@@ -161,4 +161,4 @@ pyside6-uic autowork_with_table.ui -o autowork_with_table.py
 
 ## 许可证
 
-请根据项目实际情况添加许可证信息。
+石睿轩创作，由沈喆修改第二版。
