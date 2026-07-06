@@ -117,7 +117,7 @@
       <item>
        <widget class="QRadioButton" name="input_frame_set">
         <property name="text">
-         <string>帧数</string>
+         <string>帧后</string>
         </property>
        </widget>
       </item>

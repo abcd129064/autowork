@@ -112,6 +112,11 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout.addWidget(self.end)
 
+        self.pause_btn = QPushButton(self.centralwidget)
+        self.pause_btn.setObjectName(u"pause_btn")
+
+        self.horizontalLayout.addWidget(self.pause_btn)
+
 
         self.verticalLayout_2.addLayout(self.horizontalLayout)
 
@@ -134,7 +139,6 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
 
-        QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
 
     def retranslateUi(self, MainWindow):
@@ -144,11 +148,12 @@ class Ui_MainWindow(object):
         self.open_config.setText(QCoreApplication.translate("MainWindow", u"\u914d\u7f6e", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"\u7a0b\u5e8f:", None))
         self.input_frame_before.setText(QCoreApplication.translate("MainWindow", u"\u5e27\u524d", None))
-        self.input_frame_set.setText(QCoreApplication.translate("MainWindow", u"\u5e27\u6570", None))
+        self.input_frame_set.setText(QCoreApplication.translate("MainWindow", u"\u5e27\u540e", None))
         self.input_frame_custom.setText(QCoreApplication.translate("MainWindow", u"\u81ea\u5b9a\u4e49", None))
         self.input_frame.setText(QCoreApplication.translate("MainWindow", u"400", None))
         self.open_daily.setText(QCoreApplication.translate("MainWindow", u"CPP\u65e5\u5fd7", None))
         self.start.setText(QCoreApplication.translate("MainWindow", u"\u64ad\u653e", None))
         self.end.setText(QCoreApplication.translate("MainWindow", u"\u7ed3\u675f", None))
+        self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"\u6682\u505c", None))
     # retranslateUi
 

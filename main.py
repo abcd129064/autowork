@@ -1,8 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-AutoWork 主程序示例
-这是一个示例文件，展示如何使用 autowork_with_table UI
-"""
 
 import sys
 import os
@@ -10,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import ctypes
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
     QDialog, QVBoxLayout, QHBoxLayout, QKeySequenceEdit, QDialogButtonBox,
@@ -117,12 +114,12 @@ class MainWindow(QMainWindow):
         # 加载路径配置
         self._load_paths()
         
-        # 设置默认日期为当前日期（使用 Python datetime 避免 QDate 年份异常）
+        # 设置默认日期为当前日期，日减一 （使用 Python datetime 避免 QDate 年份异常）
         from datetime import date as py_date
         from PySide6.QtCore import QDate
         today = py_date.today()
         self.ui.date.blockSignals(True)
-        self.ui.date.setDate(QDate(today.year, today.month, today.day))
+        self.ui.date.setDate(QDate(today.year, today.month, today.day-1))
         self.ui.date.blockSignals(False)
         
         # 初始化程序下拉框 - 扫描 snooker/bin64 目录下的 SnookerTracking*.exe
@@ -153,6 +150,9 @@ class MainWindow(QMainWindow):
         self._decode_process = None
         self._pending_exe_path = None
         self._pending_detect_json = None
+        
+        # 进程挂起状态
+        self._process_suspended = False
         
         # 初始化状态栏、右键菜单、快捷键、菜单栏
         self._init_statusbar()
@@ -266,6 +266,7 @@ class MainWindow(QMainWindow):
         self.ui.open_daily.clicked.connect(self.on_open_daily_clicked)
         self.ui.write_table.clicked.connect(self.on_open_dir_clicked)
         self.ui.open_config.clicked.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
+        self.ui.pause_btn.clicked.connect(self._on_pause_clicked)
         # 列表项选择事件
         self.ui.id_list.itemClicked.connect(self.on_id_selected)
         self.ui.loacl_video_list.itemClicked.connect(self.on_video_selected)
@@ -374,6 +375,8 @@ class MainWindow(QMainWindow):
         """程序结束时回调"""
         self.ui.show_log.appendPlainText(f"\n[程序结束] 退出码: {exit_code}")
         self.running_process = None
+        self._process_suspended = False
+        self.ui.pause_btn.setText("暂停")
         self._update_status_idle()
         
     @Slot()
@@ -388,6 +391,8 @@ class MainWindow(QMainWindow):
         self.running_process.kill()  # 强制终止
         self.ui.show_log.appendPlainText("[结束] 程序已强制终止")
         self.running_process = None
+        self._process_suspended = False
+        self.ui.pause_btn.setText("暂停")
         self._update_status_idle()
         
     @Slot()
@@ -523,8 +528,10 @@ class MainWindow(QMainWindow):
             self.ui.show_log.appendPlainText(f"  [模式] 帧前: {log_frame_id} - {offset} = {result}")
             return result
         elif self.ui.input_frame_set.isChecked():
-            self.ui.show_log.appendPlainText(f"  [模式] 帧数: {log_frame_id}")
-            return log_frame_id
+            offset = self._get_frame_input_value()
+            result = log_frame_id + offset
+            self.ui.show_log.appendPlainText(f"  [模式] 帧后: {log_frame_id} + {offset} = {result}")
+            return result
         elif self.ui.input_frame_custom.isChecked():
             custom = self._get_frame_input_value()
             self.ui.show_log.appendPlainText(f"  [模式] 自定义: {custom}")
@@ -770,8 +777,132 @@ class MainWindow(QMainWindow):
     def _update_status_idle(self):
         self.status_state.setText("状态: 空闲")
 
+    def _update_status_paused(self, exe_name):
+        self.status_state.setText(f"状态: 已暂停 - {exe_name}")
+
     def _update_status_logs(self, count):
         self.status_logs.setText(f"日志: {count} 行")
+
+    # ==================== 暂停/恢复 ====================
+
+    @Slot()
+    def _on_pause_clicked(self):
+        """暂停按钮点击事件 - 挂起/恢复外部进程"""
+        self._toggle_process_suspend()
+
+    def _toggle_process_suspend(self):
+        """切换外部进程的挂起/恢复状态"""
+        if self.running_process is None:
+            return
+        state = self.running_process.state()
+        if state != QProcess.Running:
+            return
+
+        pid = int(self.running_process.processId())
+        if self._process_suspended:
+            # 恢复进程
+            if self._win_resume_process(pid):
+                self._process_suspended = False
+                self.ui.pause_btn.setText("暂停")
+                self.ui.show_log.appendPlainText("[播放] 程序已恢复")
+                exe_name = self.ui.choose_exe.currentText()
+                self._update_status_running(exe_name)
+            else:
+                self.ui.show_log.appendPlainText("[警告] 恢复进程失败")
+        else:
+            # 挂起进程
+            if self._win_suspend_process(pid):
+                self._process_suspended = True
+                self.ui.pause_btn.setText("恢复")
+                self.ui.show_log.appendPlainText("[播放] 程序已暂停")
+                exe_name = self.ui.choose_exe.currentText()
+                self._update_status_paused(exe_name)
+            else:
+                self.ui.show_log.appendPlainText("[警告] 暂停进程失败")
+
+    @staticmethod
+    def _win_suspend_process(pid):
+        """Windows API: 挂起指定进程的所有线程"""
+        PROCESS_SUSPEND_RESUME = 0x0800
+        THREAD_SUSPEND_RESUME = 0x0002
+        TH32CS_SNAPTHREAD = 0x00000004
+
+        class THREADENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ThreadID", ctypes.c_ulong),
+                ("th32OwnerProcessID", ctypes.c_ulong),
+                ("tpBasePri", ctypes.c_long),
+                ("tpDeltaPri", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+            ]
+
+        h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
+        if not h_process:
+            return False
+        try:
+            snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+            if snap == -1:
+                return False
+            te = THREADENTRY32()
+            te.dwSize = ctypes.sizeof(THREADENTRY32)
+            kernel32 = ctypes.windll.kernel32
+            if kernel32.Thread32First(snap, ctypes.byref(te)):
+                while True:
+                    if te.th32OwnerProcessID == pid:
+                        h_thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                        if h_thread:
+                            kernel32.SuspendThread(h_thread)
+                            kernel32.CloseHandle(h_thread)
+                    if not kernel32.Thread32Next(snap, ctypes.byref(te)):
+                        break
+            kernel32.CloseHandle(snap)
+            return True
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h_process)
+
+    @staticmethod
+    def _win_resume_process(pid):
+        """Windows API: 恢复指定进程的所有线程"""
+        PROCESS_SUSPEND_RESUME = 0x0800
+        THREAD_SUSPEND_RESUME = 0x0002
+        TH32CS_SNAPTHREAD = 0x00000004
+
+        class THREADENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ThreadID", ctypes.c_ulong),
+                ("th32OwnerProcessID", ctypes.c_ulong),
+                ("tpBasePri", ctypes.c_long),
+                ("tpDeltaPri", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+            ]
+
+        h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
+        if not h_process:
+            return False
+        try:
+            snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+            if snap == -1:
+                return False
+            te = THREADENTRY32()
+            te.dwSize = ctypes.sizeof(THREADENTRY32)
+            kernel32 = ctypes.windll.kernel32
+            if kernel32.Thread32First(snap, ctypes.byref(te)):
+                while True:
+                    if te.th32OwnerProcessID == pid:
+                        h_thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                        if h_thread:
+                            kernel32.ResumeThread(h_thread)
+                            kernel32.CloseHandle(h_thread)
+                    if not kernel32.Thread32Next(snap, ctypes.byref(te)):
+                        break
+            kernel32.CloseHandle(snap)
+            return True
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h_process)
 
     # ==================== 右键菜单 ====================
 
@@ -953,7 +1084,7 @@ class MainWindow(QMainWindow):
             self._apply_font_family()
             self.ui.show_log.appendPlainText(f"[配置] 已更新字体: {font.family()}")
 
-    def _on_about(self):
+    def _on_about(self) :
         """显示关于对话框"""
         QMessageBox.about(
             self,
