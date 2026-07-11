@@ -10,7 +10,7 @@ import ctypes
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
     QDialog, QVBoxLayout, QHBoxLayout, QKeySequenceEdit, QDialogButtonBox,
-    QComboBox, QSpinBox)
+    QComboBox, QSpinBox, QListView, QAbstractItemView)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction
 from autowork_with_table import Ui_MainWindow
@@ -163,6 +163,11 @@ class MainWindow(QMainWindow):
         self._apply_highlight_color()
         self._apply_font_size()
         self._apply_font_family()
+        # 替换 choose_exe 的弹出视图为自定义 QListView，配合 setMaxVisibleItems 生效
+        _popup_view = QListView(self.ui.choose_exe)
+        _popup_view.setUniformItemSizes(True)
+        _popup_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ui.choose_exe.setView(_popup_view)
     
     def _load_exe_list(self):
         """加载 snooker/bin64 目录下的 SnookerTracking*.exe 到程序下拉框"""
@@ -186,6 +191,8 @@ class MainWindow(QMainWindow):
         for exe_path in sorted(exe_files):
             exe_name = os.path.basename(exe_path)
             self.ui.choose_exe.addItem(exe_name)
+        # 限制下拉列表最多显示 8 项，超出自动滚动
+        self.ui.choose_exe.setMaxVisibleItems(8)
         
         self.ui.show_log.appendPlainText(f"[程序] 找到 {len(exe_files)} 个可执行文件")
 
@@ -268,8 +275,8 @@ class MainWindow(QMainWindow):
         self.ui.open_config.clicked.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
         self.ui.pause_btn.clicked.connect(self._on_pause_clicked)
         # 列表项选择事件
-        self.ui.id_list.itemClicked.connect(self.on_id_selected)
-        self.ui.loacl_video_list.itemClicked.connect(self.on_video_selected)
+        self.ui.id_list.currentItemChanged.connect(self._on_id_current_changed)
+        self.ui.loacl_video_list.currentItemChanged.connect(self._on_video_current_changed)
         self.ui.log_list.itemClicked.connect(self.on_log_selected)
         self.ui.log_list.itemDoubleClicked.connect(self.on_log_double_clicked)
         
@@ -282,7 +289,8 @@ class MainWindow(QMainWindow):
         # 右键菜单信号
         self.ui.id_list.customContextMenuRequested.connect(self._id_list_context_menu)
         self.ui.log_list.customContextMenuRequested.connect(self._log_list_context_menu)
-    
+        self.ui.loacl_video_list.customContextMenuRequested.connect(self._loacl_video_list_context_menu)
+
     @Slot()
     def on_flush_clicked(self):
         """刷新按钮点击事件"""
@@ -345,7 +353,7 @@ class MainWindow(QMainWindow):
         self.running_process.readyReadStandardError.connect(self._on_program_error)
         self.running_process.finished.connect(self._on_program_finished)
         
-        # 启动前准备 detect.json（可能需要异步解码）
+        # 启动前准备 detect.json
         self._pending_exe_path = exe_path
         need_decode = self._prepare_detect_json()
         
@@ -461,6 +469,11 @@ class MainWindow(QMainWindow):
         self.ui.show_log.appendPlainText(f"[配置] 已打开: {path}")
         
     @Slot()
+    def _on_id_current_changed(self, current, previous):
+        """第一列当前项改变（鼠标点击/键盘导航均触发）"""
+        if current is not None:
+            self.on_id_selected(current)
+
     def on_id_selected(self, item):
         """ID列表项选中事件 - 加载对应设备的日志目录"""
         device_code = item.text()
@@ -472,6 +485,11 @@ class MainWindow(QMainWindow):
         # 清空第三列
         self._load_logs_for_device(device_code)
         
+    def _on_video_current_changed(self, current, previous):
+        """第二列当前项改变（鼠标点击/键盘导航均触发）"""
+        if current is not None:
+            self.on_video_selected(current)
+
     @Slot()
     def on_video_selected(self, item):
         """日志目录项选中事件 - 在第三列展示日志内容"""
@@ -525,6 +543,11 @@ class MainWindow(QMainWindow):
         if self.ui.input_frame_before.isChecked():
             offset = self._get_frame_input_value()
             result = log_frame_id - offset
+            if result < 0:
+                self.ui.show_log.appendPlainText(
+                    f"  [警告] 帧前偏移后起始帧为负值({result})，已修正为 0。"
+                    f"log_frame_id={log_frame_id}, offset={offset}")
+                result = 0
             self.ui.show_log.appendPlainText(f"  [模式] 帧前: {log_frame_id} - {offset} = {result}")
             return result
         elif self.ui.input_frame_set.isChecked():
@@ -538,7 +561,13 @@ class MainWindow(QMainWindow):
             return custom
         else:
             offset = self._get_frame_input_value()
-            return log_frame_id - offset
+            result = log_frame_id - offset
+            if result < 0:
+                self.ui.show_log.appendPlainText(
+                    f"  [警告] 帧前偏移后起始帧为负值({result})，已修正为 0。"
+                    f"log_frame_id={log_frame_id}, offset={offset}")
+                result = 0
+            return result
 
     def _launch_program(self, exe_path, exe_name, exe_dir):
         """实际启动主程序（在 detect.json 准备好之后调用）"""
@@ -606,8 +635,7 @@ class MainWindow(QMainWindow):
         self._launch_program(exe_path, exe_name, exe_dir)
 
     def _prepare_detect_json(self):
-        """准备 detect.json：解密并复制到程序目录。
-        返回 True 表示正在异步解码，返回 False 表示已同步完成或跳过。"""
+        """准备 detect.json：解密并复制到程序目录。返回 True 表示正在异步解码，返回 False 表示已同步完成或跳过。"""
         # 检查是否选中了设备
         if not self.ui.id_list.currentItem():
             self.ui.show_log.appendPlainText("[detect] 未选中设备，跳过 detect.json 处理")
@@ -747,6 +775,11 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_log_double_clicked(self, item):
         """日志列表项双击事件 - 解析日志、更新cfg.json并启动程序"""
+        # 如果已有程序在运行，先自动结束旧程序
+        if self.running_process is not None:
+            self.ui.show_log.appendPlainText("\n[双击] 检测到已有程序运行，自动结束旧程序...")
+            self.on_end_clicked()
+        
         # 先触发选中逻辑（更新cfg.json）
         self.on_log_selected(item)
         
@@ -910,6 +943,7 @@ class MainWindow(QMainWindow):
         """为列表控件设置自定义右键菜单策略"""
         self.ui.id_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.ui.log_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ui.loacl_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def _id_list_context_menu(self, pos):
         """设备列表右键菜单"""
@@ -926,20 +960,48 @@ class MainWindow(QMainWindow):
     def _log_list_context_menu(self, pos):
         """日志内容列表右键菜单"""
         from PySide6.QtWidgets import QMenu
+        item = self.ui.log_list.currentItem()
+        if item is None:
+            return
         menu = QMenu(self)
         action_copy = menu.addAction("复制此行")
+        action_copy_frame = menu.addAction("复制帧数")
         action_locate = menu.addAction("在文件管理器中定位")
         action = menu.exec(self.ui.log_list.mapToGlobal(pos))
         if action == action_copy:
-            item = self.ui.log_list.currentItem()
             if item:
                 QApplication.clipboard().setText(item.text())
                 self.statusBar().showMessage("已复制到剪贴板", 2000)
+                self.ui.show_log.appendPlainText("[复制] 已复制当前行文本到剪贴板")
+        elif action == action_copy_frame:
+            frame_match = re.search(r'frame_id:(\d+)', item.text())
+            if frame_match:
+                frame_id = frame_match.group(1)
+                QApplication.clipboard().setText(frame_id)
+                self.statusBar().showMessage(f"帧数 {frame_id} 已复制到剪贴板", 2000)
+                self.ui.show_log.appendPlainText(f"[复制] 帧数 {frame_id} 已复制到剪贴板")
+            else:
+                self.ui.show_log.appendPlainText("[提示] 当前行未找到 frame_id")
         elif action == action_locate:
             if self._current_log_path and os.path.exists(self._current_log_path):
                 subprocess.run(['explorer', '/select,', self._current_log_path])
             else:
                 self.ui.show_log.appendPlainText("[提示] 无法定位日志文件")
+
+    def _loacl_video_list_context_menu(self, pos):
+        """日志文件列表右键菜单"""
+        from PySide6.QtWidgets import QMenu
+        item = self.ui.loacl_video_list.currentItem()
+        if item is None:
+            return
+        menu = QMenu(self)
+        action_copy_name = menu.addAction("复制视频名")
+        action = menu.exec(self.ui.loacl_video_list.mapToGlobal(pos))
+        if action == action_copy_name:
+            pure_name = os.path.splitext(item.text())[0]
+            QApplication.clipboard().setText(pure_name)
+            self.statusBar().showMessage(f"文件名 {pure_name} 已复制到剪贴板", 2000)
+            self.ui.show_log.appendPlainText(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
 
     # ==================== 快捷键 ====================
 
