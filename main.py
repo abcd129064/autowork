@@ -7,13 +7,406 @@ import re
 import shutil
 import subprocess
 import ctypes
+import ftplib
+import stat
+import time
+from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
     QDialog, QVBoxLayout, QHBoxLayout, QKeySequenceEdit, QDialogButtonBox,
-    QComboBox, QSpinBox, QListView, QAbstractItemView)
-from PySide6.QtCore import Slot, QProcess, Qt, QTimer
+    QComboBox, QSpinBox, QListView, QAbstractItemView, QFrame, QFormLayout,
+    QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog,
+    QPushButton, QProgressDialog)
+from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction
 from autowork_with_table import Ui_MainWindow
+from p2p import generate_random_port, is_port_in_use
+
+try:
+    import paramiko
+    PARAMIKO_AVAILABLE = True
+except ImportError:
+    PARAMIKO_AVAILABLE = False
+
+
+class SSHWorker(QThread):
+    """SSH 连接工作线程"""
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, host, port, username, password):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self._client = None
+
+    def run(self):
+        try:
+            self._client = paramiko.SSHClient()
+            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self._client.connect(self.host, port=self.port,
+                                 username=self.username, password=self.password,
+                                 timeout=10)
+            stdin, stdout, stderr = self._client.exec_command("hostname && whoami")
+            result = stdout.read().decode('utf-8', errors='ignore').strip()
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def close(self):
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
+
+class FTPWorker(QThread):
+    """FTP 连接工作线程"""
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, host, port, username, password):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self._ftp = None
+
+    def run(self):
+        try:
+            self._ftp = ftplib.FTP()
+            self._ftp.connect(self.host, self.port, timeout=10)
+            self._ftp.login(self.username, self.password)
+            welcome = self._ftp.getwelcome()
+            files = self._ftp.nlst()
+            self.finished.emit(f"{welcome}\n文件列表: {', '.join(files[:10])}")
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def close(self):
+        if self._ftp:
+            try:
+                self._ftp.quit()
+            except Exception:
+                pass
+            self._ftp = None
+
+
+class SFTPListWorker(QThread):
+    """异步 SFTP 列目录工作线程"""
+    result = Signal(str, list)
+    error = Signal(str)
+
+    def __init__(self, transport, remote_path):
+        super().__init__()
+        self.transport = transport
+        self.remote_path = remote_path
+
+    def run(self):
+        try:
+            sftp = paramiko.SFTPClient.from_transport(self.transport)
+            entries = []
+            for name in sftp.listdir(self.remote_path):
+                full_path = self.remote_path.rstrip('/') + '/' + name
+                try:
+                    st = sftp.stat(full_path)
+                    is_dir = stat.S_ISDIR(st.st_mode) if st.st_mode else False
+                    size = st.st_size if st.st_size else 0
+                    mtime = datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M') if st.st_mtime else ''
+                    perm = stat.filemode(st.st_mode) if st.st_mode else ''
+                except Exception:
+                    is_dir, size, mtime, perm = False, 0, '', ''
+                entries.append({
+                    'name': name, 'is_dir': is_dir,
+                    'size': size, 'mtime': mtime, 'perm': perm
+                })
+            sftp.close()
+            self.result.emit(self.remote_path, entries)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class SFTPOperationWorker(QThread):
+    """异步 SFTP 操作工作线程（上传/下载/删除/创建目录）"""
+    success = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, transport, operation, local_path='', remote_path=''):
+        super().__init__()
+        self.transport = transport
+        self.operation = operation
+        self.local_path = local_path
+        self.remote_path = remote_path
+
+    def run(self):
+        sftp = None
+        try:
+            sftp = paramiko.SFTPClient.from_transport(self.transport)
+            if self.operation == 'upload':
+                sftp.put(self.local_path, self.remote_path)
+                self.success.emit(f"已上传: {os.path.basename(self.local_path)}")
+            elif self.operation == 'download':
+                sftp.get(self.remote_path, self.local_path)
+                self.success.emit(f"已下载: {os.path.basename(self.remote_path)}")
+            elif self.operation == 'delete':
+                sftp.remove(self.remote_path)
+                self.success.emit(f"已删除: {os.path.basename(self.remote_path)}")
+            elif self.operation == 'rmdir':
+                sftp.rmdir(self.remote_path)
+                self.success.emit(f"已删除目录: {os.path.basename(self.remote_path)}")
+            elif self.operation == 'mkdir':
+                sftp.mkdir(self.remote_path)
+                self.success.emit(f"已创建目录: {os.path.basename(self.remote_path)}")
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+
+class SFTPWindow(QDialog):
+    """SFTP 文件管理窗口"""
+
+    def __init__(self, host, port, username, password, log_callback=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"SFTP 文件管理 - {host}")
+        self.resize(750, 500)
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._transport = None
+        self._current_path = '/home'
+        self._log = log_callback or (lambda msg: None)
+        self._worker = None
+        self._init_ui()
+        QTimer.singleShot(100, self._connect_and_list)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        # 顶部路径栏
+        path_layout = QHBoxLayout()
+        self._btn_up = QPushButton(".. 上级目录")
+        self._btn_up.clicked.connect(self._go_up)
+        path_layout.addWidget(self._btn_up)
+        path_layout.addWidget(QLabel("当前路径:"))
+        self._lbl_path = QLabel(self._current_path)
+        self._lbl_path.setStyleSheet("font-weight: bold;")
+        path_layout.addWidget(self._lbl_path, 1)
+        self._btn_refresh = QPushButton("刷新")
+        self._btn_refresh.clicked.connect(self._refresh)
+        path_layout.addWidget(self._btn_refresh)
+        layout.addLayout(path_layout)
+        # 文件列表
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["文件名", "大小", "类型", "权限", "修改时间"])
+        self._tree.setColumnCount(5)
+        header = self._tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in [1, 2, 3, 4]:
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        layout.addWidget(self._tree)
+        # 底部按钮栏
+        btn_layout = QHBoxLayout()
+        self._btn_upload = QPushButton("上传文件")
+        self._btn_upload.clicked.connect(self._upload_file)
+        btn_layout.addWidget(self._btn_upload)
+        self._btn_download = QPushButton("下载文件")
+        self._btn_download.clicked.connect(self._download_file)
+        btn_layout.addWidget(self._btn_download)
+        self._btn_delete = QPushButton("删除")
+        self._btn_delete.clicked.connect(self._delete_selected)
+        btn_layout.addWidget(self._btn_delete)
+        self._btn_mkdir = QPushButton("新建目录")
+        self._btn_mkdir.clicked.connect(self._create_directory)
+        btn_layout.addWidget(self._btn_mkdir)
+        btn_layout.addStretch()
+        self._lbl_status = QLabel("就绪")
+        btn_layout.addWidget(self._lbl_status)
+        layout.addLayout(btn_layout)
+
+    def _connect_and_list(self):
+        """建立 SFTP 连接并列出根目录"""
+        self._lbl_status.setText("正在连接...")
+        try:
+            self._transport = paramiko.Transport((self._host, self._port))
+            self._transport.connect(username=self._username, password=self._password)
+            self._log(f"[SFTP] 已连接到 {self._host}:{self._port}")
+            self._lbl_status.setText("已连接")
+            self._list_directory(self._current_path)
+        except Exception as e:
+            self._log(f"[SFTP] 连接失败: {e}")
+            self._lbl_status.setText(f"连接失败: {e}")
+
+    def _cleanup_worker(self):
+        """安全清理当前 worker，防止 QThread C++ 对象被 GC 提前回收"""
+        if self._worker is not None:
+            if self._worker.isRunning():
+                self._worker.wait(3000)
+            self._worker.deleteLater()
+            self._worker = None
+
+    def _list_directory(self, path):
+        """异步列出目录内容"""
+        if self._transport is None:
+            return
+        self._cleanup_worker()
+        self._lbl_status.setText(f"加载中: {path}")
+        worker = SFTPListWorker(self._transport, path)
+        worker.result.connect(self._on_list_result)
+        worker.error.connect(self._on_list_error)
+        self._worker = worker
+        worker.start()
+
+    def _on_list_result(self, path, entries):
+        """目录列表加载完成"""
+        self._current_path = path
+        self._lbl_path.setText(path)
+        self._tree.clear()
+        # 目录排前，文件排后
+        dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'])
+        files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'])
+        for entry in dirs + files:
+            item = QTreeWidgetItem()
+            prefix = "/ " if entry['is_dir'] else ""
+            item.setText(0, prefix + entry['name'])
+            size_str = self._format_size(entry['size']) if not entry['is_dir'] else ''
+            item.setText(1, size_str)
+            item.setText(2, "目录" if entry['is_dir'] else "文件")
+            item.setText(3, entry['perm'])
+            item.setText(4, entry['mtime'])
+            item.setData(0, Qt.ItemDataRole.UserRole, entry)
+            self._tree.addTopLevelItem(item)
+        self._lbl_status.setText(f"{len(dirs)} 个目录, {len(files)} 个文件")
+        self._log(f"[SFTP] 目录加载完成: {path} ({len(dirs)} 目录, {len(files)} 文件)")
+
+    def _on_list_error(self, error):
+        self._lbl_status.setText(f"列表失败: {error}")
+        self._log(f"[SFTP] 列表失败: {error}")
+
+    def _refresh(self):
+        self._list_directory(self._current_path)
+
+    def _go_up(self):
+        parent = '/'.join(self._current_path.rstrip('/').split('/')[:-1])
+        if not parent:
+            parent = '/'
+        self._list_directory(parent)
+
+    def _on_item_double_clicked(self, item, column):
+        entry = item.data(0, Qt.ItemDataRole.UserRole)
+        if entry and entry['is_dir']:
+            new_path = self._current_path.rstrip('/') + '/' + entry['name']
+            self._list_directory(new_path)
+
+    def _upload_file(self):
+        local_path, _ = QFileDialog.getOpenFileName(self, "选择要上传的文件")
+        if not local_path:
+            return
+        remote_path = self._current_path.rstrip('/') + '/' + os.path.basename(local_path)
+        self._cleanup_worker()
+        self._lbl_status.setText(f"上传中: {os.path.basename(local_path)}...")
+        self._log(f"[SFTP] 上传: {local_path} -> {remote_path}")
+        worker = SFTPOperationWorker(self._transport, 'upload', local_path, remote_path)
+        worker.success.connect(self._on_op_success)
+        worker.error.connect(self._on_op_error)
+        self._worker = worker
+        worker.start()
+
+    def _download_file(self):
+        item = self._tree.currentItem()
+        if not item:
+            self._log("[SFTP] 请先选择要下载的文件")
+            return
+        entry = item.data(0, Qt.ItemDataRole.UserRole)
+        if not entry or entry['is_dir']:
+            self._log("[SFTP] 请选择一个文件（非目录）")
+            return
+        local_path, _ = QFileDialog.getSaveFileName(self, "保存到", entry['name'])
+        if not local_path:
+            return
+        remote_path = self._current_path.rstrip('/') + '/' + entry['name']
+        self._cleanup_worker()
+        self._lbl_status.setText(f"下载中: {entry['name']}...")
+        self._log(f"[SFTP] 下载: {remote_path} -> {local_path}")
+        worker = SFTPOperationWorker(self._transport, 'download', local_path, remote_path)
+        worker.success.connect(self._on_op_success)
+        worker.error.connect(self._on_op_error)
+        self._worker = worker
+        worker.start()
+
+    def _delete_selected(self):
+        item = self._tree.currentItem()
+        if not item:
+            self._log("[SFTP] 请先选择要删除的文件或目录")
+            return
+        entry = item.data(0, Qt.ItemDataRole.UserRole)
+        if not entry:
+            return
+        remote_path = self._current_path.rstrip('/') + '/' + entry['name']
+        op = 'rmdir' if entry['is_dir'] else 'delete'
+        self._cleanup_worker()
+        self._log(f"[SFTP] 删除: {remote_path}")
+        worker = SFTPOperationWorker(self._transport, op, '', remote_path)
+        worker.success.connect(self._on_op_success)
+        worker.error.connect(self._on_op_error)
+        self._worker = worker
+        worker.start()
+
+    def _create_directory(self):
+        name, ok = QInputDialog.getText(self, "新建目录", "目录名:")
+        if not ok or not name:
+            return
+        remote_path = self._current_path.rstrip('/') + '/' + name
+        self._cleanup_worker()
+        self._log(f"[SFTP] 创建目录: {remote_path}")
+        worker = SFTPOperationWorker(self._transport, 'mkdir', '', remote_path)
+        worker.success.connect(self._on_op_success)
+        worker.error.connect(self._on_op_error)
+        self._worker = worker
+        worker.start()
+
+    def _on_op_success(self, msg):
+        self._lbl_status.setText(msg)
+        self._log(f"[SFTP] {msg}")
+        self._list_directory(self._current_path)
+
+    def _on_op_error(self, error):
+        self._lbl_status.setText(f"操作失败: {error}")
+        self._log(f"[SFTP] 操作失败: {error}")
+
+    @staticmethod
+    def _format_size(size):
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}" if unit != 'B' else f"{size} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def closeEvent(self, event):
+        # 先安全等待 worker 结束，再关闭 transport
+        if self._worker is not None:
+            if self._worker.isRunning():
+                self._worker.wait(3000)
+            self._worker.deleteLater()
+            self._worker = None
+        if self._transport:
+            try:
+                self._transport.close()
+            except Exception:
+                pass
+            self._transport = None
+            self._log("[SFTP] 已断开连接")
+        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -31,7 +424,7 @@ class MainWindow(QMainWindow):
         # 连接信号和槽
         self.connect_signals()
     
-    # 默认路径配置（首次运行时自动写入 settings.json）
+    # 默认路径配置，首次运行时自动写入 settings.json
     DEFAULT_PATHS = {
         "exe_dir": r"C:\Users\shen_zhe\Desktop\snooker\bin64",
         "videos_dir": r"C:\Users\shen_zhe\Desktop\videos",
@@ -168,6 +561,15 @@ class MainWindow(QMainWindow):
         _popup_view.setUniformItemSizes(True)
         _popup_view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ui.choose_exe.setView(_popup_view)
+        # P2P 状态
+        self._frpc_process = None
+        self._p2p_visitors = []
+        self._p2p_current_index = -1
+        self._ssh_worker = None
+        self._ftp_worker = None
+        self._auto_ssh_worker = None
+        self._sftp_window = None
+        self._init_p2p_panel()
     
     def _load_exe_list(self):
         """加载 snooker/bin64 目录下的 SnookerTracking*.exe 到程序下拉框"""
@@ -290,6 +692,16 @@ class MainWindow(QMainWindow):
         self.ui.id_list.customContextMenuRequested.connect(self._id_list_context_menu)
         self.ui.log_list.customContextMenuRequested.connect(self._log_list_context_menu)
         self.ui.loacl_video_list.customContextMenuRequested.connect(self._loacl_video_list_context_menu)
+        
+        # P2P 面板信号
+        self.ui.p2p_btn.toggled.connect(self._on_p2p_toggled)
+        self.ui.p2p_add_btn.clicked.connect(self._on_p2p_add)
+        self.ui.p2p_delete_btn.clicked.connect(self._on_p2p_delete)
+        self.ui.p2p_connect_btn.clicked.connect(self._on_p2p_connect)
+        self.ui.p2p_disconnect_btn.clicked.connect(self._on_p2p_disconnect)
+        self.ui.p2p_visitor_list.currentRowChanged.connect(self._on_p2p_visitor_selected)
+        self.ui.p2p_mode_combo.currentIndexChanged.connect(self._on_p2p_mode_changed)
+        self.ui.p2p_sftp_btn.clicked.connect(self._on_sftp_btn_clicked)
 
     @Slot()
     def on_flush_clicked(self):
@@ -1002,6 +1414,425 @@ class MainWindow(QMainWindow):
             QApplication.clipboard().setText(pure_name)
             self.statusBar().showMessage(f"文件名 {pure_name} 已复制到剪贴板", 2000)
             self.ui.show_log.appendPlainText(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
+
+    # ==================== P2P 连接 ====================
+
+    def _init_p2p_panel(self):
+        """初始化 P2P 面板状态和加载已保存配置"""
+        # 从 settings.json 加载已保存的 visitor 配置
+        settings = self._load_settings()
+        saved = settings.get("p2p_visitors", [])
+        for v in saved:
+            self._p2p_visitors.append(dict(v))
+        self._refresh_p2p_list()
+        # 初始化表单 bindPort 为随机值
+        self.ui.p2p_form_port.setValue(self._get_new_random_port())
+        self._update_p2p_visibility()
+        self._update_p2p_buttons()
+
+    def _get_new_random_port(self):
+        """生成不冲突的随机端口（排除已添加 visitor 的端口）"""
+        used_ports = {v["bindPort"] for v in self._p2p_visitors}
+        return generate_random_port(exclude_ports=used_ports)
+
+    def _on_p2p_toggled(self, checked):
+        """切换 P2P 面板显示/隐藏"""
+        self.ui.p2p_panel.setVisible(checked)
+
+    def _on_p2p_add(self):
+        """添加新的 visitor 配置"""
+        server_name = self.ui.p2p_form_server.text().strip()
+        if not server_name:
+            self.ui.show_log.appendPlainText("[P2P] 请填写 serverName")
+            return
+        port = self.ui.p2p_form_port.value()
+        # 检查端口是否与已有 visitor 冲突
+        for i, v in enumerate(self._p2p_visitors):
+            if v["bindPort"] == port and i != self._p2p_current_index:
+                self.ui.show_log.appendPlainText(f"[P2P] 端口 {port} 已被 {v['serverName']} 使用，请更换端口")
+                return
+        visitor = {
+            "serverName": server_name,
+            "bindPort": port,
+            "secretKey": self.ui.p2p_form_key.text().strip() or "abc123"
+        }
+        self._p2p_visitors.append(visitor)
+        # 刷新列表时阻塞信号，防止 currentRowChanged 触发 _save_current_form 覆盖数据
+        self.ui.p2p_visitor_list.blockSignals(True)
+        self._refresh_p2p_list()
+        self.ui.p2p_visitor_list.blockSignals(False)
+        # 更新当前索引为新项
+        self._p2p_current_index = len(self._p2p_visitors) - 1
+        self.ui.p2p_visitor_list.setCurrentRow(self._p2p_current_index)
+        self._save_p2p_settings()
+        # 添加后更新表单端口为下一个随机值
+        self.ui.p2p_form_port.setValue(self._get_new_random_port())
+
+    def _on_p2p_delete(self):
+        """删除当前选中的 visitor"""
+        row = self.ui.p2p_visitor_list.currentRow()
+        if 0 <= row < len(self._p2p_visitors):
+            self._p2p_visitors.pop(row)
+            self._p2p_current_index = -1
+            self._refresh_p2p_list()
+            self._save_p2p_settings()
+
+    def _on_p2p_visitor_selected(self, row):
+        """选择 visitor 列表项时加载到表单"""
+        # 先保存当前表单
+        self._save_current_form()
+        if 0 <= row < len(self._p2p_visitors):
+            self._p2p_current_index = row
+            v = self._p2p_visitors[row]
+            self.ui.p2p_form_server.setText(v.get("serverName", ""))
+            self.ui.p2p_form_port.setValue(v.get("bindPort", 10000))
+            self.ui.p2p_form_key.setText(v.get("secretKey", "abc123"))
+        else:
+            self._p2p_current_index = -1
+
+    def _save_current_form(self):
+        """将当前表单内容保存回 visitor 数据"""
+        if 0 <= self._p2p_current_index < len(self._p2p_visitors):
+            v = self._p2p_visitors[self._p2p_current_index]
+            v["serverName"] = self.ui.p2p_form_server.text()
+            v["bindPort"] = self.ui.p2p_form_port.value()
+            v["secretKey"] = self.ui.p2p_form_key.text()
+            # 更新列表显示
+            item = self.ui.p2p_visitor_list.item(self._p2p_current_index)
+            if item:
+                item.setText(v["serverName"])
+
+    def _refresh_p2p_list(self):
+        """刷新 visitor 列表显示"""
+        self.ui.p2p_visitor_list.clear()
+        for v in self._p2p_visitors:
+            self.ui.p2p_visitor_list.addItem(v.get("serverName", ""))
+
+    def _save_p2p_settings(self):
+        """保存 visitor 配置到 settings.json"""
+        self._save_settings({"p2p_visitors": self._p2p_visitors})
+
+    def _on_p2p_connect(self):
+        """连接按钮 - 根据当前模式分发连接"""
+        mode = self.ui.p2p_mode_combo.currentText()
+        self.ui.show_log.appendPlainText(f"[P2P] 连接按钮点击，模式: {mode}")
+        if mode == "XTCP":
+            self._on_xtcp_connect()
+        elif mode == "SSH":
+            self._on_ssh_connect()
+        elif mode == "FTP":
+            self._on_ftp_connect()
+
+    def _on_p2p_disconnect(self):
+        """断开按钮 - 根据当前模式分发断开"""
+        mode = self.ui.p2p_mode_combo.currentText()
+        if mode == "XTCP":
+            self._on_xtcp_disconnect()
+        elif mode == "SSH":
+            self._on_ssh_disconnect()
+        elif mode == "FTP":
+            self._on_ftp_disconnect()
+
+    def _on_p2p_mode_changed(self, index):
+        """连接方式切换时更新 UI 显隐"""
+        self._save_current_form()
+        self._update_p2p_visibility()
+
+    def _update_p2p_visibility(self):
+        """根据当前模式显示/隐藏对应表单"""
+        mode = self.ui.p2p_mode_combo.currentText()
+        is_xtcp = (mode == "XTCP")
+        # XTCP 控件显隐
+        for w in self.ui.p2p_xtcp_widgets:
+            w.setVisible(is_xtcp)
+        for i in range(self.ui.p2p_xtcp_form.rowCount()):
+            lbl = self.ui.p2p_xtcp_form.itemAt(i * 2, QFormLayout.ItemRole.LabelRole)
+            if lbl and lbl.widget():
+                lbl.widget().setVisible(is_xtcp)
+        # host 字段随模式切换显隐（仅第0行），账号/密码始终可见
+        is_ssh_ftp = not is_xtcp
+        for w in self.ui.p2p_ssh_widgets:
+            w.setVisible(is_ssh_ftp)
+        host_lbl = self.ui.p2p_ssh_form.itemAt(0, QFormLayout.ItemRole.LabelRole)
+        if host_lbl and host_lbl.widget():
+            host_lbl.widget().setVisible(is_ssh_ftp)
+        self._update_p2p_buttons()
+
+    def _on_xtcp_connect(self):
+        """生成 TOML 并启动 frpc"""
+        self._save_current_form()
+        if not self._p2p_visitors:
+            self.ui.show_log.appendPlainText("[P2P] 请先添加 visitor 配置")
+            return
+        if self._frpc_process is not None:
+            self.ui.show_log.appendPlainText("[P2P] frpc 已在运行中")
+            return
+        app_dir = self._get_app_dir()
+        toml_path = os.path.join(app_dir, "frpc_xtcp.toml")
+        try:
+            self._write_frpc_toml(toml_path)
+            self.ui.show_log.appendPlainText(f"[P2P] 已生成 {toml_path}")
+        except Exception as e:
+            self.ui.show_log.appendPlainText(f"[P2P] 生成 TOML 失败: {e}")
+            return
+        frpc_exe = os.path.join(app_dir, "frpc.exe")
+        if not os.path.exists(frpc_exe):
+            self.ui.show_log.appendPlainText(f"[P2P] frpc.exe 不存在: {frpc_exe}")
+            return
+        self._frpc_process = QProcess()
+        self._frpc_process.setWorkingDirectory(app_dir)
+        self._frpc_process.readyReadStandardOutput.connect(self._on_frpc_output)
+        self._frpc_process.readyReadStandardError.connect(self._on_frpc_error)
+        self._frpc_process.finished.connect(self._on_frpc_finished)
+        self._frpc_process.start(frpc_exe, ["-c", toml_path])
+        self.ui.show_log.appendPlainText(f"[P2P] 已启动 frpc: {frpc_exe} -c {toml_path}")
+        self._update_p2p_buttons()
+        # frpc 启动后延迟尝试 SSH 自动登录
+        if PARAMIKO_AVAILABLE and self._p2p_visitors:
+            first_visitor = self._p2p_visitors[0]
+            QTimer.singleShot(3000, lambda: self._try_auto_ssh_login(
+                first_visitor["bindPort"],
+                self.ui.p2p_ssh_user.text(),
+                self.ui.p2p_ssh_pass.text()
+            ))
+            self.ui.show_log.appendPlainText(
+                f"[P2P] 3秒后尝试 SSH 登录 127.0.0.1:{first_visitor['bindPort']}...")
+
+    def _try_auto_ssh_login(self, port, username, password):
+        """frpc 启动后自动尝试 SSH 登录"""
+        if self._frpc_process is None:
+            return
+        worker = SSHWorker("127.0.0.1", port, username, password)
+        # 先保存引用，再启动，防止信号先于赋值到达
+        self._auto_ssh_worker = worker
+        worker.finished.connect(self._on_auto_ssh_login_success)
+        worker.error.connect(self._on_auto_ssh_login_failed)
+        worker.start()
+
+    def _on_auto_ssh_login_success(self, result):
+        """自动 SSH 登录成功"""
+        self.ui.show_log.appendPlainText(f"[P2P] SSH 自动登录成功: {result}")
+        self.ui.p2p_sftp_btn.setEnabled(True)
+        if self._auto_ssh_worker:
+            self._auto_ssh_worker.wait(3000)
+            self._auto_ssh_worker.deleteLater()
+        self._auto_ssh_worker = None
+
+    def _on_auto_ssh_login_failed(self, error):
+        """自动 SSH 登录失败"""
+        self.ui.show_log.appendPlainText(f"[P2P] SSH 自动登录失败: {error}")
+        if self._auto_ssh_worker:
+            self._auto_ssh_worker.wait(3000)
+            self._auto_ssh_worker.deleteLater()
+        self._auto_ssh_worker = None
+
+    def _on_xtcp_disconnect(self):
+        """停止 frpc 进程"""
+        if self._frpc_process is None:
+            self.ui.show_log.appendPlainText("[P2P] frpc 未在运行")
+            return
+        self.ui.show_log.appendPlainText("[P2P] 正在停止 frpc...")
+        proc = self._frpc_process
+        self._frpc_process = None  # 先置空，防止 _on_frpc_finished 重复处理
+        proc.kill()
+        proc.waitForFinished(3000)
+        proc.deleteLater()
+        # 同时清理 auto_ssh_worker（frpc 停了，SSH 也没意义了）
+        if self._auto_ssh_worker:
+            self._auto_ssh_worker.wait(3000)
+            self._auto_ssh_worker.deleteLater()
+            self._auto_ssh_worker = None
+        self.ui.p2p_sftp_btn.setEnabled(False)
+        self._update_p2p_buttons()
+        self.ui.show_log.appendPlainText("[P2P] frpc 已停止")
+
+    def _on_ssh_connect(self):
+        """启动 SSH 连接"""
+        if not PARAMIKO_AVAILABLE:
+            self.ui.show_log.appendPlainText("[SSH] paramiko 未安装，请执行: pip install paramiko")
+            return
+        if self._ssh_worker is not None:
+            self.ui.show_log.appendPlainText("[SSH] 已有连接正在运行")
+            return
+        host = self.ui.p2p_ssh_host.text().strip()
+        if not host:
+            self.ui.show_log.appendPlainText("[SSH] 请输入主机地址")
+            return
+        port = 22
+        self._ssh_worker = SSHWorker(
+            host, port,
+            self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
+        )
+        self._ssh_worker.finished.connect(self._on_ssh_finished)
+        self._ssh_worker.error.connect(self._on_ssh_error)
+        self._ssh_worker.start()
+        self.ui.show_log.appendPlainText(f"[SSH] 正在连接 {host}:{port}...")
+        self._update_p2p_buttons()
+
+    def _on_ssh_disconnect(self):
+        """断开 SSH 连接"""
+        if self._ssh_worker is None:
+            self.ui.show_log.appendPlainText("[SSH] 未连接")
+            return
+        worker = self._ssh_worker
+        self._ssh_worker = None
+        worker.close()
+        worker.quit()
+        worker.wait(3000)
+        worker.deleteLater()
+        self.ui.p2p_sftp_btn.setEnabled(False)
+        self._update_p2p_buttons()
+        self.ui.show_log.appendPlainText("[SSH] 已断开")
+
+    def _on_ssh_finished(self, result):
+        """SSH 连接成功回调"""
+        self.ui.show_log.appendPlainText(f"[SSH] 连接成功: {result}")
+        self.ui.p2p_sftp_btn.setEnabled(True)
+        # 线程已结束，用 deleteLater 安全销毁 C++ 对象
+        # _ssh_worker 引用保留，断开按钮需通过它关闭 paramiko 客户端
+        if self._ssh_worker:
+            self._ssh_worker.deleteLater()
+
+    def _on_ssh_error(self, error):
+        """SSH 连接失败回调"""
+        self.ui.show_log.appendPlainText(f"[SSH] 连接失败: {error}")
+        if self._ssh_worker:
+            self._ssh_worker.wait(3000)
+            self._ssh_worker.deleteLater()
+        self._ssh_worker = None
+        self._update_p2p_buttons()
+
+    def _on_ftp_connect(self):
+        """启动 FTP 连接"""
+        if self._ftp_worker is not None:
+            self.ui.show_log.appendPlainText("[FTP] 已有连接正在运行")
+            return
+        host = self.ui.p2p_ssh_host.text().strip()
+        if not host:
+            self.ui.show_log.appendPlainText("[FTP] 请输入主机地址")
+            return
+        port = 21
+        self._ftp_worker = FTPWorker(
+            host, port,
+            self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
+        )
+        self._ftp_worker.finished.connect(self._on_ftp_finished)
+        self._ftp_worker.error.connect(self._on_ftp_error)
+        self._ftp_worker.start()
+        self.ui.show_log.appendPlainText(f"[FTP] 正在连接 {host}:{port}...")
+        self._update_p2p_buttons()
+
+    def _on_ftp_disconnect(self):
+        """断开 FTP 连接"""
+        if self._ftp_worker is None:
+            self.ui.show_log.appendPlainText("[FTP] 未连接")
+            return
+        worker = self._ftp_worker
+        self._ftp_worker = None
+        worker.close()
+        worker.quit()
+        worker.wait(3000)
+        worker.deleteLater()
+        self._update_p2p_buttons()
+        self.ui.show_log.appendPlainText("[FTP] 已断开")
+
+    def _on_ftp_finished(self, result):
+        """FTP 连接成功回调"""
+        self.ui.show_log.appendPlainText(f"[FTP] 连接成功:\n{result}")
+
+    def _on_ftp_error(self, error):
+        """FTP 连接失败回调"""
+        self.ui.show_log.appendPlainText(f"[FTP] 连接失败: {error}")
+        if self._ftp_worker:
+            self._ftp_worker.wait(3000)
+            self._ftp_worker.deleteLater()
+        self._ftp_worker = None
+        self._update_p2p_buttons()
+
+    def _write_frpc_toml(self, path):
+        """手动写入 frpc_xtcp.toml 文件（含全局头部配置，遍历所有 visitor）"""
+        with open(path, 'w', encoding='utf-8') as f:
+            # 全局头部配置
+            f.write('serverAddr = "49.235.34.253"\n')
+            f.write('serverPort = 7900\n')
+            f.write('auth.method = "token"\n')
+            f.write('auth.token = "123"\n')
+            f.write('\n')
+            for v in self._p2p_visitors:
+                sn = v["serverName"]
+                f.write("[[visitors]]\n")
+                f.write(f'name = "{sn}"\n')
+                f.write(f'type = "xtcp"\n')
+                f.write(f'serverName = "{sn}"\n')
+                f.write(f'secretKey = "{v["secretKey"]}"\n')
+                f.write(f'bindPort = {v["bindPort"]}\n')
+                f.write("\n")
+
+    def _on_frpc_output(self):
+        """处理 frpc 标准输出"""
+        if self._frpc_process:
+            output = self._frpc_process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
+            if output.strip():
+                self.ui.show_log.appendPlainText(f"[frpc] {output.strip()}")
+
+    def _on_frpc_error(self):
+        """处理 frpc 错误输出"""
+        if self._frpc_process:
+            error = self._frpc_process.readAllStandardError().data().decode('utf-8', errors='ignore')
+            if error.strip():
+                self.ui.show_log.appendPlainText(f"[frpc] {error.strip()}")
+
+    def _on_frpc_finished(self, exit_code, exit_status):
+        """frpc 进程结束回调"""
+        self.ui.show_log.appendPlainText(f"[P2P] frpc 已退出，退出码: {exit_code}")
+        self._frpc_process = None
+        self._update_p2p_buttons()
+
+    def _update_p2p_buttons(self):
+        """更新连接/断开按钮状态"""
+        mode = self.ui.p2p_mode_combo.currentText()
+        if mode == "XTCP":
+            running = self._frpc_process is not None
+        elif mode == "SSH":
+            running = self._ssh_worker is not None
+        elif mode == "FTP":
+            running = self._ftp_worker is not None
+        else:
+            running = False
+        self.ui.p2p_connect_btn.setEnabled(not running)
+        self.ui.p2p_disconnect_btn.setEnabled(running)
+
+    def _on_sftp_btn_clicked(self):
+        """打开 SFTP 文件管理窗口"""
+        if not PARAMIKO_AVAILABLE:
+            self.ui.show_log.appendPlainText("[SFTP] paramiko 未安装")
+            return
+        mode = self.ui.p2p_mode_combo.currentText()
+        if mode == "XTCP":
+            # XTCP 模式：连接到 127.0.0.1:bindPort
+            if not self._p2p_visitors:
+                self.ui.show_log.appendPlainText("[SFTP] 请先添加 visitor 配置")
+                return
+            host = "127.0.0.1"
+            port = self._p2p_visitors[0]["bindPort"]
+        elif mode == "SSH":
+            host = self.ui.p2p_ssh_host.text().strip()
+            port = 22
+        else:
+            self.ui.show_log.appendPlainText("[SFTP] SFTP 仅支持 XTCP/SSH 模式")
+            return
+        username = self.ui.p2p_ssh_user.text()
+        password = self.ui.p2p_ssh_pass.text()
+        if not host:
+            self.ui.show_log.appendPlainText("[SFTP] 主机地址不能为空")
+            return
+        self.ui.show_log.appendPlainText(f"[SFTP] 打开文件管理: {host}:{port}")
+        self._sftp_window = SFTPWindow(
+            host, port, username, password,
+            log_callback=lambda msg: self.ui.show_log.appendPlainText(msg),
+            parent=self
+        )
+        self._sftp_window.show()
 
     # ==================== 快捷键 ====================
 
