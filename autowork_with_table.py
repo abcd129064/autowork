@@ -16,9 +16,9 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit,
-    QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
-    QPushButton, QRadioButton, QSizePolicy, QSplitter, QVBoxLayout,
+    QPushButton, QRadioButton, QSizePolicy, QSpinBox, QSplitter, QVBoxLayout,
     QWidget)
 
 class Ui_MainWindow(object):
@@ -117,8 +117,20 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout.addWidget(self.pause_btn)
 
+        self.p2p_btn = QPushButton(self.centralwidget)
+        self.p2p_btn.setObjectName(u"p2p_btn")
+        self.p2p_btn.setCheckable(True)
+        self.p2p_btn.setMaximumWidth(50)
+
+        self.horizontalLayout.addWidget(self.p2p_btn)
+
 
         self.verticalLayout_2.addLayout(self.horizontalLayout)
+
+        self.horizontalLayout_main = QHBoxLayout()
+        self.horizontalLayout_main.setObjectName(u"horizontalLayout_main")
+        self.horizontalLayout_main.setContentsMargins(0, 0, 0, 0)
+        self.horizontalLayout_main.setSpacing(0)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self.centralwidget)
         self.splitter.setObjectName(u"splitter")
@@ -133,7 +145,116 @@ class Ui_MainWindow(object):
         self.show_log.setReadOnly(True)
         self.splitter.setSizes([80, 150, 300, 500])
 
-        self.verticalLayout_2.addWidget(self.splitter)
+        self.horizontalLayout_main.addWidget(self.splitter)
+
+        # --- P2P 右侧面板 ---
+        self.p2p_panel = QFrame(self.centralwidget)
+        self.p2p_panel.setObjectName(u"p2p_panel")
+        self.p2p_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        p2p_main_layout = QVBoxLayout(self.p2p_panel)
+        p2p_main_layout.setContentsMargins(6, 6, 6, 6)
+        p2p_main_layout.setSpacing(4)
+
+        self.p2p_visitor_list = QListWidget(self.p2p_panel)
+        self.p2p_visitor_list.setObjectName(u"p2p_visitor_list")
+        self.p2p_visitor_list.setMaximumHeight(120)
+        p2p_main_layout.addWidget(self.p2p_visitor_list)
+
+        p2p_list_btn_layout = QHBoxLayout()
+        self.p2p_add_btn = QPushButton("添加")
+        self.p2p_add_btn.setObjectName(u"p2p_add_btn")
+        self.p2p_delete_btn = QPushButton("删除")
+        self.p2p_delete_btn.setObjectName(u"p2p_delete_btn")
+        p2p_list_btn_layout.addWidget(self.p2p_add_btn)
+        p2p_list_btn_layout.addWidget(self.p2p_delete_btn)
+        p2p_main_layout.addLayout(p2p_list_btn_layout)
+
+        self.p2p_form_server = QLineEdit(self.p2p_panel)
+        self.p2p_form_server.setObjectName(u"p2p_form_server")
+        self.p2p_form_port = QSpinBox(self.p2p_panel)
+        self.p2p_form_port.setObjectName(u"p2p_form_port")
+        self.p2p_form_port.setRange(1024, 65535)
+        self.p2p_form_key = QLineEdit(self.p2p_panel)
+        self.p2p_form_key.setObjectName(u"p2p_form_key")
+        self.p2p_form_key.setText("abc123")
+
+        self.p2p_xtcp_form = QFormLayout()
+        self.p2p_xtcp_form.addRow("serverName:", self.p2p_form_server)
+        self.p2p_xtcp_form.addRow("bindPort:", self.p2p_form_port)
+        self.p2p_xtcp_form.addRow("secretKey:", self.p2p_form_key)
+        p2p_main_layout.addLayout(self.p2p_xtcp_form)
+
+        # XTCP 专属控件列表（用于模式切换时显隐）
+        self.p2p_xtcp_widgets = [
+            self.p2p_visitor_list, self.p2p_add_btn, self.p2p_delete_btn,
+            self.p2p_form_server, self.p2p_form_port, self.p2p_form_key
+        ]
+
+        self.p2p_connect_btn = QPushButton("连接", self.p2p_panel)
+        self.p2p_connect_btn.setObjectName(u"p2p_connect_btn")
+        self.p2p_disconnect_btn = QPushButton("断开", self.p2p_panel)
+        self.p2p_disconnect_btn.setObjectName(u"p2p_disconnect_btn")
+        p2p_main_layout.addWidget(self.p2p_connect_btn)
+        p2p_main_layout.addWidget(self.p2p_disconnect_btn)
+
+        self.p2p_sftp_btn = QPushButton("文件管理", self.p2p_panel)
+        self.p2p_sftp_btn.setObjectName(u"p2p_sftp_btn")
+        self.p2p_sftp_btn.setEnabled(False)
+        p2p_main_layout.addWidget(self.p2p_sftp_btn)
+
+        # --- 分隔线 ---
+        p2p_separator = QFrame(self.p2p_panel)
+        p2p_separator.setFrameShape(QFrame.Shape.HLine)
+        p2p_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        p2p_main_layout.addWidget(p2p_separator)
+
+        # --- 连接方式选择 ---
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("连接方式:"))
+        self.p2p_mode_combo = QComboBox(self.p2p_panel)
+        self.p2p_mode_combo.setObjectName(u"p2p_mode_combo")
+        self.p2p_mode_combo.addItems(["XTCP", "SSH", "FTP"])
+        mode_layout.addWidget(self.p2p_mode_combo)
+        p2p_main_layout.addLayout(mode_layout)
+
+        # --- SSH/FTP 表单 ---
+        self.p2p_ssh_host = QLineEdit(self.p2p_panel)
+        self.p2p_ssh_host.setObjectName(u"p2p_ssh_host")
+        self.p2p_ssh_host.setPlaceholderText("127.0.0.1")
+        self.p2p_ssh_user = QLineEdit(self.p2p_panel)
+        self.p2p_ssh_user.setObjectName(u"p2p_ssh_user")
+        self.p2p_ssh_user.setText("newbv")
+        self.p2p_ssh_pass = QLineEdit(self.p2p_panel)
+        self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
+        self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.p2p_ssh_pass.setText("Xqsjnbv155")
+
+        self.p2p_ssh_form = QFormLayout()
+        self.p2p_ssh_form.addRow("host:", self.p2p_ssh_host)
+        self.p2p_ssh_form.addRow("\u8d26\u53f7:", self.p2p_ssh_user)
+        self.p2p_ssh_form.addRow("\u5bc6\u7801:", self.p2p_ssh_pass)
+        p2p_main_layout.addLayout(self.p2p_ssh_form)
+
+        # 仅 host 随模式切换显隐（账号/密码始终可见）
+        self.p2p_ssh_widgets = [
+            self.p2p_ssh_host,
+        ]
+        # 默认 XTCP 模式，隐藏 host 字段及其标签
+        for w in self.p2p_ssh_widgets:
+            w.setVisible(False)
+        # 仅隐藏 host 行的标签（第0行）
+        host_lbl_item = self.p2p_ssh_form.itemAt(0, QFormLayout.ItemRole.LabelRole)
+        if host_lbl_item and host_lbl_item.widget():
+            host_lbl_item.widget().setVisible(False)
+
+        p2p_main_layout.addStretch()
+
+        self.p2p_panel.setFixedWidth(260)
+        self.p2p_panel.setVisible(False)
+
+        self.horizontalLayout_main.addWidget(self.p2p_panel)
+
+        self.verticalLayout_2.addLayout(self.horizontalLayout_main)
 
         MainWindow.setCentralWidget(self.centralwidget)
 
@@ -155,5 +276,6 @@ class Ui_MainWindow(object):
         self.start.setText(QCoreApplication.translate("MainWindow", u"\u64ad\u653e", None))
         self.end.setText(QCoreApplication.translate("MainWindow", u"\u7ed3\u675f", None))
         self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"\u6682\u505c", None))
+        self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"P2P", None))
     # retranslateUi
 
