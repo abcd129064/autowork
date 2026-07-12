@@ -12,13 +12,14 @@ import stat
 import time
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
-    QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
+    QWidget, QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
     QDialog, QVBoxLayout, QHBoxLayout, QKeySequenceEdit, QDialogButtonBox,
     QComboBox, QSpinBox, QListView, QAbstractItemView, QFrame, QFormLayout,
     QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog,
-    QPushButton, QProgressDialog)
+    QPushButton, QProgressDialog, QPlainTextEdit, QSplitter, QProgressBar,
+    QTableWidget, QTableWidgetItem)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction
+from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QTextCursor
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -132,26 +133,31 @@ class SFTPListWorker(QThread):
 
 
 class SFTPOperationWorker(QThread):
-    """异步 SFTP 操作工作线程（上传/下载/删除/创建目录）"""
+    """异步 SFTP 操作工作线程（上传/下载/删除/创建目录），支持传输进度"""
     success = Signal(str)
     error = Signal(str)
+    progress = Signal(int, int)  # (transferred_bytes, total_bytes)
 
-    def __init__(self, transport, operation, local_path='', remote_path=''):
+    def __init__(self, transport, operation, local_path='', remote_path='', file_size=0):
         super().__init__()
         self.transport = transport
         self.operation = operation
         self.local_path = local_path
         self.remote_path = remote_path
+        self.file_size = file_size
+
+    def _progress_cb(self, transferred, total):
+        self.progress.emit(transferred, total)
 
     def run(self):
         sftp = None
         try:
             sftp = paramiko.SFTPClient.from_transport(self.transport)
             if self.operation == 'upload':
-                sftp.put(self.local_path, self.remote_path)
+                sftp.put(self.local_path, self.remote_path, callback=self._progress_cb)
                 self.success.emit(f"已上传: {os.path.basename(self.local_path)}")
             elif self.operation == 'download':
-                sftp.get(self.remote_path, self.local_path)
+                sftp.get(self.remote_path, self.local_path, callback=self._progress_cb)
                 self.success.emit(f"已下载: {os.path.basename(self.remote_path)}")
             elif self.operation == 'delete':
                 sftp.remove(self.remote_path)
@@ -173,239 +179,685 @@ class SFTPOperationWorker(QThread):
 
 
 class SFTPWindow(QDialog):
-    """SFTP 文件管理窗口"""
+    """SFTP 文件管理窗口（左右双面板，类似 Xftp）"""
 
-    def __init__(self, host, port, username, password, log_callback=None, parent=None):
+    def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"SFTP 文件管理 - {host}")
-        self.resize(750, 500)
+        title = f"SFTP 文件管理 - {server_name} ({host}:{port})" if server_name else f"SFTP 文件管理 - {host}:{port}"
+        self.setWindowTitle(title)
+        self.resize(1000, 620)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        self._server_name = server_name
         self._transport = None
-        self._current_path = '/home'
+        self._remote_path = '/home'
+        self._remote_entries = []
+        self._local_path = os.path.expanduser('~')
+        self._local_entries = []
         self._log = log_callback or (lambda msg: None)
-        self._worker = None
+        # 列目录用单一 worker
+        self._list_worker = None
+        # 传输用多 worker 并行管理：{id: {'worker': ..., 'row': ..., 'start_time': ...}}
+        self._transfer_workers = {}
+        self._next_transfer_id = 0
         self._init_ui()
         QTimer.singleShot(100, self._connect_and_list)
 
+    # ------------------------------------------------------------------ UI 构建
     def _init_ui(self):
-        layout = QVBoxLayout(self)
-        # 顶部路径栏
-        path_layout = QHBoxLayout()
-        self._btn_up = QPushButton(".. 上级目录")
-        self._btn_up.clicked.connect(self._go_up)
-        path_layout.addWidget(self._btn_up)
-        path_layout.addWidget(QLabel("当前路径:"))
-        self._lbl_path = QLabel(self._current_path)
-        self._lbl_path.setStyleSheet("font-weight: bold;")
-        path_layout.addWidget(self._lbl_path, 1)
-        self._btn_refresh = QPushButton("刷新")
-        self._btn_refresh.clicked.connect(self._refresh)
-        path_layout.addWidget(self._btn_refresh)
-        layout.addLayout(path_layout)
-        # 文件列表
-        self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["文件名", "大小", "类型", "权限", "修改时间"])
-        self._tree.setColumnCount(5)
-        header = self._tree.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in [1, 2, 3, 4]:
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
-        layout.addWidget(self._tree)
-        # 底部按钮栏
-        btn_layout = QHBoxLayout()
-        self._btn_upload = QPushButton("上传文件")
-        self._btn_upload.clicked.connect(self._upload_file)
-        btn_layout.addWidget(self._btn_upload)
-        self._btn_download = QPushButton("下载文件")
-        self._btn_download.clicked.connect(self._download_file)
-        btn_layout.addWidget(self._btn_download)
-        self._btn_delete = QPushButton("删除")
-        self._btn_delete.clicked.connect(self._delete_selected)
-        btn_layout.addWidget(self._btn_delete)
-        self._btn_mkdir = QPushButton("新建目录")
-        self._btn_mkdir.clicked.connect(self._create_directory)
-        btn_layout.addWidget(self._btn_mkdir)
-        btn_layout.addStretch()
-        self._lbl_status = QLabel("就绪")
-        btn_layout.addWidget(self._lbl_status)
-        layout.addLayout(btn_layout)
+        root = QVBoxLayout(self)
 
+        # ---- 左右双面板
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 左侧 - 本地文件
+        self._left_panel = QWidget()
+        left_lay = QVBoxLayout(self._left_panel)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_bar = QHBoxLayout()
+        self._btn_local_up = QPushButton('.. 上级')
+        self._btn_local_up.clicked.connect(self._local_go_up)
+        left_bar.addWidget(self._btn_local_up)
+        left_bar.addWidget(QLabel('本地:'))
+        self._edit_local_path = QLineEdit(self._local_path)
+        self._edit_local_path.setStyleSheet('font-weight:bold;')
+        self._edit_local_path.returnPressed.connect(self._on_local_path_entered)
+        left_bar.addWidget(self._edit_local_path, 1)
+        self._btn_local_refresh = QPushButton('刷新')
+        self._btn_local_refresh.clicked.connect(self._local_refresh)
+        left_bar.addWidget(self._btn_local_refresh)
+        left_lay.addLayout(left_bar)
+
+        self._local_tree = QTreeWidget()
+        self._local_tree.setHeaderLabels(['文件名', '大小', '类型', '修改时间'])
+        self._local_tree.setColumnCount(4)
+        lh = self._local_tree.header()
+        lh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in [1, 2, 3]:
+            lh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self._local_tree.itemDoubleClicked.connect(self._on_local_item_double_clicked)
+        left_lay.addWidget(self._local_tree)
+
+        # 本地底部搜索框（默认隐藏）
+        self._local_search_frame = QWidget()
+        local_sf = QHBoxLayout(self._local_search_frame)
+        local_sf.setContentsMargins(0, 2, 0, 0)
+        self._local_search_edit = QLineEdit()
+        self._local_search_edit.setPlaceholderText('搜索本地文件...')
+        self._local_search_edit.returnPressed.connect(self._on_local_search)
+        local_sf.addWidget(self._local_search_edit, 1)
+        btn_ls = QPushButton('搜索')
+        btn_ls.clicked.connect(self._on_local_search)
+        local_sf.addWidget(btn_ls)
+        btn_lc = QPushButton('✕')
+        btn_lc.clicked.connect(lambda: self._local_search_frame.hide())
+        local_sf.addWidget(btn_lc)
+        left_lay.addWidget(self._local_search_frame)
+        self._local_search_frame.hide()
+
+        # 右侧 - 远程 SFTP
+        self._right_panel = QWidget()
+        right_lay = QVBoxLayout(self._right_panel)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_bar = QHBoxLayout()
+        self._btn_up = QPushButton('.. 上级目录')
+        self._btn_up.clicked.connect(self._go_up)
+        right_bar.addWidget(self._btn_up)
+        right_bar.addWidget(QLabel('远程:'))
+        self._edit_remote_path = QLineEdit(self._remote_path)
+        self._edit_remote_path.setStyleSheet('font-weight:bold;')
+        self._edit_remote_path.returnPressed.connect(self._on_remote_path_entered)
+        right_bar.addWidget(self._edit_remote_path, 1)
+        self._btn_refresh = QPushButton('刷新')
+        self._btn_refresh.clicked.connect(self._refresh)
+        right_bar.addWidget(self._btn_refresh)
+        right_lay.addLayout(right_bar)
+
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(['文件名', '大小', '类型', '权限', '修改时间'])
+        self._tree.setColumnCount(5)
+        rh = self._tree.header()
+        rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in [1, 2, 3, 4]:
+            rh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        right_lay.addWidget(self._tree)
+
+        # 远程底部搜索框（默认隐藏）
+        self._remote_search_frame = QWidget()
+        remote_sf = QHBoxLayout(self._remote_search_frame)
+        remote_sf.setContentsMargins(0, 2, 0, 0)
+        self._remote_search_edit = QLineEdit()
+        self._remote_search_edit.setPlaceholderText('搜索远程文件...')
+        self._remote_search_edit.returnPressed.connect(self._on_remote_search)
+        remote_sf.addWidget(self._remote_search_edit, 1)
+        btn_rs = QPushButton('搜索')
+        btn_rs.clicked.connect(self._on_remote_search)
+        remote_sf.addWidget(btn_rs)
+        btn_rc = QPushButton('✕')
+        btn_rc.clicked.connect(lambda: self._remote_search_frame.hide())
+        remote_sf.addWidget(btn_rc)
+        right_lay.addWidget(self._remote_search_frame)
+        self._remote_search_frame.hide()
+
+        self._splitter.addWidget(self._left_panel)
+        self._splitter.addWidget(self._right_panel)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 1)
+        root.addWidget(self._splitter, 1)
+
+        # ---- 传输队列面板
+        self._transfer_table = QTableWidget(0, 4)
+        self._transfer_table.setHorizontalHeaderLabels(['文件名', '进度', '速度', '状态'])
+        self._transfer_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in [1, 2, 3]:
+            self._transfer_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self._transfer_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._transfer_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._transfer_table.verticalHeader().setDefaultSectionSize(24)
+        self._transfer_table.setFixedHeight(130)
+        root.addWidget(self._transfer_table)
+
+        # ---- 操作按钮栏
+        btn_row = QHBoxLayout()
+        self._btn_upload = QPushButton('上传文件 ▶')
+        self._btn_upload.clicked.connect(self._upload_file)
+        btn_row.addWidget(self._btn_upload)
+        self._btn_download = QPushButton('◀ 下载文件')
+        self._btn_download.clicked.connect(self._download_file)
+        btn_row.addWidget(self._btn_download)
+        self._btn_delete = QPushButton('删除')
+        self._btn_delete.clicked.connect(self._delete_selected)
+        btn_row.addWidget(self._btn_delete)
+        self._btn_mkdir = QPushButton('新建目录')
+        self._btn_mkdir.clicked.connect(self._create_directory)
+        btn_row.addWidget(self._btn_mkdir)
+        btn_row.addStretch()
+        self._lbl_status = QLabel('就绪')
+        btn_row.addWidget(self._lbl_status)
+        root.addLayout(btn_row)
+
+        # ---- Ctrl+F 快捷键
+        sc = QShortcut(QKeySequence('Ctrl+F'), self)
+        sc.activated.connect(self._on_search_shortcut)
+        esc = QShortcut(QKeySequence('Escape'), self)
+        esc.activated.connect(self._hide_search_boxes)
+
+    # ------------------------------------------------------------------ 连接
     def _connect_and_list(self):
-        """建立 SFTP 连接并列出根目录"""
-        self._lbl_status.setText("正在连接...")
+        self._lbl_status.setText('正在连接...')
         try:
             self._transport = paramiko.Transport((self._host, self._port))
             self._transport.connect(username=self._username, password=self._password)
-            self._log(f"[SFTP] 已连接到 {self._host}:{self._port}")
-            self._lbl_status.setText("已连接")
-            self._list_directory(self._current_path)
+            self._log(f'[SFTP] 已连接到 {self._host}:{self._port}')
+            self._lbl_status.setText('已连接')
+            self._list_remote(self._remote_path)
+            self._list_local(self._local_path)
         except Exception as e:
-            self._log(f"[SFTP] 连接失败: {e}")
-            self._lbl_status.setText(f"连接失败: {e}")
+            self._log(f'[SFTP] 连接失败: {e}')
+            self._lbl_status.setText(f'连接失败: {e}')
 
-    def _cleanup_worker(self):
-        """安全清理当前 worker，防止 QThread C++ 对象被 GC 提前回收"""
-        if self._worker is not None:
-            if self._worker.isRunning():
-                self._worker.wait(3000)
-            self._worker.deleteLater()
-            self._worker = None
+    # ------------------------------------------------------------------ Worker 管理
+    def _cleanup_list_worker(self):
+        if self._list_worker is not None:
+            if self._list_worker.isRunning():
+                self._list_worker.wait(3000)
+            self._list_worker.deleteLater()
+            self._list_worker = None
 
-    def _list_directory(self, path):
-        """异步列出目录内容"""
+    def _safe_delete_transfer_worker(self, tid):
+        """安全清理单个传输 worker"""
+        info = self._transfer_workers.pop(tid, None)
+        if info:
+            w = info['worker']
+            if w.isRunning():
+                w.wait(3000)
+            w.deleteLater()
+
+    # ------------------------------------------------------------------ 远程列目录
+    def _list_remote(self, path):
         if self._transport is None:
             return
-        self._cleanup_worker()
-        self._lbl_status.setText(f"加载中: {path}")
+        self._cleanup_list_worker()
+        self._lbl_status.setText(f'加载中: {path}')
         worker = SFTPListWorker(self._transport, path)
         worker.result.connect(self._on_list_result)
         worker.error.connect(self._on_list_error)
-        self._worker = worker
+        self._list_worker = worker
         worker.start()
 
     def _on_list_result(self, path, entries):
-        """目录列表加载完成"""
-        self._current_path = path
-        self._lbl_path.setText(path)
+        self._remote_path = path
+        self._remote_entries = entries
+        self._edit_remote_path.setText(path)
+        self._populate_remote(entries)
+        dirs = [e for e in entries if e['is_dir']]
+        files = [e for e in entries if not e['is_dir']]
+        self._lbl_status.setText(f'{len(dirs)} 个目录, {len(files)} 个文件')
+        self._log(f'[SFTP] 目录加载完成: {path} ({len(dirs)} 目录, {len(files)} 文件)')
+
+    def _on_list_error(self, error):
+        self._lbl_status.setText(f'列表失败: {error}')
+        self._log(f'[SFTP] 列表失败: {error}')
+
+    def _populate_remote(self, entries):
         self._tree.clear()
-        # 目录排前，文件排后
         dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'])
         files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'])
         for entry in dirs + files:
             item = QTreeWidgetItem()
-            prefix = "/ " if entry['is_dir'] else ""
+            prefix = '/ ' if entry['is_dir'] else ''
             item.setText(0, prefix + entry['name'])
-            size_str = self._format_size(entry['size']) if not entry['is_dir'] else ''
-            item.setText(1, size_str)
-            item.setText(2, "目录" if entry['is_dir'] else "文件")
+            item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
+            item.setText(2, '目录' if entry['is_dir'] else '文件')
             item.setText(3, entry['perm'])
             item.setText(4, entry['mtime'])
             item.setData(0, Qt.ItemDataRole.UserRole, entry)
             self._tree.addTopLevelItem(item)
-        self._lbl_status.setText(f"{len(dirs)} 个目录, {len(files)} 个文件")
-        self._log(f"[SFTP] 目录加载完成: {path} ({len(dirs)} 目录, {len(files)} 文件)")
 
-    def _on_list_error(self, error):
-        self._lbl_status.setText(f"列表失败: {error}")
-        self._log(f"[SFTP] 列表失败: {error}")
+    # ------------------------------------------------------------------ 搜索
+    def _on_search_shortcut(self):
+        focus_right = self._right_panel and self._right_panel.isAncestorOf(self.focusWidget())
+        focus_left = self._left_panel and self._left_panel.isAncestorOf(self.focusWidget())
+        if focus_right or (not focus_left and self._right_panel is not None):
+            self._remote_search_frame.show()
+            self._remote_search_edit.setFocus()
+        else:
+            self._local_search_frame.show()
+            self._local_search_edit.setFocus()
 
+    def _hide_search_boxes(self):
+        self._local_search_frame.hide()
+        self._remote_search_frame.hide()
+
+    def _on_remote_search(self):
+        keyword = self._remote_search_edit.text().strip()
+        if not keyword:
+            return
+        kw = keyword.lower()
+        matched = [e for e in self._remote_entries if kw in e['name'].lower()]
+        self._populate_remote(matched)
+        self._lbl_status.setText(f'搜索完成，找到 {len(matched)} 个匹配项')
+
+    def _on_local_search(self):
+        keyword = self._local_search_edit.text().strip()
+        if not keyword:
+            return
+        kw = keyword.lower()
+        matched = [e for e in self._local_entries if kw in e['name'].lower()]
+        self._populate_local(matched)
+        self._lbl_status.setText(f'搜索完成，找到 {len(matched)} 个匹配项')
+
+    def _populate_local(self, entries):
+        self._local_tree.clear()
+        dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'].lower())
+        files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'].lower())
+        for entry in dirs + files:
+            item = QTreeWidgetItem()
+            prefix = '/ ' if entry['is_dir'] else ''
+            item.setText(0, prefix + entry['name'])
+            item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
+            item.setText(2, '目录' if entry['is_dir'] else '文件')
+            item.setText(3, entry['mtime'])
+            item.setData(0, Qt.ItemDataRole.UserRole, entry)
+            self._local_tree.addTopLevelItem(item)
+
+    # ------------------------------------------------------------------ 路径输入跳转
+    def _on_local_path_entered(self):
+        path = self._edit_local_path.text().strip()
+        if os.path.isdir(path):
+            self._list_local(path)
+        else:
+            self._lbl_status.setText(f'本地路径不存在: {path}')
+
+    def _on_remote_path_entered(self):
+        path = self._edit_remote_path.text().strip()
+        if path:
+            self._list_remote(path)
+
+    # ------------------------------------------------------------------ 本地列目录
+    def _list_local(self, path):
+        if not os.path.isdir(path):
+            self._lbl_status.setText(f'本地路径无效: {path}')
+            return
+        self._local_path = path
+        self._edit_local_path.setText(path)
+        self._local_tree.clear()
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)
+        except Exception as e:
+            self._lbl_status.setText(f'读取本地目录失败: {e}')
+            return
+        self._local_entries = []
+        dirs = sorted([e for e in entries if e.is_dir()], key=lambda x: x.name.lower())
+        files = sorted([e for e in entries if e.is_file()], key=lambda x: x.name.lower())
+        for entry in dirs + files:
+            try:
+                st = entry.stat()
+            except Exception:
+                continue
+            is_dir = entry.is_dir()
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M') if st.st_mtime else ''
+            edata = {
+                'name': entry.name, 'is_dir': is_dir,
+                'size': st.st_size if not is_dir else 0,
+                'mtime': mtime, 'path': entry.path,
+            }
+            self._local_entries.append(edata)
+        self._populate_local(self._local_entries)
+
+    def _local_refresh(self):
+        self._list_local(self._local_path)
+
+    def _local_go_up(self):
+        parent = os.path.dirname(self._local_path)
+        if parent != self._local_path:
+            self._list_local(parent)
+
+    def _on_local_item_double_clicked(self, item, column):
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        if data['is_dir']:
+            self._list_local(data['path'])
+        else:
+            self._upload_file(data)
+
+    # ------------------------------------------------------------------ 远程导航
     def _refresh(self):
-        self._list_directory(self._current_path)
+        self._list_remote(self._remote_path)
 
     def _go_up(self):
-        parent = '/'.join(self._current_path.rstrip('/').split('/')[:-1])
+        parent = '/'.join(self._remote_path.rstrip('/').split('/')[:-1])
         if not parent:
             parent = '/'
-        self._list_directory(parent)
+        self._list_remote(parent)
 
     def _on_item_double_clicked(self, item, column):
         entry = item.data(0, Qt.ItemDataRole.UserRole)
-        if entry and entry['is_dir']:
-            new_path = self._current_path.rstrip('/') + '/' + entry['name']
-            self._list_directory(new_path)
-
-    def _upload_file(self):
-        local_path, _ = QFileDialog.getOpenFileName(self, "选择要上传的文件")
-        if not local_path:
+        if not entry:
             return
-        remote_path = self._current_path.rstrip('/') + '/' + os.path.basename(local_path)
-        self._cleanup_worker()
-        self._lbl_status.setText(f"上传中: {os.path.basename(local_path)}...")
-        self._log(f"[SFTP] 上传: {local_path} -> {remote_path}")
-        worker = SFTPOperationWorker(self._transport, 'upload', local_path, remote_path)
-        worker.success.connect(self._on_op_success)
-        worker.error.connect(self._on_op_error)
-        self._worker = worker
+        if entry['is_dir']:
+            new_path = self._remote_path.rstrip('/') + '/' + entry['name']
+            self._list_remote(new_path)
+        else:
+            self._download_file(entry)
+
+    # ------------------------------------------------------------------ 上传 / 下载
+    def _upload_file(self, data=None):
+        if data is None:
+            item = self._local_tree.currentItem()
+            if not item:
+                self._log('[SFTP] 请先在左侧本地面板选择一个文件')
+                return
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not data or data['is_dir']:
+                self._log('[SFTP] 请选择一个文件（非目录）')
+                return
+        local_path = data['path']
+        remote_path = self._remote_path.rstrip('/') + '/' + data['name']
+        file_size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
+        self._log(f'[SFTP] 上传: {local_path} -> {remote_path}')
+        worker = SFTPOperationWorker(self._transport, 'upload', local_path, remote_path, file_size=file_size)
+        self._start_transfer_op(worker, data['name'], '上传', file_size)
+
+    def _download_file(self, entry=None):
+        if entry is None:
+            item = self._tree.currentItem()
+            if not item:
+                self._log('[SFTP] 请先在右侧远程面板选择一个文件')
+                return
+            entry = item.data(0, Qt.ItemDataRole.UserRole)
+            if not entry or entry['is_dir']:
+                self._log('[SFTP] 请选择一个文件（非目录）')
+                return
+        remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
+        local_path = os.path.join(self._local_path, entry['name'])
+        file_size = entry.get('size', 0)
+        self._log(f'[SFTP] 下载: {remote_path} -> {local_path}')
+        worker = SFTPOperationWorker(self._transport, 'download', local_path, remote_path, file_size=file_size)
+        self._start_transfer_op(worker, entry['name'], '下载', file_size)
+
+    def _start_transfer_op(self, worker, filename, op_label, file_size):
+        """启动传输任务，在传输队列表格中添加一行"""
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        # 在表格中新增一行
+        row = self._transfer_table.rowCount()
+        self._transfer_table.insertRow(row)
+        self._transfer_table.setItem(row, 0, QTableWidgetItem(f'{op_label}: {filename}'))
+        # 进度条
+        pb = QProgressBar()
+        pb.setRange(0, 100)
+        pb.setValue(0)
+        self._transfer_table.setCellWidget(row, 1, pb)
+        self._transfer_table.setItem(row, 2, QTableWidgetItem('0 B/s'))
+        self._transfer_table.setItem(row, 3, QTableWidgetItem('传输中'))
+        # 记录 worker 信息
+        info = {'worker': worker, 'row': row, 'start_time': time.time()}
+        self._transfer_workers[tid] = info
+        # 连接信号
+        worker.progress.connect(lambda t, tot, _tid=tid: self._on_transfer_progress(_tid, t, tot))
+        worker.success.connect(lambda msg, _tid=tid: self._on_transfer_success(_tid, msg))
+        worker.error.connect(lambda err, _tid=tid: self._on_transfer_error(_tid, err))
         worker.start()
 
-    def _download_file(self):
-        item = self._tree.currentItem()
-        if not item:
-            self._log("[SFTP] 请先选择要下载的文件")
+    def _on_transfer_progress(self, tid, transferred, total):
+        info = self._transfer_workers.get(tid)
+        if not info:
             return
-        entry = item.data(0, Qt.ItemDataRole.UserRole)
-        if not entry or entry['is_dir']:
-            self._log("[SFTP] 请选择一个文件（非目录）")
-            return
-        local_path, _ = QFileDialog.getSaveFileName(self, "保存到", entry['name'])
-        if not local_path:
-            return
-        remote_path = self._current_path.rstrip('/') + '/' + entry['name']
-        self._cleanup_worker()
-        self._lbl_status.setText(f"下载中: {entry['name']}...")
-        self._log(f"[SFTP] 下载: {remote_path} -> {local_path}")
-        worker = SFTPOperationWorker(self._transport, 'download', local_path, remote_path)
-        worker.success.connect(self._on_op_success)
-        worker.error.connect(self._on_op_error)
-        self._worker = worker
-        worker.start()
+        row = info['row']
+        pct = int(transferred * 100 / total) if total > 0 else 0
+        pb = self._transfer_table.cellWidget(row, 1)
+        if pb:
+            pb.setValue(pct)
+        elapsed = time.time() - info['start_time']
+        speed = transferred / elapsed if elapsed > 0.5 else 0
+        speed_item = self._transfer_table.item(row, 2)
+        if speed_item:
+            speed_item.setText(f'{self._format_size(speed)}/s')
 
+    def _on_transfer_success(self, tid, msg):
+        info = self._transfer_workers.get(tid)
+        if info:
+            row = info['row']
+            pb = self._transfer_table.cellWidget(row, 1)
+            if pb:
+                pb.setValue(100)
+            status_item = self._transfer_table.item(row, 3)
+            if status_item:
+                status_item.setText('完成')
+        self._safe_delete_transfer_worker(tid)
+        self._lbl_status.setText(msg)
+        self._log(f'[SFTP] {msg}')
+        self._list_remote(self._remote_path)
+        self._list_local(self._local_path)
+
+    def _on_transfer_error(self, tid, error):
+        info = self._transfer_workers.get(tid)
+        if info:
+            row = info['row']
+            status_item = self._transfer_table.item(row, 3)
+            if status_item:
+                status_item.setText(f'失败: {error}')
+        self._safe_delete_transfer_worker(tid)
+        self._lbl_status.setText(f'操作失败: {error}')
+        self._log(f'[SFTP] 操作失败: {error}')
+
+    # ------------------------------------------------------------------ 删除 / 新建目录
     def _delete_selected(self):
         item = self._tree.currentItem()
         if not item:
-            self._log("[SFTP] 请先选择要删除的文件或目录")
+            self._log('[SFTP] 请先在右侧远程面板选择要删除的文件或目录')
             return
         entry = item.data(0, Qt.ItemDataRole.UserRole)
         if not entry:
             return
-        remote_path = self._current_path.rstrip('/') + '/' + entry['name']
+        remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         op = 'rmdir' if entry['is_dir'] else 'delete'
-        self._cleanup_worker()
-        self._log(f"[SFTP] 删除: {remote_path}")
+        self._log(f'[SFTP] 删除: {remote_path}')
         worker = SFTPOperationWorker(self._transport, op, '', remote_path)
-        worker.success.connect(self._on_op_success)
-        worker.error.connect(self._on_op_error)
-        self._worker = worker
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
         worker.start()
 
     def _create_directory(self):
-        name, ok = QInputDialog.getText(self, "新建目录", "目录名:")
+        name, ok = QInputDialog.getText(self, '新建目录', '目录名:')
         if not ok or not name:
             return
-        remote_path = self._current_path.rstrip('/') + '/' + name
-        self._cleanup_worker()
-        self._log(f"[SFTP] 创建目录: {remote_path}")
+        remote_path = self._remote_path.rstrip('/') + '/' + name
+        self._log(f'[SFTP] 创建目录: {remote_path}')
         worker = SFTPOperationWorker(self._transport, 'mkdir', '', remote_path)
-        worker.success.connect(self._on_op_success)
-        worker.error.connect(self._on_op_error)
-        self._worker = worker
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
         worker.start()
 
-    def _on_op_success(self, msg):
+    # ------------------------------------------------------------------ 回调
+    def _on_quick_op_success(self, msg):
         self._lbl_status.setText(msg)
-        self._log(f"[SFTP] {msg}")
-        self._list_directory(self._current_path)
+        self._log(f'[SFTP] {msg}')
+        self._list_remote(self._remote_path)
 
-    def _on_op_error(self, error):
-        self._lbl_status.setText(f"操作失败: {error}")
-        self._log(f"[SFTP] 操作失败: {error}")
+    def _on_quick_op_error(self, error):
+        self._lbl_status.setText(f'操作失败: {error}')
+        self._log(f'[SFTP] 操作失败: {error}')
 
+    # ------------------------------------------------------------------ 工具
     @staticmethod
     def _format_size(size):
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size < 1024:
-                return f"{size:.1f} {unit}" if unit != 'B' else f"{size} {unit}"
+                return f'{size:.1f} {unit}' if unit != 'B' else f'{size} {unit}'
             size /= 1024
-        return f"{size:.1f} TB"
+        return f'{size:.1f} TB'
 
+    # ------------------------------------------------------------------ 关闭
     def closeEvent(self, event):
-        # 先安全等待 worker 结束，再关闭 transport
-        if self._worker is not None:
-            if self._worker.isRunning():
-                self._worker.wait(3000)
-            self._worker.deleteLater()
-            self._worker = None
+        # 清理列目录 worker
+        self._cleanup_list_worker()
+        # 清理所有传输 worker
+        for tid in list(self._transfer_workers.keys()):
+            self._safe_delete_transfer_worker(tid)
         if self._transport:
             try:
                 self._transport.close()
             except Exception:
                 pass
             self._transport = None
-            self._log("[SFTP] 已断开连接")
+            self._log('[SFTP] 已断开连接')
+        super().closeEvent(event)
+
+
+class SSHCommandWorker(QThread):
+    """异步执行 SSH 命令的工作线程"""
+    output = Signal(str)
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, client, command):
+        super().__init__()
+        self.client = client
+        self.command = command
+
+    def run(self):
+        try:
+            stdin, stdout, stderr = self.client.exec_command(self.command)
+            out = stdout.read().decode('utf-8', errors='ignore')
+            err = stderr.read().decode('utf-8', errors='ignore')
+            if out:
+                self.output.emit(out)
+            if err:
+                self.error.emit(err)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
+
+
+class SSHTerminalWindow(QDialog):
+    """SSH 终端窗口（类似 Xshell）"""
+
+    def __init__(self, host, port, username, password, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"SSH 终端 - {host}:{port}")
+        self.resize(700, 450)
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._client = None
+        self._cmd_worker = None
+        self._init_ui()
+        QTimer.singleShot(100, self._connect_ssh)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        # 输出区域（黑底绿字，仿终端风格）
+        self._output = QPlainTextEdit()
+        self._output.setReadOnly(True)
+        self._output.setStyleSheet(
+            "QPlainTextEdit { background-color: #1e1e1e; color: #00ff00; "
+            "font-family: Consolas, 'Courier New', monospace; font-size: 11pt; }"
+        )
+        self._output.setMaximumBlockCount(5000)
+        layout.addWidget(self._output, 1)
+        # 输入栏
+        input_layout = QHBoxLayout()
+        self._prompt_lbl = QLabel("$")
+        self._prompt_lbl.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        input_layout.addWidget(self._prompt_lbl)
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("输入命令，按回车执行...")
+        self._input.setStyleSheet("font-size: 11pt;")
+        self._input.returnPressed.connect(self._on_send_command)
+        input_layout.addWidget(self._input, 1)
+        layout.addLayout(input_layout)
+
+    def _connect_ssh(self):
+        """建立 SSH 连接"""
+        self._output.appendPlainText(f"正在连接 {self._host}:{self._port} ...")
+        try:
+            self._client = paramiko.SSHClient()
+            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self._client.connect(
+                self._host, port=self._port,
+                username=self._username, password=self._password,
+                timeout=10
+            )
+            self._output.appendPlainText(f"已连接到 {self._host}:{self._port}，可以开始输入命令。\n")
+            self._input.setFocus()
+        except Exception as e:
+            self._output.appendPlainText(f"连接失败: {e}")
+            self._input.setEnabled(False)
+
+    def _on_send_command(self):
+        """发送命令"""
+        if self._client is None:
+            return
+        cmd = self._input.text().strip()
+        if not cmd:
+            return
+        self._input.clear()
+        self._output.appendPlainText(f"$ {cmd}")
+        # 清理旧 worker
+        if self._cmd_worker is not None:
+            if self._cmd_worker.isRunning():
+                self._cmd_worker.wait(3000)
+            self._cmd_worker.deleteLater()
+            self._cmd_worker = None
+        worker = SSHCommandWorker(self._client, cmd)
+        worker.output.connect(self._on_cmd_output)
+        worker.error.connect(self._on_cmd_error)
+        worker.finished.connect(self._on_cmd_finished)
+        self._cmd_worker = worker
+        worker.start()
+
+    def _on_cmd_output(self, text):
+        self._output.appendPlainText(text.rstrip('\n'))
+        self._scroll_to_bottom()
+
+    def _on_cmd_error(self, text):
+        # 错误输出用红色
+        self._output.appendHtml(f'<span style="color:#ff5555;">{text.rstrip(chr(10))}</span>')
+        self._scroll_to_bottom()
+
+    def _on_cmd_finished(self):
+        if self._cmd_worker:
+            self._cmd_worker.deleteLater()
+        self._cmd_worker = None
+        self._scroll_to_bottom()
+
+    def _scroll_to_bottom(self):
+        sb = self._output.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def closeEvent(self, event):
+        # 安全清理命令 worker
+        if self._cmd_worker is not None:
+            if self._cmd_worker.isRunning():
+                self._cmd_worker.wait(3000)
+            self._cmd_worker.deleteLater()
+            self._cmd_worker = None
+        # 关闭 SSH 连接
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
         super().closeEvent(event)
 
 
@@ -569,6 +1021,7 @@ class MainWindow(QMainWindow):
         self._ftp_worker = None
         self._auto_ssh_worker = None
         self._sftp_window = None
+        self._ssh_terminal_window = None
         self._init_p2p_panel()
     
     def _load_exe_list(self):
@@ -702,6 +1155,7 @@ class MainWindow(QMainWindow):
         self.ui.p2p_visitor_list.currentRowChanged.connect(self._on_p2p_visitor_selected)
         self.ui.p2p_mode_combo.currentIndexChanged.connect(self._on_p2p_mode_changed)
         self.ui.p2p_sftp_btn.clicked.connect(self._on_sftp_btn_clicked)
+        self.ui.p2p_ssh_terminal_btn.clicked.connect(self._on_ssh_terminal_btn_clicked)
 
     @Slot()
     def on_flush_clicked(self):
@@ -1613,6 +2067,7 @@ class MainWindow(QMainWindow):
         """自动 SSH 登录成功"""
         self.ui.show_log.appendPlainText(f"[P2P] SSH 自动登录成功: {result}")
         self.ui.p2p_sftp_btn.setEnabled(True)
+        self.ui.p2p_ssh_terminal_btn.setEnabled(True)
         if self._auto_ssh_worker:
             self._auto_ssh_worker.wait(3000)
             self._auto_ssh_worker.deleteLater()
@@ -1643,6 +2098,7 @@ class MainWindow(QMainWindow):
             self._auto_ssh_worker.deleteLater()
             self._auto_ssh_worker = None
         self.ui.p2p_sftp_btn.setEnabled(False)
+        self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         self._update_p2p_buttons()
         self.ui.show_log.appendPlainText("[P2P] frpc 已停止")
 
@@ -1681,6 +2137,7 @@ class MainWindow(QMainWindow):
         worker.wait(3000)
         worker.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
+        self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         self._update_p2p_buttons()
         self.ui.show_log.appendPlainText("[SSH] 已断开")
 
@@ -1688,6 +2145,7 @@ class MainWindow(QMainWindow):
         """SSH 连接成功回调"""
         self.ui.show_log.appendPlainText(f"[SSH] 连接成功: {result}")
         self.ui.p2p_sftp_btn.setEnabled(True)
+        self.ui.p2p_ssh_terminal_btn.setEnabled(True)
         # 线程已结束，用 deleteLater 安全销毁 C++ 对象
         # _ssh_worker 引用保留，断开按钮需通过它关闭 paramiko 客户端
         if self._ssh_worker:
@@ -1700,6 +2158,7 @@ class MainWindow(QMainWindow):
             self._ssh_worker.wait(3000)
             self._ssh_worker.deleteLater()
         self._ssh_worker = None
+        self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         self._update_p2p_buttons()
 
     def _on_ftp_connect(self):
@@ -1808,13 +2267,19 @@ class MainWindow(QMainWindow):
             self.ui.show_log.appendPlainText("[SFTP] paramiko 未安装")
             return
         mode = self.ui.p2p_mode_combo.currentText()
+        server_name = ''
         if mode == "XTCP":
-            # XTCP 模式：连接到 127.0.0.1:bindPort
+            # XTCP 模式：连接到 127.0.0.1:当前选中 visitor 的 bindPort
             if not self._p2p_visitors:
                 self.ui.show_log.appendPlainText("[SFTP] 请先添加 visitor 配置")
                 return
+            idx = self._p2p_current_index
+            if not (0 <= idx < len(self._p2p_visitors)):
+                self.ui.show_log.appendPlainText("[SFTP] 请先在列表中选择一个 visitor")
+                return
             host = "127.0.0.1"
-            port = self._p2p_visitors[0]["bindPort"]
+            port = self._p2p_visitors[idx]["bindPort"]
+            server_name = self._p2p_visitors[idx].get("serverName", "")
         elif mode == "SSH":
             host = self.ui.p2p_ssh_host.text().strip()
             port = 22
@@ -1826,13 +2291,47 @@ class MainWindow(QMainWindow):
         if not host:
             self.ui.show_log.appendPlainText("[SFTP] 主机地址不能为空")
             return
-        self.ui.show_log.appendPlainText(f"[SFTP] 打开文件管理: {host}:{port}")
+        self.ui.show_log.appendPlainText(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
         self._sftp_window = SFTPWindow(
             host, port, username, password,
+            server_name=server_name,
             log_callback=lambda msg: self.ui.show_log.appendPlainText(msg),
             parent=self
         )
         self._sftp_window.show()
+
+    def _on_ssh_terminal_btn_clicked(self):
+        """打开 SSH 终端窗口"""
+        if not PARAMIKO_AVAILABLE:
+            self.ui.show_log.appendPlainText("[SSH] paramiko 未安装")
+            return
+        mode = self.ui.p2p_mode_combo.currentText()
+        if mode == "XTCP":
+            if not self._p2p_visitors:
+                self.ui.show_log.appendPlainText("[SSH] 请先添加 visitor 配置")
+                return
+            idx = self._p2p_current_index
+            if not (0 <= idx < len(self._p2p_visitors)):
+                self.ui.show_log.appendPlainText("[SSH] 请先在列表中选择一个 visitor")
+                return
+            host = "127.0.0.1"
+            port = self._p2p_visitors[idx]["bindPort"]
+        elif mode == "SSH":
+            host = self.ui.p2p_ssh_host.text().strip()
+            port = 22
+        else:
+            self.ui.show_log.appendPlainText("[SSH] SSH 终端仅支持 XTCP/SSH 模式")
+            return
+        username = self.ui.p2p_ssh_user.text()
+        password = self.ui.p2p_ssh_pass.text()
+        if not host:
+            self.ui.show_log.appendPlainText("[SSH] 主机地址不能为空")
+            return
+        self.ui.show_log.appendPlainText(f"[SSH] 打开终端: {host}:{port}")
+        self._ssh_terminal_window = SSHTerminalWindow(
+            host, port, username, password, parent=self
+        )
+        self._ssh_terminal_window.show()
 
     # ==================== 快捷键 ====================
 

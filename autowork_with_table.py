@@ -202,6 +202,11 @@ class Ui_MainWindow(object):
         self.p2p_sftp_btn.setEnabled(False)
         p2p_main_layout.addWidget(self.p2p_sftp_btn)
 
+        self.p2p_ssh_terminal_btn = QPushButton("SSH 终端", self.p2p_panel)
+        self.p2p_ssh_terminal_btn.setObjectName(u"p2p_ssh_terminal_btn")
+        self.p2p_ssh_terminal_btn.setEnabled(False)
+        p2p_main_layout.addWidget(self.p2p_ssh_terminal_btn)
+
         # --- 分隔线 ---
         p2p_separator = QFrame(self.p2p_panel)
         p2p_separator.setFrameShape(QFrame.Shape.HLine)
