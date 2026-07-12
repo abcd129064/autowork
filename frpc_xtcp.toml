@@ -1,0 +1,19 @@
+serverAddr = "49.235.34.253"
+serverPort = 7900
+auth.method = "token"
+auth.token = "123"
+
+[[visitors]]
+name = "snk_4002"
+type = "xtcp"
+serverName = "snk_4002"
+secretKey = "abc123"
+bindPort = 56340
+
+[[visitors]]
+name = "snk_4003"
+type = "xtcp"
+serverName = "snk_4003"
+secretKey = "abc123"
+bindPort = 23133
+
