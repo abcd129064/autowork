@@ -4,16 +4,9 @@ auth.method = "token"
 auth.token = "123"
 
 [[visitors]]
-name = "snk_4002"
+name = "snk_4008"
 type = "xtcp"
-serverName = "snk_4002"
+serverName = "snk_4008"
 secretKey = "abc123"
-bindPort = 56340
-
-[[visitors]]
-name = "snk_4003"
-type = "xtcp"
-serverName = "snk_4003"
-secretKey = "abc123"
-bindPort = 23133
+bindPort = 53165
 

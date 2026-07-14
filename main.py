@@ -55,6 +55,9 @@ class SSHWorker(QThread):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            # run() 结束后立即关闭 paramiko client，避免资源泄漏
+            self.close()
 
     def close(self):
         if self._client:
@@ -178,6 +181,46 @@ class SFTPOperationWorker(QThread):
                     pass
 
 
+# 网络就绪类错误关键词，匹配时自动重试，认证失败等错误不重试
+_RETRYABLE_KEYWORDS = ('Error reading SSH protocol banner', 'Server connection dropped')
+_RETRY_MAX = 5
+_RETRY_DELAY = 2  # 秒
+
+
+class SFTPConnectWorker(QThread):
+    """异步建立 paramiko.Transport 连接的工作线程（含自动重试）"""
+    connected = Signal(object)   # 成功时发射 transport 对象
+    error = Signal(str)          # 失败时发射错误信息
+
+    def __init__(self, host, port, username, password):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+
+    def run(self):
+        for attempt in range(1, _RETRY_MAX + 1):
+            try:
+                transport = paramiko.Transport((self.host, self.port))
+                transport.connect(username=self.username, password=self.password)
+                self.connected.emit(transport)
+                return  # 成功，立即退出
+            except Exception as e:
+                err_msg = str(e)
+                # 仅网络就绪类错误才重试，认证失败等直接报错
+                if any(kw in err_msg for kw in _RETRYABLE_KEYWORDS) and attempt < _RETRY_MAX:
+                    print(f'[SFTP] 连接失败 ({err_msg})，正在重试 ({attempt}/{_RETRY_MAX})...')
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                # 不可重试的错误 或 已达最大重试次数
+                if attempt > 1:
+                    self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {err_msg}')
+                else:
+                    self.error.emit(err_msg)
+                return
+
+
 class SFTPWindow(QDialog):
     """SFTP 文件管理窗口（左右双面板，类似 Xftp）"""
 
@@ -194,11 +237,20 @@ class SFTPWindow(QDialog):
         self._transport = None
         self._remote_path = '/home'
         self._remote_entries = []
-        self._local_path = os.path.expanduser('~')
+        # 本地默认进入桌面目录，不存在时回退到用户主目录
+        _desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+        self._local_path = _desktop if os.path.isdir(_desktop) else os.path.expanduser('~')
         self._local_entries = []
         self._log = log_callback or (lambda msg: None)
+        # 异步连接用 worker
+        self._connect_worker = None
         # 列目录用单一 worker
         self._list_worker = None
+        # 列目录防重入与过期结果过滤
+        self._list_generation = 0
+        self._listing = False
+        # 待处理的远程路径（当前正在列目录时用户发起新导航时暂存）
+        self._pending_remote_path = None
         # 传输用多 worker 并行管理：{id: {'worker': ..., 'row': ..., 'start_time': ...}}
         self._transfer_workers = {}
         self._next_transfer_id = 0
@@ -218,6 +270,7 @@ class SFTPWindow(QDialog):
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_bar = QHBoxLayout()
         self._btn_local_up = QPushButton('.. 上级')
+        self._btn_local_up.setAutoDefault(False)  # 防止 QDialog 中 Enter 键劫持
         self._btn_local_up.clicked.connect(self._local_go_up)
         left_bar.addWidget(self._btn_local_up)
         left_bar.addWidget(QLabel('本地:'))
@@ -226,6 +279,7 @@ class SFTPWindow(QDialog):
         self._edit_local_path.returnPressed.connect(self._on_local_path_entered)
         left_bar.addWidget(self._edit_local_path, 1)
         self._btn_local_refresh = QPushButton('刷新')
+        self._btn_local_refresh.setAutoDefault(False)
         self._btn_local_refresh.clicked.connect(self._local_refresh)
         left_bar.addWidget(self._btn_local_refresh)
         left_lay.addLayout(left_bar)
@@ -249,9 +303,11 @@ class SFTPWindow(QDialog):
         self._local_search_edit.returnPressed.connect(self._on_local_search)
         local_sf.addWidget(self._local_search_edit, 1)
         btn_ls = QPushButton('搜索')
+        btn_ls.setAutoDefault(False)
         btn_ls.clicked.connect(self._on_local_search)
         local_sf.addWidget(btn_ls)
         btn_lc = QPushButton('✕')
+        btn_lc.setAutoDefault(False)
         btn_lc.clicked.connect(lambda: self._local_search_frame.hide())
         local_sf.addWidget(btn_lc)
         left_lay.addWidget(self._local_search_frame)
@@ -263,6 +319,7 @@ class SFTPWindow(QDialog):
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_bar = QHBoxLayout()
         self._btn_up = QPushButton('.. 上级目录')
+        self._btn_up.setAutoDefault(False)  # 防止 QDialog 中 Enter 键劫持
         self._btn_up.clicked.connect(self._go_up)
         right_bar.addWidget(self._btn_up)
         right_bar.addWidget(QLabel('远程:'))
@@ -271,6 +328,7 @@ class SFTPWindow(QDialog):
         self._edit_remote_path.returnPressed.connect(self._on_remote_path_entered)
         right_bar.addWidget(self._edit_remote_path, 1)
         self._btn_refresh = QPushButton('刷新')
+        self._btn_refresh.setAutoDefault(False)
         self._btn_refresh.clicked.connect(self._refresh)
         right_bar.addWidget(self._btn_refresh)
         right_lay.addLayout(right_bar)
@@ -294,9 +352,11 @@ class SFTPWindow(QDialog):
         self._remote_search_edit.returnPressed.connect(self._on_remote_search)
         remote_sf.addWidget(self._remote_search_edit, 1)
         btn_rs = QPushButton('搜索')
+        btn_rs.setAutoDefault(False)
         btn_rs.clicked.connect(self._on_remote_search)
         remote_sf.addWidget(btn_rs)
         btn_rc = QPushButton('✕')
+        btn_rc.setAutoDefault(False)
         btn_rc.clicked.connect(lambda: self._remote_search_frame.hide())
         remote_sf.addWidget(btn_rc)
         right_lay.addWidget(self._remote_search_frame)
@@ -311,27 +371,41 @@ class SFTPWindow(QDialog):
         # ---- 传输队列面板
         self._transfer_table = QTableWidget(0, 4)
         self._transfer_table.setHorizontalHeaderLabels(['文件名', '进度', '速度', '状态'])
-        self._transfer_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in [1, 2, 3]:
-            self._transfer_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        hdr = self._transfer_table.horizontalHeader()
+        # 前3列可拖拽调整，最后一列自动拉伸填满剩余空间（解决右侧空白和不自适应问题）
+        for c in range(3):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # 状态列自动贴合右边界
+        # 设置合理的默认列宽（仅对 Interactive 列生效）
+        hdr.resizeSection(0, 280)   # 文件名（最长内容）
+        hdr.resizeSection(1, 180)   # 进度（QProgressBar）
+        hdr.resizeSection(2, 100)   # 速度
+        # 禁止水平滚动条，所有列始终在可视区域内显示
+        self._transfer_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._transfer_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._transfer_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._transfer_table.verticalHeader().setDefaultSectionSize(24)
+        # 垂直滚动条仅在有内容超出时才显示，任务少时不会出现多余滚动条
+        self._transfer_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._transfer_table.setFixedHeight(130)
         root.addWidget(self._transfer_table)
 
         # ---- 操作按钮栏
         btn_row = QHBoxLayout()
         self._btn_upload = QPushButton('上传文件 ▶')
+        self._btn_upload.setAutoDefault(False)
         self._btn_upload.clicked.connect(self._upload_file)
         btn_row.addWidget(self._btn_upload)
         self._btn_download = QPushButton('◀ 下载文件')
+        self._btn_download.setAutoDefault(False)
         self._btn_download.clicked.connect(self._download_file)
         btn_row.addWidget(self._btn_download)
         self._btn_delete = QPushButton('删除')
+        self._btn_delete.setAutoDefault(False)
         self._btn_delete.clicked.connect(self._delete_selected)
         btn_row.addWidget(self._btn_delete)
         self._btn_mkdir = QPushButton('新建目录')
+        self._btn_mkdir.setAutoDefault(False)
         self._btn_mkdir.clicked.connect(self._create_directory)
         btn_row.addWidget(self._btn_mkdir)
         btn_row.addStretch()
@@ -347,25 +421,65 @@ class SFTPWindow(QDialog):
 
     # ------------------------------------------------------------------ 连接
     def _connect_and_list(self):
+        """异步建立 SFTP 连接，不阻塞主线程"""
         self._lbl_status.setText('正在连接...')
-        try:
-            self._transport = paramiko.Transport((self._host, self._port))
-            self._transport.connect(username=self._username, password=self._password)
-            self._log(f'[SFTP] 已连接到 {self._host}:{self._port}')
-            self._lbl_status.setText('已连接')
-            self._list_remote(self._remote_path)
-            self._list_local(self._local_path)
-        except Exception as e:
-            self._log(f'[SFTP] 连接失败: {e}')
-            self._lbl_status.setText(f'连接失败: {e}')
+        # 加载本地目录不依赖网络，可立即执行
+        self._list_local(self._local_path)
+        worker = SFTPConnectWorker(self._host, self._port, self._username, self._password)
+        worker.connected.connect(self._on_sftp_connect_success)
+        worker.error.connect(self._on_sftp_connect_error)
+        self._connect_worker = worker
+        worker.start()
+
+    def _on_sftp_connect_success(self, transport):
+        """异步 SFTP 连接成功回调"""
+        self._transport = transport
+        self._log(f'[SFTP] 已连接到 {self._host}:{self._port}')
+        self._lbl_status.setText('已连接')
+        self._list_remote(self._remote_path)
+        self._cleanup_connect_worker()
+
+    def _on_sftp_connect_error(self, error):
+        """异步 SFTP 连接失败回调"""
+        self._log(f'[SFTP] 连接失败: {error}')
+        self._lbl_status.setText(f'连接失败: {error}')
+        self._cleanup_connect_worker()
+
+    def _cleanup_connect_worker(self):
+        """安全清理连接 worker"""
+        if self._connect_worker is not None:
+            worker = self._connect_worker
+            self._connect_worker = None
+            if worker.isRunning():
+                worker.wait(3000)
+            worker.deleteLater()
 
     # ------------------------------------------------------------------ Worker 管理
     def _cleanup_list_worker(self):
+        """非阻塞清理列目录 worker：断开信号后交由 deleteLater"""
         if self._list_worker is not None:
-            if self._list_worker.isRunning():
-                self._list_worker.wait(3000)
-            self._list_worker.deleteLater()
+            w = self._list_worker
             self._list_worker = None
+            # 断开所有信号，防止旧 worker 结果回调干扰
+            try:
+                w.result.disconnect()
+            except Exception:
+                pass
+            try:
+                w.error.disconnect()
+            except Exception:
+                pass
+            try:
+                w.finished.disconnect()
+            except Exception:
+                pass
+            if w.isRunning():
+                # 不阻塞主线程，等 finished 信号后再 deleteLater
+                w.finished.connect(w.deleteLater)
+                # 信号已断开，旧 worker 的 result/error 不会再到达，重置 _listing
+                self._listing = False
+            else:
+                w.deleteLater()
 
     def _safe_delete_transfer_worker(self, tid):
         """安全清理单个传输 worker"""
@@ -380,15 +494,38 @@ class SFTPWindow(QDialog):
     def _list_remote(self, path):
         if self._transport is None:
             return
+        # 防重入：如果正在列目录，暂存目标路径，等当前操作完成后自动执行
+        if self._listing:
+            self._pending_remote_path = path
+            self._lbl_status.setText(f'等待加载: {path}')
+            return
+        # 非阻塞清理旧 worker（断开信号，不 wait）
         self._cleanup_list_worker()
+        self._list_generation += 1
+        gen = self._list_generation
+        self._listing = True
         self._lbl_status.setText(f'加载中: {path}')
         worker = SFTPListWorker(self._transport, path)
         worker.result.connect(self._on_list_result)
         worker.error.connect(self._on_list_error)
+        worker.finished.connect(self._on_list_worker_finished)
+        # 在 worker 上记录 generation，用于回调中校验
+        worker._list_gen = gen
         self._list_worker = worker
         worker.start()
 
+    def _on_list_worker_finished(self):
+        """列目录 worker 线程结束后的异步清理回调"""
+        if self._list_worker is not None and not self._list_worker.isRunning():
+            self._list_worker.deleteLater()
+            self._list_worker = None
+
     def _on_list_result(self, path, entries):
+        # 校验 generation，忽略过期 worker 的结果
+        worker = self.sender()
+        if worker and hasattr(worker, '_list_gen') and worker._list_gen != self._list_generation:
+            return
+        self._listing = False
         self._remote_path = path
         self._remote_entries = entries
         self._edit_remote_path.setText(path)
@@ -397,10 +534,25 @@ class SFTPWindow(QDialog):
         files = [e for e in entries if not e['is_dir']]
         self._lbl_status.setText(f'{len(dirs)} 个目录, {len(files)} 个文件')
         self._log(f'[SFTP] 目录加载完成: {path} ({len(dirs)} 目录, {len(files)} 文件)')
+        # 处理挂起的导航请求
+        self._process_pending_remote_path()
 
     def _on_list_error(self, error):
+        worker = self.sender()
+        if worker and hasattr(worker, '_list_gen') and worker._list_gen != self._list_generation:
+            return
+        self._listing = False
         self._lbl_status.setText(f'列表失败: {error}')
         self._log(f'[SFTP] 列表失败: {error}')
+        # 处理挂起的导航请求（即使当前失败也要执行用户的新请求）
+        self._process_pending_remote_path()
+
+    def _process_pending_remote_path(self):
+        """当前 listing 结束后，执行用户挂起的远程导航请求"""
+        pending = self._pending_remote_path
+        if pending is not None:
+            self._pending_remote_path = None
+            self._list_remote(pending)
 
     def _populate_remote(self, entries):
         self._tree.clear()
@@ -467,6 +619,10 @@ class SFTPWindow(QDialog):
     # ------------------------------------------------------------------ 路径输入跳转
     def _on_local_path_entered(self):
         path = self._edit_local_path.text().strip()
+        # 守卫：仅在路径实际发生变化时才导航，防止误触发
+        if os.path.normcase(os.path.normpath(path)) == os.path.normcase(os.path.normpath(self._local_path)):
+            return
+        print(f'[SFTP] 本地路径导航: {self._local_path} -> {path}')
         if os.path.isdir(path):
             self._list_local(path)
         else:
@@ -475,6 +631,7 @@ class SFTPWindow(QDialog):
     def _on_remote_path_entered(self):
         path = self._edit_remote_path.text().strip()
         if path:
+            print(f'[SFTP] 远程路径导航: {self._remote_path} -> {path}')
             self._list_remote(path)
 
     # ------------------------------------------------------------------ 本地列目录
@@ -537,6 +694,8 @@ class SFTPWindow(QDialog):
         self._list_remote(parent)
 
     def _on_item_double_clicked(self, item, column):
+        if self._listing:
+            return  # 正在加载目录，忽略双击
         entry = item.data(0, Qt.ItemDataRole.UserRole)
         if not entry:
             return
@@ -706,6 +865,8 @@ class SFTPWindow(QDialog):
 
     # ------------------------------------------------------------------ 关闭
     def closeEvent(self, event):
+        # 清理异步连接 worker
+        self._cleanup_connect_worker()
         # 清理列目录 worker
         self._cleanup_list_worker()
         # 清理所有传输 worker
@@ -747,6 +908,43 @@ class SSHCommandWorker(QThread):
             self.finished.emit()
 
 
+class SSHConnectWorker(QThread):
+    """异步建立 SSH 连接的工作线程（保持 client 存活，含自动重试）"""
+    connected = Signal(object)   # 成功时发射 SSHClient 对象
+    error = Signal(str)          # 失败时发射错误信息
+
+    def __init__(self, host, port, username, password):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+
+    def run(self):
+        for attempt in range(1, _RETRY_MAX + 1):
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    self.host, port=self.port,
+                    username=self.username, password=self.password,
+                    timeout=10
+                )
+                self.connected.emit(client)
+                return  # 成功，立即退出
+            except Exception as e:
+                err_msg = str(e)
+                if any(kw in err_msg for kw in _RETRYABLE_KEYWORDS) and attempt < _RETRY_MAX:
+                    print(f'[SSH] 连接失败 ({err_msg})，正在重试 ({attempt}/{_RETRY_MAX})...')
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                if attempt > 1:
+                    self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {err_msg}')
+                else:
+                    self.error.emit(err_msg)
+                return
+
+
 class SSHTerminalWindow(QDialog):
     """SSH 终端窗口（类似 Xshell）"""
 
@@ -760,6 +958,7 @@ class SSHTerminalWindow(QDialog):
         self._password = password
         self._client = None
         self._cmd_worker = None
+        self._connect_worker = None
         self._init_ui()
         QTimer.singleShot(100, self._connect_ssh)
 
@@ -787,21 +986,37 @@ class SSHTerminalWindow(QDialog):
         layout.addLayout(input_layout)
 
     def _connect_ssh(self):
-        """建立 SSH 连接"""
+        """异步建立 SSH 连接，不阻塞主线程"""
         self._output.appendPlainText(f"正在连接 {self._host}:{self._port} ...")
-        try:
-            self._client = paramiko.SSHClient()
-            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            self._client.connect(
-                self._host, port=self._port,
-                username=self._username, password=self._password,
-                timeout=10
-            )
-            self._output.appendPlainText(f"已连接到 {self._host}:{self._port}，可以开始输入命令。\n")
-            self._input.setFocus()
-        except Exception as e:
-            self._output.appendPlainText(f"连接失败: {e}")
-            self._input.setEnabled(False)
+        self._input.setEnabled(False)
+        worker = SSHConnectWorker(self._host, self._port, self._username, self._password)
+        worker.connected.connect(self._on_ssh_connect_success)
+        worker.error.connect(self._on_ssh_connect_error)
+        self._connect_worker = worker
+        worker.start()
+
+    def _on_ssh_connect_success(self, client):
+        """异步 SSH 连接成功回调"""
+        self._client = client
+        self._output.appendPlainText(f"已连接到 {self._host}:{self._port}，可以开始输入命令。\n")
+        self._input.setEnabled(True)
+        self._input.setFocus()
+        self._cleanup_connect_worker()
+
+    def _on_ssh_connect_error(self, error):
+        """异步 SSH 连接失败回调"""
+        self._output.appendPlainText(f"连接失败: {error}")
+        self._input.setEnabled(False)
+        self._cleanup_connect_worker()
+
+    def _cleanup_connect_worker(self):
+        """安全清理连接 worker"""
+        if self._connect_worker is not None:
+            worker = self._connect_worker
+            self._connect_worker = None
+            if worker.isRunning():
+                worker.wait(3000)
+            worker.deleteLater()
 
     def _on_send_command(self):
         """发送命令"""
@@ -845,6 +1060,8 @@ class SSHTerminalWindow(QDialog):
         sb.setValue(sb.maximum())
 
     def closeEvent(self, event):
+        # 清理连接 worker
+        self._cleanup_connect_worker()
         # 安全清理命令 worker
         if self._cmd_worker is not None:
             if self._cmd_worker.isRunning():
@@ -1019,7 +1236,6 @@ class MainWindow(QMainWindow):
         self._p2p_current_index = -1
         self._ssh_worker = None
         self._ftp_worker = None
-        self._auto_ssh_worker = None
         self._sftp_window = None
         self._ssh_terminal_window = None
         self._init_p2p_panel()
@@ -1310,12 +1526,13 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def on_open_config_clicked(self):
-        """配置按钮点击事件 - 选择打开 settings.json 或 cfg.json"""
+        """配置按钮点击事件 - 选择打开 settings.json / cfg.json / frpc_xtcp.toml"""
         msg = QMessageBox(self)
         msg.setWindowTitle("打开配置文件")
         msg.setText("选择要打开的配置文件：")
         settings_btn = msg.addButton("settings.json", QMessageBox.ActionRole)
         cfg_btn = msg.addButton("cfg.json", QMessageBox.ActionRole)
+        frpc_btn = msg.addButton("frpc_xtcp.toml", QMessageBox.ActionRole)
         msg.addButton(QMessageBox.Cancel)
         msg.exec()
         
@@ -1324,6 +1541,8 @@ class MainWindow(QMainWindow):
             path = self._get_settings_path()
         elif clicked == cfg_btn:
             path = os.path.join(self.exe_dir, "cfg.json")
+        elif clicked == frpc_btn:
+            path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
         else:
             return
         
@@ -1872,17 +2091,39 @@ class MainWindow(QMainWindow):
     # ==================== P2P 连接 ====================
 
     def _init_p2p_panel(self):
-        """初始化 P2P 面板状态和加载已保存配置"""
-        # 从 settings.json 加载已保存的 visitor 配置
-        settings = self._load_settings()
-        saved = settings.get("p2p_visitors", [])
-        for v in saved:
-            self._p2p_visitors.append(dict(v))
+        """初始化 P2P 面板状态，从已有的 frpc_xtcp.toml 恢复 visitor 列表"""
+        self._load_visitors_from_toml()
         self._refresh_p2p_list()
         # 初始化表单 bindPort 为随机值
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
         self._update_p2p_visibility()
         self._update_p2p_buttons()
+
+    def _load_visitors_from_toml(self):
+        """从已有的 frpc_xtcp.toml 解析 [[visitors]] 段恢复 visitor 列表"""
+        import re
+        toml_path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
+        if not os.path.exists(toml_path):
+            return
+        try:
+            with open(toml_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # 按 [[visitors]] 分割，跳过全局头部
+            blocks = content.split('[[visitors]]')
+            for block in blocks[1:]:  # 第一段是全局头部，跳过
+                visitor = {}
+                m_server = re.search(r'serverName\s*=\s*"([^"]+)"', block)
+                m_key = re.search(r'secretKey\s*=\s*"([^"]+)"', block)
+                m_port = re.search(r'bindPort\s*=\s*(\d+)', block)
+                if m_server and m_port:
+                    visitor["serverName"] = m_server.group(1)
+                    visitor["secretKey"] = m_key.group(1) if m_key else "abc123"
+                    visitor["bindPort"] = int(m_port.group(1))
+                    self._p2p_visitors.append(visitor)
+            if self._p2p_visitors:
+                self.ui.show_log.appendPlainText(f"[P2P] 从 TOML 恢复了 {len(self._p2p_visitors)} 个 visitor")
+        except Exception as e:
+            self.ui.show_log.appendPlainText(f"[P2P] 解析 TOML 失败: {e}")
 
     def _get_new_random_port(self):
         """生成不冲突的随机端口（排除已添加 visitor 的端口）"""
@@ -1918,7 +2159,6 @@ class MainWindow(QMainWindow):
         # 更新当前索引为新项
         self._p2p_current_index = len(self._p2p_visitors) - 1
         self.ui.p2p_visitor_list.setCurrentRow(self._p2p_current_index)
-        self._save_p2p_settings()
         # 添加后更新表单端口为下一个随机值
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
 
@@ -1929,7 +2169,6 @@ class MainWindow(QMainWindow):
             self._p2p_visitors.pop(row)
             self._p2p_current_index = -1
             self._refresh_p2p_list()
-            self._save_p2p_settings()
 
     def _on_p2p_visitor_selected(self, row):
         """选择 visitor 列表项时加载到表单"""
@@ -1963,8 +2202,8 @@ class MainWindow(QMainWindow):
             self.ui.p2p_visitor_list.addItem(v.get("serverName", ""))
 
     def _save_p2p_settings(self):
-        """保存 visitor 配置到 settings.json"""
-        self._save_settings({"p2p_visitors": self._p2p_visitors})
+        """visitor 配置仅存于内存，连接时写入 TOML，不持久化到 settings.json"""
+        pass
 
     def _on_p2p_connect(self):
         """连接按钮 - 根据当前模式分发连接"""
@@ -2024,10 +2263,10 @@ class MainWindow(QMainWindow):
         app_dir = self._get_app_dir()
         toml_path = os.path.join(app_dir, "frpc_xtcp.toml")
         try:
-            self._write_frpc_toml(toml_path)
+            self._write_frpc_config(toml_path)
             self.ui.show_log.appendPlainText(f"[P2P] 已生成 {toml_path}")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[P2P] 生成 TOML 失败: {e}")
+            self.ui.show_log.appendPlainText(f"[P2P] 生成配置失败: {e}")
             return
         frpc_exe = os.path.join(app_dir, "frpc.exe")
         if not os.path.exists(frpc_exe):
@@ -2041,45 +2280,6 @@ class MainWindow(QMainWindow):
         self._frpc_process.start(frpc_exe, ["-c", toml_path])
         self.ui.show_log.appendPlainText(f"[P2P] 已启动 frpc: {frpc_exe} -c {toml_path}")
         self._update_p2p_buttons()
-        # frpc 启动后延迟尝试 SSH 自动登录
-        if PARAMIKO_AVAILABLE and self._p2p_visitors:
-            first_visitor = self._p2p_visitors[0]
-            QTimer.singleShot(3000, lambda: self._try_auto_ssh_login(
-                first_visitor["bindPort"],
-                self.ui.p2p_ssh_user.text(),
-                self.ui.p2p_ssh_pass.text()
-            ))
-            self.ui.show_log.appendPlainText(
-                f"[P2P] 3秒后尝试 SSH 登录 127.0.0.1:{first_visitor['bindPort']}...")
-
-    def _try_auto_ssh_login(self, port, username, password):
-        """frpc 启动后自动尝试 SSH 登录"""
-        if self._frpc_process is None:
-            return
-        worker = SSHWorker("127.0.0.1", port, username, password)
-        # 先保存引用，再启动，防止信号先于赋值到达
-        self._auto_ssh_worker = worker
-        worker.finished.connect(self._on_auto_ssh_login_success)
-        worker.error.connect(self._on_auto_ssh_login_failed)
-        worker.start()
-
-    def _on_auto_ssh_login_success(self, result):
-        """自动 SSH 登录成功"""
-        self.ui.show_log.appendPlainText(f"[P2P] SSH 自动登录成功: {result}")
-        self.ui.p2p_sftp_btn.setEnabled(True)
-        self.ui.p2p_ssh_terminal_btn.setEnabled(True)
-        if self._auto_ssh_worker:
-            self._auto_ssh_worker.wait(3000)
-            self._auto_ssh_worker.deleteLater()
-        self._auto_ssh_worker = None
-
-    def _on_auto_ssh_login_failed(self, error):
-        """自动 SSH 登录失败"""
-        self.ui.show_log.appendPlainText(f"[P2P] SSH 自动登录失败: {error}")
-        if self._auto_ssh_worker:
-            self._auto_ssh_worker.wait(3000)
-            self._auto_ssh_worker.deleteLater()
-        self._auto_ssh_worker = None
 
     def _on_xtcp_disconnect(self):
         """停止 frpc 进程"""
@@ -2092,13 +2292,10 @@ class MainWindow(QMainWindow):
         proc.kill()
         proc.waitForFinished(3000)
         proc.deleteLater()
-        # 同时清理 auto_ssh_worker（frpc 停了，SSH 也没意义了）
-        if self._auto_ssh_worker:
-            self._auto_ssh_worker.wait(3000)
-            self._auto_ssh_worker.deleteLater()
-            self._auto_ssh_worker = None
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        # 断开时关闭已打开的 SFTP/SSH 终端窗口
+        self._close_p2p_windows()
         self._update_p2p_buttons()
         self.ui.show_log.appendPlainText("[P2P] frpc 已停止")
 
@@ -2107,9 +2304,14 @@ class MainWindow(QMainWindow):
         if not PARAMIKO_AVAILABLE:
             self.ui.show_log.appendPlainText("[SSH] paramiko 未安装，请执行: pip install paramiko")
             return
-        if self._ssh_worker is not None:
+        # 增加对 isRunning 的检查，防止残留引用误判
+        if self._ssh_worker is not None and self._ssh_worker.isRunning():
             self.ui.show_log.appendPlainText("[SSH] 已有连接正在运行")
             return
+        # 清理残留的旧 worker 引用
+        if self._ssh_worker is not None:
+            self._ssh_worker.deleteLater()
+            self._ssh_worker = None
         host = self.ui.p2p_ssh_host.text().strip()
         if not host:
             self.ui.show_log.appendPlainText("[SSH] 请输入主机地址")
@@ -2132,24 +2334,30 @@ class MainWindow(QMainWindow):
             return
         worker = self._ssh_worker
         self._ssh_worker = None
-        worker.close()
-        worker.quit()
-        worker.wait(3000)
+        # 仅在 worker 仍在运行时才调用 close/quit/wait
+        if worker.isRunning():
+            worker.close()
+            worker.quit()
+            worker.wait(3000)
         worker.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        # 断开时关闭已打开的 SFTP/SSH 终端窗口
+        self._close_p2p_windows()
         self._update_p2p_buttons()
         self.ui.show_log.appendPlainText("[SSH] 已断开")
 
     def _on_ssh_finished(self, result):
         """SSH 连接成功回调"""
         self.ui.show_log.appendPlainText(f"[SSH] 连接成功: {result}")
+        # 仅在 SSH 真正成功后才启用按钮
         self.ui.p2p_sftp_btn.setEnabled(True)
         self.ui.p2p_ssh_terminal_btn.setEnabled(True)
-        # 线程已结束，用 deleteLater 安全销毁 C++ 对象
-        # _ssh_worker 引用保留，断开按钮需通过它关闭 paramiko 客户端
+        # 线程结束后安全销毁并清空引用，防止后续操作已销毁对象
         if self._ssh_worker:
+            self._ssh_worker.wait(3000)
             self._ssh_worker.deleteLater()
+            self._ssh_worker = None
 
     def _on_ssh_error(self, error):
         """SSH 连接失败回调"""
@@ -2158,14 +2366,19 @@ class MainWindow(QMainWindow):
             self._ssh_worker.wait(3000)
             self._ssh_worker.deleteLater()
         self._ssh_worker = None
+        self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         self._update_p2p_buttons()
 
     def _on_ftp_connect(self):
         """启动 FTP 连接"""
-        if self._ftp_worker is not None:
+        if self._ftp_worker is not None and self._ftp_worker.isRunning():
             self.ui.show_log.appendPlainText("[FTP] 已有连接正在运行")
             return
+        # 清理残留的旧 worker 引用
+        if self._ftp_worker is not None:
+            self._ftp_worker.deleteLater()
+            self._ftp_worker = None
         host = self.ui.p2p_ssh_host.text().strip()
         if not host:
             self.ui.show_log.appendPlainText("[FTP] 请输入主机地址")
@@ -2188,9 +2401,10 @@ class MainWindow(QMainWindow):
             return
         worker = self._ftp_worker
         self._ftp_worker = None
-        worker.close()
-        worker.quit()
-        worker.wait(3000)
+        if worker.isRunning():
+            worker.close()
+            worker.quit()
+            worker.wait(3000)
         worker.deleteLater()
         self._update_p2p_buttons()
         self.ui.show_log.appendPlainText("[FTP] 已断开")
@@ -2198,6 +2412,11 @@ class MainWindow(QMainWindow):
     def _on_ftp_finished(self, result):
         """FTP 连接成功回调"""
         self.ui.show_log.appendPlainText(f"[FTP] 连接成功:\n{result}")
+        # 线程结束后安全销毁并清空引用
+        if self._ftp_worker:
+            self._ftp_worker.wait(3000)
+            self._ftp_worker.deleteLater()
+            self._ftp_worker = None
 
     def _on_ftp_error(self, error):
         """FTP 连接失败回调"""
@@ -2208,14 +2427,33 @@ class MainWindow(QMainWindow):
         self._ftp_worker = None
         self._update_p2p_buttons()
 
-    def _write_frpc_toml(self, path):
-        """手动写入 frpc_xtcp.toml 文件（含全局头部配置，遍历所有 visitor）"""
+    # frpc 服务器默认配置（settings.json 缺失时自动生成）
+    _FRPC_SERVER_DEFAULTS = {
+        "serverAddr": "49.235.34.253",
+        "serverPort": 7900,
+        "auth_method": "token",
+        "auth_token": "123",
+    }
+
+    def _write_frpc_config(self, path):
+        """生成 frpc_xtcp.toml 文件（全局头部从 settings.json 的 frpc_server 读取，遍历所有 visitor）"""
+        settings = self._load_settings()
+        frpc_server = settings.get("frpc_server")
+        if not frpc_server:
+            # 缺失时自动生成默认配置并写入 settings.json
+            frpc_server = dict(self._FRPC_SERVER_DEFAULTS)
+            self._save_settings({"frpc_server": frpc_server})
+            self.ui.show_log.appendPlainText("[P2P] settings.json 中未找到 frpc_server，已自动生成默认配置")
+        server_addr = frpc_server.get("serverAddr", self._FRPC_SERVER_DEFAULTS["serverAddr"])
+        server_port = frpc_server.get("serverPort", self._FRPC_SERVER_DEFAULTS["serverPort"])
+        auth_method = frpc_server.get("auth_method", self._FRPC_SERVER_DEFAULTS["auth_method"])
+        auth_token = frpc_server.get("auth_token", self._FRPC_SERVER_DEFAULTS["auth_token"])
         with open(path, 'w', encoding='utf-8') as f:
-            # 全局头部配置
-            f.write('serverAddr = "49.235.34.253"\n')
-            f.write('serverPort = 7900\n')
-            f.write('auth.method = "token"\n')
-            f.write('auth.token = "123"\n')
+            # 全局头部配置（从 settings.json 的 frpc_server 字段读取）
+            f.write(f'serverAddr = "{server_addr}"\n')
+            f.write(f'serverPort = {server_port}\n')
+            f.write(f'auth.method = "{auth_method}"\n')
+            f.write(f'auth.token = "{auth_token}"\n')
             f.write('\n')
             for v in self._p2p_visitors:
                 sn = v["serverName"]
@@ -2245,13 +2483,21 @@ class MainWindow(QMainWindow):
         """frpc 进程结束回调"""
         self.ui.show_log.appendPlainText(f"[P2P] frpc 已退出，退出码: {exit_code}")
         self._frpc_process = None
+        # frpc 意外退出时禁用 SFTP/SSH 终端按钮，防止误触
+        self.ui.p2p_sftp_btn.setEnabled(False)
+        self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        # 关闭已打开的 SFTP/SSH 终端窗口
+        self._close_p2p_windows()
         self._update_p2p_buttons()
 
     def _update_p2p_buttons(self):
-        """更新连接/断开按钮状态"""
+        """更新连接/断开按钮状态，以及 SFTP/SSH 终端按钮状态"""
         mode = self.ui.p2p_mode_combo.currentText()
         if mode == "XTCP":
             running = self._frpc_process is not None
+            # XTCP 模式下，frpc 运行时即可使用 SFTP/SSH 终端（具体连接时再按选中 visitor 的 bindPort 发起）
+            self.ui.p2p_sftp_btn.setEnabled(running)
+            self.ui.p2p_ssh_terminal_btn.setEnabled(running)
         elif mode == "SSH":
             running = self._ssh_worker is not None
         elif mode == "FTP":
@@ -2260,6 +2506,21 @@ class MainWindow(QMainWindow):
             running = False
         self.ui.p2p_connect_btn.setEnabled(not running)
         self.ui.p2p_disconnect_btn.setEnabled(running)
+
+    def _close_p2p_windows(self):
+        """关闭已打开的 SFTP 和 SSH 终端窗口，避免连接失效后误操作"""
+        if self._sftp_window is not None:
+            try:
+                self._sftp_window.close()
+            except Exception:
+                pass
+            self._sftp_window = None
+        if self._ssh_terminal_window is not None:
+            try:
+                self._ssh_terminal_window.close()
+            except Exception:
+                pass
+            self._ssh_terminal_window = None
 
     def _on_sftp_btn_clicked(self):
         """打开 SFTP 文件管理窗口"""
