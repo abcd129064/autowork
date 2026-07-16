@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'autowork.ui'
+## Form generated from reading UI file 'autowork_with_table.ui'
 ##
-## Created by: Qt User Interface Compiler version 6.10.0
+## Created by: Qt User Interface Compiler version 6.11.1
 ##
 ## WARNING! All changes made in this file will be lost when recompiling UI file!
 ################################################################################
@@ -50,7 +50,6 @@ class Ui_MainWindow(object):
         self.date = QDateEdit(self.centralwidget)
         self.date.setObjectName(u"date")
         self.date.setMaximumSize(QSize(128, 16777215))
-        self.date.setDisplayFormat("yyyy-MM-dd")
         self.date.setCalendarPopup(True)
         self.date.setDateTime(QDateTime(QDate(2000, 10, 7), QTime(0, 0, 0)))
 
@@ -112,8 +111,10 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout.addWidget(self.end)
 
+        # ===== pause_btn（暂停/恢复按钮）— 与 start/end 同行 =====
         self.pause_btn = QPushButton(self.centralwidget)
         self.pause_btn.setObjectName(u"pause_btn")
+        self.pause_btn.setText("暂停")
 
         self.horizontalLayout.addWidget(self.pause_btn)
 
@@ -232,7 +233,7 @@ class Ui_MainWindow(object):
         self.p2p_ssh_pass = QLineEdit(self.p2p_panel)
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
         self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.p2p_ssh_pass.setText("Xqsjnbv155")
+        self.p2p_ssh_pass.setText("Xqjjnbv155")
 
         self.p2p_ssh_form = QFormLayout()
         self.p2p_ssh_form.addRow("host:", self.p2p_ssh_host)
@@ -247,7 +248,6 @@ class Ui_MainWindow(object):
         # 默认 XTCP 模式，隐藏 host 字段及其标签
         for w in self.p2p_ssh_widgets:
             w.setVisible(False)
-        # 仅隐藏 host 行的标签（第0行）
         host_lbl_item = self.p2p_ssh_form.itemAt(0, QFormLayout.ItemRole.LabelRole)
         if host_lbl_item and host_lbl_item.widget():
             host_lbl_item.widget().setVisible(False)
@@ -265,11 +265,13 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
 
+        QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
 
     def retranslateUi(self, MainWindow):
         MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"autowork", None))
         self.flush.setText(QCoreApplication.translate("MainWindow", u"\u5237\u65b0", None))
+        self.date.setDisplayFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
         self.write_table.setText(QCoreApplication.translate("MainWindow", u"\u6253\u5f00\u76ee\u5f55", None))
         self.open_config.setText(QCoreApplication.translate("MainWindow", u"\u914d\u7f6e", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"\u7a0b\u5e8f:", None))
