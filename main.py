@@ -997,6 +997,10 @@ class SSHTerminalWindow(QDialog):
         self._send_btn.setEnabled(False)
         input_layout.addWidget(self._send_btn)
 
+        self._cmd_btn = QPushButton("在 CMD 中打开")
+        self._cmd_btn.clicked.connect(self._open_in_cmd)
+        input_layout.addWidget(self._cmd_btn)
+
         layout.addLayout(input_layout)
 
     def _connect_ssh(self):
@@ -1075,6 +1079,18 @@ class SSHTerminalWindow(QDialog):
         self._output.moveCursor(QTextCursor.End)
         self._output.insertPlainText(text)
         self._output.moveCursor(QTextCursor.End)
+
+    def _open_in_cmd(self):
+        """在系统 CMD 中打开 SSH 连接（交互式终端）"""
+        if not shutil.which('ssh'):
+            QMessageBox.warning(
+                self, "未找到 SSH 客户端",
+                "系统中未安装 OpenSSH 客户端。\n"
+                "请在 Windows 设置 > 应用 > 可选功能 中安装 OpenSSH 客户端。"
+            )
+            return
+        cmd = f'ssh -p {self._port} {self._username}@{self._host}'
+        subprocess.Popen(['cmd', '/k', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
 
     def closeEvent(self, event):
         # 清理 exec worker
