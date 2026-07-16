@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import ctypes
-import ftplib
 import stat
 import time
 from datetime import datetime
@@ -30,8 +29,8 @@ except ImportError:
     PARAMIKO_AVAILABLE = False
 
 
-class SSHWorker(QThread):
-    """SSH 连接工作线程"""
+class TCPWorker(QThread):
+    """TCP 连接工作线程"""
     finished = Signal(str)
     error = Signal(str)
 
@@ -66,39 +65,6 @@ class SSHWorker(QThread):
             except Exception:
                 pass
             self._client = None
-
-
-class FTPWorker(QThread):
-    """FTP 连接工作线程"""
-    finished = Signal(str)
-    error = Signal(str)
-
-    def __init__(self, host, port, username, password):
-        super().__init__()
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self._ftp = None
-
-    def run(self):
-        try:
-            self._ftp = ftplib.FTP()
-            self._ftp.connect(self.host, self.port, timeout=10)
-            self._ftp.login(self.username, self.password)
-            welcome = self._ftp.getwelcome()
-            files = self._ftp.nlst()
-            self.finished.emit(f"{welcome}\n文件列表: {', '.join(files[:10])}")
-        except Exception as e:
-            self.error.emit(str(e))
-
-    def close(self):
-        if self._ftp:
-            try:
-                self._ftp.quit()
-            except Exception:
-                pass
-            self._ftp = None
 
 
 class SFTPListWorker(QThread):
@@ -1266,12 +1232,11 @@ class MainWindow(QMainWindow):
         _popup_view.setUniformItemSizes(True)
         _popup_view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ui.choose_exe.setView(_popup_view)
-        # P2P 状态
+        # 远程状态
         self._frpc_process = None
         self._p2p_visitors = []
         self._p2p_current_index = -1
-        self._ssh_worker = None
-        self._ftp_worker = None
+        self._tcp_worker = None
         self._sftp_window = None
         self._ssh_terminal_window = None
         self._init_p2p_panel()
@@ -1398,7 +1363,7 @@ class MainWindow(QMainWindow):
         self.ui.log_list.customContextMenuRequested.connect(self._log_list_context_menu)
         self.ui.loacl_video_list.customContextMenuRequested.connect(self._loacl_video_list_context_menu)
         
-        # P2P 面板信号
+        # 远程面板信号
         self.ui.p2p_btn.toggled.connect(self._on_p2p_toggled)
         self.ui.p2p_add_btn.clicked.connect(self._on_p2p_add)
         self.ui.p2p_delete_btn.clicked.connect(self._on_p2p_delete)
@@ -2124,10 +2089,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"文件名 {pure_name} 已复制到剪贴板", 2000)
             self.ui.show_log.appendPlainText(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
 
-    # ==================== P2P 连接 ====================
+    # ==================== 远程连接 ====================
 
     def _init_p2p_panel(self):
-        """初始化 P2P 面板状态，从已有的 frpc_xtcp.toml 恢复 visitor 列表"""
+        """初始化远程面板状态，从已有的 frpc_xtcp.toml 恢复 visitor 列表"""
         self._load_visitors_from_toml()
         self._refresh_p2p_list()
         # 初始化表单 bindPort 为随机值
@@ -2157,9 +2122,9 @@ class MainWindow(QMainWindow):
                     visitor["bindPort"] = int(m_port.group(1))
                     self._p2p_visitors.append(visitor)
             if self._p2p_visitors:
-                self.ui.show_log.appendPlainText(f"[P2P] 从 TOML 恢复了 {len(self._p2p_visitors)} 个 visitor")
+                self.ui.show_log.appendPlainText(f"[远程] 从 TOML 恢复了 {len(self._p2p_visitors)} 个 visitor")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[P2P] 解析 TOML 失败: {e}")
+            self.ui.show_log.appendPlainText(f"[远程] 解析 TOML 失败: {e}")
 
     def _get_new_random_port(self):
         """生成不冲突的随机端口（排除已添加 visitor 的端口）"""
@@ -2167,20 +2132,20 @@ class MainWindow(QMainWindow):
         return generate_random_port(exclude_ports=used_ports)
 
     def _on_p2p_toggled(self, checked):
-        """切换 P2P 面板显示/隐藏"""
+        """切换远程面板显示/隐藏"""
         self.ui.p2p_panel.setVisible(checked)
 
     def _on_p2p_add(self):
         """添加新的 visitor 配置"""
         server_name = self.ui.p2p_form_server.text().strip()
         if not server_name:
-            self.ui.show_log.appendPlainText("[P2P] 请填写 serverName")
+            self.ui.show_log.appendPlainText("[远程] 请填写 serverName")
             return
         port = self.ui.p2p_form_port.value()
         # 检查端口是否与已有 visitor 冲突
         for i, v in enumerate(self._p2p_visitors):
             if v["bindPort"] == port and i != self._p2p_current_index:
-                self.ui.show_log.appendPlainText(f"[P2P] 端口 {port} 已被 {v['serverName']} 使用，请更换端口")
+                self.ui.show_log.appendPlainText(f"[远程] 端口 {port} 已被 {v['serverName']} 使用，请更换端口")
                 return
         visitor = {
             "serverName": server_name,
@@ -2244,23 +2209,19 @@ class MainWindow(QMainWindow):
     def _on_p2p_connect(self):
         """连接按钮 - 根据当前模式分发连接"""
         mode = self.ui.p2p_mode_combo.currentText()
-        self.ui.show_log.appendPlainText(f"[P2P] 连接按钮点击，模式: {mode}")
+        self.ui.show_log.appendPlainText(f"[远程] 连接按钮点击，模式: {mode}")
         if mode == "XTCP":
             self._on_xtcp_connect()
-        elif mode == "SSH":
-            self._on_ssh_connect()
-        elif mode == "FTP":
-            self._on_ftp_connect()
+        elif mode == "TCP":
+            self._on_tcp_connect()
 
     def _on_p2p_disconnect(self):
         """断开按钮 - 根据当前模式分发断开"""
         mode = self.ui.p2p_mode_combo.currentText()
         if mode == "XTCP":
             self._on_xtcp_disconnect()
-        elif mode == "SSH":
-            self._on_ssh_disconnect()
-        elif mode == "FTP":
-            self._on_ftp_disconnect()
+        elif mode == "TCP":
+            self._on_tcp_disconnect()
 
     def _on_p2p_mode_changed(self, index):
         """连接方式切换时更新 UI 显隐"""
@@ -2278,35 +2239,36 @@ class MainWindow(QMainWindow):
             lbl = self.ui.p2p_xtcp_form.itemAt(i * 2, QFormLayout.ItemRole.LabelRole)
             if lbl and lbl.widget():
                 lbl.widget().setVisible(is_xtcp)
-        # host 字段随模式切换显隐（仅第0行），账号/密码始终可见
-        is_ssh_ftp = not is_xtcp
+        # host/port 字段随模式切换显隐（仅第0/1行），账号/密码始终可见
+        is_tcp = not is_xtcp
         for w in self.ui.p2p_ssh_widgets:
-            w.setVisible(is_ssh_ftp)
-        host_lbl = self.ui.p2p_ssh_form.itemAt(0, QFormLayout.ItemRole.LabelRole)
-        if host_lbl and host_lbl.widget():
-            host_lbl.widget().setVisible(is_ssh_ftp)
+            w.setVisible(is_tcp)
+        for row_idx in range(2):  # host(行0) 和 port(行1)
+            lbl = self.ui.p2p_ssh_form.itemAt(row_idx, QFormLayout.ItemRole.LabelRole)
+            if lbl and lbl.widget():
+                lbl.widget().setVisible(is_tcp)
         self._update_p2p_buttons()
 
     def _on_xtcp_connect(self):
         """生成 TOML 并启动 frpc"""
         self._save_current_form()
         if not self._p2p_visitors:
-            self.ui.show_log.appendPlainText("[P2P] 请先添加 visitor 配置")
+            self.ui.show_log.appendPlainText("[远程] 请先添加 visitor 配置")
             return
         if self._frpc_process is not None:
-            self.ui.show_log.appendPlainText("[P2P] frpc 已在运行中")
+            self.ui.show_log.appendPlainText("[远程] frpc 已在运行中")
             return
         app_dir = self._get_app_dir()
         toml_path = os.path.join(app_dir, "frpc_xtcp.toml")
         try:
             self._write_frpc_config(toml_path)
-            self.ui.show_log.appendPlainText(f"[P2P] 已生成 {toml_path}")
+            self.ui.show_log.appendPlainText(f"[远程] 已生成 {toml_path}")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[P2P] 生成配置失败: {e}")
+            self.ui.show_log.appendPlainText(f"[远程] 生成配置失败: {e}")
             return
         frpc_exe = os.path.join(app_dir, "frpc.exe")
         if not os.path.exists(frpc_exe):
-            self.ui.show_log.appendPlainText(f"[P2P] frpc.exe 不存在: {frpc_exe}")
+            self.ui.show_log.appendPlainText(f"[远程] frpc.exe 不存在: {frpc_exe}")
             return
         self._frpc_process = QProcess()
         self._frpc_process.setWorkingDirectory(app_dir)
@@ -2314,15 +2276,15 @@ class MainWindow(QMainWindow):
         self._frpc_process.readyReadStandardError.connect(self._on_frpc_error)
         self._frpc_process.finished.connect(self._on_frpc_finished)
         self._frpc_process.start(frpc_exe, ["-c", toml_path])
-        self.ui.show_log.appendPlainText(f"[P2P] 已启动 frpc: {frpc_exe} -c {toml_path}")
+        self.ui.show_log.appendPlainText(f"[远程] 已启动 frpc: {frpc_exe} -c {toml_path}")
         self._update_p2p_buttons()
 
     def _on_xtcp_disconnect(self):
         """停止 frpc 进程"""
         if self._frpc_process is None:
-            self.ui.show_log.appendPlainText("[P2P] frpc 未在运行")
+            self.ui.show_log.appendPlainText("[远程] frpc 未在运行")
             return
-        self.ui.show_log.appendPlainText("[P2P] 正在停止 frpc...")
+        self.ui.show_log.appendPlainText("[远程] 正在停止 frpc...")
         proc = self._frpc_process
         self._frpc_process = None  # 先置空，防止 _on_frpc_finished 重复处理
         proc.kill()
@@ -2333,43 +2295,43 @@ class MainWindow(QMainWindow):
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
-        self.ui.show_log.appendPlainText("[P2P] frpc 已停止")
+        self.ui.show_log.appendPlainText("[远程] frpc 已停止")
 
-    def _on_ssh_connect(self):
-        """启动 SSH 连接"""
+    def _on_tcp_connect(self):
+        """启动 TCP 连接"""
         if not PARAMIKO_AVAILABLE:
-            self.ui.show_log.appendPlainText("[SSH] paramiko 未安装，请执行: pip install paramiko")
+            self.ui.show_log.appendPlainText("[TCP] paramiko 未安装，请执行: pip install paramiko")
             return
         # 增加对 isRunning 的检查，防止残留引用误判
-        if self._ssh_worker is not None and self._ssh_worker.isRunning():
-            self.ui.show_log.appendPlainText("[SSH] 已有连接正在运行")
+        if self._tcp_worker is not None and self._tcp_worker.isRunning():
+            self.ui.show_log.appendPlainText("[TCP] 已有连接正在运行")
             return
         # 清理残留的旧 worker 引用
-        if self._ssh_worker is not None:
-            self._ssh_worker.deleteLater()
-            self._ssh_worker = None
+        if self._tcp_worker is not None:
+            self._tcp_worker.deleteLater()
+            self._tcp_worker = None
         host = self.ui.p2p_ssh_host.text().strip()
         if not host:
-            self.ui.show_log.appendPlainText("[SSH] 请输入主机地址")
+            self.ui.show_log.appendPlainText("[TCP] 请输入主机地址")
             return
-        port = 22
-        self._ssh_worker = SSHWorker(
+        port = self.ui.p2p_ssh_port.value()
+        self._tcp_worker = TCPWorker(
             host, port,
             self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
         )
-        self._ssh_worker.finished.connect(self._on_ssh_finished)
-        self._ssh_worker.error.connect(self._on_ssh_error)
-        self._ssh_worker.start()
-        self.ui.show_log.appendPlainText(f"[SSH] 正在连接 {host}:{port}...")
+        self._tcp_worker.finished.connect(self._on_tcp_finished)
+        self._tcp_worker.error.connect(self._on_tcp_error)
+        self._tcp_worker.start()
+        self.ui.show_log.appendPlainText(f"[TCP] 正在连接 {host}:{port}...")
         self._update_p2p_buttons()
 
-    def _on_ssh_disconnect(self):
-        """断开 SSH 连接"""
-        if self._ssh_worker is None:
-            self.ui.show_log.appendPlainText("[SSH] 未连接")
+    def _on_tcp_disconnect(self):
+        """断开 TCP 连接"""
+        if self._tcp_worker is None:
+            self.ui.show_log.appendPlainText("[TCP] 未连接")
             return
-        worker = self._ssh_worker
-        self._ssh_worker = None
+        worker = self._tcp_worker
+        self._tcp_worker = None
         # 非阻塞清理：运行中的 worker 等 finished 后再 deleteLater
         if worker.isRunning():
             worker.close()
@@ -2382,84 +2344,27 @@ class MainWindow(QMainWindow):
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
-        self.ui.show_log.appendPlainText("[SSH] 已断开")
+        self.ui.show_log.appendPlainText("[TCP] 已断开")
 
-    def _on_ssh_finished(self, result):
-        """SSH 连接成功回调"""
-        self.ui.show_log.appendPlainText(f"[SSH] 连接成功: {result}")
-        # 仅在 SSH 真正成功后才启用按钮
+    def _on_tcp_finished(self, result):
+        """TCP 连接成功回调"""
+        self.ui.show_log.appendPlainText(f"[TCP] 连接成功: {result}")
+        # 仅在 TCP 真正成功后才启用按钮
         self.ui.p2p_sftp_btn.setEnabled(True)
         self.ui.p2p_ssh_terminal_btn.setEnabled(True)
         # 线程结束后安全销毁并清空引用
-        if self._ssh_worker:
-            self._ssh_worker.deleteLater()
-            self._ssh_worker = None
+        if self._tcp_worker:
+            self._tcp_worker.deleteLater()
+            self._tcp_worker = None
 
-    def _on_ssh_error(self, error):
-        """SSH 连接失败回调"""
-        self.ui.show_log.appendPlainText(f"[SSH] 连接失败: {error}")
-        if self._ssh_worker:
-            self._ssh_worker.deleteLater()
-        self._ssh_worker = None
+    def _on_tcp_error(self, error):
+        """TCP 连接失败回调"""
+        self.ui.show_log.appendPlainText(f"[TCP] 连接失败: {error}")
+        if self._tcp_worker:
+            self._tcp_worker.deleteLater()
+        self._tcp_worker = None
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
-        self._update_p2p_buttons()
-
-    def _on_ftp_connect(self):
-        """启动 FTP 连接"""
-        if self._ftp_worker is not None and self._ftp_worker.isRunning():
-            self.ui.show_log.appendPlainText("[FTP] 已有连接正在运行")
-            return
-        # 清理残留的旧 worker 引用
-        if self._ftp_worker is not None:
-            self._ftp_worker.deleteLater()
-            self._ftp_worker = None
-        host = self.ui.p2p_ssh_host.text().strip()
-        if not host:
-            self.ui.show_log.appendPlainText("[FTP] 请输入主机地址")
-            return
-        port = 21
-        self._ftp_worker = FTPWorker(
-            host, port,
-            self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
-        )
-        self._ftp_worker.finished.connect(self._on_ftp_finished)
-        self._ftp_worker.error.connect(self._on_ftp_error)
-        self._ftp_worker.start()
-        self.ui.show_log.appendPlainText(f"[FTP] 正在连接 {host}:{port}...")
-        self._update_p2p_buttons()
-
-    def _on_ftp_disconnect(self):
-        """断开 FTP 连接"""
-        if self._ftp_worker is None:
-            self.ui.show_log.appendPlainText("[FTP] 未连接")
-            return
-        worker = self._ftp_worker
-        self._ftp_worker = None
-        # 非阻塞清理
-        if worker.isRunning():
-            worker.close()
-            worker.quit()
-            worker.finished.connect(worker.deleteLater)
-        else:
-            worker.deleteLater()
-        self._update_p2p_buttons()
-        self.ui.show_log.appendPlainText("[FTP] 已断开")
-
-    def _on_ftp_finished(self, result):
-        """FTP 连接成功回调"""
-        self.ui.show_log.appendPlainText(f"[FTP] 连接成功:\n{result}")
-        # 线程结束后安全销毁并清空引用
-        if self._ftp_worker:
-            self._ftp_worker.deleteLater()
-            self._ftp_worker = None
-
-    def _on_ftp_error(self, error):
-        """FTP 连接失败回调"""
-        self.ui.show_log.appendPlainText(f"[FTP] 连接失败: {error}")
-        if self._ftp_worker:
-            self._ftp_worker.deleteLater()
-        self._ftp_worker = None
         self._update_p2p_buttons()
 
     # frpc 服务器默认配置（settings.json 缺失时自动生成）
@@ -2478,7 +2383,7 @@ class MainWindow(QMainWindow):
             # 缺失时自动生成默认配置并写入 settings.json
             frpc_server = dict(self._FRPC_SERVER_DEFAULTS)
             self._save_settings({"frpc_server": frpc_server})
-            self.ui.show_log.appendPlainText("[P2P] settings.json 中未找到 frpc_server，已自动生成默认配置")
+            self.ui.show_log.appendPlainText("[远程] settings.json 中未找到 frpc_server，已自动生成默认配置")
         server_addr = frpc_server.get("serverAddr", self._FRPC_SERVER_DEFAULTS["serverAddr"])
         server_port = frpc_server.get("serverPort", self._FRPC_SERVER_DEFAULTS["serverPort"])
         auth_method = frpc_server.get("auth_method", self._FRPC_SERVER_DEFAULTS["auth_method"])
@@ -2516,7 +2421,7 @@ class MainWindow(QMainWindow):
 
     def _on_frpc_finished(self, exit_code, exit_status):
         """frpc 进程结束回调"""
-        self.ui.show_log.appendPlainText(f"[P2P] frpc 已退出，退出码: {exit_code}")
+        self.ui.show_log.appendPlainText(f"[远程] frpc 已退出，退出码: {exit_code}")
         self._frpc_process = None
         # frpc 意外退出时禁用 SFTP/SSH 终端按钮，防止误触
         self.ui.p2p_sftp_btn.setEnabled(False)
@@ -2533,10 +2438,8 @@ class MainWindow(QMainWindow):
             # XTCP 模式下，frpc 运行时即可使用 SFTP/SSH 终端（具体连接时再按选中 visitor 的 bindPort 发起）
             self.ui.p2p_sftp_btn.setEnabled(running)
             self.ui.p2p_ssh_terminal_btn.setEnabled(running)
-        elif mode == "SSH":
-            running = self._ssh_worker is not None
-        elif mode == "FTP":
-            running = self._ftp_worker is not None
+        elif mode == "TCP":
+            running = self._tcp_worker is not None
         else:
             running = False
         self.ui.p2p_connect_btn.setEnabled(not running)
@@ -2576,11 +2479,11 @@ class MainWindow(QMainWindow):
             host = "127.0.0.1"
             port = self._p2p_visitors[idx]["bindPort"]
             server_name = self._p2p_visitors[idx].get("serverName", "")
-        elif mode == "SSH":
+        elif mode == "TCP":
             host = self.ui.p2p_ssh_host.text().strip()
-            port = 22
+            port = self.ui.p2p_ssh_port.value()
         else:
-            self.ui.show_log.appendPlainText("[SFTP] SFTP 仅支持 XTCP/SSH 模式")
+            self.ui.show_log.appendPlainText("[SFTP] SFTP 仅支持 XTCP/TCP 模式")
             return
         username = self.ui.p2p_ssh_user.text()
         password = self.ui.p2p_ssh_pass.text()
@@ -2612,11 +2515,11 @@ class MainWindow(QMainWindow):
                 return
             host = "127.0.0.1"
             port = self._p2p_visitors[idx]["bindPort"]
-        elif mode == "SSH":
+        elif mode == "TCP":
             host = self.ui.p2p_ssh_host.text().strip()
-            port = 22
+            port = self.ui.p2p_ssh_port.value()
         else:
-            self.ui.show_log.appendPlainText("[SSH] SSH 终端仅支持 XTCP/SSH 模式")
+            self.ui.show_log.appendPlainText("[SSH] SSH 终端仅支持 XTCP/TCP 模式")
             return
         username = self.ui.p2p_ssh_user.text()
         password = self.ui.p2p_ssh_pass.text()

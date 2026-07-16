@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'autowork.ui'
+## Form generated from reading UI file 'autowork_with_table.ui'
 ##
-## Created by: Qt User Interface Compiler version 6.10.0
+## Created by: Qt User Interface Compiler version 6.11.1
 ##
 ## WARNING! All changes made in this file will be lost when recompiling UI file!
 ################################################################################
@@ -50,7 +50,6 @@ class Ui_MainWindow(object):
         self.date = QDateEdit(self.centralwidget)
         self.date.setObjectName(u"date")
         self.date.setMaximumSize(QSize(128, 16777215))
-        self.date.setDisplayFormat("yyyy-MM-dd")
         self.date.setCalendarPopup(True)
         self.date.setDateTime(QDateTime(QDate(2000, 10, 7), QTime(0, 0, 0)))
 
@@ -112,8 +111,10 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout.addWidget(self.end)
 
+        # ===== pause_btn（暂停/恢复按钮）— 与 start/end 同行 =====
         self.pause_btn = QPushButton(self.centralwidget)
         self.pause_btn.setObjectName(u"pause_btn")
+        self.pause_btn.setText("暂停")
 
         self.horizontalLayout.addWidget(self.pause_btn)
 
@@ -147,7 +148,7 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout_main.addWidget(self.splitter)
 
-        # --- P2P 右侧面板 ---
+        # --- 远程面板 ---
         self.p2p_panel = QFrame(self.centralwidget)
         self.p2p_panel.setObjectName(u"p2p_panel")
         self.p2p_panel.setFrameShape(QFrame.Shape.StyledPanel)
@@ -218,39 +219,44 @@ class Ui_MainWindow(object):
         mode_layout.addWidget(QLabel("连接方式:"))
         self.p2p_mode_combo = QComboBox(self.p2p_panel)
         self.p2p_mode_combo.setObjectName(u"p2p_mode_combo")
-        self.p2p_mode_combo.addItems(["XTCP", "SSH", "FTP"])
+        self.p2p_mode_combo.addItems(["XTCP", "TCP"])
         mode_layout.addWidget(self.p2p_mode_combo)
         p2p_main_layout.addLayout(mode_layout)
 
-        # --- SSH/FTP 表单 ---
+        # --- TCP 表单 ---
         self.p2p_ssh_host = QLineEdit(self.p2p_panel)
         self.p2p_ssh_host.setObjectName(u"p2p_ssh_host")
         self.p2p_ssh_host.setPlaceholderText("127.0.0.1")
+        self.p2p_ssh_port = QSpinBox(self.p2p_panel)
+        self.p2p_ssh_port.setObjectName(u"p2p_ssh_port")
+        self.p2p_ssh_port.setRange(1, 65535)
+        self.p2p_ssh_port.setValue(22)
         self.p2p_ssh_user = QLineEdit(self.p2p_panel)
         self.p2p_ssh_user.setObjectName(u"p2p_ssh_user")
         self.p2p_ssh_user.setText("newbv")
         self.p2p_ssh_pass = QLineEdit(self.p2p_panel)
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
         self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.p2p_ssh_pass.setText("Xqsjnbv155")
+        self.p2p_ssh_pass.setText("Xqjjnbv155")
 
         self.p2p_ssh_form = QFormLayout()
         self.p2p_ssh_form.addRow("host:", self.p2p_ssh_host)
+        self.p2p_ssh_form.addRow("port:", self.p2p_ssh_port)
         self.p2p_ssh_form.addRow("\u8d26\u53f7:", self.p2p_ssh_user)
         self.p2p_ssh_form.addRow("\u5bc6\u7801:", self.p2p_ssh_pass)
         p2p_main_layout.addLayout(self.p2p_ssh_form)
 
-        # 仅 host 随模式切换显隐（账号/密码始终可见）
+        # host/port 随模式切换显隐（账号/密码始终可见）
         self.p2p_ssh_widgets = [
-            self.p2p_ssh_host,
+            self.p2p_ssh_host, self.p2p_ssh_port,
         ]
-        # 默认 XTCP 模式，隐藏 host 字段及其标签
+        # 默认 XTCP 模式，隐藏 host/port 字段及其标签
         for w in self.p2p_ssh_widgets:
             w.setVisible(False)
-        # 仅隐藏 host 行的标签（第0行）
-        host_lbl_item = self.p2p_ssh_form.itemAt(0, QFormLayout.ItemRole.LabelRole)
-        if host_lbl_item and host_lbl_item.widget():
-            host_lbl_item.widget().setVisible(False)
+        for row_idx in range(2):  # host(行0) 和 port(行1)
+            lbl_item = self.p2p_ssh_form.itemAt(row_idx, QFormLayout.ItemRole.LabelRole)
+            if lbl_item and lbl_item.widget():
+                lbl_item.widget().setVisible(False)
 
         p2p_main_layout.addStretch()
 
@@ -265,11 +271,13 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
 
+        QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
 
     def retranslateUi(self, MainWindow):
         MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"autowork", None))
         self.flush.setText(QCoreApplication.translate("MainWindow", u"\u5237\u65b0", None))
+        self.date.setDisplayFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
         self.write_table.setText(QCoreApplication.translate("MainWindow", u"\u6253\u5f00\u76ee\u5f55", None))
         self.open_config.setText(QCoreApplication.translate("MainWindow", u"\u914d\u7f6e", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"\u7a0b\u5e8f:", None))
@@ -281,6 +289,6 @@ class Ui_MainWindow(object):
         self.start.setText(QCoreApplication.translate("MainWindow", u"\u64ad\u653e", None))
         self.end.setText(QCoreApplication.translate("MainWindow", u"\u7ed3\u675f", None))
         self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"\u6682\u505c", None))
-        self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"P2P", None))
+        self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"\u8fdc\u7a0b", None))
     # retranslateUi
 
