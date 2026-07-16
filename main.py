@@ -446,13 +446,14 @@ class SFTPWindow(QDialog):
         self._cleanup_connect_worker()
 
     def _cleanup_connect_worker(self):
-        """安全清理连接 worker"""
+        """非阻塞安全清理连接 worker"""
         if self._connect_worker is not None:
-            worker = self._connect_worker
+            w = self._connect_worker
             self._connect_worker = None
-            if worker.isRunning():
-                worker.wait(3000)
-            worker.deleteLater()
+            if w.isRunning():
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
 
     # ------------------------------------------------------------------ Worker 管理
     def _cleanup_list_worker(self):
@@ -482,13 +483,14 @@ class SFTPWindow(QDialog):
                 w.deleteLater()
 
     def _safe_delete_transfer_worker(self, tid):
-        """安全清理单个传输 worker"""
+        """非阻塞安全清理单个传输 worker"""
         info = self._transfer_workers.pop(tid, None)
         if info:
             w = info['worker']
             if w.isRunning():
-                w.wait(3000)
-            w.deleteLater()
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
 
     # ------------------------------------------------------------------ 远程列目录
     def _list_remote(self, path):
@@ -882,32 +884,6 @@ class SFTPWindow(QDialog):
         super().closeEvent(event)
 
 
-class SSHCommandWorker(QThread):
-    """异步执行 SSH 命令的工作线程"""
-    output = Signal(str)
-    error = Signal(str)
-    finished = Signal()
-
-    def __init__(self, client, command):
-        super().__init__()
-        self.client = client
-        self.command = command
-
-    def run(self):
-        try:
-            stdin, stdout, stderr = self.client.exec_command(self.command)
-            out = stdout.read().decode('utf-8', errors='ignore')
-            err = stderr.read().decode('utf-8', errors='ignore')
-            if out:
-                self.output.emit(out)
-            if err:
-                self.error.emit(err)
-        except Exception as e:
-            self.error.emit(str(e))
-        finally:
-            self.finished.emit()
-
-
 class SSHConnectWorker(QThread):
     """异步建立 SSH 连接的工作线程（保持 client 存活，含自动重试）"""
     connected = Signal(object)   # 成功时发射 SSHClient 对象
@@ -944,131 +920,174 @@ class SSHConnectWorker(QThread):
                     self.error.emit(err_msg)
                 return
 
+class SSHExecWorker(QThread):
+    """异步执行 SSH 命令的工作线程（使用 exec_command，无持久 shell）"""
+    output = Signal(str)
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, client, command):
+        super().__init__()
+        self._client = client
+        self._command = command
+
+    def run(self):
+        try:
+            stdin, stdout, stderr = self._client.exec_command(self._command)
+            out = stdout.read().decode('utf-8', errors='ignore')
+            err = stderr.read().decode('utf-8', errors='ignore')
+            if out:
+                self.output.emit(out)
+            if err:
+                self.error.emit(err)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
+
 
 class SSHTerminalWindow(QDialog):
-    """SSH 终端窗口（类似 Xshell）"""
+    """SSH 终端窗口（exec_command 模式，底部输入框）"""
 
     def __init__(self, host, port, username, password, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"SSH 终端 - {host}:{port}")
-        self.resize(700, 450)
+        self.resize(800, 500)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
         self._client = None
-        self._cmd_worker = None
         self._connect_worker = None
+        self._exec_worker = None
         self._init_ui()
         QTimer.singleShot(100, self._connect_ssh)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        # 输出区域（黑底绿字，仿终端风格）
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        # 输出区域
         self._output = QPlainTextEdit()
         self._output.setReadOnly(True)
         self._output.setStyleSheet(
             "QPlainTextEdit { background-color: #1e1e1e; color: #00ff00; "
             "font-family: Consolas, 'Courier New', monospace; font-size: 11pt; }"
         )
-        self._output.setMaximumBlockCount(5000)
-        layout.addWidget(self._output, 1)
-        # 输入栏
+        layout.addWidget(self._output)
+
+        # 输入区域
         input_layout = QHBoxLayout()
-        self._prompt_lbl = QLabel("$")
-        self._prompt_lbl.setStyleSheet("font-weight: bold; font-size: 11pt;")
-        input_layout.addWidget(self._prompt_lbl)
+        self._prompt_label = QLabel("$")
+        self._prompt_label.setStyleSheet("color: #00ff00; font-family: Consolas; font-size: 11pt;")
+        input_layout.addWidget(self._prompt_label)
+
         self._input = QLineEdit()
-        self._input.setPlaceholderText("输入命令，按回车执行...")
-        self._input.setStyleSheet("font-size: 11pt;")
-        self._input.returnPressed.connect(self._on_send_command)
-        input_layout.addWidget(self._input, 1)
+        self._input.setStyleSheet(
+            "QLineEdit { background-color: #2d2d2d; color: #00ff00; "
+            "font-family: Consolas, 'Courier New', monospace; font-size: 11pt; }"
+        )
+        self._input.setPlaceholderText("输入命令，回车执行...")
+        self._input.returnPressed.connect(self._execute_command)
+        self._input.setEnabled(False)  # 连接成功前禁用
+        input_layout.addWidget(self._input)
+
+        self._send_btn = QPushButton("执行")
+        self._send_btn.clicked.connect(self._execute_command)
+        self._send_btn.setEnabled(False)
+        input_layout.addWidget(self._send_btn)
+
         layout.addLayout(input_layout)
 
     def _connect_ssh(self):
-        """异步建立 SSH 连接，不阻塞主线程"""
-        self._output.appendPlainText(f"正在连接 {self._host}:{self._port} ...")
-        self._input.setEnabled(False)
+        """异步建立 SSH 连接"""
+        self._append_output(f"正在连接 {self._host}:{self._port} ...\n")
         worker = SSHConnectWorker(self._host, self._port, self._username, self._password)
-        worker.connected.connect(self._on_ssh_connect_success)
-        worker.error.connect(self._on_ssh_connect_error)
+        worker.connected.connect(self._on_connected)
+        worker.error.connect(self._on_connect_error)
         self._connect_worker = worker
         worker.start()
 
-    def _on_ssh_connect_success(self, client):
-        """异步 SSH 连接成功回调"""
+    def _on_connected(self, client):
+        """SSH 连接成功"""
         self._client = client
-        self._output.appendPlainText(f"已连接到 {self._host}:{self._port}，可以开始输入命令。\n")
+        self._cleanup_connect_worker()
         self._input.setEnabled(True)
+        self._send_btn.setEnabled(True)
         self._input.setFocus()
-        self._cleanup_connect_worker()
+        self._append_output("[连接成功] 请输入命令\n")
 
-    def _on_ssh_connect_error(self, error):
-        """异步 SSH 连接失败回调"""
-        self._output.appendPlainText(f"连接失败: {error}")
-        self._input.setEnabled(False)
+    def _on_connect_error(self, error):
+        """SSH 连接失败"""
         self._cleanup_connect_worker()
+        self._append_output(f"[连接失败] {error}\n")
 
     def _cleanup_connect_worker(self):
-        """安全清理连接 worker"""
+        """非阻塞清理连接 worker"""
         if self._connect_worker is not None:
-            worker = self._connect_worker
+            w = self._connect_worker
             self._connect_worker = None
-            if worker.isRunning():
-                worker.wait(3000)
-            worker.deleteLater()
+            if w.isRunning():
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
 
-    def _on_send_command(self):
-        """发送命令"""
-        if self._client is None:
-            return
+    def _execute_command(self):
+        """执行输入的命令"""
         cmd = self._input.text().strip()
-        if not cmd:
+        if not cmd or self._client is None:
             return
         self._input.clear()
-        self._output.appendPlainText(f"$ {cmd}")
-        # 清理旧 worker
-        if self._cmd_worker is not None:
-            if self._cmd_worker.isRunning():
-                self._cmd_worker.wait(3000)
-            self._cmd_worker.deleteLater()
-            self._cmd_worker = None
-        worker = SSHCommandWorker(self._client, cmd)
-        worker.output.connect(self._on_cmd_output)
-        worker.error.connect(self._on_cmd_error)
-        worker.finished.connect(self._on_cmd_finished)
-        self._cmd_worker = worker
+        self._append_output(f"$ {cmd}\n")
+
+        # 清理上一个 exec worker
+        if self._exec_worker is not None:
+            if self._exec_worker.isRunning():
+                return  # 上一个命令还在执行
+            self._exec_worker = None
+
+        worker = SSHExecWorker(self._client, cmd)
+        worker.output.connect(self._on_output)
+        worker.error.connect(self._on_error)
+        worker.finished.connect(self._on_exec_finished)
+        self._exec_worker = worker
         worker.start()
 
-    def _on_cmd_output(self, text):
-        self._output.appendPlainText(text.rstrip('\n'))
-        self._scroll_to_bottom()
+    def _on_output(self, text):
+        """命令标准输出"""
+        self._append_output(text)
 
-    def _on_cmd_error(self, text):
-        # 错误输出用红色
-        self._output.appendHtml(f'<span style="color:#ff5555;">{text.rstrip(chr(10))}</span>')
-        self._scroll_to_bottom()
+    def _on_error(self, text):
+        """命令标准错误"""
+        self._append_output(f"[错误] {text}")
 
-    def _on_cmd_finished(self):
-        if self._cmd_worker:
-            self._cmd_worker.deleteLater()
-        self._cmd_worker = None
-        self._scroll_to_bottom()
+    def _on_exec_finished(self):
+        """命令执行完成"""
+        w = self._exec_worker
+        self._exec_worker = None
+        if w is not None:
+            w.deleteLater()
+        self._append_output("---\n")
+        self._input.setFocus()
 
-    def _scroll_to_bottom(self):
-        sb = self._output.verticalScrollBar()
-        sb.setValue(sb.maximum())
+    def _append_output(self, text):
+        """追加文本到输出区域"""
+        self._output.moveCursor(QTextCursor.End)
+        self._output.insertPlainText(text)
+        self._output.moveCursor(QTextCursor.End)
 
     def closeEvent(self, event):
-        # 清理连接 worker
+        # 清理 exec worker
+        if self._exec_worker is not None:
+            w = self._exec_worker
+            self._exec_worker = None
+            if w.isRunning():
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
+        # 清理 connect worker
         self._cleanup_connect_worker()
-        # 安全清理命令 worker
-        if self._cmd_worker is not None:
-            if self._cmd_worker.isRunning():
-                self._cmd_worker.wait(3000)
-            self._cmd_worker.deleteLater()
-            self._cmd_worker = None
-        # 关闭 SSH 连接
+        # 关闭 SSH client
         if self._client:
             try:
                 self._client.close()
@@ -1076,6 +1095,7 @@ class SSHTerminalWindow(QDialog):
                 pass
             self._client = None
         super().closeEvent(event)
+
 
 
 class MainWindow(QMainWindow):
@@ -2334,12 +2354,13 @@ class MainWindow(QMainWindow):
             return
         worker = self._ssh_worker
         self._ssh_worker = None
-        # 仅在 worker 仍在运行时才调用 close/quit/wait
+        # 非阻塞清理：运行中的 worker 等 finished 后再 deleteLater
         if worker.isRunning():
             worker.close()
             worker.quit()
-            worker.wait(3000)
-        worker.deleteLater()
+            worker.finished.connect(worker.deleteLater)
+        else:
+            worker.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
@@ -2353,9 +2374,8 @@ class MainWindow(QMainWindow):
         # 仅在 SSH 真正成功后才启用按钮
         self.ui.p2p_sftp_btn.setEnabled(True)
         self.ui.p2p_ssh_terminal_btn.setEnabled(True)
-        # 线程结束后安全销毁并清空引用，防止后续操作已销毁对象
+        # 线程结束后安全销毁并清空引用
         if self._ssh_worker:
-            self._ssh_worker.wait(3000)
             self._ssh_worker.deleteLater()
             self._ssh_worker = None
 
@@ -2363,7 +2383,6 @@ class MainWindow(QMainWindow):
         """SSH 连接失败回调"""
         self.ui.show_log.appendPlainText(f"[SSH] 连接失败: {error}")
         if self._ssh_worker:
-            self._ssh_worker.wait(3000)
             self._ssh_worker.deleteLater()
         self._ssh_worker = None
         self.ui.p2p_sftp_btn.setEnabled(False)
@@ -2401,11 +2420,13 @@ class MainWindow(QMainWindow):
             return
         worker = self._ftp_worker
         self._ftp_worker = None
+        # 非阻塞清理
         if worker.isRunning():
             worker.close()
             worker.quit()
-            worker.wait(3000)
-        worker.deleteLater()
+            worker.finished.connect(worker.deleteLater)
+        else:
+            worker.deleteLater()
         self._update_p2p_buttons()
         self.ui.show_log.appendPlainText("[FTP] 已断开")
 
@@ -2414,7 +2435,6 @@ class MainWindow(QMainWindow):
         self.ui.show_log.appendPlainText(f"[FTP] 连接成功:\n{result}")
         # 线程结束后安全销毁并清空引用
         if self._ftp_worker:
-            self._ftp_worker.wait(3000)
             self._ftp_worker.deleteLater()
             self._ftp_worker = None
 
@@ -2422,7 +2442,6 @@ class MainWindow(QMainWindow):
         """FTP 连接失败回调"""
         self.ui.show_log.appendPlainText(f"[FTP] 连接失败: {error}")
         if self._ftp_worker:
-            self._ftp_worker.wait(3000)
             self._ftp_worker.deleteLater()
         self._ftp_worker = None
         self._update_p2p_buttons()
