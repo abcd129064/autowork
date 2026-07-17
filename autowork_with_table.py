@@ -237,7 +237,7 @@ class Ui_MainWindow(object):
         self.p2p_ssh_pass = QLineEdit(self.p2p_panel)
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
         self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.p2p_ssh_pass.setText("Xqjjnbv155")
+        self.p2p_ssh_pass.setText("Xqsjnbv155")
 
         self.p2p_ssh_form = QFormLayout()
         self.p2p_ssh_form.addRow("host:", self.p2p_ssh_host)
