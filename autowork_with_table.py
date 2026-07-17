@@ -42,6 +42,7 @@ class Ui_MainWindow(object):
         self.horizontalLayout = QHBoxLayout()
         self.horizontalLayout.setObjectName(u"horizontalLayout")
         self.horizontalLayout.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
+        self.horizontalLayout.setSpacing(8)
         self.flush = QPushButton(self.centralwidget)
         self.flush.setObjectName(u"flush")
 
@@ -210,6 +211,7 @@ class Ui_MainWindow(object):
 
         # --- 分隔线 ---
         p2p_separator = QFrame(self.p2p_panel)
+        p2p_separator.setObjectName(u"p2p_separator")
         p2p_separator.setFrameShape(QFrame.Shape.HLine)
         p2p_separator.setFrameShadow(QFrame.Shadow.Sunken)
         p2p_main_layout.addWidget(p2p_separator)

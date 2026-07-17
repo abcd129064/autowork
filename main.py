@@ -1227,6 +1227,7 @@ class MainWindow(QMainWindow):
         self._apply_highlight_color()
         self._apply_font_size()
         self._apply_font_family()
+        self._apply_theme()
         # 替换 choose_exe 的弹出视图为自定义 QListView，配合 setMaxVisibleItems 生效
         _popup_view = QListView(self.ui.choose_exe)
         _popup_view.setUniformItemSizes(True)
@@ -2591,6 +2592,13 @@ class MainWindow(QMainWindow):
         act_scale.triggered.connect(lambda: QTimer.singleShot(0, self._on_dpi_scale))
         act_ff = theme_menu.addAction("字体设置")
         act_ff.triggered.connect(lambda: QTimer.singleShot(0, self._on_font_family))
+        theme_menu.addSeparator()
+        # 深色主题切换
+        self._theme_action = QAction("深色主题", self)
+        self._theme_action.setCheckable(True)
+        self._theme_action.setChecked(self._load_settings().get("dark_theme", True))
+        self._theme_action.toggled.connect(self._on_toggle_theme)
+        theme_menu.addAction(self._theme_action)
 
         # 「帮助」菜单
         help_menu = menubar.addMenu("帮助")
@@ -2710,6 +2718,390 @@ class MainWindow(QMainWindow):
             font = QApplication.font()
             font.setFamily(family)
             QApplication.setFont(font)
+
+    def _apply_theme(self):
+        """根据 settings.json 中的 dark_theme 字段应用深色主题或恢复默认样式"""
+        settings = self._load_settings()
+        if not settings.get("dark_theme", True):
+            self.setStyleSheet("")
+            return
+        stylesheet = """
+        /* ===== 全局 & 主窗口 ===== */
+        QMainWindow {
+            background-color: #0a0e1a;
+        }
+        QWidget {
+            color: #c8d0dc;
+        }
+        QWidget#centralwidget {
+            background-color: #0a0e1a;
+        }
+
+        /* ===== 按钮 ===== */
+        QPushButton {
+            background-color: #121828;
+            color: #00d4ff;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            padding: 4px 14px;
+            min-height: 20px;
+        }
+        QPushButton:hover {
+            background-color: #1a2438;
+            border: 1px solid #00d4ff;
+        }
+        QPushButton:pressed {
+            background-color: #0c1220;
+            border: 1px solid #00a8cc;
+        }
+        QPushButton:checked {
+            background-color: #0e1a2e;
+            border: 1px solid #00d4ff;
+            color: #00d4ff;
+        }
+        QPushButton:disabled {
+            color: #3a4558;
+            border: 1px solid #1a2030;
+            background-color: #0e1218;
+        }
+
+        /* ===== 输入框 ===== */
+        QLineEdit {
+            background-color: #0c1220;
+            color: #d0d8e4;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            padding: 3px 6px;
+            selection-background-color: #00d4ff;
+            selection-color: #0a0e1a;
+        }
+        QLineEdit:focus {
+            border: 1px solid #00d4ff;
+        }
+        QLineEdit:disabled {
+            color: #3a4558;
+            background-color: #0a0e16;
+        }
+
+        /* ===== 下拉框 ===== */
+        QComboBox {
+            background-color: #0c1220;
+            color: #d0d8e4;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            padding: 3px 8px;
+            min-height: 20px;
+        }
+        QComboBox:hover {
+            border: 1px solid #00d4ff;
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 20px;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid #00d4ff;
+            margin-right: 6px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #0c1220;
+            color: #d0d8e4;
+            border: 1px solid #1e2a40;
+            selection-background-color: #0e1a2e;
+            selection-color: #00d4ff;
+            outline: none;
+        }
+
+        /* ===== 数字微调框 ===== */
+        QSpinBox {
+            background-color: #0c1220;
+            color: #d0d8e4;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            padding: 3px 4px;
+        }
+        QSpinBox:hover {
+            border: 1px solid #00d4ff;
+        }
+        QSpinBox:focus {
+            border: 1px solid #00d4ff;
+        }
+        QSpinBox::up-button, QSpinBox::down-button {
+            background-color: #121828;
+            border: none;
+            width: 16px;
+        }
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+            background-color: #1a2438;
+        }
+        QSpinBox::up-arrow {
+            image: none;
+            border-left: 3px solid transparent;
+            border-right: 3px solid transparent;
+            border-bottom: 4px solid #00d4ff;
+        }
+        QSpinBox::down-arrow {
+            image: none;
+            border-left: 3px solid transparent;
+            border-right: 3px solid transparent;
+            border-top: 4px solid #00d4ff;
+        }
+
+        /* ===== 日期编辑框 ===== */
+        QDateEdit {
+            background-color: #0c1220;
+            color: #d0d8e4;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            padding: 3px 6px;
+        }
+        QDateEdit:hover {
+            border: 1px solid #00d4ff;
+        }
+        QDateEdit::drop-down {
+            border: none;
+            width: 20px;
+        }
+        QDateEdit::down-arrow {
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid #00d4ff;
+            margin-right: 6px;
+        }
+        QDateEdit QAbstractItemView {
+            background-color: #0c1220;
+            color: #d0d8e4;
+            border: 1px solid #1e2a40;
+            selection-background-color: #0e1a2e;
+            selection-color: #00d4ff;
+        }
+
+        /* ===== 单选按钮 ===== */
+        QRadioButton {
+            color: #c8d0dc;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 14px;
+            height: 14px;
+        }
+        QRadioButton::indicator:unchecked {
+            border: 1px solid #1e2a40;
+            border-radius: 7px;
+            background-color: #0c1220;
+        }
+        QRadioButton::indicator:checked {
+            border: 1px solid #00d4ff;
+            border-radius: 7px;
+            background-color: #00d4ff;
+        }
+        QRadioButton::indicator:hover {
+            border: 1px solid #00d4ff;
+        }
+
+        /* ===== 列表控件 ===== */
+        QListWidget {
+            background-color: #0c1220;
+            color: #c8d0dc;
+            border: 1px solid #1a2030;
+            border-radius: 2px;
+            outline: none;
+        }
+        QListWidget::item {
+            padding: 2px 4px;
+            border: none;
+        }
+        QListWidget::item:selected {
+            background-color: #0e1a2e;
+            color: #00d4ff;
+        }
+        QListWidget::item:hover:!selected {
+            background-color: #101828;
+        }
+
+        /* ===== 日志输出区域（终端风格） ===== */
+        QPlainTextEdit#show_log {
+            background-color: #080c14;
+            color: #00e8a0;
+            border: 1px solid #1a2030;
+            border-radius: 2px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 10pt;
+            selection-background-color: #00d4ff;
+            selection-color: #0a0e1a;
+        }
+
+        /* ===== 分隔器 ===== */
+        QSplitter::handle {
+            background-color: #1a2030;
+        }
+        QSplitter::handle:horizontal {
+            width: 2px;
+        }
+        QSplitter::handle:vertical {
+            height: 2px;
+        }
+        QSplitter::handle:hover {
+            background-color: #00d4ff;
+        }
+
+        /* ===== 标签 ===== */
+        QLabel {
+            color: #8892a2;
+            background-color: transparent;
+        }
+
+        /* ===== 远程面板 ===== */
+        QFrame#p2p_panel {
+            background-color: #0c1020;
+            border: 1px solid #1a2538;
+            border-radius: 4px;
+        }
+
+        /* ===== 远程面板内分隔线 ===== */
+        QFrame#p2p_separator {
+            color: #1a2538;
+            max-height: 2px;
+        }
+
+        /* ===== 状态栏 ===== */
+        QStatusBar {
+            background-color: #080c14;
+            color: #6a7384;
+            border-top: 1px solid #1a2030;
+        }
+
+        /* ===== 菜单栏 ===== */
+        QMenuBar {
+            background-color: #0a0e1a;
+            color: #c8d0dc;
+            border-bottom: 1px solid #1a2030;
+            padding: 1px;
+        }
+        QMenuBar::item {
+            background: transparent;
+            padding: 3px 10px;
+            border-radius: 2px;
+        }
+        QMenuBar::item:selected {
+            background-color: #0e1a2e;
+            color: #00d4ff;
+        }
+
+        /* ===== 菜单 ===== */
+        QMenu {
+            background-color: #0c1220;
+            color: #c8d0dc;
+            border: 1px solid #1a2030;
+            border-radius: 3px;
+            padding: 2px;
+        }
+        QMenu::item {
+            padding: 4px 28px 4px 10px;
+            border-radius: 2px;
+        }
+        QMenu::item:selected {
+            background-color: #0e1a2e;
+            color: #00d4ff;
+        }
+        QMenu::separator {
+            height: 1px;
+            background-color: #1a2030;
+            margin: 3px 6px;
+        }
+
+        /* ===== 滚动条（垂直） ===== */
+        QScrollBar:vertical {
+            background-color: #0a0e1a;
+            width: 10px;
+            border: none;
+            margin: 0;
+        }
+        QScrollBar::handle:vertical {
+            background-color: #1e2a40;
+            border-radius: 4px;
+            min-height: 20px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background-color: #00d4ff;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: none;
+        }
+
+        /* ===== 滚动条（水平） ===== */
+        QScrollBar:horizontal {
+            background-color: #0a0e1a;
+            height: 10px;
+            border: none;
+            margin: 0;
+        }
+        QScrollBar::handle:horizontal {
+            background-color: #1e2a40;
+            border-radius: 4px;
+            min-width: 20px;
+            margin: 2px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background-color: #00d4ff;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0px;
+        }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            background: none;
+        }
+
+        /* ===== 工具提示 ===== */
+        QToolTip {
+            background-color: #0c1220;
+            color: #00d4ff;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            padding: 3px 6px;
+        }
+
+        /* ===== 消息框 ===== */
+        QMessageBox {
+            background-color: #0a0e1a;
+        }
+        QMessageBox QLabel {
+            color: #c8d0dc;
+        }
+
+        /* ===== 进度对话框 ===== */
+        QProgressDialog {
+            background-color: #0a0e1a;
+        }
+        QProgressBar {
+            background-color: #0c1220;
+            border: 1px solid #1e2a40;
+            border-radius: 3px;
+            text-align: center;
+            color: #d0d8e4;
+            height: 18px;
+        }
+        QProgressBar::chunk {
+            background-color: #00d4ff;
+            border-radius: 2px;
+        }
+        """
+        self.setStyleSheet(stylesheet)
+
+    def _on_toggle_theme(self, checked):
+        """切换深色主题"""
+        self._save_settings({"dark_theme": checked})
+        self._apply_theme()
+        theme_name = "深色主题" if checked else "默认主题"
+        self.ui.show_log.appendPlainText(f"[主题] 已切换为{theme_name}")
 
     @staticmethod
     def apply_dpi_scale(settings_path):
