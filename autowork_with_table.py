@@ -156,6 +156,9 @@ class Ui_MainWindow(object):
         self.p2p_btn.setMaximumWidth(50)
         self.horizontalLayout.addWidget(self.p2p_btn)
 
+        # 尾部弹性空间，防止全屏时控件被均分拉开
+        self.horizontalLayout.addStretch()
+
         self.verticalLayout_2.addWidget(self.toolbar_widget)
 
         # ============================================================
@@ -166,94 +169,39 @@ class Ui_MainWindow(object):
         self.horizontalLayout_main.setContentsMargins(0, 0, 0, 0)
         self.horizontalLayout_main.setSpacing(0)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal, self.centralwidget)
-        self.splitter.setObjectName(u"splitter")
-
-        # ===== 左侧面板: 设备列表 + 文件/日志树 (垂直 Splitter) =====
-        self.left_panel = QWidget()
-        self.left_panel.setObjectName(u"left_panel")
-        left_outer = QVBoxLayout(self.left_panel)
-        left_outer.setContentsMargins(0, 0, 0, 0)
-        left_outer.setSpacing(0)
-
-        # 顶部标题
-        left_header = QLabel("  \u8bbe\u5907")
-        left_header.setObjectName(u"left_panel_header")
-        left_header.setFixedHeight(30)
-        left_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        left_outer.addWidget(left_header)
-
-        # 垂直 Splitter: 上方设备列表 | 下方视频+日志
-        self.left_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.left_splitter.setObjectName(u"left_splitter")
-
-        # 上方: 设备列表
+        # 创建核心控件（两套布局共享，切换时复用实例）
         self.id_list = QListWidget()
         self.id_list.setObjectName(u"id_list")
-        self.left_splitter.addWidget(self.id_list)
-
-        # 下方: 视频列表 + 日志列表
-        bottom_widget = QWidget()
-        bottom_widget.setObjectName(u"left_bottom")
-        bottom_layout = QVBoxLayout(bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(0)
-
-        bottom_header = QLabel("  \u6587\u4ef6 / \u65e5\u5fd7")
-        bottom_header.setObjectName(u"left_panel_header")
-        bottom_header.setFixedHeight(26)
-        bottom_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        bottom_layout.addWidget(bottom_header)
 
         self.loacl_video_list = QListWidget()
         self.loacl_video_list.setObjectName(u"loacl_video_list")
-        bottom_layout.addWidget(self.loacl_video_list, 1)
 
         self.log_list = QListWidget()
         self.log_list.setObjectName(u"log_list")
-        bottom_layout.addWidget(self.log_list, 2)
 
-        self.left_splitter.addWidget(bottom_widget)
-        self.left_splitter.setSizes([200, 400])
+        self.show_log = QPlainTextEdit()
+        self.show_log.setObjectName(u"show_log")
+        self.show_log.setReadOnly(True)
+        self.show_log.setFont(QFont("Consolas", 10))
 
-        left_outer.addWidget(self.left_splitter, 1)
-        self.splitter.addWidget(self.left_panel)
-
-        # ===== 中间: 日志控制台 =====
-        self.center_panel = QWidget()
-        self.center_panel.setObjectName(u"center_panel")
-        center_layout = QVBoxLayout(self.center_panel)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(0)
-
-        # 日志顶部状态条
-        self.log_status_bar = QWidget(self.center_panel)
+        # 日志顶部状态条（仅新版布局显示）
+        self.log_status_bar = QWidget()
         self.log_status_bar.setObjectName(u"log_status_bar")
         self.log_status_bar.setFixedHeight(26)
         log_status_layout = QHBoxLayout(self.log_status_bar)
         log_status_layout.setContentsMargins(8, 2, 8, 2)
         log_status_layout.setSpacing(12)
-
         self.log_status_device = QLabel("\u8bbe\u5907: --")
         self.log_status_device.setObjectName(u"log_status_device")
         log_status_layout.addWidget(self.log_status_device)
-
         self.log_status_count = QLabel("\u65e5\u5fd7: 0 \u6761")
         self.log_status_count.setObjectName(u"log_status_count")
         log_status_layout.addWidget(self.log_status_count)
-
         log_status_layout.addStretch()
-        center_layout.addWidget(self.log_status_bar)
 
-        # 日志输出区
-        self.show_log = QPlainTextEdit()
-        self.show_log.setObjectName(u"show_log")
-        self.show_log.setReadOnly(True)
-        self.show_log.setFont(QFont("Consolas", 10))
-        center_layout.addWidget(self.show_log, 1)
-
-        self.splitter.addWidget(self.center_panel)
-        self.splitter.setSizes([220, 580])
+        # 构建默认布局（新版）
+        self._is_classic_layout = False
+        self._build_modern_content()
 
         self.horizontalLayout_main.addWidget(self.splitter)
 
@@ -423,3 +371,121 @@ class Ui_MainWindow(object):
         self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"\u6682\u505c", None))
         self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"\u8fdc\u7a0b", None))
     # retranslateUi
+
+    # ================================================================
+    # 布局构建与切换
+    # ================================================================
+
+    def _build_modern_content(self):
+        """新版布局: 左侧嵌套Splitter(设备|文件 + 日志) | 中间日志控制台"""
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self.centralwidget)
+        self.splitter.setObjectName(u"splitter")
+
+        # ===== 左侧面板 =====
+        self.left_panel = QWidget()
+        self.left_panel.setObjectName(u"left_panel")
+        left_outer = QVBoxLayout(self.left_panel)
+        left_outer.setContentsMargins(0, 0, 0, 0)
+        left_outer.setSpacing(0)
+
+        self.left_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.left_splitter.setObjectName(u"left_splitter")
+
+        # 上方: 水平 Splitter，设备列表 | 文件列表
+        self.left_top_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.left_top_splitter.setObjectName(u"left_top_splitter")
+
+        id_widget = QWidget()
+        id_layout = QVBoxLayout(id_widget)
+        id_layout.setContentsMargins(0, 0, 0, 0)
+        id_layout.setSpacing(0)
+        id_header = QLabel("  \u8bbe\u5907")
+        id_header.setObjectName(u"left_panel_header")
+        id_header.setFixedHeight(26)
+        id_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        id_layout.addWidget(id_header)
+        id_layout.addWidget(self.id_list, 1)
+        self.left_top_splitter.addWidget(id_widget)
+
+        file_widget = QWidget()
+        file_layout = QVBoxLayout(file_widget)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        file_layout.setSpacing(0)
+        file_header = QLabel("  \u6587\u4ef6 / \u65e5\u5fd7")
+        file_header.setObjectName(u"left_panel_header")
+        file_header.setFixedHeight(26)
+        file_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        file_layout.addWidget(file_header)
+        file_layout.addWidget(self.loacl_video_list, 1)
+        self.left_top_splitter.addWidget(file_widget)
+
+        self.left_top_splitter.setSizes([100, 120])
+        self.left_splitter.addWidget(self.left_top_splitter)
+
+        # 下方: 日志内容列表
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(0)
+        log_header = QLabel("  \u65e5\u5fd7\u5185\u5bb9")
+        log_header.setObjectName(u"left_panel_header")
+        log_header.setFixedHeight(26)
+        log_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        log_layout.addWidget(log_header)
+        log_layout.addWidget(self.log_list, 1)
+        self.left_splitter.addWidget(log_widget)
+
+        self.left_splitter.setSizes([350, 650])
+        left_outer.addWidget(self.left_splitter, 1)
+        self.splitter.addWidget(self.left_panel)
+
+        # ===== 中间: 日志控制台 =====
+        self.center_panel = QWidget()
+        self.center_panel.setObjectName(u"center_panel")
+        center_layout = QVBoxLayout(self.center_panel)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+        center_layout.addWidget(self.log_status_bar)
+        center_layout.addWidget(self.show_log, 1)
+        self.splitter.addWidget(self.center_panel)
+
+        self.splitter.setSizes([400, 600])
+        self._is_classic_layout = False
+
+    def _build_classic_content(self):
+        """经典布局: 四列水平Splitter（设备|文件|日志内容|日志控制台）"""
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self.centralwidget)
+        self.splitter.setObjectName(u"splitter")
+
+        self.splitter.addWidget(self.id_list)
+        self.splitter.addWidget(self.loacl_video_list)
+        self.splitter.addWidget(self.log_list)
+        self.splitter.addWidget(self.show_log)
+
+        self.splitter.setSizes([80, 150, 300, 500])
+        self._is_classic_layout = True
+
+    def switch_layout(self, classic=False):
+        """切换布局模式，复用核心控件实例（保留数据和信号连接）"""
+        if classic == self._is_classic_layout:
+            return
+
+        # 1. 将核心控件从旧布局中脱离（设置 parent=None 防止被旧 splitter 删除）
+        self.id_list.setParent(None)
+        self.loacl_video_list.setParent(None)
+        self.log_list.setParent(None)
+        self.show_log.setParent(None)
+        self.log_status_bar.setParent(None)
+
+        # 2. 从 horizontalLayout_main 中移除旧 splitter 并删除
+        self.horizontalLayout_main.removeWidget(self.splitter)
+        self.splitter.deleteLater()
+
+        # 3. 构建新布局
+        if classic:
+            self._build_classic_content()
+        else:
+            self._build_modern_content()
+
+        # 4. 将新 splitter 插入到 horizontalLayout_main 的最前面（p2p_panel 之前）
+        self.horizontalLayout_main.insertWidget(0, self.splitter)

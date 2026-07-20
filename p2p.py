@@ -49,3 +49,50 @@ def is_port_in_use(port, host='127.0.0.1'):
         return result == 0
     except (socket.error, OSError):
         return False
+
+def open_xshell_and_xftp(host, port, username=None, password=None, DEFAULT_CONFIG=None):
+    """使用Xshell和Xftp双开连接"""
+    if username is None:
+        username = input(f"\n请输入SSH用户名 (默认 {DEFAULT_CONFIG['default_username']}): ").strip() or DEFAULT_CONFIG['default_username']
+
+    if password is None:
+        password = input(f"请输入SSH密码 (回车使用默认密码): ").strip() or DEFAULT_CONFIG['default_password']
+
+    print(f"\n[INFO] 正在连接到: {username}@{host}:{port}")
+
+    try:
+        create_new_console = 0x00000010
+
+        xshell_url = f'ssh://{username}:{password}@{host}:{port}'
+        xshell_cmd = f'xshell -url "{xshell_url}"'
+
+        xftp_url = f'sftp://{username}:{password}@{host}:{port}'
+        xftp_cmd = f'xftp -url "{xftp_url}"'
+
+        print("[INFO] 正在打开Xshell")
+        subprocess.Popen(
+            xshell_cmd,
+            shell=True,
+            creationflags=create_new_console
+        )
+
+        time.sleep(0.5)
+
+        print("[INFO] 正在打开Xftp")
+        subprocess.Popen(
+            xftp_cmd,
+            shell=True,
+            creationflags=create_new_console
+        )
+
+        print("[INFO] Xshell和Xftp已打开")
+        print("[INFO] 如果Xshell或Xftp未启动，请检查环境变量")
+        return True
+
+    except FileNotFoundError:
+        print("[ERROR] 未找到xshell或xftp命令")
+        print("[INFO] 请确保已安装Xshell和Xftp，并将安装目录添加到系统PATH")
+        return False
+    except OSError as e:
+        print(f"[ERROR] 连接失败: {e}")
+        return False
