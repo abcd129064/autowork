@@ -358,7 +358,9 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
 
-        QMetaObject.connectSlotsByName(MainWindow)
+        # 注意：不能调用 QMetaObject.connectSlotsByName(MainWindow)
+        # 它会按 on_<objectName>_<signal> 规则自动连接 on_end_clicked / on_flush_clicked 等槽，
+        # 与 connect_signals() 中的手动连接重复，导致按钮点击触发两次。
     # setupUi
 
     def retranslateUi(self, MainWindow):

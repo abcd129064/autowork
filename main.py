@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QTableWidget, QTableWidgetItem)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
-from qfluentwidgets import setTheme, setThemeColor, Theme
+from qfluentwidgets import setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -2057,6 +2057,33 @@ class MainWindow(QMainWindow):
             # 用户不在底部，启动/重置延迟滚动定时器（debounce）
             self._log_scroll_timer.start()
 
+    def _show_info_bar(self, message, message_type="info", title=None, duration=2500):
+        """弹出 Fluent InfoBar 消息条（右上角），与 _append_log 互不干涉。
+
+        参数:
+            message: 消息内容
+            message_type: 'success' / 'info' / 'warning' / 'error'
+            title: 标题（默认按类型自动生成）
+            duration: 显示时长(ms)，<=0 表示常驻不自动关闭
+        """
+        if title is None:
+            title = {'success': '成功', 'info': '提示',
+                     'warning': '警告', 'error': '错误'}.get(message_type, '提示')
+        kwargs = dict(
+            title=title,
+            content=message,
+            parent=self,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            duration=duration,
+        )
+        factory = {
+            'success': InfoBar.success,
+            'info': InfoBar.info,
+            'warning': InfoBar.warning,
+            'error': InfoBar.error,
+        }.get(message_type, InfoBar.info)
+        factory(**kwargs)
+
     def _load_exe_list(self):
         """加载 snooker/bin64 目录下的 SnookerTracking*.exe 到程序下拉框"""
         import glob
@@ -2135,6 +2162,7 @@ class MainWindow(QMainWindow):
         
         if not os.path.exists(date_dir):
             self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir})")
+            self._show_info_bar(f"{device_code} 下未找到 {date_str} 的日志", "warning")
             return
         
         # 查找日期目录下的 txt 和 log 文件
@@ -2222,6 +2250,7 @@ class MainWindow(QMainWindow):
             self.ui.log_list.clear()
         
         self._append_log("[刷新] 完成")
+        self._show_info_bar("数据刷新完成", "success")
         
     @Slot()
     def on_start_clicked(self):
@@ -2229,6 +2258,7 @@ class MainWindow(QMainWindow):
         # 如果已经有程序在运行，先结束它
         if self.running_process is not None:
             self._append_log("\n[警告] 已有程序正在运行，请先点击'结束'")
+            self._show_info_bar("已有程序正在运行，请先点击'结束'", "warning")
             return
         
         # 获取选中的程序
@@ -2291,12 +2321,14 @@ class MainWindow(QMainWindow):
         """结束按钮点击事件 - 停止运行的程序"""
         if self.running_process is None:
             self._append_log("\n[提示] 没有正在运行的程序")
+            self._show_info_bar("没有正在运行的程序", "warning")
             return
         
         # 直接强制终止进程
         self._append_log("\n[结束] 正在终止程序...")
         self.running_process.kill()  # 强制终止
         self._append_log("[结束] 程序已强制终止")
+        self._show_info_bar("程序已终止", "info")
         self.running_process = None
         self._process_suspended = False
         self.ui.pause_btn.setText("暂停")
@@ -2308,6 +2340,7 @@ class MainWindow(QMainWindow):
         # 检查是否选中了设备
         if not self.ui.id_list.currentItem():
             self._append_log("[提示] 请先选择设备代码")
+            self._show_info_bar("请先选择设备代码", "warning")
             return
         
         device_code = self.ui.id_list.currentItem().text()
@@ -2318,6 +2351,7 @@ class MainWindow(QMainWindow):
         
         if not os.path.exists(daily_path):
             self._append_log(f"[提示] CPP 日志文件不存在: {daily_path}")
+            self._show_info_bar(f"CPP 日志文件不存在: {daily_path}", "warning")
             return
         
         # 用系统默认程序打开文件
@@ -2329,6 +2363,7 @@ class MainWindow(QMainWindow):
         """打开目录按钮点击事件 - 打开当前选中设备的目录"""
         if not self.ui.id_list.currentItem():
             self._append_log("[提示] 请先选择设备代码")
+            self._show_info_bar("请先选择设备代码", "warning")
             return
         
         device_code = self.ui.id_list.currentItem().text()
@@ -2336,6 +2371,7 @@ class MainWindow(QMainWindow):
         
         if not os.path.exists(device_dir):
             self._append_log(f"[提示] 目录不存在: {device_dir}")
+            self._show_info_bar("目录不存在", "warning")
             return
         
         os.startfile(device_dir)
@@ -2380,6 +2416,7 @@ class MainWindow(QMainWindow):
         """ID列表项选中事件 - 加载对应设备的日志目录"""
         device_code = item.text()
         self._append_log(f"\n[设备选中] {device_code}")
+        self._show_info_bar(f"设备选中：{device_code}", "success")
         self._update_status_device(device_code)
         
         # 加载该设备下的日志目录到第二列
@@ -2423,9 +2460,11 @@ class MainWindow(QMainWindow):
             
             line_count = len(content.splitlines())
             self._append_log(f"[日志内容] 已加载 {line_count} 行")
+            self._show_info_bar(f"日志已加载 {line_count} 行", "success")
             self._update_status_logs(line_count)
         except Exception as e:
             self._append_log(f"[错误] 无法读取日志文件: {str(e)}")
+            self._show_info_bar(f"无法读取日志文件: {e}", "error")
             self.ui.log_list.clear()
             self._current_log_path = None
         
@@ -2482,6 +2521,7 @@ class MainWindow(QMainWindow):
         self.running_process.start(exe_path)
         self._append_log(f"\n[播放] 已启动程序: {exe_name}")
         self._append_log(f"  - 工作目录: {exe_dir}")
+        self._show_info_bar(f"已启动程序: {exe_name}", "success")
         self._update_status_running(exe_name)
 
     def _on_decode_output(self):
@@ -2673,6 +2713,7 @@ class MainWindow(QMainWindow):
         if exe_name:
             self._save_settings({"last_exe": exe_name})
             self._append_log(f"[配置] 已保存程序选择: {exe_name}")
+            self._show_info_bar(f"已保存程序选择: {exe_name}", "success")
 
     @Slot()
     def on_log_double_clicked(self, item):
@@ -2776,6 +2817,7 @@ class MainWindow(QMainWindow):
                 self._process_suspended = True
                 self.ui.pause_btn.setText("恢复")
                 self._append_log("[播放] 程序已暂停")
+                self._show_info_bar("程序已暂停")
                 exe_name = self.ui.choose_exe.currentText()
                 self._update_status_paused(exe_name)
             else:
@@ -3189,6 +3231,7 @@ class MainWindow(QMainWindow):
     def _on_tcp_finished(self, result):
         """TCP 连接成功回调"""
         self._append_log(f"[TCP] 连接成功: {result}")
+        self._show_info_bar(f"TCP 连接成功: {result}", "success")
         # 仅在 TCP 真正成功后才启用按钮
         self.ui.p2p_sftp_btn.setEnabled(True)
         self.ui.p2p_ssh_terminal_btn.setEnabled(True)
@@ -3200,6 +3243,7 @@ class MainWindow(QMainWindow):
     def _on_tcp_error(self, error):
         """TCP 连接失败回调"""
         self._append_log(f"[TCP] 连接失败: {error}")
+        self._show_info_bar(f"网络连接失败: {error}", "error", duration=4000)
         if self._tcp_worker:
             self._tcp_worker.deleteLater()
         self._tcp_worker = None
@@ -3553,7 +3597,12 @@ class MainWindow(QMainWindow):
         settings = self._load_settings()
         current_family = settings.get("font_family", "")
         current_font = QFont(current_family) if current_family else QFont()
-        font, ok = QFontDialog.getFont(current_font, self, "选择字体")
+        result = QFontDialog.getFont(current_font, self, "选择字体")
+        # PySide6 不同版本返回顺序可能为 (QFont, bool) 或 (bool, QFont)
+        if isinstance(result[0], QFont):
+            font, ok = result[0], result[1]
+        else:
+            ok, font = result[0], result[1]
         if ok:
             self._save_settings({"font_family": font.family()})
             self._apply_font_family()
@@ -3940,12 +3989,15 @@ class MainWindow(QMainWindow):
 
     def _poll_system_theme(self):
         """轮询检测 Windows 主题变化，变化时自动重新应用主题"""
-        sys_dark = self._system_is_dark()
-        if sys_dark != self._last_applied_dark:
-            self._last_applied_dark = sys_dark
-            self._apply_theme()
-            actual = "深色" if sys_dark else "浅色"
-            self._append_log(f"[主题] 检测到系统主题变化，已自动切换为{actual}")
+        try:
+            sys_dark = self._system_is_dark()
+            if sys_dark != self._last_applied_dark:
+                self._last_applied_dark = sys_dark
+                self._apply_theme()
+                actual = "深色" if sys_dark else "浅色"
+                self._append_log(f"[主题] 检测到系统主题变化，已自动切换为{actual}")
+        except KeyboardInterrupt:
+            pass
 
     def _on_theme_selected(self, action):
         """主题子菜单互斥选择"""
