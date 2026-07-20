@@ -1,5 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
+# 自动收集 qfluentwidgets 全部子模块（含 _rc.resource 图标/QSS 资源）
+# 排除 multimedia（需要 PySide6.QtMultimedia，本项目未使用）
+qfw_hiddenimports = [
+    m for m in collect_submodules('qfluentwidgets')
+    if 'multimedia' not in m
+]
 
 a = Analysis(
     ['main.py'],
@@ -16,16 +24,18 @@ a = Analysis(
         'PySide6.QtWidgets',
         'PySide6.QtCore',
         'PySide6.QtGui',
+        'PySide6.QtSvg',
+        'PySide6.QtSvgWidgets',
         'paramiko',
         'cryptography',
         'bcrypt',
-        'qfluentwidgets',
         'darkdetect',
-    ],
+        'darkdetect._windows_detect',
+    ] + qfw_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['qfluentwidgets.multimedia', 'scipy', 'numpy'],
     noarchive=False,
     optimize=0,
 )

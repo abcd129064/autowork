@@ -30,7 +30,7 @@ try:
 except ImportError:
     PARAMIKO_AVAILABLE = False
 
-# Windows DLL 函数声明（使用 WINFUNCTYPE 消除 IDE 静态分析警告）
+# Windows DLL 函数声明
 if sys.platform == 'win32':
     _k32 = ctypes.WinDLL('kernel32')
     _OpenProcess = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)(

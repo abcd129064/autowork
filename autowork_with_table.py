@@ -93,7 +93,7 @@ class Ui_MainWindow(object):
 
         self.date = CalendarPicker(self.toolbar_widget)
         self.date.setObjectName(u"date")
-        self.date.setFixedWidth(110)
+        self.date.setFixedWidth(150)
         self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
 
@@ -160,7 +160,7 @@ class Ui_MainWindow(object):
 
         self.p2p_btn = ToggleButton(self.toolbar_widget)
         self.p2p_btn.setObjectName(u"p2p_btn")
-        self.p2p_btn.setMaximumWidth(50)
+        self.p2p_btn.setMaximumWidth(72)
         self.horizontalLayout.addWidget(self.p2p_btn)
 
         # 尾部弹性空间，防止全屏时控件被均分拉开
