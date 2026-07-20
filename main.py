@@ -3577,6 +3577,7 @@ class MainWindow(QMainWindow):
             })
             self._append_log(
                 f"[配置] 已更新高亮颜色: RGB({color.red()},{color.green()},{color.blue()})")
+            self._show_info_bar(f"[配置] 已更新高亮颜色: RGB({color.red()},{color.green()},{color.blue()})")
 
     def _on_font_size(self):
         """弹出字号选择对话框"""
@@ -3587,6 +3588,7 @@ class MainWindow(QMainWindow):
             self._save_settings({"font_size": val})
             self._apply_font_size()
             self._append_log(f"[配置] 已更新字号: {val}pt")
+            self._show_info_bar(f"[配置] 已更新字号: {val}pt")
 
     def _on_dpi_scale(self):
         """弹出 DPI 缩放比例选择对话框"""
@@ -3603,6 +3605,7 @@ class MainWindow(QMainWindow):
             self._save_settings({"dpi_scale": val})
             QMessageBox.information(self, "界面缩放", "缩放设置已保存，重启应用后生效。")
             self._append_log(f"[配置] 已设置缩放: {val}%（重启后生效）")
+            self._show_info_bar(f"[配置] 已设置缩放: {val}%,需重启")
 
     def _on_font_family(self):
         """弹出字体选择对话框"""
@@ -3618,6 +3621,7 @@ class MainWindow(QMainWindow):
         if ok:
             self._save_settings({"font_family": font.family()})
             self._apply_font_family()
+            self._show_info_bar(f"[配置] 已更新字体: {font.family()}")
             self._append_log(f"[配置] 已更新字体: {font.family()}")
 
     def _on_about(self) :
@@ -3796,6 +3800,12 @@ class MainWindow(QMainWindow):
             font-size: 10pt;
             selection-background-color: #00BCD4;
             selection-color: #FFFFFF;
+        }
+        /* 覆盖 Fluent 内置 hover/focus 变色，保持终端背景恒定 */
+        QPlainTextEdit#show_log:hover,
+        QPlainTextEdit#show_log:focus {
+            background-color: #0D0D0D;
+            border: none;
         }
 
         /* ===== 日志顶部状态条 ===== */

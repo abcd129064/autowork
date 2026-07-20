@@ -15,7 +15,7 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication,
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QMainWindow, QPlainTextEdit,
+    QMainWindow,
     QSizePolicy, QSpinBox, QSplitter, QVBoxLayout,
     QWidget, QStatusBar)
 from qfluentwidgets import (
@@ -26,6 +26,7 @@ from qfluentwidgets import (
     CalendarPicker,
     RadioButton,
     ListWidget,
+    PlainTextEdit as FluentPlainTextEdit,
 )
 
 
@@ -163,7 +164,7 @@ class Ui_MainWindow(object):
         self.p2p_btn.setMaximumWidth(72)
         self.horizontalLayout.addWidget(self.p2p_btn)
 
-        # 尾部弹性空间，防止全屏时控件被均分拉开
+        # 弹性空间，将所有控件推向左侧
         self.horizontalLayout.addStretch()
 
         self.verticalLayout_2.addWidget(self.toolbar_widget)
@@ -186,10 +187,12 @@ class Ui_MainWindow(object):
         self.log_list = ListWidget()
         self.log_list.setObjectName(u"log_list")
 
-        self.show_log = QPlainTextEdit()
+        self.show_log = FluentPlainTextEdit()
         self.show_log.setObjectName(u"show_log")
         self.show_log.setReadOnly(True)
         self.show_log.setFont(QFont("Consolas", 10))
+        # 隐藏 Fluent EditLayer 覆盖层，避免聚焦时绘制主题色底边
+        self.show_log.layer.hide()
 
         # 日志顶部状态条（仅新版布局显示）
         self.log_status_bar = QWidget()
