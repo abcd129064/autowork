@@ -9,6 +9,7 @@ import subprocess
 import ctypes
 import stat
 import time
+import threading
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QWidget, QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QPushButton, QProgressDialog, QPlainTextEdit, QSplitter, QProgressBar,
     QTableWidget, QTableWidgetItem)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QTextCursor
+from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -27,6 +28,29 @@ try:
     PARAMIKO_AVAILABLE = True
 except ImportError:
     PARAMIKO_AVAILABLE = False
+
+# Windows DLL 函数声明（使用 WINFUNCTYPE 消除 IDE 静态分析警告）
+if sys.platform == 'win32':
+    _k32 = ctypes.WinDLL('kernel32')
+    _OpenProcess = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)(
+        ('OpenProcess', _k32))
+    _CreateToolhelp32Snapshot = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong)(
+        ('CreateToolhelp32Snapshot', _k32))
+    _Thread32First = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(
+        ('Thread32First', _k32))
+    _Thread32Next = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(
+        ('Thread32Next', _k32))
+    _OpenThread = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)(
+        ('OpenThread', _k32))
+    _SuspendThread = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
+        ('SuspendThread', _k32))
+    _ResumeThread = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
+        ('ResumeThread', _k32))
+    _CloseHandle = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p)(
+        ('CloseHandle', _k32))
+    _dwm = ctypes.WinDLL('dwmapi')
+    _DwmSetWindowAttribute = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong)(
+        ('DwmSetWindowAttribute', _dwm))
 
 
 class TCPWorker(QThread):
@@ -107,21 +131,44 @@ class SFTPOperationWorker(QThread):
     error = Signal(str)
     progress = Signal(int, int)  # (transferred_bytes, total_bytes)
 
-    def __init__(self, transport, operation, local_path='', remote_path='', file_size=0):
+    def __init__(self, conn_params, operation, local_path='', remote_path='', file_size=0):
         super().__init__()
-        self.transport = transport
+        self.conn_params = conn_params  # (host, port, username, password)
         self.operation = operation
         self.local_path = local_path
         self.remote_path = remote_path
         self.file_size = file_size
+        # 暂停/停止控制
+        self._pause_event = threading.Event()  # set=运行, clear=暂停
+        self._pause_event.set()
+        self._stop_flag = False
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    def stop(self):
+        self._stop_flag = True
+        self._pause_event.set()  # 解除暂停阻塞以便线程退出
 
     def _progress_cb(self, transferred, total):
+        # 检查停止
+        if self._stop_flag:
+            raise InterruptedError('传输已取消')
+        # 检查暂停（阻塞等待直到恢复）
+        self._pause_event.wait()
         self.progress.emit(transferred, total)
 
     def run(self):
+        transport = None
         sftp = None
         try:
-            sftp = paramiko.SFTPClient.from_transport(self.transport)
+            host, port, username, password = self.conn_params
+            transport = paramiko.Transport((host, port))
+            transport.connect(username=username, password=password)
+            sftp = paramiko.SFTPClient.from_transport(transport)
             if self.operation == 'upload':
                 sftp.put(self.local_path, self.remote_path, callback=self._progress_cb)
                 self.success.emit(f"已上传: {os.path.basename(self.local_path)}")
@@ -137,6 +184,8 @@ class SFTPOperationWorker(QThread):
             elif self.operation == 'mkdir':
                 sftp.mkdir(self.remote_path)
                 self.success.emit(f"已创建目录: {os.path.basename(self.remote_path)}")
+        except InterruptedError:
+            pass  # 用户取消，不报错
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -145,6 +194,209 @@ class SFTPOperationWorker(QThread):
                     sftp.close()
                 except Exception:
                     pass
+            if transport:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+
+
+class SFTPDirTransferWorker(QThread):
+    """异步 SFTP 目录递归传输工作线程（上传整个目录/下载整个目录）"""
+    success = Signal(str)
+    error = Signal(str)
+    progress = Signal(int, int)  # (transferred_bytes, total_bytes)
+
+    def __init__(self, conn_params, operation, local_dir='', remote_dir='', dir_name=''):
+        super().__init__()
+        self.conn_params = conn_params  # (host, port, username, password)
+        self.operation = operation  # 'upload_dir' or 'download_dir'
+        self.local_dir = local_dir
+        self.remote_dir = remote_dir
+        self.dir_name = dir_name
+        # 暂停/停止控制
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._stop_flag = False
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    def stop(self):
+        self._stop_flag = True
+        self._pause_event.set()
+
+    def _check_pause_stop(self):
+        """检查停止/暂停状态，停止时抛出InterruptedError，暂停时阻塞等待"""
+        if self._stop_flag:
+            raise InterruptedError('传输已取消')
+        self._pause_event.wait()
+
+    def run(self):
+        transport = None
+        sftp = None
+        try:
+            host, port, username, password = self.conn_params
+            transport = paramiko.Transport((host, port))
+            transport.connect(username=username, password=password)
+            sftp = paramiko.SFTPClient.from_transport(transport)
+            if self.operation == 'upload_dir':
+                self._upload_dir(sftp)
+            elif self.operation == 'download_dir':
+                self._download_dir(sftp)
+        except InterruptedError:
+            pass  # 用户取消，不报错
+        except Exception as e:
+            self.error.emit(f"目录传输失败 [{self.dir_name}]: {e}")
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if transport:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+
+    def _upload_dir(self, sftp):
+        """递归上传本地目录到远程"""
+        # 先计算总大小
+        total_size = 0
+        file_list = []  # [(local_file_path, relative_path), ...]
+        for root, dirs, files in os.walk(self.local_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                rel = os.path.relpath(fpath, self.local_dir)
+                try:
+                    total_size += os.path.getsize(fpath)
+                except OSError:
+                    pass
+                file_list.append((fpath, rel))
+
+        transferred = 0
+        errors = []
+        # 创建远程根目录
+        self._mkdir_p_remote(sftp, self.remote_dir)
+        # 预创建所有子目录
+        for root, dirs, files in os.walk(self.local_dir):
+            for dname in dirs:
+                dpath = os.path.join(root, dname)
+                rel_dir = os.path.relpath(dpath, self.local_dir).replace('\\', '/')
+                remote_sub = self.remote_dir.rstrip('/') + '/' + rel_dir
+                self._mkdir_p_remote(sftp, remote_sub)
+
+        # 逐文件上传
+        for fpath, rel in file_list:
+            self._check_pause_stop()
+            rel_remote = rel.replace('\\', '/')
+            remote_file = self.remote_dir.rstrip('/') + '/' + rel_remote
+            try:
+                file_size = os.path.getsize(fpath)
+                sftp.put(fpath, remote_file)
+                transferred += file_size
+                self.progress.emit(transferred, total_size)
+            except PermissionError as e:
+                errors.append(f"权限不足: {rel} ({e})")
+            except OSError as e:
+                errors.append(f"文件占用/不可读: {rel} ({e})")
+            except Exception as e:
+                errors.append(f"传输失败: {rel} ({e})")
+
+        if errors:
+            err_summary = '; '.join(errors[:5])
+            if len(errors) > 5:
+                err_summary += f' ...等共{len(errors)}个错误'
+            self.error.emit(f"目录上传部分失败 [{self.dir_name}]: {err_summary}")
+        else:
+            self.success.emit(f"已上传目录: {self.dir_name} ({len(file_list)} 个文件)")
+
+    def _download_dir(self, sftp):
+        """递归下载远程目录到本地"""
+        # 先递归收集远程文件列表及总大小
+        file_list = []  # [(remote_file_path, relative_path, size), ...]
+        total_size = 0
+        self._collect_remote_files(sftp, self.remote_dir, '', file_list)
+        for _, _, sz in file_list:
+            total_size += sz
+
+        transferred = 0
+        errors = []
+        # 创建本地根目录
+        try:
+            os.makedirs(self.local_dir, exist_ok=True)
+        except OSError as e:
+            self.error.emit(f"无法创建本地目录 [{self.local_dir}]: {e}")
+            return
+
+        # 逐文件下载
+        for remote_file, rel, sz in file_list:
+            self._check_pause_stop()
+            local_file = os.path.join(self.local_dir, rel.replace('/', os.sep))
+            local_sub_dir = os.path.dirname(local_file)
+            try:
+                os.makedirs(local_sub_dir, exist_ok=True)
+                sftp.get(remote_file, local_file)
+                transferred += sz
+                self.progress.emit(transferred, total_size)
+            except PermissionError as e:
+                errors.append(f"权限不足: {rel} ({e})")
+            except OSError as e:
+                errors.append(f"目标不可写/路径不存在: {rel} ({e})")
+            except Exception as e:
+                errors.append(f"传输失败: {rel} ({e})")
+
+        if errors:
+            err_summary = '; '.join(errors[:5])
+            if len(errors) > 5:
+                err_summary += f' ...等共{len(errors)}个错误'
+            self.error.emit(f"目录下载部分失败 [{self.dir_name}]: {err_summary}")
+        else:
+            self.success.emit(f"已下载目录: {self.dir_name} ({len(file_list)} 个文件)")
+
+    def _collect_remote_files(self, sftp, remote_base, rel_prefix, file_list):
+        """递归收集远程目录下的所有文件"""
+        try:
+            entries = sftp.listdir_attr(remote_base)
+        except Exception:
+            return
+        for attr in entries:
+            name = attr.filename
+            full_path = remote_base.rstrip('/') + '/' + name
+            rel_path = (rel_prefix + '/' + name) if rel_prefix else name
+            if stat.S_ISDIR(attr.st_mode) if attr.st_mode else False:
+                self._collect_remote_files(sftp, full_path, rel_path, file_list)
+            else:
+                size = attr.st_size if attr.st_size else 0
+                file_list.append((full_path, rel_path, size))
+
+    def _mkdir_p_remote(self, sftp, remote_path):
+        """递归创建远程目录（类似 mkdir -p）"""
+        dirs_to_create = []
+        path = remote_path
+        while path and path != '/':
+            try:
+                sftp.stat(path)
+                break  # 已存在
+            except FileNotFoundError:
+                dirs_to_create.append(path)
+                path = '/'.join(path.rstrip('/').split('/')[:-1])
+                if not path:
+                    path = '/'
+            except IOError:
+                dirs_to_create.append(path)
+                path = '/'.join(path.rstrip('/').split('/')[:-1])
+                if not path:
+                    path = '/'
+        for d in reversed(dirs_to_create):
+            try:
+                sftp.mkdir(d)
+            except Exception:
+                pass  # 可能已被并发创建
 
 
 # 网络就绪类错误关键词，匹配时自动重试，认证失败等错误不重试
@@ -188,7 +440,7 @@ class SFTPConnectWorker(QThread):
 
 
 class SFTPWindow(QDialog):
-    """SFTP 文件管理窗口（左右双面板，类似 Xftp）"""
+    """SFTP 文件管理窗口"""
 
     def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
         super().__init__(parent)
@@ -200,6 +452,7 @@ class SFTPWindow(QDialog):
         self._username = username
         self._password = password
         self._server_name = server_name
+        self._conn_params = (host, port, username, password)  # 用于创建独立传输连接
         self._transport = None
         self._remote_path = '/home'
         self._remote_entries = []
@@ -258,6 +511,8 @@ class SFTPWindow(QDialog):
         for c in [1, 2, 3]:
             lh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         self._local_tree.itemDoubleClicked.connect(self._on_local_item_double_clicked)
+        self._local_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._local_tree.customContextMenuRequested.connect(self._on_local_context_menu)
         left_lay.addWidget(self._local_tree)
 
         # 本地底部搜索框（默认隐藏）
@@ -307,6 +562,8 @@ class SFTPWindow(QDialog):
         for c in [1, 2, 3, 4]:
             rh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_remote_context_menu)
         right_lay.addWidget(self._tree)
 
         # 远程底部搜索框（默认隐藏）
@@ -354,15 +611,17 @@ class SFTPWindow(QDialog):
         # 垂直滚动条仅在有内容超出时才显示，任务少时不会出现多余滚动条
         self._transfer_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._transfer_table.setFixedHeight(130)
+        self._transfer_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._transfer_table.customContextMenuRequested.connect(self._on_transfer_context_menu)
         root.addWidget(self._transfer_table)
 
         # ---- 操作按钮栏
         btn_row = QHBoxLayout()
-        self._btn_upload = QPushButton('上传文件 ▶')
+        self._btn_upload = QPushButton('上传 ▶')
         self._btn_upload.setAutoDefault(False)
         self._btn_upload.clicked.connect(self._upload_file)
         btn_row.addWidget(self._btn_upload)
-        self._btn_download = QPushButton('◀ 下载文件')
+        self._btn_download = QPushButton('◀ 下载')
         self._btn_download.setAutoDefault(False)
         self._btn_download.clicked.connect(self._download_file)
         btn_row.addWidget(self._btn_download)
@@ -374,6 +633,10 @@ class SFTPWindow(QDialog):
         self._btn_mkdir.setAutoDefault(False)
         self._btn_mkdir.clicked.connect(self._create_directory)
         btn_row.addWidget(self._btn_mkdir)
+        self._btn_xftp = QPushButton('Xftp')
+        self._btn_xftp.setAutoDefault(False)
+        self._btn_xftp.clicked.connect(self._open_in_xftp)
+        btn_row.addWidget(self._btn_xftp)
         btn_row.addStretch()
         self._lbl_status = QLabel('就绪')
         btn_row.addWidget(self._lbl_status)
@@ -675,38 +938,66 @@ class SFTPWindow(QDialog):
 
     # ------------------------------------------------------------------ 上传 / 下载
     def _upload_file(self, data=None):
+        if not isinstance(data, dict):
+            data = None
         if data is None:
             item = self._local_tree.currentItem()
             if not item:
-                self._log('[SFTP] 请先在左侧本地面板选择一个文件')
+                self._log('[SFTP] 请先在左侧本地面板选择一个文件或目录')
                 return
             data = item.data(0, Qt.ItemDataRole.UserRole)
-            if not data or data['is_dir']:
-                self._log('[SFTP] 请选择一个文件（非目录）')
+            if not data:
                 return
+        if data['is_dir']:
+            self._upload_dir(data)
+            return
         local_path = data['path']
         remote_path = self._remote_path.rstrip('/') + '/' + data['name']
         file_size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         self._log(f'[SFTP] 上传: {local_path} -> {remote_path}')
-        worker = SFTPOperationWorker(self._transport, 'upload', local_path, remote_path, file_size=file_size)
+        worker = SFTPOperationWorker(self._conn_params, 'upload', local_path, remote_path, file_size=file_size)
         self._start_transfer_op(worker, data['name'], '上传', file_size)
 
+    def _upload_dir(self, data):
+        """上传整个本地目录到远程"""
+        local_dir = data['path']
+        dir_name = data['name']
+        remote_dir = self._remote_path.rstrip('/') + '/' + dir_name
+        self._log(f'[SFTP] 上传目录: {local_dir} -> {remote_dir}')
+        worker = SFTPDirTransferWorker(self._conn_params, 'upload_dir',
+                                       local_dir=local_dir, remote_dir=remote_dir, dir_name=dir_name)
+        self._start_transfer_op(worker, f'[目录] {dir_name}', '上传', 0)
+
     def _download_file(self, entry=None):
+        if not isinstance(entry, dict):
+            entry = None
         if entry is None:
             item = self._tree.currentItem()
             if not item:
-                self._log('[SFTP] 请先在右侧远程面板选择一个文件')
+                self._log('[SFTP] 请先在右侧远程面板选择一个文件或目录')
                 return
             entry = item.data(0, Qt.ItemDataRole.UserRole)
-            if not entry or entry['is_dir']:
-                self._log('[SFTP] 请选择一个文件（非目录）')
+            if not entry:
                 return
+        if entry['is_dir']:
+            self._download_dir(entry)
+            return
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         local_path = os.path.join(self._local_path, entry['name'])
         file_size = entry.get('size', 0)
         self._log(f'[SFTP] 下载: {remote_path} -> {local_path}')
-        worker = SFTPOperationWorker(self._transport, 'download', local_path, remote_path, file_size=file_size)
+        worker = SFTPOperationWorker(self._conn_params, 'download', local_path, remote_path, file_size=file_size)
         self._start_transfer_op(worker, entry['name'], '下载', file_size)
+
+    def _download_dir(self, entry):
+        """下载整个远程目录到本地"""
+        dir_name = entry['name']
+        remote_dir = self._remote_path.rstrip('/') + '/' + dir_name
+        local_dir = os.path.join(self._local_path, dir_name)
+        self._log(f'[SFTP] 下载目录: {remote_dir} -> {local_dir}')
+        worker = SFTPDirTransferWorker(self._conn_params, 'download_dir',
+                                       local_dir=local_dir, remote_dir=remote_dir, dir_name=dir_name)
+        self._start_transfer_op(worker, f'[目录] {dir_name}', '下载', 0)
 
     def _start_transfer_op(self, worker, filename, op_label, file_size):
         """启动传输任务，在传输队列表格中添加一行"""
@@ -723,8 +1014,10 @@ class SFTPWindow(QDialog):
         self._transfer_table.setCellWidget(row, 1, pb)
         self._transfer_table.setItem(row, 2, QTableWidgetItem('0 B/s'))
         self._transfer_table.setItem(row, 3, QTableWidgetItem('传输中'))
-        # 记录 worker 信息
-        info = {'worker': worker, 'row': row, 'start_time': time.time()}
+        # 记录 worker 信息（含速度计算用的滑动窗口字段）
+        now = time.time()
+        info = {'worker': worker, 'row': row, 'start_time': now,
+                'last_bytes': 0, 'last_time': now, 'speed': 0.0}
         self._transfer_workers[tid] = info
         # 连接信号
         worker.progress.connect(lambda t, tot, _tid=tid: self._on_transfer_progress(_tid, t, tot))
@@ -741,11 +1034,17 @@ class SFTPWindow(QDialog):
         pb = self._transfer_table.cellWidget(row, 1)
         if pb:
             pb.setValue(pct)
-        elapsed = time.time() - info['start_time']
-        speed = transferred / elapsed if elapsed > 0.5 else 0
+        # 滑动窗口计算实时速度（排除暂停期间）
+        now = time.time()
+        dt = now - info['last_time']
+        if dt >= 0.5:
+            db = transferred - info['last_bytes']
+            info['speed'] = db / dt if db > 0 else 0.0
+            info['last_bytes'] = transferred
+            info['last_time'] = now
         speed_item = self._transfer_table.item(row, 2)
         if speed_item:
-            speed_item.setText(f'{self._format_size(speed)}/s')
+            speed_item.setText(f'{self._format_size(info["speed"])}/s')
 
     def _on_transfer_success(self, tid, msg):
         info = self._transfer_workers.get(tid)
@@ -774,6 +1073,163 @@ class SFTPWindow(QDialog):
         self._lbl_status.setText(f'操作失败: {error}')
         self._log(f'[SFTP] 操作失败: {error}')
 
+    # ------------------------------------------------------------------ 传输队列右键菜单
+    def _on_transfer_context_menu(self, pos):
+        """传输队列面板右键菜单"""
+        menu = QMenu(self)
+        row = self._transfer_table.rowAt(pos.y())
+        has_selection = row >= 0
+        has_tasks = self._transfer_table.rowCount() > 0
+
+        # 判断选中行状态
+        selected_status = ''
+        if has_selection:
+            status_item = self._transfer_table.item(row, 3)
+            if status_item:
+                selected_status = status_item.text()
+
+        act_pause = menu.addAction('暂停')
+        act_pause_all = menu.addAction('全部暂停')
+        act_resume = menu.addAction('继续')
+        act_resume_all = menu.addAction('全部继续')
+        menu.addSeparator()
+        act_delete = menu.addAction('删除')
+        act_delete_all = menu.addAction('全部删除')
+
+        # 启用/禁用逻辑
+        act_pause.setEnabled(has_selection and selected_status == '传输中')
+        act_pause_all.setEnabled(has_tasks)
+        act_resume.setEnabled(has_selection and selected_status == '已暂停')
+        act_resume_all.setEnabled(has_tasks)
+        act_delete.setEnabled(has_selection)
+        act_delete_all.setEnabled(has_tasks)
+
+        action = menu.exec(self._transfer_table.viewport().mapToGlobal(pos))
+        if action is None:
+            return
+        if action == act_pause:
+            self._transfer_pause_row(row)
+        elif action == act_pause_all:
+            self._transfer_pause_all()
+        elif action == act_resume:
+            self._transfer_resume_row(row)
+        elif action == act_resume_all:
+            self._transfer_resume_all()
+        elif action == act_delete:
+            self._transfer_delete_row(row)
+        elif action == act_delete_all:
+            self._transfer_delete_all()
+
+    def _find_tid_by_row(self, row):
+        """根据表格行号查找对应的 transfer id"""
+        for tid, info in self._transfer_workers.items():
+            if info['row'] == row:
+                return tid
+        return None
+
+    def _transfer_pause_row(self, row):
+        """暂停指定行的传输任务"""
+        tid = self._find_tid_by_row(row)
+        if tid is None:
+            return
+        info = self._transfer_workers[tid]
+        worker = info['worker']
+        if hasattr(worker, 'pause'):
+            worker.pause()
+        status_item = self._transfer_table.item(row, 3)
+        if status_item:
+            status_item.setText('已暂停')
+        name_item = self._transfer_table.item(row, 0)
+        name = name_item.text() if name_item else f'任务{tid}'
+        self._log(f'[SFTP] 已暂停传输: {name}')
+
+    def _transfer_resume_row(self, row):
+        """恢复指定行的传输任务"""
+        tid = self._find_tid_by_row(row)
+        if tid is None:
+            return
+        info = self._transfer_workers[tid]
+        worker = info['worker']
+        if hasattr(worker, 'resume'):
+            worker.resume()
+        # 重置速度计算基准，排除暂停期间的时间
+        info['last_time'] = time.time()
+        info['speed'] = 0.0
+        status_item = self._transfer_table.item(row, 3)
+        if status_item:
+            status_item.setText('传输中')
+        name_item = self._transfer_table.item(row, 0)
+        name = name_item.text() if name_item else f'任务{tid}'
+        self._log(f'[SFTP] 已继续传输: {name}')
+
+    def _transfer_pause_all(self):
+        """暂停所有传输中的任务"""
+        count = 0
+        for tid, info in list(self._transfer_workers.items()):
+            row = info['row']
+            if row < 0:
+                continue
+            status_item = self._transfer_table.item(row, 3)
+            if status_item and status_item.text() == '传输中':
+                worker = info['worker']
+                if hasattr(worker, 'pause'):
+                    worker.pause()
+                status_item.setText('已暂停')
+                count += 1
+        if count:
+            self._log(f'[SFTP] 已暂停全部传输 ({count} 个任务)')
+
+    def _transfer_resume_all(self):
+        """恢复所有已暂停的任务"""
+        count = 0
+        for tid, info in list(self._transfer_workers.items()):
+            row = info['row']
+            if row < 0:
+                continue
+            status_item = self._transfer_table.item(row, 3)
+            if status_item and status_item.text() == '已暂停':
+                worker = info['worker']
+                if hasattr(worker, 'resume'):
+                    worker.resume()
+                # 重置速度计算基准
+                info['last_time'] = time.time()
+                info['speed'] = 0.0
+                status_item.setText('传输中')
+                count += 1
+        if count:
+            self._log(f'[SFTP] 已继续全部传输 ({count} 个任务)')
+
+    def _transfer_delete_row(self, row):
+        """删除指定行的传输任务"""
+        tid = self._find_tid_by_row(row)
+        name_item = self._transfer_table.item(row, 0)
+        name = name_item.text() if name_item else f'任务{row}'
+        if tid is not None:
+            info = self._transfer_workers.get(tid)
+            if info:
+                worker = info['worker']
+                if hasattr(worker, 'stop'):
+                    worker.stop()
+                self._safe_delete_transfer_worker(tid)
+        self._transfer_table.removeRow(row)
+        # 删除行后更新其他 worker 的 row 索引
+        for t, inf in self._transfer_workers.items():
+            if inf['row'] > row:
+                inf['row'] -= 1
+        self._log(f'[SFTP] 已删除传输: {name}')
+
+    def _transfer_delete_all(self):
+        """删除所有传输任务"""
+        for tid in list(self._transfer_workers.keys()):
+            info = self._transfer_workers.get(tid)
+            if info:
+                worker = info['worker']
+                if hasattr(worker, 'stop'):
+                    worker.stop()
+                self._safe_delete_transfer_worker(tid)
+        self._transfer_table.setRowCount(0)
+        self._log('[SFTP] 已清空传输队列')
+
     # ------------------------------------------------------------------ 删除 / 新建目录
     def _delete_selected(self):
         item = self._tree.currentItem()
@@ -786,7 +1242,7 @@ class SFTPWindow(QDialog):
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         op = 'rmdir' if entry['is_dir'] else 'delete'
         self._log(f'[SFTP] 删除: {remote_path}')
-        worker = SFTPOperationWorker(self._transport, op, '', remote_path)
+        worker = SFTPOperationWorker(self._conn_params, op, '', remote_path)
         worker.success.connect(self._on_quick_op_success)
         worker.error.connect(self._on_quick_op_error)
         tid = self._next_transfer_id
@@ -802,7 +1258,7 @@ class SFTPWindow(QDialog):
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
         self._log(f'[SFTP] 创建目录: {remote_path}')
-        worker = SFTPOperationWorker(self._transport, 'mkdir', '', remote_path)
+        worker = SFTPOperationWorker(self._conn_params, 'mkdir', '', remote_path)
         worker.success.connect(self._on_quick_op_success)
         worker.error.connect(self._on_quick_op_error)
         tid = self._next_transfer_id
@@ -811,6 +1267,24 @@ class SFTPWindow(QDialog):
         worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
         worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
         worker.start()
+
+    def _open_in_xftp(self):
+        """使用 Xftp 打开当前 SFTP 连接"""
+        if not shutil.which('xftp'):
+            msg = "[提示] 未找到 Xftp，请确认已安装并加入系统 PATH"
+            self._log(msg)
+            QMessageBox.warning(self, "未找到 Xftp", msg)
+            return
+        xftp_url = f'sftp://{self._username}:{self._password}@{self._host}:{self._port}'
+        try:
+            subprocess.Popen(
+                f'xftp -url "{xftp_url}"',
+                shell=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        except Exception as e:
+            self._log(f"[提示] 启动 Xftp 失败: {e}")
+            QMessageBox.warning(self, "打开失败", f"无法启动 Xftp：{e}")
 
     # ------------------------------------------------------------------ 回调
     def _on_quick_op_success(self, msg):
@@ -830,6 +1304,279 @@ class SFTPWindow(QDialog):
                 return f'{size:.1f} {unit}' if unit != 'B' else f'{size} {unit}'
             size /= 1024
         return f'{size:.1f} TB'
+
+    # ------------------------------------------------------------------ 右键菜单
+    def _on_local_context_menu(self, pos):
+        """本地面板右键菜单"""
+        item = self._local_tree.itemAt(pos)
+        menu = QMenu(self)
+        if item:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not data:
+                return
+            act_transfer = menu.addAction('传输（上传）')
+            act_open = menu.addAction('打开')
+            act_copy = menu.addAction('复制路径')
+            act_rename = menu.addAction('重命名')
+            act_delete = menu.addAction('删除')
+            menu.addSeparator()
+        # 新建子菜单（空白区域也可用）
+        new_menu = menu.addMenu('新建')
+        act_new_file = new_menu.addAction('新建文件')
+        act_new_dir = new_menu.addAction('新建文件夹')
+
+        action = menu.exec(self._local_tree.viewport().mapToGlobal(pos))
+        if action is None:
+            return
+        if item and action == act_transfer:
+            self._upload_file(data)
+        elif item and action == act_open:
+            self._ctx_local_open(data)
+        elif item and action == act_copy:
+            QApplication.clipboard().setText(data['path'])
+            self._log(f'[SFTP] 已复制路径: {data["path"]}')
+        elif item and action == act_rename:
+            self._ctx_rename_local(data)
+        elif item and action == act_delete:
+            self._ctx_delete_local(data)
+        elif action == act_new_file:
+            self._ctx_new_file_local()
+        elif action == act_new_dir:
+            self._ctx_new_dir_local()
+
+    def _on_remote_context_menu(self, pos):
+        """远程面板右键菜单"""
+        item = self._tree.itemAt(pos)
+        menu = QMenu(self)
+        if item:
+            entry = item.data(0, Qt.ItemDataRole.UserRole)
+            if not entry:
+                return
+            act_transfer = menu.addAction('传输（下载）')
+            act_open = menu.addAction('打开')
+            act_copy = menu.addAction('复制路径')
+            act_rename = menu.addAction('重命名')
+            act_delete = menu.addAction('删除')
+            menu.addSeparator()
+        # 新建子菜单
+        new_menu = menu.addMenu('新建')
+        act_new_file = new_menu.addAction('新建文件')
+        act_new_dir = new_menu.addAction('新建文件夹')
+
+        action = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if action is None:
+            return
+        if item and action == act_transfer:
+            self._download_file(entry)
+        elif item and action == act_open:
+            self._ctx_remote_open(entry)
+        elif item and action == act_copy:
+            remote_full = self._remote_path.rstrip('/') + '/' + entry['name']
+            QApplication.clipboard().setText(remote_full)
+            self._log(f'[SFTP] 已复制路径: {remote_full}')
+        elif item and action == act_rename:
+            self._ctx_rename_remote(entry)
+        elif item and action == act_delete:
+            self._ctx_delete_remote(entry)
+        elif action == act_new_file:
+            self._ctx_new_file_remote()
+        elif action == act_new_dir:
+            self._ctx_new_dir_remote()
+
+    # ---- 右键菜单操作实现 ----
+    def _get_temp_dir(self):
+        """获取程序所在目录下的临时子目录，不存在则创建"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = os.path.join(base, '_sftp_temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        return temp_dir
+
+    def _ctx_local_open(self, data):
+        """用系统默认程序打开本地文件/文件夹"""
+        path = data['path']
+        try:
+            os.startfile(path)
+            self._log(f'[SFTP] 已打开: {path}')
+        except OSError as e:
+            self._log(f'[SFTP] 打开失败: {e}')
+
+    def _ctx_remote_open(self, entry):
+        """下载远程文件到临时目录后自动打开"""
+        temp_dir = self._get_temp_dir()
+        remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
+        if entry['is_dir']:
+            local_dir = os.path.join(temp_dir, entry['name'])
+            self._log(f'[SFTP] 下载目录并打开: {remote_path} -> {local_dir}')
+            worker = SFTPDirTransferWorker(self._conn_params, 'download_dir',
+                                           local_dir=local_dir, remote_dir=remote_path, dir_name=entry['name'])
+            worker.success.connect(lambda msg, p=local_dir: self._open_after_download(p))
+            self._start_transfer_op(worker, f'[打开] {entry["name"]}', '下载', 0)
+        else:
+            local_path = os.path.join(temp_dir, entry['name'])
+            file_size = entry.get('size', 0)
+            self._log(f'[SFTP] 下载并打开: {remote_path} -> {local_path}')
+            worker = SFTPOperationWorker(self._conn_params, 'download', local_path, remote_path, file_size=file_size)
+            worker.success.connect(lambda msg, p=local_path: self._open_after_download(p))
+            self._start_transfer_op(worker, f'[打开] {entry["name"]}', '下载', file_size)
+
+    def _open_after_download(self, path):
+        """下载完成后用系统默认程序打开文件/文件夹"""
+        try:
+            os.startfile(path)
+            self._log(f'[SFTP] 已打开: {path}')
+        except OSError as e:
+            self._log(f'[SFTP] 打开失败: {e}')
+
+    def _ctx_rename_local(self, data):
+        """重命名本地文件/文件夹"""
+        new_name, ok = QInputDialog.getText(self, '重命名', '新名称:', text=data['name'])
+        if not ok or not new_name or new_name == data['name']:
+            return
+        old_path = data['path']
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        try:
+            os.rename(old_path, new_path)
+            self._log(f'[SFTP] 已重命名: {data["name"]} -> {new_name}')
+            self._list_local(self._local_path)
+        except PermissionError as e:
+            self._log(f'[SFTP] 重命名失败（权限不足）: {e}')
+        except OSError as e:
+            self._log(f'[SFTP] 重命名失败: {e}')
+
+    def _ctx_rename_remote(self, entry):
+        """重命名远程文件/文件夹"""
+        new_name, ok = QInputDialog.getText(self, '重命名', '新名称:', text=entry['name'])
+        if not ok or not new_name or new_name == entry['name']:
+            return
+        old_path = self._remote_path.rstrip('/') + '/' + entry['name']
+        new_path = self._remote_path.rstrip('/') + '/' + new_name
+        self._log(f'[SFTP] 重命名: {old_path} -> {new_path}')
+        try:
+            sftp = paramiko.SFTPClient.from_transport(self._transport)
+            try:
+                sftp.posix_rename(old_path, new_path)
+            except (AttributeError, IOError):
+                sftp.rename(old_path, new_path)
+            sftp.close()
+            self._log(f'[SFTP] 已重命名: {entry["name"]} -> {new_name}')
+            self._list_remote(self._remote_path)
+        except Exception as e:
+            self._log(f'[SFTP] 重命名失败: {e}')
+
+    def _ctx_delete_local(self, data):
+        """删除本地文件/文件夹（带确认）"""
+        msg = f'确定要删除本地{"\u76ee\u5f55" if data["is_dir"] else "\u6587\u4ef6"} "{data["name"]}" 吗？'
+        if data['is_dir']:
+            msg = f'确定要删除本地目录 "{data["name"]}" 及其所有内容吗？'
+        reply = QMessageBox.question(self, '确认删除', msg,
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        path = data['path']
+        try:
+            if data['is_dir']:
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            self._log(f'[SFTP] 已删除本地: {path}')
+            self._list_local(self._local_path)
+        except PermissionError as e:
+            self._log(f'[SFTP] 删除失败（权限不足）: {e}')
+        except OSError as e:
+            self._log(f'[SFTP] 删除失败: {e}')
+
+    def _ctx_delete_remote(self, entry):
+        """删除远程文件/文件夹（带确认）"""
+        if entry['is_dir']:
+            msg = f'确定要删除远程目录 "{entry["name"]}" 吗？\n注意：仅能删除空目录。'
+        else:
+            msg = f'确定要删除远程文件 "{entry["name"]}" 吗？'
+        reply = QMessageBox.question(self, '确认删除', msg,
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
+        op = 'rmdir' if entry['is_dir'] else 'delete'
+        self._log(f'[SFTP] 删除: {remote_path}')
+        worker = SFTPOperationWorker(self._conn_params, op, '', remote_path)
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.start()
+
+    def _ctx_new_file_local(self):
+        """在本地当前目录新建空文件"""
+        name, ok = QInputDialog.getText(self, '新建文件', '文件名:')
+        if not ok or not name:
+            return
+        path = os.path.join(self._local_path, name)
+        try:
+            open(path, 'w').close()
+            self._log(f'[SFTP] 已创建本地文件: {path}')
+            self._list_local(self._local_path)
+        except PermissionError as e:
+            self._log(f'[SFTP] 创建文件失败（权限不足）: {e}')
+        except OSError as e:
+            self._log(f'[SFTP] 创建文件失败: {e}')
+
+    def _ctx_new_dir_local(self):
+        """在本地当前目录新建文件夹"""
+        name, ok = QInputDialog.getText(self, '新建文件夹', '文件夹名:')
+        if not ok or not name:
+            return
+        path = os.path.join(self._local_path, name)
+        try:
+            os.makedirs(path, exist_ok=True)
+            self._log(f'[SFTP] 已创建本地目录: {path}')
+            self._list_local(self._local_path)
+        except PermissionError as e:
+            self._log(f'[SFTP] 创建目录失败（权限不足）: {e}')
+        except OSError as e:
+            self._log(f'[SFTP] 创建目录失败: {e}')
+
+    def _ctx_new_file_remote(self):
+        """在远程当前目录新建空文件"""
+        name, ok = QInputDialog.getText(self, '新建文件', '文件名:')
+        if not ok or not name:
+            return
+        remote_path = self._remote_path.rstrip('/') + '/' + name
+        self._log(f'[SFTP] 创建远程文件: {remote_path}')
+        sftp = None
+        try:
+            sftp = paramiko.SFTPClient.from_transport(self._transport)
+            with sftp.open(remote_path, 'w') as f:
+                pass
+            self._log(f'[SFTP] 已创建远程文件: {remote_path}')
+            self._list_remote(self._remote_path)
+        except Exception as e:
+            self._log(f'[SFTP] 创建远程文件失败: {e}')
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+    def _ctx_new_dir_remote(self):
+        """在远程当前目录新建文件夹"""
+        name, ok = QInputDialog.getText(self, '新建文件夹', '文件夹名:')
+        if not ok or not name:
+            return
+        remote_path = self._remote_path.rstrip('/') + '/' + name
+        self._log(f'[SFTP] 创建远程目录: {remote_path}')
+        worker = SFTPOperationWorker(self._conn_params, 'mkdir', '', remote_path)
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.start()
 
     # ------------------------------------------------------------------ 关闭
     def closeEvent(self, event):
@@ -915,7 +1662,7 @@ class SSHExecWorker(QThread):
 class SSHTerminalWindow(QDialog):
     """SSH 终端窗口（exec_command 模式，底部输入框）"""
 
-    def __init__(self, host, port, username, password, parent=None):
+    def __init__(self, host, port, username, password, log_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"SSH 终端 - {host}:{port}")
         self.resize(800, 500)
@@ -923,6 +1670,7 @@ class SSHTerminalWindow(QDialog):
         self._port = port
         self._username = username
         self._password = password
+        self._log = log_callback or (lambda msg: None)
         self._client = None
         self._connect_worker = None
         self._exec_worker = None
@@ -963,9 +1711,13 @@ class SSHTerminalWindow(QDialog):
         self._send_btn.setEnabled(False)
         input_layout.addWidget(self._send_btn)
 
-        self._cmd_btn = QPushButton("在 CMD 中打开")
+        self._cmd_btn = QPushButton("CMD")
         self._cmd_btn.clicked.connect(self._open_in_cmd)
         input_layout.addWidget(self._cmd_btn)
+
+        self._xshell_btn = QPushButton("Xshell")
+        self._xshell_btn.clicked.connect(self._open_in_xshell)
+        input_layout.addWidget(self._xshell_btn)
 
         layout.addLayout(input_layout)
 
@@ -1057,6 +1809,24 @@ class SSHTerminalWindow(QDialog):
             return
         cmd = f'ssh -p {self._port} {self._username}@{self._host}'
         subprocess.Popen(['cmd', '/k', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+    def _open_in_xshell(self):
+        """使用 Xshell 打开 SSH 连接"""
+        if not shutil.which('xshell'):
+            msg = "[提示] 未找到 Xshell，请确认已安装并加入系统 PATH"
+            self._log(msg)
+            QMessageBox.warning(self, "未找到 Xshell", msg)
+            return
+        xshell_url = f'ssh://{self._username}:{self._password}@{self._host}:{self._port}'
+        try:
+            subprocess.Popen(
+                f'xshell -url "{xshell_url}"',
+                shell=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        except Exception as e:
+            self._log(f"[提示] 启动 Xshell 失败: {e}")
+            QMessageBox.warning(self, "打开失败", f"无法启动 Xshell：{e}")
 
     def closeEvent(self, event):
         # 清理 exec worker
@@ -1151,7 +1921,7 @@ class MainWindow(QMainWindow):
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(self._settings_cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[警告] 保存配置失败: {e}")
+            self._append_log(f"[警告] 保存配置失败: {e}")
 
     def _load_paths(self):
         """从配置加载路径，并设置实例属性"""
@@ -1171,7 +1941,7 @@ class MainWindow(QMainWindow):
             for i in range(self.ui.choose_exe.count()):
                 if self.ui.choose_exe.itemText(i) == saved_exe:
                     self.ui.choose_exe.setCurrentIndex(i)
-                    self.ui.show_log.appendPlainText(f"[配置] 已恢复上次程序: {saved_exe}")
+                    self._append_log(f"[配置] 已恢复上次程序: {saved_exe}")
                     return
 
     def init_ui(self):
@@ -1180,6 +1950,8 @@ class MainWindow(QMainWindow):
         self._reload_settings_cache()
         # 加载路径配置
         self._load_paths()
+        # 初始化日志控件智能自动滚动
+        self._init_log_auto_scroll()
         
         # 设置默认日期为当前日期，日减一 （使用 Python datetime 避免 QDate 年份异常）
         from datetime import date as py_date
@@ -1198,10 +1970,10 @@ class MainWindow(QMainWindow):
         self._load_device_list()
         
         # 在日志区域显示欢迎信息
-        self.ui.show_log.appendPlainText("欢迎使用 AutoWork 工具！")
-        self.ui.show_log.appendPlainText(f"程序目录: {self.exe_dir}")
-        self.ui.show_log.appendPlainText(f"视频目录: {self.videos_dir}")
-        self.ui.show_log.appendPlainText("请选择程序并开始工作...")
+        self._append_log("欢迎使用 AutoWork 工具！")
+        self._append_log(f"程序目录: {self.exe_dir}")
+        self._append_log(f"视频目录: {self.videos_dir}")
+        self._append_log("请选择程序并开始工作...")
         
         # 存储当前选中的视频和帧数
         self.current_video = None
@@ -1231,11 +2003,13 @@ class MainWindow(QMainWindow):
         self._apply_font_size()
         self._apply_font_family()
         self._apply_theme()
+        self._apply_layout()
         # 替换 choose_exe 的弹出视图为自定义 QListView，配合 setMaxVisibleItems 生效
         _popup_view = QListView(self.ui.choose_exe)
         _popup_view.setUniformItemSizes(True)
         _popup_view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ui.choose_exe.setView(_popup_view)
+        self.ui.choose_exe.setFixedWidth(190)  # 略宽于 SnookerTracking824.exe
         # 远程状态
         self._frpc_process = None
         self._p2p_visitors = []
@@ -1244,14 +2018,52 @@ class MainWindow(QMainWindow):
         self._sftp_window = None
         self._ssh_terminal_window = None
         self._init_p2p_panel()
-    
+
+    # ==================== 日志智能自动滚动 ====================
+
+    def _init_log_auto_scroll(self):
+        """初始化日志控件的智能自动滚动功能"""
+        self._log_at_bottom = True
+        self._log_scroll_timer = QTimer(self)
+        self._log_scroll_timer.setSingleShot(True)
+        self._log_scroll_timer.setInterval(1000)
+        self._log_scroll_timer.timeout.connect(self._scroll_log_to_bottom)
+        self.ui.show_log.verticalScrollBar().valueChanged.connect(self._on_log_scroll_changed)
+
+    def _is_log_at_bottom(self):
+        """判断日志滚动条是否在底部（允许 2px 误差）"""
+        sb = self.ui.show_log.verticalScrollBar()
+        return sb.value() >= sb.maximum() - 2
+
+    def _on_log_scroll_changed(self, value):
+        """滚动条值变化时更新底部状态标志"""
+        sb = self.ui.show_log.verticalScrollBar()
+        self._log_at_bottom = (value >= sb.maximum() - 2)
+        if self._log_at_bottom and self._log_scroll_timer.isActive():
+            self._log_scroll_timer.stop()
+
+    def _scroll_log_to_bottom(self):
+        """将日志控件滚动到底部"""
+        sb = self.ui.show_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _append_log(self, text):
+        """向日志控件追加文本，带智能自动滚动"""
+        self.ui.show_log.appendPlainText(text)
+        if self._log_at_bottom:
+            # 用户在底部，立即滚动
+            self._scroll_log_to_bottom()
+        else:
+            # 用户不在底部，启动/重置延迟滚动定时器（debounce）
+            self._log_scroll_timer.start()
+
     def _load_exe_list(self):
         """加载 snooker/bin64 目录下的 SnookerTracking*.exe 到程序下拉框"""
         import glob
         
         exe_dir = self.exe_dir
         if not os.path.exists(exe_dir):
-            self.ui.show_log.appendPlainText(f"[警告] 目录不存在: {exe_dir}")
+            self._append_log(f"[警告] 目录不存在: {exe_dir}")
             return
         
         # 查找所有匹配的 exe 文件
@@ -1259,7 +2071,7 @@ class MainWindow(QMainWindow):
         exe_files = glob.glob(pattern)
         
         if not exe_files:
-            self.ui.show_log.appendPlainText(f"[警告] 未找到 SnookerTracking*.exe 文件")
+            self._append_log(f"[警告] 未找到 SnookerTracking*.exe 文件")
             return
         
         # 清空并添加文件列表
@@ -1270,13 +2082,13 @@ class MainWindow(QMainWindow):
         # 限制下拉列表最多显示 8 项，超出自动滚动
         self.ui.choose_exe.setMaxVisibleItems(8)
         
-        self.ui.show_log.appendPlainText(f"[程序] 找到 {len(exe_files)} 个可执行文件")
+        self._append_log(f"[程序] 找到 {len(exe_files)} 个可执行文件")
 
     def _load_device_list(self):
         """加载 videos 目录下的设备代码文件夹到 id_list"""
         videos_dir = self.videos_dir
         if not os.path.exists(videos_dir):
-            self.ui.show_log.appendPlainText(f"[警告] 目录不存在: {videos_dir}")
+            self._append_log(f"[警告] 目录不存在: {videos_dir}")
             return
         
         # 获取所有子目录（设备代码）
@@ -1287,7 +2099,7 @@ class MainWindow(QMainWindow):
                 device_codes.append(item)
         
         if not device_codes:
-            self.ui.show_log.appendPlainText(f"[警告] videos 目录下没有找到设备文件夹")
+            self._append_log(f"[警告] videos 目录下没有找到设备文件夹")
             return
         
         # 清空并添加设备代码列表
@@ -1295,7 +2107,7 @@ class MainWindow(QMainWindow):
         for code in sorted(device_codes):
             self.ui.id_list.addItem(code)
         
-        self.ui.show_log.appendPlainText(f"[设备] 找到 {len(device_codes)} 个设备代码")
+        self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
 
     def _get_selected_date_str(self):
         """获取日期选择器中的日期，格式如 2026-07-05"""
@@ -1311,7 +2123,7 @@ class MainWindow(QMainWindow):
         device_dir = os.path.join(videos_dir, device_code)
         
         if not os.path.exists(device_dir):
-            self.ui.show_log.appendPlainText(f"[警告] 设备目录不存在: {device_dir}")
+            self._append_log(f"[警告] 设备目录不存在: {device_dir}")
             return
         
         # 获取选中日期，构建日期子目录路径
@@ -1322,7 +2134,7 @@ class MainWindow(QMainWindow):
         self.ui.loacl_video_list.clear()
         
         if not os.path.exists(date_dir):
-            self.ui.show_log.appendPlainText(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir})")
+            self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir})")
             return
         
         # 查找日期目录下的 txt 和 log 文件
@@ -1333,7 +2145,7 @@ class MainWindow(QMainWindow):
             # 只显示文件名，如 20260705_131009.log
             self.ui.loacl_video_list.addItem(os.path.basename(log_path))
         
-        self.ui.show_log.appendPlainText(f"[日志目录] {device_code}/{date_str} 下有 {len(log_files)} 个日志文件")
+        self._append_log(f"[日志目录] {device_code}/{date_str} 下有 {len(log_files)} 个日志文件")
 
     def _load_logs_for_device(self, device_code):
         """初始化第三列为空，等待点击日志后展示内容"""
@@ -1381,7 +2193,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_flush_clicked(self):
         """刷新按钮点击事件"""
-        self.ui.show_log.appendPlainText("\n[操作] 刷新数据...")
+        self._append_log("\n[操作] 刷新数据...")
         
         # 先记住当前选中的设备代码和程序
         current_device = self.ui.id_list.currentItem()
@@ -1409,14 +2221,14 @@ class MainWindow(QMainWindow):
                     break
             self.ui.log_list.clear()
         
-        self.ui.show_log.appendPlainText("[刷新] 完成")
+        self._append_log("[刷新] 完成")
         
     @Slot()
     def on_start_clicked(self):
         """播放按钮点击事件 - 启动 SnookerTracking 程序"""
         # 如果已经有程序在运行，先结束它
         if self.running_process is not None:
-            self.ui.show_log.appendPlainText("\n[警告] 已有程序正在运行，请先点击'结束'")
+            self._append_log("\n[警告] 已有程序正在运行，请先点击'结束'")
             return
         
         # 获取选中的程序
@@ -1446,7 +2258,7 @@ class MainWindow(QMainWindow):
         
         if need_decode:
             # 解码进行中，启动将在 _on_decode_finished 中继续
-            self.ui.show_log.appendPlainText(f"\n[播放] 等待 detect.json 解码完成后启动...")
+            self._append_log(f"\n[播放] 等待 detect.json 解码完成后启动...")
             self._update_status_running(exe_name)
         else:
             # 无需解码，直接启动
@@ -1457,18 +2269,18 @@ class MainWindow(QMainWindow):
         if self.running_process:
             output = self.running_process.readAllStandardOutput().data().decode('gb2312', errors='ignore')
             if output.strip():
-                self.ui.show_log.appendPlainText(output.strip())
+                self._append_log(output.strip())
     
     def _on_program_error(self):
         """处理程序的错误输出"""
         if self.running_process:
             error = self.running_process.readAllStandardError().data().decode('gb2312', errors='ignore')
             if error.strip():
-                self.ui.show_log.appendPlainText(f"[程序错误] {error.strip()}")
+                self._append_log(f"[程序错误] {error.strip()}")
     
     def _on_program_finished(self, exit_code, exit_status):
         """程序结束时回调"""
-        self.ui.show_log.appendPlainText(f"\n[程序结束] 退出码: {exit_code}")
+        self._append_log(f"\n[程序结束] 退出码: {exit_code}")
         self.running_process = None
         self._process_suspended = False
         self.ui.pause_btn.setText("暂停")
@@ -1478,13 +2290,13 @@ class MainWindow(QMainWindow):
     def on_end_clicked(self):
         """结束按钮点击事件 - 停止运行的程序"""
         if self.running_process is None:
-            self.ui.show_log.appendPlainText("\n[提示] 没有正在运行的程序")
+            self._append_log("\n[提示] 没有正在运行的程序")
             return
         
         # 直接强制终止进程
-        self.ui.show_log.appendPlainText("\n[结束] 正在终止程序...")
+        self._append_log("\n[结束] 正在终止程序...")
         self.running_process.kill()  # 强制终止
-        self.ui.show_log.appendPlainText("[结束] 程序已强制终止")
+        self._append_log("[结束] 程序已强制终止")
         self.running_process = None
         self._process_suspended = False
         self.ui.pause_btn.setText("暂停")
@@ -1495,7 +2307,7 @@ class MainWindow(QMainWindow):
         """打开 CPP 日志文件"""
         # 检查是否选中了设备
         if not self.ui.id_list.currentItem():
-            self.ui.show_log.appendPlainText("[提示] 请先选择设备代码")
+            self._append_log("[提示] 请先选择设备代码")
             return
         
         device_code = self.ui.id_list.currentItem().text()
@@ -1505,29 +2317,29 @@ class MainWindow(QMainWindow):
         )
         
         if not os.path.exists(daily_path):
-            self.ui.show_log.appendPlainText(f"[提示] CPP 日志文件不存在: {daily_path}")
+            self._append_log(f"[提示] CPP 日志文件不存在: {daily_path}")
             return
         
         # 用系统默认程序打开文件
         os.startfile(daily_path)
-        self.ui.show_log.appendPlainText(f"[CPP日志] 已打开: {daily_path}")
+        self._append_log(f"[CPP日志] 已打开: {daily_path}")
         
     @Slot()
     def on_open_dir_clicked(self):
         """打开目录按钮点击事件 - 打开当前选中设备的目录"""
         if not self.ui.id_list.currentItem():
-            self.ui.show_log.appendPlainText("[提示] 请先选择设备代码")
+            self._append_log("[提示] 请先选择设备代码")
             return
         
         device_code = self.ui.id_list.currentItem().text()
         device_dir = os.path.join(self.videos_dir, device_code)
         
         if not os.path.exists(device_dir):
-            self.ui.show_log.appendPlainText(f"[提示] 目录不存在: {device_dir}")
+            self._append_log(f"[提示] 目录不存在: {device_dir}")
             return
         
         os.startfile(device_dir)
-        self.ui.show_log.appendPlainText(f"[打开目录] {device_dir}")
+        self._append_log(f"[打开目录] {device_dir}")
     
     @Slot()
     def on_open_config_clicked(self):
@@ -1552,11 +2364,11 @@ class MainWindow(QMainWindow):
             return
         
         if not os.path.exists(path):
-            self.ui.show_log.appendPlainText(f"[配置] 文件不存在: {path}")
+            self._append_log(f"[配置] 文件不存在: {path}")
             return
         
         os.startfile(path)
-        self.ui.show_log.appendPlainText(f"[配置] 已打开: {path}")
+        self._append_log(f"[配置] 已打开: {path}")
         
     @Slot()
     def _on_id_current_changed(self, current, previous):
@@ -1567,7 +2379,7 @@ class MainWindow(QMainWindow):
     def on_id_selected(self, item):
         """ID列表项选中事件 - 加载对应设备的日志目录"""
         device_code = item.text()
-        self.ui.show_log.appendPlainText(f"\n[设备选中] {device_code}")
+        self._append_log(f"\n[设备选中] {device_code}")
         self._update_status_device(device_code)
         
         # 加载该设备下的日志目录到第二列
@@ -1584,7 +2396,7 @@ class MainWindow(QMainWindow):
     def on_video_selected(self, item):
         """日志目录项选中事件 - 在第三列展示日志内容"""
         log_filename = item.text()
-        self.ui.show_log.appendPlainText(f"\n[日志选中] {log_filename}")
+        self._append_log(f"\n[日志选中] {log_filename}")
         
         # 获取当前选中的设备代码
         if not self.ui.id_list.currentItem():
@@ -1610,10 +2422,10 @@ class MainWindow(QMainWindow):
                 self.ui.log_list.addItem(item)
             
             line_count = len(content.splitlines())
-            self.ui.show_log.appendPlainText(f"[日志内容] 已加载 {line_count} 行")
+            self._append_log(f"[日志内容] 已加载 {line_count} 行")
             self._update_status_logs(line_count)
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[错误] 无法读取日志文件: {str(e)}")
+            self._append_log(f"[错误] 无法读取日志文件: {str(e)}")
             self.ui.log_list.clear()
             self._current_log_path = None
         
@@ -1634,26 +2446,26 @@ class MainWindow(QMainWindow):
             offset = self._get_frame_input_value()
             result = log_frame_id - offset
             if result < 0:
-                self.ui.show_log.appendPlainText(
+                self._append_log(
                     f"  [警告] 帧前偏移后起始帧为负值({result})，已修正为 0。"
                     f"log_frame_id={log_frame_id}, offset={offset}")
                 result = 0
-            self.ui.show_log.appendPlainText(f"  [模式] 帧前: {log_frame_id} - {offset} = {result}")
+            self._append_log(f"  [模式] 帧前: {log_frame_id} - {offset} = {result}")
             return result
         elif self.ui.input_frame_set.isChecked():
             offset = self._get_frame_input_value()
             result = log_frame_id + offset
-            self.ui.show_log.appendPlainText(f"  [模式] 帧后: {log_frame_id} + {offset} = {result}")
+            self._append_log(f"  [模式] 帧后: {log_frame_id} + {offset} = {result}")
             return result
         elif self.ui.input_frame_custom.isChecked():
             custom = self._get_frame_input_value()
-            self.ui.show_log.appendPlainText(f"  [模式] 自定义: {custom}")
+            self._append_log(f"  [模式] 自定义: {custom}")
             return custom
         else:
             offset = self._get_frame_input_value()
             result = log_frame_id - offset
             if result < 0:
-                self.ui.show_log.appendPlainText(
+                self._append_log(
                     f"  [警告] 帧前偏移后起始帧为负值({result})，已修正为 0。"
                     f"log_frame_id={log_frame_id}, offset={offset}")
                 result = 0
@@ -1668,8 +2480,8 @@ class MainWindow(QMainWindow):
         
         # 启动程序
         self.running_process.start(exe_path)
-        self.ui.show_log.appendPlainText(f"\n[播放] 已启动程序: {exe_name}")
-        self.ui.show_log.appendPlainText(f"  - 工作目录: {exe_dir}")
+        self._append_log(f"\n[播放] 已启动程序: {exe_name}")
+        self._append_log(f"  - 工作目录: {exe_dir}")
         self._update_status_running(exe_name)
 
     def _on_decode_output(self):
@@ -1677,14 +2489,14 @@ class MainWindow(QMainWindow):
         if self._decode_process:
             output = self._decode_process.readAllStandardOutput().data().decode('gb2312', errors='ignore')
             if output.strip():
-                self.ui.show_log.appendPlainText(f"[detect] {output.strip()}")
+                self._append_log(f"[detect] {output.strip()}")
 
     def _on_decode_error(self):
         """处理解码程序的错误输出"""
         if self._decode_process:
             error = self._decode_process.readAllStandardError().data().decode('gb2312', errors='ignore')
             if error.strip():
-                self.ui.show_log.appendPlainText(f"[detect] {error.strip()}")
+                self._append_log(f"[detect] {error.strip()}")
 
     def _on_decode_finished(self, exit_code, exit_status):
         """解码完成后回调：复制 detect.json 并启动主程序"""
@@ -1696,7 +2508,7 @@ class MainWindow(QMainWindow):
         exe_dir = os.path.dirname(exe_path)
         
         if exit_code != 0:
-            self.ui.show_log.appendPlainText(f"[detect] 解码失败，退出码: {exit_code}")
+            self._append_log(f"[detect] 解码失败，退出码: {exit_code}")
             self._pending_exe_path = None
             self._pending_detect_json = None
             self._update_status_idle()
@@ -1704,7 +2516,7 @@ class MainWindow(QMainWindow):
         
         # 验证解码结果
         if not os.path.exists(detect_json_path):
-            self.ui.show_log.appendPlainText(f"[detect] 警告: 解码后未生成 detect.json")
+            self._append_log(f"[detect] 警告: 解码后未生成 detect.json")
             self._pending_exe_path = None
             self._pending_detect_json = None
             self._update_status_idle()
@@ -1714,9 +2526,9 @@ class MainWindow(QMainWindow):
         target_path = os.path.join(self.exe_dir, "detect.json")
         try:
             shutil.copy2(detect_json_path, target_path)
-            self.ui.show_log.appendPlainText(f"[detect] 已更新 detect.json -> {target_path}")
+            self._append_log(f"[detect] 已更新 detect.json -> {target_path}")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[detect] 复制失败: {e}")
+            self._append_log(f"[detect] 复制失败: {e}")
         
         self._pending_exe_path = None
         self._pending_detect_json = None
@@ -1728,7 +2540,7 @@ class MainWindow(QMainWindow):
         """准备 detect.json：解密并复制到程序目录。返回 True 表示正在异步解码，返回 False 表示已同步完成或跳过。"""
         # 检查是否选中了设备
         if not self.ui.id_list.currentItem():
-            self.ui.show_log.appendPlainText("[detect] 未选中设备，跳过 detect.json 处理")
+            self._append_log("[detect] 未选中设备，跳过 detect.json 处理")
             return False
         
         device_code = self.ui.id_list.currentItem().text()
@@ -1743,30 +2555,30 @@ class MainWindow(QMainWindow):
         need_decode = False
         if not json_exists:
             if not bin_exists:
-                self.ui.show_log.appendPlainText(f"[detect] 警告: {device_code} 下既没有 detect.json 也没有 detect.bin")
+                self._append_log(f"[detect] 警告: {device_code} 下既没有 detect.json 也没有 detect.bin")
                 return False
-            self.ui.show_log.appendPlainText("[detect] detect.json 不存在，将从 detect.bin 解码")
+            self._append_log("[detect] detect.json 不存在，将从 detect.bin 解码")
             need_decode = True
         elif bin_exists:
             # 两者都存在，比较修改时间
             bin_mtime = os.path.getmtime(detect_bin_path)
             json_mtime = os.path.getmtime(detect_json_path)
             if bin_mtime > json_mtime:
-                self.ui.show_log.appendPlainText("[detect] detect.bin 比 detect.json 更新，重新解码")
+                self._append_log("[detect] detect.bin 比 detect.json 更新，重新解码")
                 need_decode = True
             else:
-                self.ui.show_log.appendPlainText("[detect] detect.json 已是最新，无需重新解码")
+                self._append_log("[detect] detect.json 已是最新，无需重新解码")
         
         if need_decode:
             # 使用 QProcess 异步调用 AESBase64CipherTool.exe 解码
             cipher_tool = self.cipher_tool
             if not os.path.exists(cipher_tool):
-                self.ui.show_log.appendPlainText(f"[detect] 警告: 解码工具不存在: {cipher_tool}")
+                self._append_log(f"[detect] 警告: 解码工具不存在: {cipher_tool}")
                 return False
             
             self._pending_detect_json = detect_json_path
             cmd = [cipher_tool, detect_bin_path, detect_json_path]
-            self.ui.show_log.appendPlainText(f"[detect] 正在异步解码: {' '.join(cmd)}")
+            self._append_log(f"[detect] 正在异步解码: {' '.join(cmd)}")
             
             self._decode_process = QProcess()
             self._decode_process.readyReadStandardOutput.connect(self._on_decode_output)
@@ -1779,16 +2591,16 @@ class MainWindow(QMainWindow):
         target_path = os.path.join(self.exe_dir, "detect.json")
         try:
             shutil.copy2(detect_json_path, target_path)
-            self.ui.show_log.appendPlainText(f"[detect] 已更新 detect.json -> {target_path}")
+            self._append_log(f"[detect] 已更新 detect.json -> {target_path}")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[detect] 复制失败: {e}")
+            self._append_log(f"[detect] 复制失败: {e}")
         return False
 
     def _update_cfg_json(self, video_path, frame):
         """更新 cfg.json 配置文件"""
         cfg_path = os.path.join(self.exe_dir, "cfg.json")
         if not os.path.exists(cfg_path):
-            self.ui.show_log.appendPlainText(f"[警告] cfg.json 不存在: {cfg_path}")
+            self._append_log(f"[警告] cfg.json 不存在: {cfg_path}")
             return False
         try:
             with open(cfg_path, 'r', encoding='utf-8') as f:
@@ -1802,26 +2614,26 @@ class MainWindow(QMainWindow):
                 del cfg['video_start_frame']
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
-            self.ui.show_log.appendPlainText(f"[配置] 已更新 cfg.json")
-            self.ui.show_log.appendPlainText(f"  - 视频: {video_path}")
-            self.ui.show_log.appendPlainText(f"  - 帧数: {frame}")
+            self._append_log(f"[配置] 已更新 cfg.json")
+            self._append_log(f"  - 视频: {video_path}")
+            self._append_log(f"  - 帧数: {frame}")
             return True
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[错误] 更新 cfg.json 失败: {str(e)}")
+            self._append_log(f"[错误] 更新 cfg.json 失败: {str(e)}")
             import traceback
-            self.ui.show_log.appendPlainText(traceback.format_exc())
+            self._append_log(traceback.format_exc())
             return False
 
     @Slot()
     def on_log_selected(self, item):
         """日志列表项选中事件 - 解析日志并更新cfg.json"""
         log_line = item.text()
-        self.ui.show_log.appendPlainText(f"\n[日志选中] {log_line}")
+        self._append_log(f"\n[日志选中] {log_line}")
         
         # 解析日志：提取帧数
         frame_match = re.search(r'frame_id:(\d+)', log_line)
         if not frame_match:
-            self.ui.show_log.appendPlainText("[警告] 日志中未找到 frame_id")
+            self._append_log("[警告] 日志中未找到 frame_id")
             return
         
         log_frame_id = int(frame_match.group(1))
@@ -1829,12 +2641,12 @@ class MainWindow(QMainWindow):
         
         # 获取当前选中的设备代码
         if not self.ui.id_list.currentItem():
-            self.ui.show_log.appendPlainText("[警告] 未选择设备代码")
+            self._append_log("[警告] 未选择设备代码")
             return
         
         # 从第二列获取当前选中的日志文件名，推断视频文件名
         if not self.ui.loacl_video_list.currentItem():
-            self.ui.show_log.appendPlainText("[警告] 未选择日志文件")
+            self._append_log("[警告] 未选择日志文件")
             return
         
         log_filename = self.ui.loacl_video_list.currentItem().text()
@@ -1860,14 +2672,14 @@ class MainWindow(QMainWindow):
         """程序下拉框改变时保存选择到配置文件"""
         if exe_name:
             self._save_settings({"last_exe": exe_name})
-            self.ui.show_log.appendPlainText(f"[配置] 已保存程序选择: {exe_name}")
+            self._append_log(f"[配置] 已保存程序选择: {exe_name}")
 
     @Slot()
     def on_log_double_clicked(self, item):
         """日志列表项双击事件 - 解析日志、更新cfg.json并启动程序"""
         # 如果已有程序在运行，先自动结束旧程序
         if self.running_process is not None:
-            self.ui.show_log.appendPlainText("\n[双击] 检测到已有程序运行，自动结束旧程序...")
+            self._append_log("\n[双击] 检测到已有程序运行，自动结束旧程序...")
             self.on_end_clicked()
         
         # 先触发选中逻辑（更新cfg.json）
@@ -1888,14 +2700,14 @@ class MainWindow(QMainWindow):
             # Windows 10/11 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
             DWMWA_USE_IMMERSIVE_DARK_MODE = 20
             value = ctypes.c_int(1)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            _DwmSetWindowAttribute(
                 hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
                 ctypes.byref(value), ctypes.sizeof(value)
             )
             # Windows 11 DWMWA_WINDOW_CORNER_PREFERENCE = 33 (圆角)
             DWMWA_WINDOW_CORNER_PREFERENCE = 33
             preference = ctypes.c_int(2)  # DWMWCP_ROUND = 2
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            _DwmSetWindowAttribute(
                 hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
                 ctypes.byref(preference), ctypes.sizeof(preference)
             )
@@ -1953,21 +2765,21 @@ class MainWindow(QMainWindow):
             if self._win_resume_process(pid):
                 self._process_suspended = False
                 self.ui.pause_btn.setText("暂停")
-                self.ui.show_log.appendPlainText("[播放] 程序已恢复")
+                self._append_log("[播放] 程序已恢复")
                 exe_name = self.ui.choose_exe.currentText()
                 self._update_status_running(exe_name)
             else:
-                self.ui.show_log.appendPlainText("[警告] 恢复进程失败")
+                self._append_log("[警告] 恢复进程失败")
         else:
             # 挂起进程
             if self._win_suspend_process(pid):
                 self._process_suspended = True
                 self.ui.pause_btn.setText("恢复")
-                self.ui.show_log.appendPlainText("[播放] 程序已暂停")
+                self._append_log("[播放] 程序已暂停")
                 exe_name = self.ui.choose_exe.currentText()
                 self._update_status_paused(exe_name)
             else:
-                self.ui.show_log.appendPlainText("[警告] 暂停进程失败")
+                self._append_log("[警告] 暂停进程失败")
 
     @staticmethod
     def _win_suspend_process(pid):
@@ -1987,29 +2799,28 @@ class MainWindow(QMainWindow):
                 ("dwFlags", ctypes.c_ulong),
             ]
 
-        h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
+        h_process = _OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
         if not h_process:
             return False
         try:
-            snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+            snap = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
             if snap == -1:
                 return False
             te = THREADENTRY32()
             te.dwSize = ctypes.sizeof(THREADENTRY32)
-            kernel32 = ctypes.windll.kernel32
-            if kernel32.Thread32First(snap, ctypes.byref(te)):
+            if _Thread32First(snap, ctypes.byref(te)):
                 while True:
                     if te.th32OwnerProcessID == pid:
-                        h_thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                        h_thread = _OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
                         if h_thread:
-                            kernel32.SuspendThread(h_thread)
-                            kernel32.CloseHandle(h_thread)
-                    if not kernel32.Thread32Next(snap, ctypes.byref(te)):
+                            _SuspendThread(h_thread)
+                            _CloseHandle(h_thread)
+                    if not _Thread32Next(snap, ctypes.byref(te)):
                         break
-            kernel32.CloseHandle(snap)
+            _CloseHandle(snap)
             return True
         finally:
-            ctypes.windll.kernel32.CloseHandle(h_process)
+            _CloseHandle(h_process)
 
     @staticmethod
     def _win_resume_process(pid):
@@ -2029,29 +2840,28 @@ class MainWindow(QMainWindow):
                 ("dwFlags", ctypes.c_ulong),
             ]
 
-        h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
+        h_process = _OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
         if not h_process:
             return False
         try:
-            snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+            snap = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
             if snap == -1:
                 return False
             te = THREADENTRY32()
             te.dwSize = ctypes.sizeof(THREADENTRY32)
-            kernel32 = ctypes.windll.kernel32
-            if kernel32.Thread32First(snap, ctypes.byref(te)):
+            if _Thread32First(snap, ctypes.byref(te)):
                 while True:
                     if te.th32OwnerProcessID == pid:
-                        h_thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                        h_thread = _OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
                         if h_thread:
-                            kernel32.ResumeThread(h_thread)
-                            kernel32.CloseHandle(h_thread)
-                    if not kernel32.Thread32Next(snap, ctypes.byref(te)):
+                            _ResumeThread(h_thread)
+                            _CloseHandle(h_thread)
+                    if not _Thread32Next(snap, ctypes.byref(te)):
                         break
-            kernel32.CloseHandle(snap)
+            _CloseHandle(snap)
             return True
         finally:
-            ctypes.windll.kernel32.CloseHandle(h_process)
+            _CloseHandle(h_process)
 
     # ==================== 右键菜单 ====================
 
@@ -2088,21 +2898,21 @@ class MainWindow(QMainWindow):
             if item:
                 QApplication.clipboard().setText(item.text())
                 self.statusBar().showMessage("已复制到剪贴板", 2000)
-                self.ui.show_log.appendPlainText("[复制] 已复制当前行文本到剪贴板")
+                self._append_log("[复制] 已复制当前行文本到剪贴板")
         elif action == action_copy_frame:
             frame_match = re.search(r'frame_id:(\d+)', item.text())
             if frame_match:
                 frame_id = frame_match.group(1)
                 QApplication.clipboard().setText(frame_id)
                 self.statusBar().showMessage(f"帧数 {frame_id} 已复制到剪贴板", 2000)
-                self.ui.show_log.appendPlainText(f"[复制] 帧数 {frame_id} 已复制到剪贴板")
+                self._append_log(f"[复制] 帧数 {frame_id} 已复制到剪贴板")
             else:
-                self.ui.show_log.appendPlainText("[提示] 当前行未找到 frame_id")
+                self._append_log("[提示] 当前行未找到 frame_id")
         elif action == action_locate:
             if self._current_log_path and os.path.exists(self._current_log_path):
                 subprocess.run(['explorer', '/select,', self._current_log_path])
             else:
-                self.ui.show_log.appendPlainText("[提示] 无法定位日志文件")
+                self._append_log("[提示] 无法定位日志文件")
 
     def _loacl_video_list_context_menu(self, pos):
         """日志文件列表右键菜单"""
@@ -2117,7 +2927,7 @@ class MainWindow(QMainWindow):
             pure_name = os.path.splitext(item.text())[0]
             QApplication.clipboard().setText(pure_name)
             self.statusBar().showMessage(f"文件名 {pure_name} 已复制到剪贴板", 2000)
-            self.ui.show_log.appendPlainText(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
+            self._append_log(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
 
     # ==================== 远程连接 ====================
 
@@ -2152,9 +2962,9 @@ class MainWindow(QMainWindow):
                     visitor["bindPort"] = int(m_port.group(1))
                     self._p2p_visitors.append(visitor)
             if self._p2p_visitors:
-                self.ui.show_log.appendPlainText(f"[远程] 从 TOML 恢复了 {len(self._p2p_visitors)} 个 visitor")
+                self._append_log(f"[远程] 从 TOML 恢复了 {len(self._p2p_visitors)} 个 visitor")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[远程] 解析 TOML 失败: {e}")
+            self._append_log(f"[远程] 解析 TOML 失败: {e}")
 
     def _get_new_random_port(self):
         """生成不冲突的随机端口（排除已添加 visitor 的端口）"""
@@ -2169,13 +2979,13 @@ class MainWindow(QMainWindow):
         """添加新的 visitor 配置"""
         server_name = self.ui.p2p_form_server.text().strip()
         if not server_name:
-            self.ui.show_log.appendPlainText("[远程] 请填写 serverName")
+            self._append_log("[远程] 请填写 serverName")
             return
         port = self.ui.p2p_form_port.value()
         # 检查端口是否与已有 visitor 冲突
         for i, v in enumerate(self._p2p_visitors):
             if v["bindPort"] == port and i != self._p2p_current_index:
-                self.ui.show_log.appendPlainText(f"[远程] 端口 {port} 已被 {v['serverName']} 使用，请更换端口")
+                self._append_log(f"[远程] 端口 {port} 已被 {v['serverName']} 使用，请更换端口")
                 return
         visitor = {
             "serverName": server_name,
@@ -2239,7 +3049,7 @@ class MainWindow(QMainWindow):
     def _on_p2p_connect(self):
         """连接按钮 - 根据当前模式分发连接"""
         mode = self.ui.p2p_mode_combo.currentText()
-        self.ui.show_log.appendPlainText(f"[远程] 连接按钮点击，模式: {mode}")
+        self._append_log(f"[远程] 连接按钮点击，模式: {mode}")
         if mode == "XTCP":
             self._on_xtcp_connect()
         elif mode == "TCP":
@@ -2283,22 +3093,22 @@ class MainWindow(QMainWindow):
         """生成 TOML 并启动 frpc"""
         self._save_current_form()
         if not self._p2p_visitors:
-            self.ui.show_log.appendPlainText("[远程] 请先添加 visitor 配置")
+            self._append_log("[远程] 请先添加 visitor 配置")
             return
         if self._frpc_process is not None:
-            self.ui.show_log.appendPlainText("[远程] frpc 已在运行中")
+            self._append_log("[远程] frpc 已在运行中")
             return
         app_dir = self._get_app_dir()
         toml_path = os.path.join(app_dir, "frpc_xtcp.toml")
         try:
             self._write_frpc_config(toml_path)
-            self.ui.show_log.appendPlainText(f"[远程] 已生成 {toml_path}")
+            self._append_log(f"[远程] 已生成 {toml_path}")
         except Exception as e:
-            self.ui.show_log.appendPlainText(f"[远程] 生成配置失败: {e}")
+            self._append_log(f"[远程] 生成配置失败: {e}")
             return
         frpc_exe = os.path.join(app_dir, "frpc.exe")
         if not os.path.exists(frpc_exe):
-            self.ui.show_log.appendPlainText(f"[远程] frpc.exe 不存在: {frpc_exe}")
+            self._append_log(f"[远程] frpc.exe 不存在: {frpc_exe}")
             return
         self._frpc_process = QProcess()
         self._frpc_process.setWorkingDirectory(app_dir)
@@ -2306,15 +3116,15 @@ class MainWindow(QMainWindow):
         self._frpc_process.readyReadStandardError.connect(self._on_frpc_error)
         self._frpc_process.finished.connect(self._on_frpc_finished)
         self._frpc_process.start(frpc_exe, ["-c", toml_path])
-        self.ui.show_log.appendPlainText(f"[远程] 已启动 frpc: {frpc_exe} -c {toml_path}")
+        self._append_log(f"[远程] 已启动 frpc: {frpc_exe} -c {toml_path}")
         self._update_p2p_buttons()
 
     def _on_xtcp_disconnect(self):
         """停止 frpc 进程"""
         if self._frpc_process is None:
-            self.ui.show_log.appendPlainText("[远程] frpc 未在运行")
+            self._append_log("[远程] frpc 未在运行")
             return
-        self.ui.show_log.appendPlainText("[远程] 正在停止 frpc...")
+        self._append_log("[远程] 正在停止 frpc...")
         proc = self._frpc_process
         self._frpc_process = None  # 先置空，防止 _on_frpc_finished 重复处理
         proc.kill()
@@ -2325,16 +3135,16 @@ class MainWindow(QMainWindow):
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
-        self.ui.show_log.appendPlainText("[远程] frpc 已停止")
+        self._append_log("[远程] frpc 已停止")
 
     def _on_tcp_connect(self):
         """启动 TCP 连接"""
         if not PARAMIKO_AVAILABLE:
-            self.ui.show_log.appendPlainText("[TCP] paramiko 未安装，请执行: pip install paramiko")
+            self._append_log("[TCP] paramiko 未安装，请执行: pip install paramiko")
             return
         # 增加对 isRunning 的检查，防止残留引用误判
         if self._tcp_worker is not None and self._tcp_worker.isRunning():
-            self.ui.show_log.appendPlainText("[TCP] 已有连接正在运行")
+            self._append_log("[TCP] 已有连接正在运行")
             return
         # 清理残留的旧 worker 引用
         if self._tcp_worker is not None:
@@ -2342,7 +3152,7 @@ class MainWindow(QMainWindow):
             self._tcp_worker = None
         host = self.ui.p2p_ssh_host.text().strip()
         if not host:
-            self.ui.show_log.appendPlainText("[TCP] 请输入主机地址")
+            self._append_log("[TCP] 请输入主机地址")
             return
         port = self.ui.p2p_ssh_port.value()
         self._tcp_worker = TCPWorker(
@@ -2352,13 +3162,13 @@ class MainWindow(QMainWindow):
         self._tcp_worker.finished.connect(self._on_tcp_finished)
         self._tcp_worker.error.connect(self._on_tcp_error)
         self._tcp_worker.start()
-        self.ui.show_log.appendPlainText(f"[TCP] 正在连接 {host}:{port}...")
+        self._append_log(f"[TCP] 正在连接 {host}:{port}...")
         self._update_p2p_buttons()
 
     def _on_tcp_disconnect(self):
         """断开 TCP 连接"""
         if self._tcp_worker is None:
-            self.ui.show_log.appendPlainText("[TCP] 未连接")
+            self._append_log("[TCP] 未连接")
             return
         worker = self._tcp_worker
         self._tcp_worker = None
@@ -2374,11 +3184,11 @@ class MainWindow(QMainWindow):
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
-        self.ui.show_log.appendPlainText("[TCP] 已断开")
+        self._append_log("[TCP] 已断开")
 
     def _on_tcp_finished(self, result):
         """TCP 连接成功回调"""
-        self.ui.show_log.appendPlainText(f"[TCP] 连接成功: {result}")
+        self._append_log(f"[TCP] 连接成功: {result}")
         # 仅在 TCP 真正成功后才启用按钮
         self.ui.p2p_sftp_btn.setEnabled(True)
         self.ui.p2p_ssh_terminal_btn.setEnabled(True)
@@ -2389,7 +3199,7 @@ class MainWindow(QMainWindow):
 
     def _on_tcp_error(self, error):
         """TCP 连接失败回调"""
-        self.ui.show_log.appendPlainText(f"[TCP] 连接失败: {error}")
+        self._append_log(f"[TCP] 连接失败: {error}")
         if self._tcp_worker:
             self._tcp_worker.deleteLater()
         self._tcp_worker = None
@@ -2413,7 +3223,7 @@ class MainWindow(QMainWindow):
             # 缺失时自动生成默认配置并写入 settings.json
             frpc_server = dict(self._FRPC_SERVER_DEFAULTS)
             self._save_settings({"frpc_server": frpc_server})
-            self.ui.show_log.appendPlainText("[远程] settings.json 中未找到 frpc_server，已自动生成默认配置")
+            self._append_log("[远程] settings.json 中未找到 frpc_server，已自动生成默认配置")
         server_addr = frpc_server.get("serverAddr", self._FRPC_SERVER_DEFAULTS["serverAddr"])
         server_port = frpc_server.get("serverPort", self._FRPC_SERVER_DEFAULTS["serverPort"])
         auth_method = frpc_server.get("auth_method", self._FRPC_SERVER_DEFAULTS["auth_method"])
@@ -2440,18 +3250,18 @@ class MainWindow(QMainWindow):
         if self._frpc_process:
             output = self._frpc_process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
             if output.strip():
-                self.ui.show_log.appendPlainText(f"[frpc] {output.strip()}")
+                self._append_log(f"[frpc] {output.strip()}")
 
     def _on_frpc_error(self):
         """处理 frpc 错误输出"""
         if self._frpc_process:
             error = self._frpc_process.readAllStandardError().data().decode('utf-8', errors='ignore')
             if error.strip():
-                self.ui.show_log.appendPlainText(f"[frpc] {error.strip()}")
+                self._append_log(f"[frpc] {error.strip()}")
 
     def _on_frpc_finished(self, exit_code, exit_status):
         """frpc 进程结束回调"""
-        self.ui.show_log.appendPlainText(f"[远程] frpc 已退出，退出码: {exit_code}")
+        self._append_log(f"[远程] frpc 已退出，退出码: {exit_code}")
         self._frpc_process = None
         # frpc 意外退出时禁用 SFTP/SSH 终端按钮，防止误触
         self.ui.p2p_sftp_btn.setEnabled(False)
@@ -2493,18 +3303,18 @@ class MainWindow(QMainWindow):
     def _on_sftp_btn_clicked(self):
         """打开 SFTP 文件管理窗口"""
         if not PARAMIKO_AVAILABLE:
-            self.ui.show_log.appendPlainText("[SFTP] paramiko 未安装")
+            self._append_log("[SFTP] paramiko 未安装")
             return
         mode = self.ui.p2p_mode_combo.currentText()
         server_name = ''
         if mode == "XTCP":
             # XTCP 模式：连接到 127.0.0.1:当前选中 visitor 的 bindPort
             if not self._p2p_visitors:
-                self.ui.show_log.appendPlainText("[SFTP] 请先添加 visitor 配置")
+                self._append_log("[SFTP] 请先添加 visitor 配置")
                 return
             idx = self._p2p_current_index
             if not (0 <= idx < len(self._p2p_visitors)):
-                self.ui.show_log.appendPlainText("[SFTP] 请先在列表中选择一个 visitor")
+                self._append_log("[SFTP] 请先在列表中选择一个 visitor")
                 return
             host = "127.0.0.1"
             port = self._p2p_visitors[idx]["bindPort"]
@@ -2513,18 +3323,18 @@ class MainWindow(QMainWindow):
             host = self.ui.p2p_ssh_host.text().strip()
             port = self.ui.p2p_ssh_port.value()
         else:
-            self.ui.show_log.appendPlainText("[SFTP] SFTP 仅支持 XTCP/TCP 模式")
+            self._append_log("[SFTP] SFTP 仅支持 XTCP/TCP 模式")
             return
         username = self.ui.p2p_ssh_user.text()
         password = self.ui.p2p_ssh_pass.text()
         if not host:
-            self.ui.show_log.appendPlainText("[SFTP] 主机地址不能为空")
+            self._append_log("[SFTP] 主机地址不能为空")
             return
-        self.ui.show_log.appendPlainText(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
+        self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
         self._sftp_window = SFTPWindow(
             host, port, username, password,
             server_name=server_name,
-            log_callback=lambda msg: self.ui.show_log.appendPlainText(msg),
+            log_callback=lambda msg: self._append_log(msg),
             parent=self
         )
         self._sftp_window.show()
@@ -2532,16 +3342,16 @@ class MainWindow(QMainWindow):
     def _on_ssh_terminal_btn_clicked(self):
         """打开 SSH 终端窗口"""
         if not PARAMIKO_AVAILABLE:
-            self.ui.show_log.appendPlainText("[SSH] paramiko 未安装")
+            self._append_log("[SSH] paramiko 未安装")
             return
         mode = self.ui.p2p_mode_combo.currentText()
         if mode == "XTCP":
             if not self._p2p_visitors:
-                self.ui.show_log.appendPlainText("[SSH] 请先添加 visitor 配置")
+                self._append_log("[SSH] 请先添加 visitor 配置")
                 return
             idx = self._p2p_current_index
             if not (0 <= idx < len(self._p2p_visitors)):
-                self.ui.show_log.appendPlainText("[SSH] 请先在列表中选择一个 visitor")
+                self._append_log("[SSH] 请先在列表中选择一个 visitor")
                 return
             host = "127.0.0.1"
             port = self._p2p_visitors[idx]["bindPort"]
@@ -2549,16 +3359,18 @@ class MainWindow(QMainWindow):
             host = self.ui.p2p_ssh_host.text().strip()
             port = self.ui.p2p_ssh_port.value()
         else:
-            self.ui.show_log.appendPlainText("[SSH] SSH 终端仅支持 XTCP/TCP 模式")
+            self._append_log("[SSH] SSH 终端仅支持 XTCP/TCP 模式")
             return
         username = self.ui.p2p_ssh_user.text()
         password = self.ui.p2p_ssh_pass.text()
         if not host:
-            self.ui.show_log.appendPlainText("[SSH] 主机地址不能为空")
+            self._append_log("[SSH] 主机地址不能为空")
             return
-        self.ui.show_log.appendPlainText(f"[SSH] 打开终端: {host}:{port}")
+        self._append_log(f"[SSH] 打开终端: {host}:{port}")
         self._ssh_terminal_window = SSHTerminalWindow(
-            host, port, username, password, parent=self
+            host, port, username, password,
+            log_callback=lambda msg: self._append_log(msg),
+            parent=self
         )
         self._ssh_terminal_window.show()
 
@@ -2613,21 +3425,50 @@ class MainWindow(QMainWindow):
         act_hc = func_menu.addAction("高亮颜色设置")
         act_hc.triggered.connect(lambda: QTimer.singleShot(0, self._on_highlight_color))
 
-        # 「主题」菜单
-        theme_menu = menubar.addMenu("主题")
-        act_fs = theme_menu.addAction("字号大小")
+        # 「视图」菜单（布局/主题为二级子菜单，字号/缩放/字体同级）
+        view_menu = menubar.addMenu("视图")
+        settings = self._load_settings()
+
+        # -- 二级子菜单: 布局（互斥单选） --
+        layout_menu = view_menu.addMenu("布局")
+        self._layout_group = QActionGroup(self)
+        self._layout_group.setExclusive(True)
+        self._act_layout_panel = QAction("面板布局", self)
+        self._act_layout_panel.setCheckable(True)
+        self._act_layout_panel.setChecked(not settings.get("classic_layout", False))
+        self._layout_group.addAction(self._act_layout_panel)
+        layout_menu.addAction(self._act_layout_panel)
+        self._act_layout_classic = QAction("经典布局", self)
+        self._act_layout_classic.setCheckable(True)
+        self._act_layout_classic.setChecked(settings.get("classic_layout", False))
+        self._layout_group.addAction(self._act_layout_classic)
+        layout_menu.addAction(self._act_layout_classic)
+        self._layout_group.triggered.connect(self._on_layout_selected)
+
+        # -- 二级子菜单: 主题（互斥单选） --
+        theme_menu = view_menu.addMenu("主题")
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        self._act_theme_default = QAction("默认主题", self)
+        self._act_theme_default.setCheckable(True)
+        self._act_theme_default.setChecked(not settings.get("dark_theme", True))
+        self._theme_group.addAction(self._act_theme_default)
+        theme_menu.addAction(self._act_theme_default)
+        self._act_theme_dark = QAction("深色主题", self)
+        self._act_theme_dark.setCheckable(True)
+        self._act_theme_dark.setChecked(settings.get("dark_theme", True))
+        self._theme_group.addAction(self._act_theme_dark)
+        theme_menu.addAction(self._act_theme_dark)
+        self._theme_group.triggered.connect(self._on_theme_selected)
+
+        # -- 字号/缩放/字体（与布局、主题同级） --
+        view_menu.addSeparator()
+        act_fs = view_menu.addAction("字号大小")
         act_fs.triggered.connect(lambda: QTimer.singleShot(0, self._on_font_size))
-        act_scale = theme_menu.addAction("界面缩放")
+        act_scale = view_menu.addAction("界面缩放")
         act_scale.triggered.connect(lambda: QTimer.singleShot(0, self._on_dpi_scale))
-        act_ff = theme_menu.addAction("字体设置")
+        act_ff = view_menu.addAction("字体设置")
         act_ff.triggered.connect(lambda: QTimer.singleShot(0, self._on_font_family))
-        theme_menu.addSeparator()
-        # 深色主题切换
-        self._theme_action = QAction("深色主题", self)
-        self._theme_action.setCheckable(True)
-        self._theme_action.setChecked(self._load_settings().get("dark_theme", True))
-        self._theme_action.toggled.connect(self._on_toggle_theme)
-        theme_menu.addAction(self._theme_action)
 
         # 「帮助」菜单
         help_menu = menubar.addMenu("帮助")
@@ -2661,7 +3502,7 @@ class MainWindow(QMainWindow):
             new_sc = {k: v.keySequence().toString() for k, v in editors.items()}
             self._save_settings(new_sc)
             self._init_shortcuts()
-            self.ui.show_log.appendPlainText(f"[配置] 已更新快捷键: {new_sc}")
+            self._append_log(f"[配置] 已更新快捷键: {new_sc}")
 
     def _on_highlight_color(self):
         """弹出颜色选择对话框修改日志高亮颜色"""
@@ -2672,7 +3513,7 @@ class MainWindow(QMainWindow):
             self._save_settings({
                 "highlight_color": [color.red(), color.green(), color.blue()]
             })
-            self.ui.show_log.appendPlainText(
+            self._append_log(
                 f"[配置] 已更新高亮颜色: RGB({color.red()},{color.green()},{color.blue()})")
 
     def _on_font_size(self):
@@ -2683,7 +3524,7 @@ class MainWindow(QMainWindow):
         if ok:
             self._save_settings({"font_size": val})
             self._apply_font_size()
-            self.ui.show_log.appendPlainText(f"[配置] 已更新字号: {val}pt")
+            self._append_log(f"[配置] 已更新字号: {val}pt")
 
     def _on_dpi_scale(self):
         """弹出 DPI 缩放比例选择对话框"""
@@ -2699,7 +3540,7 @@ class MainWindow(QMainWindow):
             val = int(idx.replace("%", ""))
             self._save_settings({"dpi_scale": val})
             QMessageBox.information(self, "界面缩放", "缩放设置已保存，重启应用后生效。")
-            self.ui.show_log.appendPlainText(f"[配置] 已设置缩放: {val}%（重启后生效）")
+            self._append_log(f"[配置] 已设置缩放: {val}%（重启后生效）")
 
     def _on_font_family(self):
         """弹出字体选择对话框"""
@@ -2710,7 +3551,7 @@ class MainWindow(QMainWindow):
         if ok:
             self._save_settings({"font_family": font.family()})
             self._apply_font_family()
-            self.ui.show_log.appendPlainText(f"[配置] 已更新字体: {font.family()}")
+            self._append_log(f"[配置] 已更新字体: {font.family()}")
 
     def _on_about(self) :
         """显示关于对话框"""
@@ -2718,7 +3559,7 @@ class MainWindow(QMainWindow):
             self,
             "关于",
             "AutoWork - 自动化工作工具\n"
-            "版本: 1.1\n\n"
+            "版本: 1.3.7\n\n"
             "用于视频播放、日志管理与数据记录的桌面自动化工具。"
         )
 
@@ -2781,7 +3622,6 @@ class MainWindow(QMainWindow):
         }
         QFrame#toolbar_separator {
             color: #33363D;
-            max-width: 1px;
             margin: 4px 2px;
         }
 
@@ -2844,13 +3684,6 @@ class MainWindow(QMainWindow):
             border: none;
             width: 20px;
         }
-        QComboBox::down-arrow {
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-top: 5px solid #00BCD4;
-            margin-right: 6px;
-        }
         QComboBox QAbstractItemView {
             background-color: #2C2F33;
             color: #C8D0DC;
@@ -2882,18 +3715,6 @@ class MainWindow(QMainWindow):
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {
             background-color: #00BCD4;
         }
-        QSpinBox::up-arrow {
-            image: none;
-            border-left: 3px solid transparent;
-            border-right: 3px solid transparent;
-            border-bottom: 4px solid #00BCD4;
-        }
-        QSpinBox::down-arrow {
-            image: none;
-            border-left: 3px solid transparent;
-            border-right: 3px solid transparent;
-            border-top: 4px solid #00BCD4;
-        }
 
         /* ===== 日期编辑框 ===== */
         QDateEdit {
@@ -2909,13 +3730,6 @@ class MainWindow(QMainWindow):
         QDateEdit::drop-down {
             border: none;
             width: 20px;
-        }
-        QDateEdit::down-arrow {
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-top: 5px solid #00BCD4;
-            margin-right: 6px;
         }
         QDateEdit QAbstractItemView {
             background-color: #2C2F33;
@@ -3063,10 +3877,9 @@ class MainWindow(QMainWindow):
             margin: 4px 4px 4px 0;
         }
 
-        /* ===== 远程面板内分隔线 ===== */
-        QFrame {
+        /* ===== 远程面板内分隔线（仅针对 separator 控件） ===== */
+        QFrame#toolbar_separator {
             color: #33363D;
-            max-height: 1px;
             background: transparent;
         }
 
@@ -3209,12 +4022,30 @@ class MainWindow(QMainWindow):
         """
         self.setStyleSheet(stylesheet)
 
-    def _on_toggle_theme(self, checked):
-        """切换深色主题"""
-        self._save_settings({"dark_theme": checked})
+    def _on_theme_selected(self, action):
+        """主题子菜单互斥选择"""
+        is_dark = (action == self._act_theme_dark)
+        self._save_settings({"dark_theme": is_dark})
         self._apply_theme()
-        theme_name = "深色主题" if checked else "默认主题"
-        self.ui.show_log.appendPlainText(f"[主题] 已切换为{theme_name}")
+        theme_name = "深色主题" if is_dark else "默认主题"
+        self._append_log(f"[主题] 已切换为{theme_name}")
+
+    def _on_layout_selected(self, action):
+        """布局子菜单互斥选择"""
+        is_classic = (action == self._act_layout_classic)
+        self._save_settings({"classic_layout": is_classic})
+        self.ui.switch_layout(classic=is_classic)
+        # 重新应用主题样式（新控件需要样式覆盖）
+        self._apply_theme()
+        layout_name = "经典布局" if is_classic else "面板布局"
+        self._append_log(f"[布局] 已切换为{layout_name}")
+
+    def _apply_layout(self):
+        """从 settings.json 加载并应用布局偏好"""
+        settings = self._load_settings()
+        classic = settings.get("classic_layout", False)
+        if classic:
+            self.ui.switch_layout(classic=True)
 
     @staticmethod
     def apply_dpi_scale(settings_path):
