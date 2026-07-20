@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QTableWidget, QTableWidgetItem)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
-from qfluentwidgets import setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition
+from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
+                            RoundMenu, Action, MenuAnimationType, FluentIcon)
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -2914,34 +2915,32 @@ class MainWindow(QMainWindow):
         self.ui.loacl_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def _id_list_context_menu(self, pos):
-        """设备列表右键菜单"""
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        action_open_dir = menu.addAction("打开目录")
-        action_cpp_log = menu.addAction("查看 CPP 日志")
-        action = menu.exec(self.ui.id_list.mapToGlobal(pos))
-        if action == action_open_dir:
-            self.on_open_dir_clicked()
-        elif action == action_cpp_log:
-            self.on_open_daily_clicked()
+        """设备列表右键菜单（Fluent RoundMenu）"""
+        menu = RoundMenu(parent=self)
+        action_open_dir = Action(FluentIcon.FOLDER, "打开目录")
+        action_cpp_log = Action(FluentIcon.DOCUMENT, "查看 CPP 日志")
+        action_open_dir.triggered.connect(self.on_open_dir_clicked)
+        action_cpp_log.triggered.connect(self.on_open_daily_clicked)
+        menu.addAction(action_open_dir)
+        menu.addAction(action_cpp_log)
+        menu.exec(self.ui.id_list.mapToGlobal(pos), aniType=MenuAnimationType.DROP_DOWN)
 
     def _log_list_context_menu(self, pos):
-        """日志内容列表右键菜单"""
-        from PySide6.QtWidgets import QMenu
+        """日志内容列表右键菜单（Fluent RoundMenu）"""
         item = self.ui.log_list.currentItem()
         if item is None:
             return
-        menu = QMenu(self)
-        action_copy = menu.addAction("复制此行")
-        action_copy_frame = menu.addAction("复制帧数")
-        action_locate = menu.addAction("在文件管理器中定位")
-        action = menu.exec(self.ui.log_list.mapToGlobal(pos))
-        if action == action_copy:
-            if item:
-                QApplication.clipboard().setText(item.text())
-                self.statusBar().showMessage("已复制到剪贴板", 2000)
-                self._append_log("[复制] 已复制当前行文本到剪贴板")
-        elif action == action_copy_frame:
+        menu = RoundMenu(parent=self)
+        action_copy = Action(FluentIcon.COPY, "复制此行")
+        action_copy_frame = Action(FluentIcon.LIBRARY, "复制帧数")
+        action_locate = Action(FluentIcon.PEOPLE, "在文件管理器中定位")
+
+        def _do_copy():
+            QApplication.clipboard().setText(item.text())
+            self.statusBar().showMessage("已复制到剪贴板", 2000)
+            self._append_log("[复制] 已复制当前行文本到剪贴板")
+
+        def _do_copy_frame():
             frame_match = re.search(r'frame_id:(\d+)', item.text())
             if frame_match:
                 frame_id = frame_match.group(1)
@@ -2950,26 +2949,39 @@ class MainWindow(QMainWindow):
                 self._append_log(f"[复制] 帧数 {frame_id} 已复制到剪贴板")
             else:
                 self._append_log("[提示] 当前行未找到 frame_id")
-        elif action == action_locate:
+
+        def _do_locate():
             if self._current_log_path and os.path.exists(self._current_log_path):
                 subprocess.run(['explorer', '/select,', self._current_log_path])
             else:
                 self._append_log("[提示] 无法定位日志文件")
 
+        action_copy.triggered.connect(_do_copy)
+        action_copy_frame.triggered.connect(_do_copy_frame)
+        action_locate.triggered.connect(_do_locate)
+        menu.addAction(action_copy)
+        menu.addAction(action_copy_frame)
+        menu.addSeparator()
+        menu.addAction(action_locate)
+        menu.exec(self.ui.log_list.mapToGlobal(pos), aniType=MenuAnimationType.DROP_DOWN)
+
     def _loacl_video_list_context_menu(self, pos):
-        """日志文件列表右键菜单"""
-        from PySide6.QtWidgets import QMenu
+        """日志文件列表右键菜单（Fluent RoundMenu）"""
         item = self.ui.loacl_video_list.currentItem()
         if item is None:
             return
-        menu = QMenu(self)
-        action_copy_name = menu.addAction("复制视频名")
-        action = menu.exec(self.ui.loacl_video_list.mapToGlobal(pos))
-        if action == action_copy_name:
+        menu = RoundMenu(parent=self)
+        action_copy_name = Action(FluentIcon.COPY, "复制视频名")
+
+        def _do_copy_name():
             pure_name = os.path.splitext(item.text())[0]
             QApplication.clipboard().setText(pure_name)
             self.statusBar().showMessage(f"文件名 {pure_name} 已复制到剪贴板", 2000)
             self._append_log(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
+
+        action_copy_name.triggered.connect(_do_copy_name)
+        menu.addAction(action_copy_name)
+        menu.exec(self.ui.loacl_video_list.mapToGlobal(pos), aniType=MenuAnimationType.DROP_DOWN)
 
     # ==================== 远程连接 ====================
 
