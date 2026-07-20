@@ -610,6 +610,10 @@ class SFTPWindow(QDialog):
         self._btn_mkdir.setAutoDefault(False)
         self._btn_mkdir.clicked.connect(self._create_directory)
         btn_row.addWidget(self._btn_mkdir)
+        self._btn_xftp = QPushButton('Xftp')
+        self._btn_xftp.setAutoDefault(False)
+        self._btn_xftp.clicked.connect(self._open_in_xftp)
+        btn_row.addWidget(self._btn_xftp)
         btn_row.addStretch()
         self._lbl_status = QLabel('就绪')
         btn_row.addWidget(self._lbl_status)
@@ -1241,6 +1245,24 @@ class SFTPWindow(QDialog):
         worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
         worker.start()
 
+    def _open_in_xftp(self):
+        """使用 Xftp 打开当前 SFTP 连接"""
+        if not shutil.which('xftp'):
+            msg = "[提示] 未找到 Xftp，请确认已安装并加入系统 PATH"
+            self._log(msg)
+            QMessageBox.warning(self, "未找到 Xftp", msg)
+            return
+        xftp_url = f'sftp://{self._username}:{self._password}@{self._host}:{self._port}'
+        try:
+            subprocess.Popen(
+                f'xftp -url "{xftp_url}"',
+                shell=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        except Exception as e:
+            self._log(f"[提示] 启动 Xftp 失败: {e}")
+            QMessageBox.warning(self, "打开失败", f"无法启动 Xftp：{e}")
+
     # ------------------------------------------------------------------ 回调
     def _on_quick_op_success(self, msg):
         self._lbl_status.setText(msg)
@@ -1611,7 +1633,7 @@ class SSHExecWorker(QThread):
 class SSHTerminalWindow(QDialog):
     """SSH 终端窗口（exec_command 模式，底部输入框）"""
 
-    def __init__(self, host, port, username, password, parent=None):
+    def __init__(self, host, port, username, password, log_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"SSH 终端 - {host}:{port}")
         self.resize(800, 500)
@@ -1619,6 +1641,7 @@ class SSHTerminalWindow(QDialog):
         self._port = port
         self._username = username
         self._password = password
+        self._log = log_callback or (lambda msg: None)
         self._client = None
         self._connect_worker = None
         self._exec_worker = None
@@ -1659,9 +1682,13 @@ class SSHTerminalWindow(QDialog):
         self._send_btn.setEnabled(False)
         input_layout.addWidget(self._send_btn)
 
-        self._cmd_btn = QPushButton("在 CMD 中打开")
+        self._cmd_btn = QPushButton("CMD")
         self._cmd_btn.clicked.connect(self._open_in_cmd)
         input_layout.addWidget(self._cmd_btn)
+
+        self._xshell_btn = QPushButton("Xshell")
+        self._xshell_btn.clicked.connect(self._open_in_xshell)
+        input_layout.addWidget(self._xshell_btn)
 
         layout.addLayout(input_layout)
 
@@ -1753,6 +1780,24 @@ class SSHTerminalWindow(QDialog):
             return
         cmd = f'ssh -p {self._port} {self._username}@{self._host}'
         subprocess.Popen(['cmd', '/k', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+    def _open_in_xshell(self):
+        """使用 Xshell 打开 SSH 连接"""
+        if not shutil.which('xshell'):
+            msg = "[提示] 未找到 Xshell，请确认已安装并加入系统 PATH"
+            self._log(msg)
+            QMessageBox.warning(self, "未找到 Xshell", msg)
+            return
+        xshell_url = f'ssh://{self._username}:{self._password}@{self._host}:{self._port}'
+        try:
+            subprocess.Popen(
+                f'xshell -url "{xshell_url}"',
+                shell=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        except Exception as e:
+            self._log(f"[提示] 启动 Xshell 失败: {e}")
+            QMessageBox.warning(self, "打开失败", f"无法启动 Xshell：{e}")
 
     def closeEvent(self, event):
         # 清理 exec worker
@@ -1930,6 +1975,7 @@ class MainWindow(QMainWindow):
         _popup_view.setUniformItemSizes(True)
         _popup_view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ui.choose_exe.setView(_popup_view)
+        self.ui.choose_exe.setFixedWidth(190)  # 略宽于 SnookerTracking824.exe
         # 远程状态
         self._frpc_process = None
         self._p2p_visitors = []
@@ -3264,7 +3310,9 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"[SSH] 打开终端: {host}:{port}")
         self._ssh_terminal_window = SSHTerminalWindow(
-            host, port, username, password, parent=self
+            host, port, username, password,
+            log_callback=lambda msg: self._append_log(msg),
+            parent=self
         )
         self._ssh_terminal_window.show()
 
