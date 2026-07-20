@@ -3435,12 +3435,12 @@ class MainWindow(QMainWindow):
         self._layout_group.setExclusive(True)
         self._act_layout_panel = QAction("面板布局", self)
         self._act_layout_panel.setCheckable(True)
-        self._act_layout_panel.setChecked(not settings.get("classic_layout", False))
+        self._act_layout_panel.setChecked(not settings.get("classic_layout", True))
         self._layout_group.addAction(self._act_layout_panel)
         layout_menu.addAction(self._act_layout_panel)
         self._act_layout_classic = QAction("经典布局", self)
         self._act_layout_classic.setCheckable(True)
-        self._act_layout_classic.setChecked(settings.get("classic_layout", False))
+        self._act_layout_classic.setChecked(settings.get("classic_layout", True))
         self._layout_group.addAction(self._act_layout_classic)
         layout_menu.addAction(self._act_layout_classic)
         self._layout_group.triggered.connect(self._on_layout_selected)
@@ -3451,12 +3451,12 @@ class MainWindow(QMainWindow):
         self._theme_group.setExclusive(True)
         self._act_theme_default = QAction("默认主题", self)
         self._act_theme_default.setCheckable(True)
-        self._act_theme_default.setChecked(not settings.get("dark_theme", True))
+        self._act_theme_default.setChecked(not settings.get("dark_theme", False))
         self._theme_group.addAction(self._act_theme_default)
         theme_menu.addAction(self._act_theme_default)
         self._act_theme_dark = QAction("深色主题", self)
         self._act_theme_dark.setCheckable(True)
-        self._act_theme_dark.setChecked(settings.get("dark_theme", True))
+        self._act_theme_dark.setChecked(settings.get("dark_theme", False))
         self._theme_group.addAction(self._act_theme_dark)
         theme_menu.addAction(self._act_theme_dark)
         self._theme_group.triggered.connect(self._on_theme_selected)
@@ -3592,7 +3592,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self):
         """根据 settings.json 中的 dark_theme 字段应用深色主题或恢复默认样式"""
         settings = self._load_settings()
-        if not settings.get("dark_theme", True):
+        if not settings.get("dark_theme", False):
             self.setStyleSheet("")
             return
         stylesheet = """
@@ -4043,7 +4043,7 @@ class MainWindow(QMainWindow):
     def _apply_layout(self):
         """从 settings.json 加载并应用布局偏好"""
         settings = self._load_settings()
-        classic = settings.get("classic_layout", False)
+        classic = settings.get("classic_layout", True)
         if classic:
             self.ui.switch_layout(classic=True)
 
