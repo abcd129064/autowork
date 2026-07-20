@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QTableWidget, QTableWidgetItem)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
+from qfluentwidgets import setTheme, setThemeColor, Theme
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -55,7 +56,8 @@ if sys.platform == 'win32':
 
 class TCPWorker(QThread):
     """TCP 连接工作线程"""
-    finished = Signal(str)
+    # 注意：不能命名为 finished，会遮蔽 QThread 内置 finished 信号导致崩溃
+    result_ready = Signal(str)
     error = Signal(str)
 
     def __init__(self, host, port, username, password):
@@ -75,7 +77,7 @@ class TCPWorker(QThread):
                                  timeout=10)
             stdin, stdout, stderr = self._client.exec_command("hostname && whoami")
             result = stdout.read().decode('utf-8', errors='ignore').strip()
-            self.finished.emit(result)
+            self.result_ready.emit(result)
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -1637,7 +1639,8 @@ class SSHExecWorker(QThread):
     """异步执行 SSH 命令的工作线程（使用 exec_command，无持久 shell）"""
     output = Signal(str)
     error = Signal(str)
-    finished = Signal()
+    # 注意：不能命名为 finished，会遮蔽 QThread 内置 finished 信号导致崩溃
+    done = Signal()
 
     def __init__(self, client, command):
         super().__init__()
@@ -1656,7 +1659,7 @@ class SSHExecWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
         finally:
-            self.finished.emit()
+            self.done.emit()
 
 
 class SSHTerminalWindow(QDialog):
@@ -1771,7 +1774,7 @@ class SSHTerminalWindow(QDialog):
         worker = SSHExecWorker(self._client, cmd)
         worker.output.connect(self._on_output)
         worker.error.connect(self._on_error)
-        worker.finished.connect(self._on_exec_finished)
+        worker.done.connect(self._on_exec_finished)
         self._exec_worker = worker
         worker.start()
 
@@ -2003,12 +2006,9 @@ class MainWindow(QMainWindow):
         self._apply_font_size()
         self._apply_font_family()
         self._apply_theme()
+        self._init_system_theme_monitor()
         self._apply_layout()
-        # 替换 choose_exe 的弹出视图为自定义 QListView，配合 setMaxVisibleItems 生效
-        _popup_view = QListView(self.ui.choose_exe)
-        _popup_view.setUniformItemSizes(True)
-        _popup_view.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.ui.choose_exe.setView(_popup_view)
+        # Fluent ComboBox 使用自定义弹出视图，无需 setView
         self.ui.choose_exe.setFixedWidth(190)  # 略宽于 SnookerTracking824.exe
         # 远程状态
         self._frpc_process = None
@@ -2111,7 +2111,7 @@ class MainWindow(QMainWindow):
 
     def _get_selected_date_str(self):
         """获取日期选择器中的日期，格式如 2026-07-05"""
-        qdate = self.ui.date.date()
+        qdate = self.ui.date.date
         date_str = qdate.toString("yyyy-MM-dd")
         return date_str
 
@@ -3159,7 +3159,7 @@ class MainWindow(QMainWindow):
             host, port,
             self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
         )
-        self._tcp_worker.finished.connect(self._on_tcp_finished)
+        self._tcp_worker.result_ready.connect(self._on_tcp_finished)
         self._tcp_worker.error.connect(self._on_tcp_error)
         self._tcp_worker.start()
         self._append_log(f"[TCP] 正在连接 {host}:{port}...")
@@ -3449,14 +3449,20 @@ class MainWindow(QMainWindow):
         theme_menu = view_menu.addMenu("主题")
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
-        self._act_theme_default = QAction("默认主题", self)
-        self._act_theme_default.setCheckable(True)
-        self._act_theme_default.setChecked(not settings.get("dark_theme", False))
-        self._theme_group.addAction(self._act_theme_default)
-        theme_menu.addAction(self._act_theme_default)
+        _theme_mode = self._get_theme_mode(settings)
+        self._act_theme_auto = QAction("跟随系统", self)
+        self._act_theme_auto.setCheckable(True)
+        self._act_theme_auto.setChecked(_theme_mode == "auto")
+        self._theme_group.addAction(self._act_theme_auto)
+        theme_menu.addAction(self._act_theme_auto)
+        self._act_theme_light = QAction("浅色主题", self)
+        self._act_theme_light.setCheckable(True)
+        self._act_theme_light.setChecked(_theme_mode == "light")
+        self._theme_group.addAction(self._act_theme_light)
+        theme_menu.addAction(self._act_theme_light)
         self._act_theme_dark = QAction("深色主题", self)
         self._act_theme_dark.setCheckable(True)
-        self._act_theme_dark.setChecked(settings.get("dark_theme", False))
+        self._act_theme_dark.setChecked(_theme_mode == "dark")
         self._theme_group.addAction(self._act_theme_dark)
         theme_menu.addAction(self._act_theme_dark)
         self._theme_group.triggered.connect(self._on_theme_selected)
@@ -3589,27 +3595,63 @@ class MainWindow(QMainWindow):
             font.setFamily(family)
             QApplication.setFont(font)
 
-    def _apply_theme(self):
-        """根据 settings.json 中的 dark_theme 字段应用深色主题或恢复默认样式"""
-        settings = self._load_settings()
-        if not settings.get("dark_theme", False):
-            self.setStyleSheet("")
-            return
-        stylesheet = """
-        /* ============================================================
-         *  AutoWork - SCADA 工业监控 Dashboard 主题
-         *  主背景: #1E1E24  卡片: #2C2F33  高亮: #00BCD4
-         *  文字: #C8D0DC  边框: #33363D  日志: #0D0D0D
-         * ============================================================ */
+    @staticmethod
+    def _get_theme_mode(settings):
+        """获取主题模式：'auto'(跟随系统) / 'light'(浅色) / 'dark'(深色)
+        兼容旧版布尔型 dark_theme 字段。"""
+        mode = settings.get("theme_mode", "")
+        if mode in ("auto", "light", "dark"):
+            return mode
+        # 旧版兼容：dark_theme=True → dark，False → auto（跟随系统）
+        return "dark" if settings.get("dark_theme", False) else "auto"
+    
+    @staticmethod
+    def _system_is_dark():
+        """检测 Windows 系统当前是否为深色主题"""
+        try:
+            import darkdetect
+            return bool(darkdetect.isDark())
+        except Exception:
+            return False
+    
+    @staticmethod
+    def _effective_is_dark(settings):
+        """解析实际生效的深色状态：
+        auto=跟随 Windows 系统主题，light=强制浅色，dark=强制深色。"""
+        mode = MainWindow._get_theme_mode(settings)
+        if mode == "dark":
+            return True
+        if mode == "light":
+            return False
+        return MainWindow._system_is_dark()
 
-        /* ===== 全局 & 主窗口 ===== */
+    def _apply_theme(self):
+        """根据 settings.json 中的 theme_mode 字段应用 Fluent 主题 + 补充 QSS"""
+        settings = self._load_settings()
+        is_dark = self._effective_is_dark(settings)
+
+        # Fluent 全局主题引擎（自动处理所有 Fluent 控件）
+        setTheme(Theme.DARK if is_dark else Theme.LIGHT)
+        setThemeColor("#00BCD4", lazy=True)  # lazy=True 避免立即刷新导致样式递归崩溃
+        # 锁定 Qt 调色板与应用主题一致：否则 Windows 深色模式会把调色板染成深色，
+        # 导致 Fluent 浅色控件取到白色 windowText → 白字白底看不清
+        QApplication.styleHints().setColorScheme(
+            Qt.ColorScheme.Dark if is_dark else Qt.ColorScheme.Light)
+
+        if not is_dark:
+            self.setStyleSheet("")
+            # 强制刷新所有控件样式，防止从深色切回时 Fluent 控件文字颜色残留
+            self.style().unpolish(self)
+            self.style().polish(self)
+            for w in self.findChildren(QWidget):
+                w.update()
+            return
+
+        # 补充 QSS：仅覆盖非 Fluent 的标准 Qt 控件
+        stylesheet = """
+        /* ===== 主窗口背景 ===== */
         QMainWindow {
             background-color: #1E1E24;
-        }
-        QWidget {
-            color: #C8D0DC;
-            font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-            font-size: 9pt;
         }
         QWidget#centralwidget {
             background-color: #1E1E24;
@@ -3625,7 +3667,7 @@ class MainWindow(QMainWindow):
             margin: 4px 2px;
         }
 
-        /* ===== 按钮 ===== */
+        /* ===== 按钮（对话框/SFTP/SSH 窗口中仍使用原生 QPushButton） ===== */
         QPushButton {
             background-color: #00BCD4;
             color: #FFFFFF;
@@ -3640,10 +3682,6 @@ class MainWindow(QMainWindow):
         }
         QPushButton:pressed {
             background-color: #00838F;
-        }
-        QPushButton:checked {
-            background-color: #00838F;
-            border: 2px solid #00BCD4;
         }
         QPushButton:disabled {
             background-color: #33363D;
@@ -3668,31 +3706,6 @@ class MainWindow(QMainWindow):
             background-color: #1E1E24;
         }
 
-        /* ===== 下拉框 ===== */
-        QComboBox {
-            background-color: #2C2F33;
-            color: #C8D0DC;
-            border: 1px solid #33363D;
-            border-radius: 6px;
-            padding: 4px 8px;
-            min-height: 22px;
-        }
-        QComboBox:hover {
-            border: 1px solid #00BCD4;
-        }
-        QComboBox::drop-down {
-            border: none;
-            width: 20px;
-        }
-        QComboBox QAbstractItemView {
-            background-color: #2C2F33;
-            color: #C8D0DC;
-            border: 1px solid #33363D;
-            selection-background-color: #00BCD4;
-            selection-color: #FFFFFF;
-            outline: none;
-        }
-
         /* ===== 数字微调框 ===== */
         QSpinBox {
             background-color: #2C2F33;
@@ -3701,10 +3714,7 @@ class MainWindow(QMainWindow):
             border-radius: 6px;
             padding: 4px 6px;
         }
-        QSpinBox:hover {
-            border: 1px solid #00BCD4;
-        }
-        QSpinBox:focus {
+        QSpinBox:hover, QSpinBox:focus {
             border: 1px solid #00BCD4;
         }
         QSpinBox::up-button, QSpinBox::down-button {
@@ -3714,75 +3724,6 @@ class MainWindow(QMainWindow):
         }
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {
             background-color: #00BCD4;
-        }
-
-        /* ===== 日期编辑框 ===== */
-        QDateEdit {
-            background-color: #2C2F33;
-            color: #C8D0DC;
-            border: 1px solid #33363D;
-            border-radius: 6px;
-            padding: 4px 8px;
-        }
-        QDateEdit:hover {
-            border: 1px solid #00BCD4;
-        }
-        QDateEdit::drop-down {
-            border: none;
-            width: 20px;
-        }
-        QDateEdit QAbstractItemView {
-            background-color: #2C2F33;
-            color: #C8D0DC;
-            border: 1px solid #33363D;
-            selection-background-color: #00BCD4;
-            selection-color: #FFFFFF;
-        }
-
-        /* ===== 单选按钮 ===== */
-        QRadioButton {
-            color: #C8D0DC;
-            spacing: 5px;
-        }
-        QRadioButton::indicator {
-            width: 14px;
-            height: 14px;
-        }
-        QRadioButton::indicator:unchecked {
-            border: 2px solid #33363D;
-            border-radius: 7px;
-            background-color: #2C2F33;
-        }
-        QRadioButton::indicator:checked {
-            border: 2px solid #00BCD4;
-            border-radius: 7px;
-            background-color: #00BCD4;
-        }
-        QRadioButton::indicator:hover {
-            border-color: #00BCD4;
-        }
-
-        /* ===== 列表控件 ===== */
-        QListWidget {
-            background-color: #2C2F33;
-            color: #C8D0DC;
-            border: 1px solid #33363D;
-            border-radius: 6px;
-            outline: none;
-            padding: 2px;
-        }
-        QListWidget::item {
-            padding: 4px 8px;
-            border: none;
-            border-radius: 4px;
-        }
-        QListWidget::item:selected {
-            background-color: rgba(0, 188, 212, 0.18);
-            color: #00BCD4;
-            border-left: 3px solid #00BCD4;
-        }
-        QListWidget::item:hover:!selected {
-            background-color: rgba(255, 255, 255, 0.04);
         }
 
         /* ===== 日志输出区域（终端风格） ===== */
@@ -3817,20 +3758,18 @@ class MainWindow(QMainWindow):
             padding-left: 10px;
         }
 
-        /* ===== 左侧面板容器 ===== */
-        QWidget#left_panel {
-            background-color: #1E1E24;
-        }
-        QWidget#left_bottom {
+        /* ===== 面板容器 ===== */
+        QWidget#left_panel, QWidget#center_panel {
             background-color: #1E1E24;
         }
 
-        /* ===== 中间面板容器 ===== */
-        QWidget#center_panel {
-            background-color: #1E1E24;
+        /* ===== 远程面板 ===== */
+        QFrame#p2p_panel {
+            background-color: #2C2F33;
+            border-left: 1px solid #33363D;
+            border-radius: 6px;
+            margin: 4px 4px 4px 0;
         }
-
-        /* ===== 远程面板标题 ===== */
         QLabel#p2p_panel_header {
             background-color: #202225;
             color: #00BCD4;
@@ -3839,8 +3778,6 @@ class MainWindow(QMainWindow):
             border-bottom: 1px solid #33363D;
             border-radius: 6px 6px 0 0;
         }
-
-        /* ===== 右侧卡片模块标题 ===== */
         QLabel#section_label {
             color: #00BCD4;
             font-weight: bold;
@@ -3849,7 +3786,7 @@ class MainWindow(QMainWindow):
             padding-left: 2px;
         }
 
-        /* ===== 分隔器 ===== */
+        /* ===== 分割器 ===== */
         QSplitter::handle {
             background-color: #33363D;
         }
@@ -3869,32 +3806,6 @@ class MainWindow(QMainWindow):
             background-color: transparent;
         }
 
-        /* ===== 远程面板 ===== */
-        QFrame#p2p_panel {
-            background-color: #2C2F33;
-            border-left: 1px solid #33363D;
-            border-radius: 6px;
-            margin: 4px 4px 4px 0;
-        }
-
-        /* ===== 远程面板内分隔线（仅针对 separator 控件） ===== */
-        QFrame#toolbar_separator {
-            color: #33363D;
-            background: transparent;
-        }
-
-        /* ===== 状态栏 ===== */
-        QStatusBar {
-            background-color: #202225;
-            color: #6b7280;
-            border-top: 2px solid #00BCD4;
-            padding: 3px 8px;
-        }
-        QStatusBar QLabel {
-            color: #6b7280;
-            font-size: 8pt;
-        }
-
         /* ===== 菜单栏 ===== */
         QMenuBar {
             background-color: #1E1E24;
@@ -3911,8 +3822,6 @@ class MainWindow(QMainWindow):
             background-color: rgba(0, 188, 212, 0.15);
             color: #00BCD4;
         }
-
-        /* ===== 菜单 ===== */
         QMenu {
             background-color: #2C2F33;
             color: #C8D0DC;
@@ -3934,7 +3843,7 @@ class MainWindow(QMainWindow):
             margin: 4px 8px;
         }
 
-        /* ===== 滚动条（垂直） ===== */
+        /* ===== 滚动条 ===== */
         QScrollBar:vertical {
             background-color: #1E1E24;
             width: 8px;
@@ -3956,8 +3865,6 @@ class MainWindow(QMainWindow):
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
             background: none;
         }
-
-        /* ===== 滚动条（水平） ===== */
         QScrollBar:horizontal {
             background-color: #1E1E24;
             height: 8px;
@@ -3989,18 +3896,7 @@ class MainWindow(QMainWindow):
             padding: 4px 8px;
         }
 
-        /* ===== 消息框 ===== */
-        QMessageBox {
-            background-color: #2C2F33;
-        }
-        QMessageBox QLabel {
-            color: #C8D0DC;
-        }
-
-        /* ===== 进度对话框 ===== */
-        QProgressDialog {
-            background-color: #2C2F33;
-        }
+        /* ===== 进度条 ===== */
         QProgressBar {
             background-color: #2C2F33;
             border: 1px solid #33363D;
@@ -4022,13 +3918,53 @@ class MainWindow(QMainWindow):
         """
         self.setStyleSheet(stylesheet)
 
+    # ==================== 系统主题监听（跟随系统模式） ====================
+
+    def _init_system_theme_monitor(self):
+        """初始化系统主题变化轮询（仅“跟随系统”模式下生效）"""
+        self._last_applied_dark = None
+        self._theme_poll_timer = QTimer(self)
+        self._theme_poll_timer.setInterval(2000)  # 每 2 秒检测一次 Windows 主题
+        self._theme_poll_timer.timeout.connect(self._poll_system_theme)
+        self._sync_theme_polling()
+
+    def _sync_theme_polling(self):
+        """根据当前主题模式启停轮询定时器"""
+        settings = self._load_settings()
+        if self._get_theme_mode(settings) == "auto":
+            self._last_applied_dark = self._effective_is_dark(settings)
+            if not self._theme_poll_timer.isActive():
+                self._theme_poll_timer.start()
+        else:
+            self._theme_poll_timer.stop()
+
+    def _poll_system_theme(self):
+        """轮询检测 Windows 主题变化，变化时自动重新应用主题"""
+        sys_dark = self._system_is_dark()
+        if sys_dark != self._last_applied_dark:
+            self._last_applied_dark = sys_dark
+            self._apply_theme()
+            actual = "深色" if sys_dark else "浅色"
+            self._append_log(f"[主题] 检测到系统主题变化，已自动切换为{actual}")
+
     def _on_theme_selected(self, action):
         """主题子菜单互斥选择"""
-        is_dark = (action == self._act_theme_dark)
-        self._save_settings({"dark_theme": is_dark})
+        if action == self._act_theme_dark:
+            mode = "dark"
+        elif action == self._act_theme_light:
+            mode = "light"
+        else:
+            mode = "auto"
+        self._save_settings({"theme_mode": mode})
         self._apply_theme()
-        theme_name = "深色主题" if is_dark else "默认主题"
-        self._append_log(f"[主题] 已切换为{theme_name}")
+        self._sync_theme_polling()  # 跟随系统模式时启动轮询，其他模式停止
+        if mode == "dark":
+            self._append_log("[主题] 已切换为深色主题")
+        elif mode == "light":
+            self._append_log("[主题] 已切换为浅色主题")
+        else:
+            actual = "深色" if self._system_is_dark() else "浅色"
+            self._append_log(f"[主题] 已切换为跟随系统（当前系统为{actual}）")
 
     def _on_layout_selected(self, action):
         """布局子菜单互斥选择"""
@@ -4070,6 +4006,21 @@ def main():
     
     # 设置应用程序样式
     app.setStyle("Fusion")
+
+    # 【关键】在创建任何 Fluent 控件之前设定主题，避免中途变更导致控件文字刷新遗漏
+    # theme_mode: auto=跟随 Windows 系统主题，light=强制浅色，dark=强制深色
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            _settings = json.load(f)
+    except Exception:
+        _settings = {}
+    _is_dark = MainWindow._effective_is_dark(_settings)
+    setTheme(Theme.DARK if _is_dark else Theme.LIGHT)
+    setThemeColor("#00BCD4", lazy=True)
+    # 锁定 Qt 调色板，禁止 Windows 深色模式向应用注入深色调色板
+    # （否则 Fluent 浅色控件会从深色调色板取白色文字 → 白字白底看不清）
+    QApplication.styleHints().setColorScheme(
+        Qt.ColorScheme.Dark if _is_dark else Qt.ColorScheme.Light)
     
     # 创建并显示主窗口
     window = MainWindow()

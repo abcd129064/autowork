@@ -13,11 +13,20 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QFont, QFontDatabase, QGradient, QIcon,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
-from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit,
+from PySide6.QtWidgets import (QApplication,
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
-    QPushButton, QRadioButton, QSizePolicy, QSpinBox, QSplitter, QVBoxLayout,
+    QMainWindow, QPlainTextEdit,
+    QSizePolicy, QSpinBox, QSplitter, QVBoxLayout,
     QWidget, QStatusBar)
+from qfluentwidgets import (
+    PushButton as FluentPushButton,
+    PrimaryPushButton,
+    ToggleButton,
+    ComboBox as FluentComboBox,
+    CalendarPicker,
+    RadioButton,
+    ListWidget,
+)
 
 
 def _make_separator(vertical=False):
@@ -78,22 +87,21 @@ class Ui_MainWindow(object):
         self.horizontalLayout.setContentsMargins(10, 6, 10, 6)
 
         # --- 组1: 文件操作 ---
-        self.flush = QPushButton(self.toolbar_widget)
+        self.flush = FluentPushButton(self.toolbar_widget)
         self.flush.setObjectName(u"flush")
         self.horizontalLayout.addWidget(self.flush)
 
-        self.date = QDateEdit(self.toolbar_widget)
+        self.date = CalendarPicker(self.toolbar_widget)
         self.date.setObjectName(u"date")
-        self.date.setMaximumSize(QSize(110, 16777215))
-        self.date.setCalendarPopup(True)
-        self.date.setDateTime(QDateTime(QDate(2000, 10, 7), QTime(0, 0, 0)))
+        self.date.setFixedWidth(110)
+        self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
 
-        self.write_table = QPushButton(self.toolbar_widget)
+        self.write_table = FluentPushButton(self.toolbar_widget)
         self.write_table.setObjectName(u"write_table")
         self.horizontalLayout.addWidget(self.write_table)
 
-        self.open_config = QPushButton(self.toolbar_widget)
+        self.open_config = FluentPushButton(self.toolbar_widget)
         self.open_config.setObjectName(u"open_config")
         self.horizontalLayout.addWidget(self.open_config)
 
@@ -105,22 +113,22 @@ class Ui_MainWindow(object):
         self.label_2.setObjectName(u"label_2")
         self.horizontalLayout.addWidget(self.label_2)
 
-        self.choose_exe = QComboBox(self.toolbar_widget)
+        self.choose_exe = FluentComboBox(self.toolbar_widget)
         self.choose_exe.setObjectName(u"choose_exe")
         self.choose_exe.setMinimumWidth(140)
         self.horizontalLayout.addWidget(self.choose_exe)
 
         # 帧控制
-        self.input_frame_before = QRadioButton(self.toolbar_widget)
+        self.input_frame_before = RadioButton(self.toolbar_widget)
         self.input_frame_before.setObjectName(u"input_frame_before")
         self.input_frame_before.setChecked(True)
         self.horizontalLayout.addWidget(self.input_frame_before)
 
-        self.input_frame_set = QRadioButton(self.toolbar_widget)
+        self.input_frame_set = RadioButton(self.toolbar_widget)
         self.input_frame_set.setObjectName(u"input_frame_set")
         self.horizontalLayout.addWidget(self.input_frame_set)
 
-        self.input_frame_custom = QRadioButton(self.toolbar_widget)
+        self.input_frame_custom = RadioButton(self.toolbar_widget)
         self.input_frame_custom.setObjectName(u"input_frame_custom")
         self.horizontalLayout.addWidget(self.input_frame_custom)
 
@@ -133,26 +141,25 @@ class Ui_MainWindow(object):
         self.horizontalLayout.addWidget(_make_separator(vertical=True))
 
         # --- 组3: 播放控制 ---
-        self.open_daily = QPushButton(self.toolbar_widget)
+        self.open_daily = FluentPushButton(self.toolbar_widget)
         self.open_daily.setObjectName(u"open_daily")
         self.horizontalLayout.addWidget(self.open_daily)
 
-        self.start = QPushButton(self.toolbar_widget)
+        self.start = PrimaryPushButton(self.toolbar_widget)
         self.start.setObjectName(u"start")
         self.horizontalLayout.addWidget(self.start)
 
-        self.end = QPushButton(self.toolbar_widget)
+        self.end = FluentPushButton(self.toolbar_widget)
         self.end.setObjectName(u"end")
         self.horizontalLayout.addWidget(self.end)
 
-        self.pause_btn = QPushButton(self.toolbar_widget)
+        self.pause_btn = FluentPushButton(self.toolbar_widget)
         self.pause_btn.setObjectName(u"pause_btn")
         self.pause_btn.setText("暂停")
         self.horizontalLayout.addWidget(self.pause_btn)
 
-        self.p2p_btn = QPushButton(self.toolbar_widget)
+        self.p2p_btn = ToggleButton(self.toolbar_widget)
         self.p2p_btn.setObjectName(u"p2p_btn")
-        self.p2p_btn.setCheckable(True)
         self.p2p_btn.setMaximumWidth(50)
         self.horizontalLayout.addWidget(self.p2p_btn)
 
@@ -170,13 +177,13 @@ class Ui_MainWindow(object):
         self.horizontalLayout_main.setSpacing(0)
 
         # 创建核心控件（两套布局共享，切换时复用实例）
-        self.id_list = QListWidget()
+        self.id_list = ListWidget()
         self.id_list.setObjectName(u"id_list")
 
-        self.loacl_video_list = QListWidget()
+        self.loacl_video_list = ListWidget()
         self.loacl_video_list.setObjectName(u"loacl_video_list")
 
-        self.log_list = QListWidget()
+        self.log_list = ListWidget()
         self.log_list.setObjectName(u"log_list")
 
         self.show_log = QPlainTextEdit()
@@ -223,15 +230,15 @@ class Ui_MainWindow(object):
         # --- 模块1: 服务器/网络 ---
         p2p_main_layout.addWidget(_make_section_label("◎ 服务器 / visitors"))
 
-        self.p2p_visitor_list = QListWidget(self.p2p_panel)
+        self.p2p_visitor_list = ListWidget(self.p2p_panel)
         self.p2p_visitor_list.setObjectName(u"p2p_visitor_list")
         self.p2p_visitor_list.setMaximumHeight(100)
         p2p_main_layout.addWidget(self.p2p_visitor_list)
 
         p2p_list_btn_layout = QHBoxLayout()
-        self.p2p_add_btn = QPushButton("添加")
+        self.p2p_add_btn = FluentPushButton("添加")
         self.p2p_add_btn.setObjectName(u"p2p_add_btn")
-        self.p2p_delete_btn = QPushButton("删除")
+        self.p2p_delete_btn = FluentPushButton("删除")
         self.p2p_delete_btn.setObjectName(u"p2p_delete_btn")
         p2p_list_btn_layout.addWidget(self.p2p_add_btn)
         p2p_list_btn_layout.addWidget(self.p2p_delete_btn)
@@ -263,9 +270,9 @@ class Ui_MainWindow(object):
 
         # 连接/断开按钮
         p2p_conn_layout = QHBoxLayout()
-        self.p2p_connect_btn = QPushButton("连接")
+        self.p2p_connect_btn = PrimaryPushButton("连接")
         self.p2p_connect_btn.setObjectName(u"p2p_connect_btn")
-        self.p2p_disconnect_btn = QPushButton("断开")
+        self.p2p_disconnect_btn = FluentPushButton("断开")
         self.p2p_disconnect_btn.setObjectName(u"p2p_disconnect_btn")
         p2p_conn_layout.addWidget(self.p2p_connect_btn)
         p2p_conn_layout.addWidget(self.p2p_disconnect_btn)
@@ -281,7 +288,7 @@ class Ui_MainWindow(object):
         mode_label = QLabel("连接方式:")
         mode_label.setObjectName(u"p2p_mode_label")
         mode_layout.addWidget(mode_label)
-        self.p2p_mode_combo = QComboBox(self.p2p_panel)
+        self.p2p_mode_combo = FluentComboBox(self.p2p_panel)
         self.p2p_mode_combo.setObjectName(u"p2p_mode_combo")
         self.p2p_mode_combo.addItems(["XTCP", "TCP"])
         mode_layout.addWidget(self.p2p_mode_combo)
@@ -328,12 +335,12 @@ class Ui_MainWindow(object):
         # --- 模块3: 高级功能 ---
         p2p_main_layout.addWidget(_make_section_label("◎ 功能"))
 
-        self.p2p_sftp_btn = QPushButton("文件管理")
+        self.p2p_sftp_btn = FluentPushButton("文件管理")
         self.p2p_sftp_btn.setObjectName(u"p2p_sftp_btn")
         self.p2p_sftp_btn.setEnabled(False)
         p2p_main_layout.addWidget(self.p2p_sftp_btn)
 
-        self.p2p_ssh_terminal_btn = QPushButton("SSH 终端")
+        self.p2p_ssh_terminal_btn = FluentPushButton("SSH 终端")
         self.p2p_ssh_terminal_btn.setObjectName(u"p2p_ssh_terminal_btn")
         self.p2p_ssh_terminal_btn.setEnabled(False)
         p2p_main_layout.addWidget(self.p2p_ssh_terminal_btn)
@@ -357,7 +364,7 @@ class Ui_MainWindow(object):
     def retranslateUi(self, MainWindow):
         MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"AutoWork", None))
         self.flush.setText(QCoreApplication.translate("MainWindow", u"刷新", None))
-        self.date.setDisplayFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
+        self.date.setDateFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
         self.write_table.setText(QCoreApplication.translate("MainWindow", u"打开目录", None))
         self.open_config.setText(QCoreApplication.translate("MainWindow", u"配置", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"程序:", None))

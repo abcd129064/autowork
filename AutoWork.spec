@@ -19,6 +19,8 @@ a = Analysis(
         'paramiko',
         'cryptography',
         'bcrypt',
+        'qfluentwidgets',
+        'darkdetect',
     ],
     hookspath=[],
     hooksconfig={},
