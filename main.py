@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
 from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
-                            RoundMenu, Action, MenuAnimationType, FluentIcon)
+                            RoundMenu, Action, MenuAnimationType, FluentIcon,
+                            setFontFamilies)
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -1685,25 +1686,26 @@ class SSHTerminalWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        # 输出区域
+        # 输出区域（字体通过 setFont 设置，不在 QSS 中指定，以便全局字体变更能生效）
         self._output = QPlainTextEdit()
         self._output.setReadOnly(True)
+        self._output.setFont(QFont("Consolas", 10))
         self._output.setStyleSheet(
-            "QPlainTextEdit { background-color: #1e1e1e; color: #00ff00; "
-            "font-family: Consolas, 'Courier New', monospace; font-size: 11pt; }"
+            "QPlainTextEdit { background-color: #1e1e1e; color: #00ff00; }"
         )
         layout.addWidget(self._output)
 
         # 输入区域
         input_layout = QHBoxLayout()
         self._prompt_label = QLabel("$")
-        self._prompt_label.setStyleSheet("color: #00ff00; font-family: Consolas; font-size: 11pt;")
+        self._prompt_label.setFont(QFont("Consolas", 10))
+        self._prompt_label.setStyleSheet("color: #00ff00;")
         input_layout.addWidget(self._prompt_label)
 
         self._input = QLineEdit()
+        self._input.setFont(QFont("Consolas", 10))
         self._input.setStyleSheet(
-            "QLineEdit { background-color: #2d2d2d; color: #00ff00; "
-            "font-family: Consolas, 'Courier New', monospace; font-size: 11pt; }"
+            "QLineEdit { background-color: #2d2d2d; color: #00ff00; }"
         )
         self._input.setPlaceholderText("输入命令，回车执行...")
         self._input.returnPressed.connect(self._execute_command)
@@ -3644,21 +3646,73 @@ class MainWindow(QMainWindow):
 
     def _apply_font_size(self):
         """从 settings.json 加载并应用全局字号"""
-        settings = self._load_settings()
-        size = settings.get("font_size", None)
-        if size:
-            font = QApplication.font()
-            font.setPointSize(size)
-            QApplication.setFont(font)
+        self._apply_global_font()
 
     def _apply_font_family(self):
         """从 settings.json 加载并应用全局字体"""
+        self._apply_global_font()
+
+    def _apply_global_font(self):
+        """统一应用全局字体（族 + 字号），确保所有控件生效。
+
+        修复要点：
+        1. qfluentwidgets 控件在构造时通过 setFont(getFont(14)) 显式设置字体
+           （使用 setPixelSize + setFamilies），QApplication.setFont() 对其无效，
+           必须逐个控件重新设置；
+        2. 必须使用 setPixelSize 而非 setPointSize —— Qt 中两者互斥，
+           Fluent 内部统一使用 pixelSize，若用 pointSize 会导致字体解析冲突；
+        3. 必须使用 setFamilies()（复数）设置字体族列表，与 Fluent getFont() 一致；
+        4. 先更新 qconfig.fontFamilies 再遍历控件，确保后续新建控件也使用新字体；
+        5. 不使用 unpolish/polish —— 它会触发 Fluent 样式引擎重新应用自身字体，
+           覆盖刚设好的用户字体；仅用 update() 触发重绘即可。
+        """
         settings = self._load_settings()
         family = settings.get("font_family", None)
+        size = settings.get("font_size", None)
+        if not family and not size:
+            return
+
+        # 1. 先同步 qfluentwidgets 字体族配置（影响后续新建的 Fluent 控件）
         if family:
-            font = QApplication.font()
-            font.setFamily(family)
-            QApplication.setFont(font)
+            setFontFamilies([family], save=False)
+
+        # 2. 构造目标字体 —— 使用 pixelSize + families，与 Fluent getFont() 保持一致
+        #    用户字号以 point 为单位（10~20），转换为 pixel：px = pt * 4 / 3
+        app_font = QFont()
+        if family:
+            app_font.setFamilies([family])
+        else:
+            # 未设置字体族时沿用当前应用字体的族
+            app_font.setFamilies(QApplication.font().families())
+        if size:
+            pixel_size = max(12, int(int(size) * 4 / 3))
+        else:
+            # 未设置字号时沿用当前应用字体的 pixelSize（默认 14px ≈ 10.5pt）
+            cur_px = QApplication.font().pixelSize()
+            pixel_size = cur_px if cur_px > 0 else 14
+        app_font.setPixelSize(pixel_size)
+
+        # 3. 设置为应用程序默认字体（影响后续新建的标准 Qt 控件）
+        QApplication.setFont(app_font)
+
+        # 4. 遍历所有顶级窗口及子控件，逐一设置字体
+        #    （覆盖 Fluent 控件构造时的显式字体）
+        for window in QApplication.topLevelWidgets():
+            if not isinstance(window, QWidget):
+                continue
+            self._set_widget_font_recursive(window, app_font)
+            window.update()
+
+    def _set_widget_font_recursive(self, widget, app_font):
+        """为窗口内所有控件统一设置用户字体（含日志区/终端区）。
+
+        注意：不调用 unpolish/polish，避免触发 Fluent 样式引擎重置字体。
+        仅通过 setFont() + update() 即可完成字体切换。
+        """
+        widget.setFont(app_font)
+        for child in widget.findChildren(QWidget):
+            child.setFont(app_font)
+            child.update()
 
     @staticmethod
     def _get_theme_mode(settings):
@@ -3710,6 +3764,8 @@ class MainWindow(QMainWindow):
             self.style().polish(self)
             for w in self.findChildren(QWidget):
                 w.update()
+            # 主题切换后重新应用用户字体（Fluent 引擎可能覆盖）
+            self._apply_global_font()
             return
 
         # 补充 QSS：仅覆盖非 Fluent 的标准 Qt 控件
@@ -3792,12 +3848,13 @@ class MainWindow(QMainWindow):
         }
 
         /* ===== 日志输出区域（终端风格） ===== */
+        /* 注意：不在此处指定 font-family/font-size，
+           字体由 _apply_global_font() 统一通过 widget.setFont() 控制，
+           避免 QSS 覆盖用户自选字体 */
         QPlainTextEdit#show_log {
             background-color: #0D0D0D;
             color: #B0BEC5;
             border: none;
-            font-family: 'Consolas', 'Courier New', monospace;
-            font-size: 10pt;
             selection-background-color: #00BCD4;
             selection-color: #FFFFFF;
         }
@@ -3988,6 +4045,8 @@ class MainWindow(QMainWindow):
         }
         """
         self.setStyleSheet(stylesheet)
+        # 主题切换后重新应用用户字体（Fluent 引擎可能覆盖）
+        self._apply_global_font()
 
     # ==================== 系统主题监听（跟随系统模式） ====================
 
@@ -4096,6 +4155,31 @@ def main():
     QApplication.styleHints().setColorScheme(
         Qt.ColorScheme.Dark if _is_dark else Qt.ColorScheme.Light)
     
+    # 【关键】在创建窗口/控件之前应用用户自定义字体，
+    # 使 Fluent 控件构造时 getFont() 即可取到正确的字体族
+    try:
+        _fam = _settings.get("font_family")
+        _sz = _settings.get("font_size")
+        if _fam or _sz:
+            # 先更新 qconfig，确保 Fluent getFont() 构造时读到新字体族
+            if _fam:
+                setFontFamilies([_fam], save=False)
+            # 构造字体：使用 pixelSize + families，与 Fluent getFont() 保持一致
+            _app_font = QFont()
+            if _fam:
+                _app_font.setFamilies([_fam])
+            else:
+                _app_font.setFamilies(app.font().families())
+            if _sz:
+                _px = max(12, int(int(_sz) * 4 / 3))
+            else:
+                _cur_px = app.font().pixelSize()
+                _px = _cur_px if _cur_px > 0 else 14
+            _app_font.setPixelSize(_px)
+            app.setFont(_app_font)
+    except Exception:
+        pass
+
     # 创建并显示主窗口
     window = MainWindow()
     window.show()
