@@ -1967,6 +1967,9 @@ class MainWindow(QMainWindow):
         self.ui.date.setDate(QDate(today.year, today.month, today.day-1))
         self.ui.date.blockSignals(False)
         
+        # 预热日历面板，避免首次点击弹出延迟
+        self._warmup_calendar_view()
+        
         # 初始化程序下拉框 - 扫描 snooker/bin64 目录下的 SnookerTracking*.exe
         self._load_exe_list()
         # 恢复上次选择的程序
@@ -2138,6 +2141,44 @@ class MainWindow(QMainWindow):
             self.ui.id_list.addItem(code)
         
         self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
+
+    def _warmup_calendar_view(self):
+        """预热日历面板：缓存 CalendarView 实例并复用，
+        避免每次点击都重新创建（原实现每次 new 一个导致 0.5s+ 延迟）"""
+        try:
+            from qfluentwidgets.components.date_time.calendar_view import CalendarView
+            from PySide6.QtCore import QPoint
+
+            picker = self.ui.date
+            # 创建缓存实例（关闭时不销毁，以便复用）
+            cached_view = CalendarView(self.window())
+            cached_view.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            cached_view.hide()
+
+            def _fast_show_calendar_view():
+                import warnings
+                cached_view.setResetEnabled(picker.isRestEnabled())
+                # 重新连接信号（先断开旧连接防止重复）
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    cached_view.resetted.disconnect()
+                    cached_view.dateChanged.disconnect()
+                cached_view.resetted.connect(picker.reset)
+                cached_view.dateChanged.connect(picker._onDateChanged)
+
+                if picker.date.isValid():
+                    cached_view.setDate(picker.date)
+
+                x = int(picker.width() / 2 - cached_view.sizeHint().width() / 2)
+                y = picker.height()
+                cached_view.exec(picker.mapToGlobal(QPoint(x, y)))
+
+            # 替换原始方法
+            picker._showCalendarView = _fast_show_calendar_view
+            # 保存引用防止 GC
+            picker._cached_calendar_view = cached_view
+        except Exception:
+            pass
 
     def _get_selected_date_str(self):
         """获取日期选择器中的日期，格式如 2026-07-05"""
