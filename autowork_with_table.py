@@ -310,8 +310,9 @@ class Ui_MainWindow(object):
         self.p2p_ssh_user.setText("newbv")
         self.p2p_ssh_pass = QLineEdit(self.p2p_panel)
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
-        self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.p2p_ssh_pass.setText("Xqsjnbv155")
+        self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.p2p_ssh_pass.setPlaceholderText("请输入密码")
 
         self.p2p_ssh_form = QFormLayout()
         self.p2p_ssh_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)

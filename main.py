@@ -106,6 +106,7 @@ class SFTPListWorker(QThread):
         self.remote_path = remote_path
 
     def run(self):
+        sftp = None
         try:
             sftp = paramiko.SFTPClient.from_transport(self.transport)
             entries = []
@@ -123,10 +124,15 @@ class SFTPListWorker(QThread):
                     'name': name, 'is_dir': is_dir,
                     'size': size, 'mtime': mtime, 'perm': perm
                 })
-            sftp.close()
             self.result.emit(self.remote_path, entries)
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
 
 
 class SFTPOperationWorker(QThread):
@@ -1959,12 +1965,11 @@ class MainWindow(QMainWindow):
         # 初始化日志控件智能自动滚动
         self._init_log_auto_scroll()
         
-        # 设置默认日期为当前日期，日减一 （使用 Python datetime 避免 QDate 年份异常）
-        from datetime import date as py_date
+        # 设置默认日期为昨天（addDays 自动处理跨月/跨年）
         from PySide6.QtCore import QDate
-        today = py_date.today()
+        yesterday = QDate.currentDate().addDays(-1)
         self.ui.date.blockSignals(True)
-        self.ui.date.setDate(QDate(today.year, today.month, today.day-1))
+        self.ui.date.setDate(yesterday)
         self.ui.date.blockSignals(False)
         
         # 预热日历面板，避免首次点击弹出延迟
@@ -2187,7 +2192,12 @@ class MainWindow(QMainWindow):
         return date_str
 
     def _load_videos_for_device(self, device_code):
-        """根据设备代码和选中日期加载日志文件到 loacl_video_list（第二列）"""
+        """根据设备代码和选中日期加载日志文件到 loacl_video_list（第二列）
+        
+        查找路径：
+        1. videos/{device_code}/{date_str}/ 下的 *.txt, *.log（原有逻辑）
+        2. videos/{device_code}/ 根目录下文件名以 YYYYMMDD_ 开头的 *.txt, *.log（新增）
+        """
         import glob
         
         videos_dir = self.videos_dir
@@ -2204,14 +2214,32 @@ class MainWindow(QMainWindow):
         # 清空第二列
         self.ui.loacl_video_list.clear()
         
-        if not os.path.exists(date_dir):
-            self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir})")
+        log_files = []
+        
+        # 路径1：日期子目录下的 txt 和 log 文件
+        if os.path.exists(date_dir):
+            log_files += glob.glob(os.path.join(date_dir, '*.txt'))
+            log_files += glob.glob(os.path.join(date_dir, '*.log'))
+        
+        # 路径2：设备根目录下文件名以 YYYYMMDD_ 开头的日志文件
+        # 将 2025-11-28 转换为 20251128 前缀进行匹配
+        date_prefix = date_str.replace('-', '')  # e.g. "20251128"
+        for fname in os.listdir(device_dir):
+            fpath = os.path.join(device_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if not (fname.endswith('.txt') or fname.endswith('.log')):
+                continue
+            # 匹配 YYYYMMDD_ 前缀
+            if fname.startswith(date_prefix + '_'):
+                # 避免与日期子目录中已找到的文件重复（按文件名去重）
+                if not any(os.path.basename(p) == fname for p in log_files):
+                    log_files.append(fpath)
+        
+        if not log_files:
+            self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir} 及设备根目录)")
             self._show_info_bar(f"{device_code} 下未找到 {date_str} 的日志", "warning")
             return
-        
-        # 查找日期目录下的 txt 和 log 文件
-        log_files = glob.glob(os.path.join(date_dir, '*.txt'))
-        log_files += glob.glob(os.path.join(date_dir, '*.log'))
         
         for log_path in sorted(log_files):
             # 只显示文件名，如 20260705_131009.log
@@ -2484,9 +2512,14 @@ class MainWindow(QMainWindow):
             return
         device_code = self.ui.id_list.currentItem().text()
         
-        # 拼接完整路径：设备目录/日期/文件名
+        # 拼接完整路径：优先从日期子目录查找，找不到则尝试设备根目录
         date_str = self._get_selected_date_str()
         full_log_path = os.path.join(self.videos_dir, device_code, date_str, log_filename)
+        if not os.path.exists(full_log_path):
+            # 日志文件可能直接放在设备根目录下（YYYYMMDD_HHMMSS 命名）
+            alt_path = os.path.join(self.videos_dir, device_code, log_filename)
+            if os.path.exists(alt_path):
+                full_log_path = alt_path
         
         # 读取日志文件内容并显示在第三列
         try:
@@ -2735,7 +2768,17 @@ class MainWindow(QMainWindow):
         
         log_filename = self.ui.loacl_video_list.currentItem().text()
         video_name = os.path.splitext(log_filename)[0] + '.mp4'
-        video_path = os.path.join(self.videos_dir, "videos", video_name).replace(os.sep, '/')
+        # 视频查找路径：优先 videos/videos/，其次 videos/{device_code}/
+        video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
+        device_code = self.ui.id_list.currentItem().text()
+        video_path_device = os.path.join(self.videos_dir, device_code, video_name)
+        if os.path.exists(video_path_primary):
+            video_path = video_path_primary.replace(os.sep, '/')
+        elif os.path.exists(video_path_device):
+            video_path = video_path_device.replace(os.sep, '/')
+        else:
+            # 都不存在时保持原有默认路径（videos/videos/）
+            video_path = video_path_primary.replace(os.sep, '/')
         self.current_video = video_path
         
         # 根据单选按钮模式计算实际起始帧
@@ -2868,8 +2911,15 @@ class MainWindow(QMainWindow):
                 self._append_log("[警告] 暂停进程失败")
 
     @staticmethod
-    def _win_suspend_process(pid):
-        """Windows API: 挂起指定进程的所有线程"""
+    def _win_set_process_threads(pid, thread_action):
+        """Windows API: 对指定进程的所有线程执行操作（挂起/恢复）
+
+        参数:
+            pid: 目标进程 ID
+            thread_action: 对每个线程句柄调用的函数（_SuspendThread 或 _ResumeThread）
+        返回:
+            bool: 操作是否成功
+        """
         PROCESS_SUSPEND_RESUME = 0x0800
         THREAD_SUSPEND_RESUME = 0x0002
         TH32CS_SNAPTHREAD = 0x00000004
@@ -2899,7 +2949,7 @@ class MainWindow(QMainWindow):
                     if te.th32OwnerProcessID == pid:
                         h_thread = _OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
                         if h_thread:
-                            _SuspendThread(h_thread)
+                            thread_action(h_thread)
                             _CloseHandle(h_thread)
                     if not _Thread32Next(snap, ctypes.byref(te)):
                         break
@@ -2909,45 +2959,14 @@ class MainWindow(QMainWindow):
             _CloseHandle(h_process)
 
     @staticmethod
+    def _win_suspend_process(pid):
+        """Windows API: 挂起指定进程的所有线程"""
+        return MainWindow._win_set_process_threads(pid, _SuspendThread)
+
+    @staticmethod
     def _win_resume_process(pid):
         """Windows API: 恢复指定进程的所有线程"""
-        PROCESS_SUSPEND_RESUME = 0x0800
-        THREAD_SUSPEND_RESUME = 0x0002
-        TH32CS_SNAPTHREAD = 0x00000004
-
-        class THREADENTRY32(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", ctypes.c_ulong),
-                ("cntUsage", ctypes.c_ulong),
-                ("th32ThreadID", ctypes.c_ulong),
-                ("th32OwnerProcessID", ctypes.c_ulong),
-                ("tpBasePri", ctypes.c_long),
-                ("tpDeltaPri", ctypes.c_long),
-                ("dwFlags", ctypes.c_ulong),
-            ]
-
-        h_process = _OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
-        if not h_process:
-            return False
-        try:
-            snap = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
-            if snap == -1:
-                return False
-            te = THREADENTRY32()
-            te.dwSize = ctypes.sizeof(THREADENTRY32)
-            if _Thread32First(snap, ctypes.byref(te)):
-                while True:
-                    if te.th32OwnerProcessID == pid:
-                        h_thread = _OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
-                        if h_thread:
-                            _ResumeThread(h_thread)
-                            _CloseHandle(h_thread)
-                    if not _Thread32Next(snap, ctypes.byref(te)):
-                        break
-            _CloseHandle(snap)
-            return True
-        finally:
-            _CloseHandle(h_process)
+        return MainWindow._win_set_process_threads(pid, _ResumeThread)
 
     # ==================== 右键菜单 ====================
 
@@ -3030,6 +3049,14 @@ class MainWindow(QMainWindow):
 
     def _init_p2p_panel(self):
         """初始化远程面板状态，从已有的 frpc_xtcp.toml 恢复 visitor 列表"""
+        # 从 settings.json 恢复 SSH 凭据（不再硬编码在 UI 文件中）
+        settings = self._load_settings()
+        ssh_user = settings.get("ssh_user", "")
+        ssh_pass = settings.get("ssh_pass", "")
+        if ssh_user:
+            self.ui.p2p_ssh_user.setText(ssh_user)
+        if ssh_pass:
+            self.ui.p2p_ssh_pass.setText(ssh_pass)
         self._load_visitors_from_toml()
         self._refresh_p2p_list()
         # 初始化表单 bindPort 为随机值
@@ -3252,6 +3279,7 @@ class MainWindow(QMainWindow):
             self._append_log("[TCP] 请输入主机地址")
             return
         port = self.ui.p2p_ssh_port.value()
+        self._save_ssh_credentials()
         self._tcp_worker = TCPWorker(
             host, port,
             self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
@@ -3399,6 +3427,18 @@ class MainWindow(QMainWindow):
                 pass
             self._ssh_terminal_window = None
 
+    def _save_ssh_credentials(self):
+        """将当前 SSH 账号/密码保存到 settings.json，下次启动时自动恢复"""
+        username = self.ui.p2p_ssh_user.text().strip()
+        password = self.ui.p2p_ssh_pass.text()
+        data = {}
+        if username:
+            data["ssh_user"] = username
+        if password:
+            data["ssh_pass"] = password
+        if data:
+            self._save_settings(data)
+
     def _on_sftp_btn_clicked(self):
         """打开 SFTP 文件管理窗口"""
         if not PARAMIKO_AVAILABLE:
@@ -3429,6 +3469,7 @@ class MainWindow(QMainWindow):
         if not host:
             self._append_log("[SFTP] 主机地址不能为空")
             return
+        self._save_ssh_credentials()
         self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
         self._sftp_window = SFTPWindow(
             host, port, username, password,
@@ -3465,6 +3506,7 @@ class MainWindow(QMainWindow):
         if not host:
             self._append_log("[SSH] 主机地址不能为空")
             return
+        self._save_ssh_credentials()
         self._append_log(f"[SSH] 打开终端: {host}:{port}")
         self._ssh_terminal_window = SSHTerminalWindow(
             host, port, username, password,
