@@ -3916,7 +3916,30 @@ class MainWindow(QMainWindow):
             Qt.ColorScheme.Dark if is_dark else Qt.ColorScheme.Light)
 
         if not is_dark:
-            self.setStyleSheet("")
+            # 浅色主题：Fluent 引擎接管大部分控件样式，
+            # 但 QSplitter handle 和分割线在默认浅色下几乎不可见，需补充最小 QSS
+            light_stylesheet = """
+            /* ===== 分割器（浅色主题） ===== */
+            QSplitter::handle {
+                background-color: #D6D6D6;
+            }
+            QSplitter::handle:horizontal {
+                width: 2px;
+            }
+            QSplitter::handle:vertical {
+                height: 2px;
+            }
+            QSplitter::handle:hover {
+                background-color: #00BCD4;
+            }
+
+            /* ===== 工具栏分割线（浅色主题） ===== */
+            QFrame#toolbar_separator {
+                color: #C8C8C8;
+                margin: 4px 2px;
+            }
+            """
+            self.setStyleSheet(light_stylesheet)
             # 强制刷新所有控件样式，防止从深色切回时 Fluent 控件文字颜色残留
             self.style().unpolish(self)
             self.style().polish(self)
