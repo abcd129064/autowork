@@ -8,12 +8,33 @@ name = "snk_163vip2"
 type = "xtcp"
 serverName = "snk_163vip2"
 secretKey = "abc123"
-bindPort = 53158
+bindPort = 19836
 
 [[visitors]]
-name = "snk_12901"
+name = "snk_4005"
 type = "xtcp"
-serverName = "snk_12901"
+serverName = "snk_4005"
 secretKey = "abc123"
-bindPort = 39254
+bindPort = 32863
+
+[[visitors]]
+name = "snk_4001"
+type = "xtcp"
+serverName = "snk_4001"
+secretKey = "abc123"
+bindPort = 34474
+
+[[visitors]]
+name = "snk_4002"
+type = "xtcp"
+serverName = "snk_4002"
+secretKey = "abc123"
+bindPort = 53143
+
+[[visitors]]
+name = "snk_4003"
+type = "xtcp"
+serverName = "snk_4003"
+secretKey = "abc123"
+bindPort = 13823
 

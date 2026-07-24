@@ -76,7 +76,7 @@ class TCPWorker(QThread):
             self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self._client.connect(self.host, port=self.port,
                                  username=self.username, password=self.password,
-                                 timeout=10)
+                                 timeout=10, banner_timeout=15, auth_timeout=15)
             stdin, stdout, stderr = self._client.exec_command("hostname && whoami")
             result = stdout.read().decode('utf-8', errors='ignore').strip()
             self.result_ready.emit(result)
@@ -88,6 +88,11 @@ class TCPWorker(QThread):
 
     def close(self):
         if self._client:
+            try:
+                transport = self._client.get_transport()
+                _safe_close_transport(transport)
+            except Exception:
+                pass
             try:
                 self._client.close()
             except Exception:
@@ -177,6 +182,7 @@ class SFTPOperationWorker(QThread):
         try:
             host, port, username, password = self.conn_params
             transport = paramiko.Transport((host, port))
+            transport.banner_timeout = 15
             transport.connect(username=username, password=password)
             sftp = paramiko.SFTPClient.from_transport(transport)
             if self.operation == 'upload':
@@ -194,6 +200,17 @@ class SFTPOperationWorker(QThread):
             elif self.operation == 'mkdir':
                 sftp.mkdir(self.remote_path)
                 self.success.emit(f"已创建目录: {os.path.basename(self.remote_path)}")
+            elif self.operation == 'rename':
+                # local_path 复用为 old_path
+                try:
+                    sftp.posix_rename(self.local_path, self.remote_path)
+                except (AttributeError, IOError):
+                    sftp.rename(self.local_path, self.remote_path)
+                self.success.emit(f"已重命名: {os.path.basename(self.local_path)} -> {os.path.basename(self.remote_path)}")
+            elif self.operation == 'create_file':
+                with sftp.open(self.remote_path, 'w') as f:
+                    pass
+                self.success.emit(f"已创建文件: {os.path.basename(self.remote_path)}")
         except InterruptedError:
             pass  # 用户取消，不报错
         except Exception as e:
@@ -204,11 +221,7 @@ class SFTPOperationWorker(QThread):
                     sftp.close()
                 except Exception:
                     pass
-            if transport:
-                try:
-                    transport.close()
-                except Exception:
-                    pass
+            _safe_close_transport(transport)
 
 
 class SFTPDirTransferWorker(QThread):
@@ -251,6 +264,7 @@ class SFTPDirTransferWorker(QThread):
         try:
             host, port, username, password = self.conn_params
             transport = paramiko.Transport((host, port))
+            transport.banner_timeout = 15
             transport.connect(username=username, password=password)
             sftp = paramiko.SFTPClient.from_transport(transport)
             if self.operation == 'upload_dir':
@@ -267,11 +281,7 @@ class SFTPDirTransferWorker(QThread):
                     sftp.close()
                 except Exception:
                     pass
-            if transport:
-                try:
-                    transport.close()
-                except Exception:
-                    pass
+            _safe_close_transport(transport)
 
     def _upload_dir(self, sftp):
         """递归上传本地目录到远程"""
@@ -415,6 +425,22 @@ _RETRY_MAX = 5
 _RETRY_DELAY = 2  # 秒
 
 
+def _safe_close_transport(transport, join_timeout=3):
+    """安全关闭 paramiko Transport：先 close 再 join 等待后台线程退出。
+    避免线程仍在读 socket 时 socket 被销毁导致 C 层崩溃 (0xC0000409)。
+    """
+    if transport is None:
+        return
+    try:
+        transport.close()
+    except Exception:
+        pass
+    try:
+        transport.join(join_timeout)
+    except Exception:
+        pass
+
+
 class SFTPConnectWorker(QThread):
     """异步建立 paramiko.Transport 连接的工作线程（含自动重试）"""
     connected = Signal(object)   # 成功时发射 transport 对象
@@ -426,15 +452,26 @@ class SFTPConnectWorker(QThread):
         self.port = port
         self.username = username
         self.password = password
+        self._abort = False
+
+    def abort(self):
+        """请求中止重试循环"""
+        self._abort = True
 
     def run(self):
         for attempt in range(1, _RETRY_MAX + 1):
+            if self._abort:
+                return
+            transport = None
             try:
                 transport = paramiko.Transport((self.host, self.port))
+                transport.banner_timeout = 15
                 transport.connect(username=self.username, password=self.password)
                 self.connected.emit(transport)
                 return  # 成功，立即退出
             except Exception as e:
+                # 安全关闭 transport（close+join 等待后台线程退出，避免 C 层崩溃）
+                _safe_close_transport(transport)
                 err_msg = str(e)
                 # 仅网络就绪类错误才重试，认证失败等直接报错
                 if any(kw in err_msg for kw in _RETRYABLE_KEYWORDS) and attempt < _RETRY_MAX:
@@ -442,6 +479,8 @@ class SFTPConnectWorker(QThread):
                     time.sleep(_RETRY_DELAY)
                     continue
                 # 不可重试的错误 或 已达最大重试次数
+                if self._abort:
+                    return
                 if attempt > 1:
                     self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {err_msg}')
                 else:
@@ -689,6 +728,8 @@ class SFTPWindow(QDialog):
         if self._connect_worker is not None:
             w = self._connect_worker
             self._connect_worker = None
+            if hasattr(w, 'abort'):
+                w.abort()
             if w.isRunning():
                 w.finished.connect(w.deleteLater)
             else:
@@ -733,7 +774,11 @@ class SFTPWindow(QDialog):
 
     # ------------------------------------------------------------------ 远程列目录
     def _list_remote(self, path):
-        if self._transport is None:
+        if self._transport is None or not self._transport.is_active():
+            if self._transport is not None:
+                self._lbl_status.setText('连接已断开')
+                self._log('[SFTP] Transport 已失效，请重新打开窗口')
+                self._transport = None
             return
         # 防重入：如果正在列目录，暂存目标路径，等当前操作完成后自动执行
         if self._listing:
@@ -1454,24 +1499,23 @@ class SFTPWindow(QDialog):
             self._log(f'[SFTP] 重命名失败: {e}')
 
     def _ctx_rename_remote(self, entry):
-        """重命名远程文件/文件夹"""
+        """重命名远程文件/文件夹（通过独立 Transport 的 Worker 执行，避免与列目录并发）"""
         new_name, ok = QInputDialog.getText(self, '重命名', '新名称:', text=entry['name'])
         if not ok or not new_name or new_name == entry['name']:
             return
         old_path = self._remote_path.rstrip('/') + '/' + entry['name']
         new_path = self._remote_path.rstrip('/') + '/' + new_name
         self._log(f'[SFTP] 重命名: {old_path} -> {new_path}')
-        try:
-            sftp = paramiko.SFTPClient.from_transport(self._transport)
-            try:
-                sftp.posix_rename(old_path, new_path)
-            except (AttributeError, IOError):
-                sftp.rename(old_path, new_path)
-            sftp.close()
-            self._log(f'[SFTP] 已重命名: {entry["name"]} -> {new_name}')
-            self._list_remote(self._remote_path)
-        except Exception as e:
-            self._log(f'[SFTP] 重命名失败: {e}')
+        # local_path 复用为 old_path
+        worker = SFTPOperationWorker(self._conn_params, 'rename', old_path, new_path)
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.start()
 
     def _ctx_delete_local(self, data):
         """删除本地文件/文件夹（带确认）"""
@@ -1549,27 +1593,21 @@ class SFTPWindow(QDialog):
             self._log(f'[SFTP] 创建目录失败: {e}')
 
     def _ctx_new_file_remote(self):
-        """在远程当前目录新建空文件"""
+        """在远程当前目录新建空文件（通过独立 Transport 的 Worker 执行）"""
         name, ok = QInputDialog.getText(self, '新建文件', '文件名:')
         if not ok or not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
         self._log(f'[SFTP] 创建远程文件: {remote_path}')
-        sftp = None
-        try:
-            sftp = paramiko.SFTPClient.from_transport(self._transport)
-            with sftp.open(remote_path, 'w') as f:
-                pass
-            self._log(f'[SFTP] 已创建远程文件: {remote_path}')
-            self._list_remote(self._remote_path)
-        except Exception as e:
-            self._log(f'[SFTP] 创建远程文件失败: {e}')
-        finally:
-            if sftp:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
+        worker = SFTPOperationWorker(self._conn_params, 'create_file', '', remote_path)
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.start()
 
     def _ctx_new_dir_remote(self):
         """在远程当前目录新建文件夹"""
@@ -1590,19 +1628,32 @@ class SFTPWindow(QDialog):
 
     # ------------------------------------------------------------------ 关闭
     def closeEvent(self, event):
-        # 清理异步连接 worker
+        # 1. 先标记 transport 无效，阻止新操作
+        transport = self._transport
+        self._transport = None
+        # 2. 清理异步连接 worker（中止重试）
         self._cleanup_connect_worker()
-        # 清理列目录 worker
-        self._cleanup_list_worker()
-        # 清理所有传输 worker
+        # 3. 停止所有传输 worker
         for tid in list(self._transfer_workers.keys()):
+            info = self._transfer_workers.get(tid)
+            if info and hasattr(info['worker'], 'stop'):
+                info['worker'].stop()
             self._safe_delete_transfer_worker(tid)
-        if self._transport:
+        # 4. 等待列目录 worker 结束（短超时，避免主线程永久阻塞）
+        if self._list_worker is not None:
+            w = self._list_worker
+            self._list_worker = None
             try:
-                self._transport.close()
+                w.result.disconnect()
+                w.error.disconnect()
             except Exception:
                 pass
-            self._transport = None
+            if w.isRunning():
+                w.wait(2000)
+            w.deleteLater()
+        # 5. 最后关闭 transport（close+join 等待后台线程退出）
+        _safe_close_transport(transport)
+        if transport:
             self._log('[SFTP] 已断开连接')
         super().closeEvent(event)
 
@@ -1618,25 +1669,46 @@ class SSHConnectWorker(QThread):
         self.port = port
         self.username = username
         self.password = password
+        self._abort = False
+
+    def abort(self):
+        """请求中止重试循环"""
+        self._abort = True
 
     def run(self):
         for attempt in range(1, _RETRY_MAX + 1):
+            if self._abort:
+                return
+            client = None
             try:
                 client = paramiko.SSHClient()
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 client.connect(
                     self.host, port=self.port,
                     username=self.username, password=self.password,
-                    timeout=10
+                    timeout=10, banner_timeout=15, auth_timeout=15
                 )
                 self.connected.emit(client)
                 return  # 成功，立即退出
             except Exception as e:
+                # 安全关闭 transport 后台线程（close+join），避免线程残留导致 C 层崩溃
+                if client:
+                    try:
+                        transport = client.get_transport()
+                        _safe_close_transport(transport)
+                    except Exception:
+                        pass
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
                 err_msg = str(e)
                 if any(kw in err_msg for kw in _RETRYABLE_KEYWORDS) and attempt < _RETRY_MAX:
                     print(f'[SSH] 连接失败 ({err_msg})，正在重试 ({attempt}/{_RETRY_MAX})...')
                     time.sleep(_RETRY_DELAY)
                     continue
+                if self._abort:
+                    return
                 if attempt > 1:
                     self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {err_msg}')
                 else:
@@ -1657,7 +1729,7 @@ class SSHExecWorker(QThread):
 
     def run(self):
         try:
-            stdin, stdout, stderr = self._client.exec_command(self._command)
+            stdin, stdout, stderr = self._client.exec_command(self._command, timeout=30)
             out = stdout.read().decode('utf-8', errors='ignore')
             err = stderr.read().decode('utf-8', errors='ignore')
             if out:
@@ -1761,6 +1833,8 @@ class SSHTerminalWindow(QDialog):
         if self._connect_worker is not None:
             w = self._connect_worker
             self._connect_worker = None
+            if hasattr(w, 'abort'):
+                w.abort()
             if w.isRunning():
                 w.finished.connect(w.deleteLater)
             else:
@@ -1824,18 +1898,16 @@ class SSHTerminalWindow(QDialog):
 
     def _open_in_xshell(self):
         """使用 Xshell 打开 SSH 连接"""
-        if not shutil.which('xshell'):
+        xshell_path = shutil.which('xshell') or shutil.which('Xshell')
+        if not xshell_path:
             msg = "[提示] 未找到 Xshell，请确认已安装并加入系统 PATH"
             self._log(msg)
             QMessageBox.warning(self, "未找到 Xshell", msg)
             return
         xshell_url = f'ssh://{self._username}:{self._password}@{self._host}:{self._port}'
         try:
-            subprocess.Popen(
-                f'xshell -url "{xshell_url}"',
-                shell=True,
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
+            # Xshell 是 GUI 程序，无需 shell=True 和 CREATE_NEW_CONSOLE
+            subprocess.Popen([xshell_path, '-url', xshell_url])
         except Exception as e:
             self._log(f"[提示] 启动 Xshell 失败: {e}")
             QMessageBox.warning(self, "打开失败", f"无法启动 Xshell：{e}")
@@ -1851,8 +1923,13 @@ class SSHTerminalWindow(QDialog):
                 w.deleteLater()
         # 清理 connect worker
         self._cleanup_connect_worker()
-        # 关闭 SSH client
+        # 关闭 SSH client（close+join 等待 transport 后台线程退出，避免 C 层崩溃）
         if self._client:
+            try:
+                transport = self._client.get_transport()
+                _safe_close_transport(transport)
+            except Exception:
+                pass
             try:
                 self._client.close()
             except Exception:
@@ -3297,10 +3374,8 @@ class MainWindow(QMainWindow):
             return
         worker = self._tcp_worker
         self._tcp_worker = None
-        # 非阻塞清理：运行中的 worker 等 finished 后再 deleteLater
+        # 非阻塞清理：不跨线程调用 close()，等线程自然结束后 deleteLater
         if worker.isRunning():
-            worker.close()
-            worker.quit()
             worker.finished.connect(worker.deleteLater)
         else:
             worker.deleteLater()
