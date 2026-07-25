@@ -39,6 +39,19 @@ except ImportError:
 
 # ==================== 统一连接日志（落盘，用于崩溃/异常事后定位） ====================
 
+def _get_app_dir():
+    """获取应用程序所在目录（兼容 PyInstaller 打包）。
+
+    - 开发环境：main.py 所在目录
+    - 打包环境（onedir）：sys.executable（.exe）所在目录，而非 __file__
+      指向的 _internal/ 解压目录。确保 settings.json、logs/ 等资源
+      统一落在 .exe 旁边，与用户预期一致。
+    供模块级对象（如 ConnLogger）与 MainWindow 共用，避免路径解析分叉。"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 class ConnLogger:
     """SSH/SFTP 连接统一文件日志。
     - 每条日志立即 flush 落盘，即使进程崩溃也不丢失关键信息
@@ -53,7 +66,7 @@ class ConnLogger:
         self._file = None
         self._path = ''
         try:
-            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+            log_dir = os.path.join(_get_app_dir(), 'logs')
             os.makedirs(log_dir, exist_ok=True)
             self._path = os.path.join(log_dir, 'autowork_conn.log')
             self._file = open(self._path, 'a', encoding='utf-8')
@@ -2486,10 +2499,7 @@ class MainWindow(FluentWindowBase):
     @staticmethod
     def _get_app_dir():
         """获取应用程序所在目录（兼容 PyInstaller 打包后的路径）"""
-        if getattr(sys, 'frozen', False):
-            # PyInstaller 打包后，sys.executable 指向 .exe 文件
-            return os.path.dirname(sys.executable)
-        return os.path.dirname(os.path.abspath(__file__))
+        return _get_app_dir()
 
     def _get_settings_path(self):
         """获取配置文件路径，与 main.py / .exe 同目录"""
