@@ -10,6 +10,8 @@ import ctypes
 import stat
 import time
 import threading
+import socket
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
@@ -19,7 +21,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog,
     QPushButton, QProgressDialog, QPlainTextEdit, QSplitter, QProgressBar,
     QTableWidget, QTableWidgetItem, QMenuBar)
-from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal, qInstallMessageHandler, QtMsgType
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
 from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
                             RoundMenu, Action, MenuAnimationType, FluentIcon,
@@ -33,6 +35,131 @@ try:
     PARAMIKO_AVAILABLE = True
 except ImportError:
     PARAMIKO_AVAILABLE = False
+
+
+# ==================== 统一连接日志（落盘，用于崩溃/异常事后定位） ====================
+
+class ConnLogger:
+    """SSH/SFTP 连接统一文件日志。
+    - 每条日志立即 flush 落盘，即使进程崩溃也不丢失关键信息
+    - 格式：时间戳 | 级别 | [操作类型] host:port user=xxx | 错误类型 | 详情
+    - 安全：禁止记录密码等敏感信息（仅记录用户名）
+    - 日志文件：程序目录/logs/autowork_conn.log
+    """
+    _MAX_BYTES = 2 * 1024 * 1024  # 单文件超过 2MB 时轮转
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._file = None
+        self._path = ''
+        try:
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+            os.makedirs(log_dir, exist_ok=True)
+            self._path = os.path.join(log_dir, 'autowork_conn.log')
+            self._file = open(self._path, 'a', encoding='utf-8')
+        except Exception:
+            self._file = None  # 日志不可用时静默降级，绝不影响主功能
+
+    def _write(self, level, op, msg, host=None, port=None, user=None,
+               error_type=None, detail=None):
+        if self._file is None:
+            return
+        with self._lock:
+            try:
+                # 简单轮转：文件过大时截断重建
+                if self._file.tell() > self._MAX_BYTES:
+                    self._file.close()
+                    self._file = open(self._path, 'w', encoding='utf-8')
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                target = ''
+                if host:
+                    target = f' {host}:{port}'
+                    if user:
+                        target += f' user={user}'
+                etype = f' | {error_type}' if error_type else ''
+                line = f'{ts} | {level} | [{op}]{target}{etype} | {msg}'
+                if detail:
+                    # 多行详情（调用栈）缩进对齐，便于阅读
+                    line += '\n' + '\n'.join(f'    {dl}' for dl in str(detail).rstrip().splitlines())
+                self._file.write(line + '\n')
+                self._file.flush()
+            except Exception:
+                pass  # 日志写入失败绝不影响主流程
+
+    def info(self, op, msg, **kw):
+        self._write('INFO', op, msg, **kw)
+
+    def error(self, op, msg, **kw):
+        self._write('ERROR', op, msg, **kw)
+
+    def exception(self, op, msg, exc=None, **kw):
+        """记录异常详情（含调用栈），用于严重错误落盘"""
+        detail = None
+        if exc is not None:
+            detail = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        self._write('ERROR', op, msg,
+                    error_type=type(exc).__name__ if exc else 'Exception',
+                    detail=detail, **kw)
+
+
+conn_logger = ConnLogger()
+
+
+def _qt_message_handler(msg_type, context, message):
+    """Qt 消息处理器：将 Qt 内部 warning/critical/fatal 消息落盘。
+
+    qFatal 在调用 abort()（即 0xC0000409 C 层崩溃）之前会先调用本处理器，
+    因此崩溃的真正原因（如 "QThread: Destroyed while thread is still running"）
+    能被记录下来，用于事后定位。本处理器自身绝不能抛异常。"""
+    try:
+        _levels = {
+            QtMsgType.QtDebugMsg: 'DEBUG',
+            QtMsgType.QtInfoMsg: 'INFO',
+            QtMsgType.QtWarningMsg: 'WARN',
+            QtMsgType.QtCriticalMsg: 'CRITICAL',
+            QtMsgType.QtFatalMsg: 'FATAL',
+        }
+        level = _levels.get(msg_type, 'UNKNOWN')
+        # 仅落盘 warning 及以上级别，避免 debug 信息淹没日志
+        if msg_type in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+            loc = ''
+            try:
+                if context is not None and getattr(context, 'file', None):
+                    loc = f' ({context.file}:{context.line})'
+            except Exception:
+                loc = ''
+            conn_logger._write('QT-' + level, 'QT', f'{message}{loc}')
+    except Exception:
+        pass
+
+
+def _classify_conn_error(e):
+    """将网络异常转换为用户可读的中文提示（不含敏感信息）"""
+    msg = str(e)
+    if isinstance(e, socket.timeout) or 'timed out' in msg or 'timeout' in msg.lower():
+        return '连接超时，请检查目标地址/端口是否可达'
+    if isinstance(e, ConnectionRefusedError) or 'refused' in msg.lower():
+        return '连接被拒绝，目标端口未开放或服务未启动'
+    if isinstance(e, OSError) and getattr(e, 'winerror', None) == 10065:
+        return '主机不可达，请检查网络连通性'
+    if isinstance(e, OSError) and getattr(e, 'winerror', None) == 10060:
+        return '连接超时（主机无响应），请检查防火墙或网络'
+    if PARAMIKO_AVAILABLE and isinstance(e, paramiko.AuthenticationException):
+        return '认证失败，请检查用户名和密码'
+    if PARAMIKO_AVAILABLE and isinstance(e, paramiko.BadHostKeyException):
+        return '主机密钥不匹配，可能遭受中间人攻击或服务器已重装'
+    if PARAMIKO_AVAILABLE and isinstance(e, paramiko.SSHException):
+        return f'SSH 协议错误: {msg}'
+    if isinstance(e, EOFError):
+        return '远端意外关闭连接（SSH 服务可能未就绪）'
+    if isinstance(e, InterruptedError):
+        return '操作已取消'
+    if isinstance(e, PermissionError):
+        return f'权限不足: {msg}'
+    if isinstance(e, FileNotFoundError):
+        return f'文件或路径不存在: {msg}'
+    return msg
+
 
 # Windows DLL 函数声明
 if sys.platform == 'win32':
@@ -119,6 +246,53 @@ if sys.platform == 'win32':
     DM_PELSHEIGHT = 0x100000
     DM_DISPLAYFREQUENCY = 0x400000
 
+    # ===== 窗口嵌入 API（用于远程桌面 mstsc.exe 窗口嵌入） =====
+    _user32.SetParent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _user32.SetParent.restype = ctypes.c_void_p
+    _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+    _user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+    _user32.SetWindowLongW.restype = ctypes.c_long
+    _user32.MoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_bool]
+    _user32.MoveWindow.restype = ctypes.c_bool
+    _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    _user32.IsWindowVisible.restype = ctypes.c_bool
+    _user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    _user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+    _user32.EnumWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _user32.EnumWindows.restype = ctypes.c_bool
+    _user32.IsWindow.argtypes = [ctypes.c_void_p]
+    _user32.IsWindow.restype = ctypes.c_bool
+
+    GWL_STYLE = -16
+    WS_CAPTION = 0x00C00000
+    WS_THICKFRAME = 0x00040000
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _find_window_by_pid(pid):
+        """按进程 PID 查找第一个可见的顶层窗口句柄（用于嵌入 mstsc 窗口）"""
+        found = []
+
+        def _enum_cb(hwnd, _lparam):
+            # 回调运行在 C 栈上，任何异常都必须就地吞掉，
+            # 否则异常穿透 EnumWindows 会导致进程崩溃
+            try:
+                wpid = ctypes.c_ulong()
+                _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                if wpid.value == pid and _user32.IsWindowVisible(hwnd):
+                    found.append(hwnd)
+                    return False  # 停止枚举
+            except Exception:
+                pass
+            return True
+
+        try:
+            _user32.EnumWindows(_WNDENUMPROC(_enum_cb), 0)
+        except Exception:
+            pass
+        return found[0] if found else None
+
 
 def _natural_sort_key(s):
     """自然排序 key：将字符串中的连续数字段按数值比较，非数字段按字符串比较。
@@ -143,6 +317,7 @@ class TCPWorker(QThread):
 
     def run(self):
         try:
+            conn_logger.info('SSH', '开始连接', host=self.host, port=self.port, user=self.username)
             self._client = paramiko.SSHClient()
             self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self._client.connect(self.host, port=self.port,
@@ -150,9 +325,12 @@ class TCPWorker(QThread):
                                  timeout=10, banner_timeout=15, auth_timeout=15)
             stdin, stdout, stderr = self._client.exec_command("hostname && whoami")
             result = stdout.read().decode('utf-8', errors='ignore').strip()
+            conn_logger.info('SSH', f'连接验证成功: {result}', host=self.host, port=self.port, user=self.username)
             self.result_ready.emit(result)
         except Exception as e:
-            self.error.emit(str(e))
+            conn_logger.exception('SSH', f'连接失败: {_classify_conn_error(e)}', exc=e,
+                                  host=self.host, port=self.port, user=self.username)
+            self.error.emit(_classify_conn_error(e))
         finally:
             # run() 结束后立即关闭 paramiko client，避免资源泄漏
             self.close()
@@ -184,6 +362,12 @@ class SFTPListWorker(QThread):
     def run(self):
         sftp = None
         try:
+            # 为共享 transport 的 socket 设置超时，防止连接假死后列目录无限阻塞
+            try:
+                if hasattr(self.transport, 'sock') and self.transport.sock:
+                    self.transport.sock.settimeout(30)
+            except Exception:
+                pass
             sftp = paramiko.SFTPClient.from_transport(self.transport)
             entries = []
             for name in sftp.listdir(self.remote_path):
@@ -202,7 +386,8 @@ class SFTPListWorker(QThread):
                 })
             self.result.emit(self.remote_path, entries)
         except Exception as e:
-            self.error.emit(str(e))
+            conn_logger.exception('SFTP', f'列目录失败: {self.remote_path}', exc=e)
+            self.error.emit(_classify_conn_error(e))
         finally:
             if sftp:
                 try:
@@ -254,6 +439,7 @@ class SFTPOperationWorker(QThread):
             host, port, username, password = self.conn_params
             transport = paramiko.Transport((host, port))
             transport.banner_timeout = 15
+            transport.auth_timeout = 15
             transport.connect(username=username, password=password)
             sftp = paramiko.SFTPClient.from_transport(transport)
             if self.operation == 'upload':
@@ -283,9 +469,13 @@ class SFTPOperationWorker(QThread):
                     pass
                 self.success.emit(f"已创建文件: {os.path.basename(self.remote_path)}")
         except InterruptedError:
-            pass  # 用户取消，不报错
+            conn_logger.info('SFTP', f'操作取消: {self.operation}',
+                             host=self.conn_params[0], port=self.conn_params[1])
         except Exception as e:
-            self.error.emit(str(e))
+            conn_logger.exception('SFTP', f'操作失败 [{self.operation}]', exc=e,
+                                  host=self.conn_params[0], port=self.conn_params[1],
+                                  user=self.conn_params[2])
+            self.error.emit(_classify_conn_error(e))
         finally:
             if sftp:
                 try:
@@ -336,6 +526,7 @@ class SFTPDirTransferWorker(QThread):
             host, port, username, password = self.conn_params
             transport = paramiko.Transport((host, port))
             transport.banner_timeout = 15
+            transport.auth_timeout = 15
             transport.connect(username=username, password=password)
             sftp = paramiko.SFTPClient.from_transport(transport)
             if self.operation == 'upload_dir':
@@ -343,9 +534,13 @@ class SFTPDirTransferWorker(QThread):
             elif self.operation == 'download_dir':
                 self._download_dir(sftp)
         except InterruptedError:
-            pass  # 用户取消，不报错
+            conn_logger.info('SFTP', f'目录传输取消: {self.dir_name}',
+                             host=self.conn_params[0], port=self.conn_params[1])
         except Exception as e:
-            self.error.emit(f"目录传输失败 [{self.dir_name}]: {e}")
+            conn_logger.exception('SFTP', f'目录传输失败 [{self.dir_name}]', exc=e,
+                                  host=self.conn_params[0], port=self.conn_params[1],
+                                  user=self.conn_params[2])
+            self.error.emit(f"目录传输失败 [{self.dir_name}]: {_classify_conn_error(e)}")
         finally:
             if sftp:
                 try:
@@ -532,30 +727,40 @@ class SFTPConnectWorker(QThread):
     def run(self):
         for attempt in range(1, _RETRY_MAX + 1):
             if self._abort:
+                conn_logger.info('SFTP', '连接已中止（用户取消）',
+                                 host=self.host, port=self.port, user=self.username)
                 return
             transport = None
             try:
                 transport = paramiko.Transport((self.host, self.port))
                 transport.banner_timeout = 15
+                transport.auth_timeout = 15
                 transport.connect(username=self.username, password=self.password)
+                conn_logger.info('SFTP', f'连接成功 (第{attempt}次尝试)',
+                                 host=self.host, port=self.port, user=self.username)
                 self.connected.emit(transport)
                 return  # 成功，立即退出
             except Exception as e:
                 # 安全关闭 transport（close+join 等待后台线程退出，避免 C 层崩溃）
                 _safe_close_transport(transport)
                 err_msg = str(e)
+                friendly = _classify_conn_error(e)
                 # 仅网络就绪类错误才重试，认证失败等直接报错
                 if any(kw in err_msg for kw in _RETRYABLE_KEYWORDS) and attempt < _RETRY_MAX:
-                    print(f'[SFTP] 连接失败 ({err_msg})，正在重试 ({attempt}/{_RETRY_MAX})...')
+                    conn_logger.error('SFTP', f'连接失败，将重试 ({attempt}/{_RETRY_MAX}): {err_msg}',
+                                      host=self.host, port=self.port, user=self.username,
+                                      error_type=type(e).__name__)
                     time.sleep(_RETRY_DELAY)
                     continue
                 # 不可重试的错误 或 已达最大重试次数
                 if self._abort:
                     return
+                conn_logger.exception('SFTP', f'连接最终失败 (已尝试{attempt}次): {friendly}', exc=e,
+                                      host=self.host, port=self.port, user=self.username)
                 if attempt > 1:
-                    self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {err_msg}')
+                    self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {friendly}')
                 else:
-                    self.error.emit(err_msg)
+                    self.error.emit(friendly)
                 return
 
 
@@ -1710,18 +1915,9 @@ class SFTPWindow(QDialog):
             if info and hasattr(info['worker'], 'stop'):
                 info['worker'].stop()
             self._safe_delete_transfer_worker(tid)
-        # 4. 等待列目录 worker 结束（短超时，避免主线程永久阻塞）
-        if self._list_worker is not None:
-            w = self._list_worker
-            self._list_worker = None
-            try:
-                w.result.disconnect()
-                w.error.disconnect()
-            except Exception:
-                pass
-            if w.isRunning():
-                w.wait(2000)
-            w.deleteLater()
+        # 4. 清理列目录 worker（复用非阻塞清理逻辑：running 时交 finished→deleteLater，
+        #    禁止主线程 wait() 后对可能仍在运行的线程 deleteLater，避免 qFatal）
+        self._cleanup_list_worker()
         # 5. 最后关闭 transport（close+join 等待后台线程退出）
         _safe_close_transport(transport)
         if transport:
@@ -1749,9 +1945,13 @@ class SSHConnectWorker(QThread):
     def run(self):
         for attempt in range(1, _RETRY_MAX + 1):
             if self._abort:
+                conn_logger.info('SSH', '连接已中止（用户取消）',
+                                 host=self.host, port=self.port, user=self.username)
                 return
             client = None
             try:
+                conn_logger.info('SSH', f'尝试连接 ({attempt}/{_RETRY_MAX})',
+                                 host=self.host, port=self.port, user=self.username)
                 client = paramiko.SSHClient()
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 client.connect(
@@ -1759,6 +1959,8 @@ class SSHConnectWorker(QThread):
                     username=self.username, password=self.password,
                     timeout=10, banner_timeout=15, auth_timeout=15
                 )
+                conn_logger.info('SSH', f'连接成功 (第{attempt}次尝试)',
+                                 host=self.host, port=self.port, user=self.username)
                 self.connected.emit(client)
                 return  # 成功，立即退出
             except Exception as e:
@@ -1774,16 +1976,21 @@ class SSHConnectWorker(QThread):
                     except Exception:
                         pass
                 err_msg = str(e)
+                friendly = _classify_conn_error(e)
                 if any(kw in err_msg for kw in _RETRYABLE_KEYWORDS) and attempt < _RETRY_MAX:
-                    print(f'[SSH] 连接失败 ({err_msg})，正在重试 ({attempt}/{_RETRY_MAX})...')
+                    conn_logger.error('SSH', f'连接失败，将重试 ({attempt}/{_RETRY_MAX}): {err_msg}',
+                                      host=self.host, port=self.port, user=self.username,
+                                      error_type=type(e).__name__)
                     time.sleep(_RETRY_DELAY)
                     continue
                 if self._abort:
                     return
+                conn_logger.exception('SSH', f'连接最终失败 (已尝试{attempt}次): {friendly}', exc=e,
+                                      host=self.host, port=self.port, user=self.username)
                 if attempt > 1:
-                    self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {err_msg}')
+                    self.error.emit(f'连接失败（已重试{_RETRY_MAX}次）: {friendly}')
                 else:
-                    self.error.emit(err_msg)
+                    self.error.emit(friendly)
                 return
 
 class SSHExecWorker(QThread):
@@ -1801,6 +2008,11 @@ class SSHExecWorker(QThread):
     def run(self):
         try:
             stdin, stdout, stderr = self._client.exec_command(self._command, timeout=30)
+            # 通道级超时兜底：连接假死时 read() 不会无限阻塞（120s 无数据视为异常）
+            try:
+                stdout.channel.settimeout(120)
+            except Exception:
+                pass
             out = stdout.read().decode('utf-8', errors='ignore')
             err = stderr.read().decode('utf-8', errors='ignore')
             if out:
@@ -1808,7 +2020,8 @@ class SSHExecWorker(QThread):
             if err:
                 self.error.emit(err)
         except Exception as e:
-            self.error.emit(str(e))
+            conn_logger.exception('SSH-EXEC', f'命令执行失败: {self._command[:100]}', exc=e)
+            self.error.emit(f'[命令执行异常] {_classify_conn_error(e)}')
         finally:
             self.done.emit()
 
@@ -1945,7 +2158,10 @@ class SSHTerminalWindow(QDialog):
         w = self._exec_worker
         self._exec_worker = None
         if w is not None:
-            w.deleteLater()
+            if w.isRunning():
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
         self._append_output("---\n")
         self._input.setFocus()
 
@@ -1965,7 +2181,12 @@ class SSHTerminalWindow(QDialog):
             )
             return
         cmd = f'ssh -p {self._port} {self._username}@{self._host}'
-        subprocess.Popen(['cmd', '/k', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        try:
+            subprocess.Popen(['cmd', '/k', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        except Exception as e:
+            conn_logger.exception('SSH', '启动 CMD 终端失败', exc=e,
+                                  host=self._host, port=self._port)
+            QMessageBox.warning(self, "启动失败", f"无法打开 CMD 终端：{e}")
 
     def _open_in_xshell(self):
         """使用 Xshell 打开 SSH 连接"""
@@ -2008,6 +2229,206 @@ class SSHTerminalWindow(QDialog):
             self._client = None
         super().closeEvent(event)
 
+
+class RDPWindow(QDialog):
+    """远程桌面窗口（嵌入系统 mstsc.exe 窗口到应用内）
+
+    实现思路：
+    1. 通过 cmdkey 静默注册 RDP 凭据（免密码弹窗）
+    2. 启动 mstsc.exe /v:host:port
+    3. 轮询查找 mstsc 窗口句柄，SetParent 嵌入容器控件
+    4. 去除标题栏样式、同步窗口尺寸、监控进程生命周期
+    """
+
+    def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
+        super().__init__(parent)
+        title = f"远程桌面 - {server_name} ({host}:{port})" if server_name else f"远程桌面 - {host}:{port}"
+        self.setWindowTitle(title)
+        self.resize(1280, 800)
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._log = log_callback or (lambda msg: None)
+        self._mstsc_proc = None
+        self._embedded_hwnd = None
+        self._find_timer = None
+        self._watch_timer = None
+        self._init_ui()
+        QTimer.singleShot(100, self._start_rdp)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        # 嵌入容器（必须是原生窗口才能接受 SetParent）
+        self._container = QWidget()
+        self._container.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        layout.addWidget(self._container, 1)
+        # 底部状态栏
+        self._status_label = QLabel('正在启动远程桌面...')
+        self._status_label.setFixedHeight(24)
+        self._status_label.setStyleSheet('padding: 2px 8px;')
+        layout.addWidget(self._status_label)
+
+    # ------------------------------------------------------------------ 连接流程
+    def _start_rdp(self):
+        """注册凭据并启动 mstsc.exe"""
+        # 1. cmdkey 静默注册凭据（mstsc 自动登录，不弹密码框）
+        #    用参数列表形式而非 shell=True，避免密码中的特殊字符破坏命令
+        try:
+            subprocess.run(
+                ['cmdkey', f'/generic:TERMSRV/{self._host}',
+                 f'/user:{self._username}', f'/pass:{self._password}'],
+                creationflags=0x08000000, timeout=5,
+                capture_output=True
+            )
+        except Exception as e:
+            self._log(f"[RDP] 注册凭据失败: {e}")
+        # 2. 启动 mstsc
+        try:
+            self._mstsc_proc = subprocess.Popen(['mstsc', f'/v:{self._host}:{self._port}'])
+        except Exception as e:
+            conn_logger.exception('RDP', '启动 mstsc.exe 失败', exc=e,
+                                  host=self._host, port=self._port)
+            self._status_label.setText(f'启动远程桌面失败: {e}')
+            return
+        conn_logger.info('RDP', f'已启动 mstsc: {self._host}:{self._port}',
+                         host=self._host, port=self._port, user=self._username)
+        self._status_label.setText(f'正在连接 {self._host}:{self._port} ...')
+        # 3. 轮询查找 mstsc 窗口（15 秒超时）
+        self._find_deadline = time.time() + 15
+        self._find_timer = QTimer(self)
+        self._find_timer.timeout.connect(self._try_find_window)
+        self._find_timer.start(300)
+
+    def _try_find_window(self):
+        """轮询查找 mstsc 窗口句柄，找到后嵌入"""
+        if self._mstsc_proc is None or self._mstsc_proc.poll() is not None:
+            self._find_timer.stop()
+            self._status_label.setText('远程桌面进程已退出（连接失败或被取消）')
+            self._log('[RDP] mstsc 进程在嵌入前已退出')
+            return
+        hwnd = _find_window_by_pid(self._mstsc_proc.pid)
+        if hwnd:
+            self._find_timer.stop()
+            self._embed_window(hwnd)
+        elif time.time() > self._find_deadline:
+            self._find_timer.stop()
+            self._status_label.setText('未找到远程桌面窗口（超时）')
+            self._log('[RDP] 查找 mstsc 窗口超时')
+
+    def _embed_window(self, hwnd):
+        """将 mstsc 窗口嵌入容器"""
+        try:
+            if not _user32.IsWindow(hwnd):
+                self._status_label.setText('远程桌面窗口已失效')
+                return
+            self._embedded_hwnd = hwnd
+            container_hwnd = int(self._container.winId())
+            # 去除标题栏和边框，远程桌面画面填满容器
+            style = _user32.GetWindowLongW(hwnd, GWL_STYLE)
+            style &= ~(WS_CAPTION | WS_THICKFRAME)
+            _user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+            # 嵌入
+            _user32.SetParent(hwnd, container_hwnd)
+            self._resize_embedded()
+            self._status_label.setText(f'已连接: {self._host}:{self._port}')
+            self._log(f"[RDP] 远程桌面已嵌入: {self._host}:{self._port}")
+            # 删除临时凭据（安全：不在凭据库中留存密码）
+            self._remove_cred()
+            # 监控进程生命周期：用户在远程桌面内断开时更新状态
+            self._watch_timer = QTimer(self)
+            self._watch_timer.timeout.connect(self._check_alive)
+            self._watch_timer.start(2000)
+        except Exception as e:
+            conn_logger.exception('RDP', '嵌入窗口失败', exc=e,
+                                  host=self._host, port=self._port)
+            self._embedded_hwnd = None
+            self._status_label.setText(f'嵌入窗口失败: {e}')
+
+    def _check_alive(self):
+        """检测 mstsc 进程/窗口是否存活（会话断开或连接失败时更新状态）"""
+        try:
+            if self._mstsc_proc is not None and self._mstsc_proc.poll() is not None:
+                self._watch_timer.stop()
+                self._embedded_hwnd = None
+                self._status_label.setText('远程桌面已断开')
+                self._log('[RDP] 远程桌面会话已结束')
+            elif self._embedded_hwnd and not _user32.IsWindow(self._embedded_hwnd):
+                # 进程仍活着但窗口已被 mstsc 自行销毁（连接失败弹错误对话框等），
+                # 必须清空悬空句柄，防止后续 MoveWindow 操作到已被复用的句柄
+                self._embedded_hwnd = None
+                self._status_label.setText('远程桌面连接失败（窗口已关闭）')
+                self._log('[RDP] mstsc 窗口已销毁（连接失败或弹出错误提示）')
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ 尺寸同步
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_embedded()
+
+    def _resize_embedded(self):
+        if not self._embedded_hwnd:
+            return
+        try:
+            # 窗口可能已被 mstsc 销毁（连接失败等），先校验句柄有效性
+            if not _user32.IsWindow(self._embedded_hwnd):
+                self._embedded_hwnd = None
+                return
+            if self._container.width() > 0 and self._container.height() > 0:
+                _user32.MoveWindow(self._embedded_hwnd, 0, 0,
+                                   self._container.width(), self._container.height(), True)
+        except Exception:
+            self._embedded_hwnd = None
+
+    # ------------------------------------------------------------------ 清理
+    def _remove_cred(self):
+        """删除 cmdkey 注册的临时 RDP 凭据"""
+        try:
+            subprocess.run(['cmdkey', f'/delete:TERMSRV/{self._host}'],
+                           creationflags=0x08000000,
+                           timeout=5, capture_output=True)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        try:
+            if self._find_timer is not None and self._find_timer.isActive():
+                self._find_timer.stop()
+            if self._watch_timer is not None and self._watch_timer.isActive():
+                self._watch_timer.stop()
+            hwnd = self._embedded_hwnd
+            self._embedded_hwnd = None
+            # 1. 先把嵌入窗口从容器摘除（还原为桌面顶层窗口），
+            #    避免随后 Qt 销毁容器 HWND 时跨进程级联销毁 mstsc 窗口导致崩溃
+            if hwnd:
+                try:
+                    if _user32.IsWindow(hwnd):
+                        _user32.SetParent(hwnd, None)
+                except Exception:
+                    pass
+            # 2. 终止 mstsc 进程（关闭窗口 = 结束会话），
+            #    同步等待进程真正退出后再放行 Qt 销毁容器
+            if self._mstsc_proc is not None and self._mstsc_proc.poll() is None:
+                try:
+                    self._mstsc_proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    self._mstsc_proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        self._mstsc_proc.kill()
+                        self._mstsc_proc.wait(timeout=2)
+                    except Exception:
+                        pass
+            self._mstsc_proc = None
+            self._remove_cred()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 class MainWindow(FluentWindowBase):
@@ -2201,6 +2622,7 @@ class MainWindow(FluentWindowBase):
         self._tcp_worker = None
         self._sftp_window = None
         self._ssh_terminal_window = None
+        self._rdp_window = None
         self._init_p2p_panel()
 
     # ==================== 日志智能自动滚动 ====================
@@ -2489,6 +2911,7 @@ class MainWindow(FluentWindowBase):
         self.ui.p2p_mode_combo.currentIndexChanged.connect(self._on_p2p_mode_changed)
         self.ui.p2p_sftp_btn.clicked.connect(self._on_sftp_btn_clicked)
         self.ui.p2p_ssh_terminal_btn.clicked.connect(self._on_ssh_terminal_btn_clicked)
+        self.ui.p2p_rdp_btn.clicked.connect(self._on_rdp_btn_clicked)
 
         # 启动三端按钮
         self.ui.start_three_btn.clicked.connect(self.on_start_three_clicked)
@@ -3543,7 +3966,11 @@ class MainWindow(FluentWindowBase):
         self.ui.p2p_panel.setVisible(checked)
 
     def _on_p2p_add(self):
-        """添加新的 visitor 配置"""
+        """添加按钮：XTCP 模式添加 visitor，TCP 模式保存当前服务器(ip:port)"""
+        if self.ui.p2p_mode_combo.currentText() == "TCP":
+            self._on_tcp_server_add()
+            return
+        # --- XTCP：添加 visitor ---
         server_name = self.ui.p2p_form_server.text().strip()
         if not server_name:
             self._append_log("[远程] 请填写 serverName")
@@ -3571,7 +3998,11 @@ class MainWindow(FluentWindowBase):
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
 
     def _on_p2p_delete(self):
-        """删除当前选中的 visitor"""
+        """删除按钮：XTCP 模式删除 visitor，TCP 模式删除选中的服务器"""
+        if self.ui.p2p_mode_combo.currentText() == "TCP":
+            self._on_tcp_server_delete()
+            return
+        # --- XTCP：删除 visitor ---
         row = self.ui.p2p_visitor_list.currentRow()
         if 0 <= row < len(self._p2p_visitors):
             self._p2p_visitors.pop(row)
@@ -3579,7 +4010,11 @@ class MainWindow(FluentWindowBase):
             self._refresh_p2p_list()
 
     def _on_p2p_visitor_selected(self, row):
-        """选择 visitor 列表项时加载到表单"""
+        """列表选择：XTCP 模式加载 visitor 到表单，TCP 模式填充 host/port"""
+        if self.ui.p2p_mode_combo.currentText() == "TCP":
+            self._on_tcp_server_selected(row)
+            return
+        # --- XTCP：加载 visitor ---
         # 先保存当前表单
         self._save_current_form()
         if 0 <= row < len(self._p2p_visitors):
@@ -3613,6 +4048,84 @@ class MainWindow(FluentWindowBase):
         """visitor 配置仅存于内存，连接时写入 TOML，不持久化到 settings.json"""
         pass
 
+    # ------------------------------------------------------------------ TCP 保存的服务器
+    def _load_tcp_servers(self):
+        """从 settings.json 读取保存的服务器列表（ip:port 字符串）"""
+        settings = self._load_settings()
+        servers = settings.get("tcp_servers", [])
+        if not isinstance(servers, list):
+            return []
+        return [s for s in servers if isinstance(s, str) and s.strip()]
+
+    def _save_tcp_servers(self, servers):
+        """持久化保存的服务器列表到 settings.json"""
+        self._save_settings({"tcp_servers": servers})
+
+    def _refresh_tcp_server_list(self):
+        """刷新保存的服务器列表显示（TCP 模式复用 p2p_visitor_list）"""
+        self.ui.p2p_visitor_list.clear()
+        for s in self._load_tcp_servers():
+            self.ui.p2p_visitor_list.addItem(s)
+
+    def _reload_p2p_list_for_mode(self):
+        """按当前模式重载列表内容（XTCP=visitors，TCP=保存的服务器）"""
+        mode = self.ui.p2p_mode_combo.currentText()
+        self.ui.p2p_visitor_list.blockSignals(True)
+        if mode == "TCP":
+            self._p2p_current_index = -1
+            self._refresh_tcp_server_list()
+        else:
+            # XTCP：保留之前选中的 visitor
+            saved = self._p2p_current_index
+            self._refresh_p2p_list()
+            if 0 <= saved < self.ui.p2p_visitor_list.count():
+                self.ui.p2p_visitor_list.setCurrentRow(saved)
+        self.ui.p2p_visitor_list.blockSignals(False)
+
+    def _on_tcp_server_add(self):
+        """TCP 模式：把当前 host:port 保存到服务器列表"""
+        host = self.ui.p2p_ssh_host.text().strip()
+        if not host:
+            self._append_log("[远程] 请先填写主机地址 host")
+            return
+        entry = f"{host}:{self.ui.p2p_ssh_port.value()}"
+        servers = self._load_tcp_servers()
+        if entry in servers:
+            self._append_log(f"[远程] 服务器 {entry} 已在列表中")
+            return
+        servers.append(entry)
+        self._save_tcp_servers(servers)
+        self._refresh_tcp_server_list()
+        self.ui.p2p_visitor_list.setCurrentRow(len(servers) - 1)
+        self._append_log(f"[远程] 已保存服务器: {entry}")
+
+    def _on_tcp_server_delete(self):
+        """TCP 模式：删除选中的服务器"""
+        row = self.ui.p2p_visitor_list.currentRow()
+        servers = self._load_tcp_servers()
+        if 0 <= row < len(servers):
+            removed = servers.pop(row)
+            self._save_tcp_servers(servers)
+            self._refresh_tcp_server_list()
+            self._append_log(f"[远程] 已删除服务器: {removed}")
+
+    def _on_tcp_server_selected(self, row):
+        """TCP 模式：选中服务器时填充 host/port"""
+        servers = self._load_tcp_servers()
+        if not (0 <= row < len(servers)):
+            return
+        entry = servers[row]
+        host, _, port_str = entry.rpartition(':')
+        if not host:  # 无冒号，仅主机地址
+            host, port = entry, 22
+        else:
+            try:
+                port = int(port_str)
+            except ValueError:
+                host, port = entry, 22
+        self.ui.p2p_ssh_host.setText(host)
+        self.ui.p2p_ssh_port.setValue(port)
+
     def _on_p2p_connect(self):
         """连接按钮 - 根据当前模式分发连接"""
         mode = self.ui.p2p_mode_combo.currentText()
@@ -3639,21 +4152,28 @@ class MainWindow(FluentWindowBase):
         """根据当前模式显示/隐藏对应表单"""
         mode = self.ui.p2p_mode_combo.currentText()
         is_xtcp = (mode == "XTCP")
-        # XTCP 控件显隐
+        is_tcp = not is_xtcp
+        # 分区标题：XTCP=visitor 列表，TCP=保存的服务器列表
+        self.ui.p2p_server_section_label.setText(
+            "◎ 服务器 / visitors" if is_xtcp else "◎ 保存的服务器")
+        # XTCP 专属表单显隐（visitor 列表与添加/删除按钮两模式共用，始终可见）
         for w in self.ui.p2p_xtcp_widgets:
             w.setVisible(is_xtcp)
         for i in range(self.ui.p2p_xtcp_form.rowCount()):
             lbl = self.ui.p2p_xtcp_form.itemAt(i * 2, QFormLayout.ItemRole.LabelRole)
             if lbl and lbl.widget():
                 lbl.widget().setVisible(is_xtcp)
+        # 连接/断开为 XTCP 专属（TCP 模式由各功能按钮点击时直连，无需统一连接入口）
+        self.ui.p2p_conn_widget.setVisible(is_xtcp)
         # host/port 字段随模式切换显隐（仅第0/1行），账号/密码始终可见
-        is_tcp = not is_xtcp
         for w in self.ui.p2p_ssh_widgets:
             w.setVisible(is_tcp)
         for row_idx in range(2):  # host(行0) 和 port(行1)
             lbl = self.ui.p2p_ssh_form.itemAt(row_idx, QFormLayout.ItemRole.LabelRole)
             if lbl and lbl.widget():
                 lbl.widget().setVisible(is_tcp)
+        # 按模式重载列表内容（XTCP=visitors，TCP=保存的服务器）
+        self._reload_p2p_list_for_mode()
         self._update_p2p_buttons()
 
     def _on_xtcp_connect(self):
@@ -3699,6 +4219,7 @@ class MainWindow(FluentWindowBase):
         proc.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        self.ui.p2p_rdp_btn.setEnabled(False)
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
@@ -3747,6 +4268,7 @@ class MainWindow(FluentWindowBase):
             worker.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        self.ui.p2p_rdp_btn.setEnabled(False)
         # 断开时关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
@@ -3759,20 +4281,30 @@ class MainWindow(FluentWindowBase):
         # 仅在 TCP 真正成功后才启用按钮
         self.ui.p2p_sftp_btn.setEnabled(True)
         self.ui.p2p_ssh_terminal_btn.setEnabled(True)
-        # 线程结束后安全销毁并清空引用
+        self.ui.p2p_rdp_btn.setEnabled(True)
+        # 线程结束后安全销毁并清空引用（running 时交 finished→deleteLater，避免运行中被销毁 qFatal）
         if self._tcp_worker:
-            self._tcp_worker.deleteLater()
+            w = self._tcp_worker
             self._tcp_worker = None
+            if w.isRunning():
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
 
     def _on_tcp_error(self, error):
         """TCP 连接失败回调"""
         self._append_log(f"[TCP] 连接失败: {error}")
         self._show_info_bar(f"网络连接失败: {error}", "error", duration=4000)
         if self._tcp_worker:
-            self._tcp_worker.deleteLater()
-        self._tcp_worker = None
+            w = self._tcp_worker
+            self._tcp_worker = None
+            if w.isRunning():
+                w.finished.connect(w.deleteLater)
+            else:
+                w.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        self.ui.p2p_rdp_btn.setEnabled(False)
         self._update_p2p_buttons()
 
     # frpc 服务器默认配置（settings.json 缺失时自动生成）
@@ -3834,24 +4366,32 @@ class MainWindow(FluentWindowBase):
         # frpc 意外退出时禁用 SFTP/SSH 终端按钮，防止误触
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+        self.ui.p2p_rdp_btn.setEnabled(False)
         # 关闭已打开的 SFTP/SSH 终端窗口
         self._close_p2p_windows()
         self._update_p2p_buttons()
 
     def _update_p2p_buttons(self):
-        """更新连接/断开按钮状态，以及 SFTP/SSH 终端按钮状态"""
+        """更新连接/断开按钮状态，以及 SFTP/SSH 终端/远程桌面按钮状态"""
         mode = self.ui.p2p_mode_combo.currentText()
         if mode == "XTCP":
             running = self._frpc_process is not None
-            # XTCP 模式下，frpc 运行时即可使用 SFTP/SSH 终端（具体连接时再按选中 visitor 的 bindPort 发起）
+            # XTCP 模式下，frpc 运行时即可使用各功能（具体连接时再按选中 visitor 的 bindPort 发起）
             self.ui.p2p_sftp_btn.setEnabled(running)
             self.ui.p2p_ssh_terminal_btn.setEnabled(running)
+            self.ui.p2p_rdp_btn.setEnabled(running)
+            self.ui.p2p_connect_btn.setEnabled(not running)
+            self.ui.p2p_disconnect_btn.setEnabled(running)
         elif mode == "TCP":
-            running = self._tcp_worker is not None
+            # TCP 模式：无需先点“连接”，各功能按钮点击时自行建立连接。
+            # 这样即使端口是 RDP/SFTP/HTTP 等非 SSH 端口，也能直接使用对应功能。
+            self.ui.p2p_sftp_btn.setEnabled(True)
+            self.ui.p2p_ssh_terminal_btn.setEnabled(True)
+            self.ui.p2p_rdp_btn.setEnabled(True)
         else:
-            running = False
-        self.ui.p2p_connect_btn.setEnabled(not running)
-        self.ui.p2p_disconnect_btn.setEnabled(running)
+            self.ui.p2p_sftp_btn.setEnabled(False)
+            self.ui.p2p_ssh_terminal_btn.setEnabled(False)
+            self.ui.p2p_rdp_btn.setEnabled(False)
 
     def _close_p2p_windows(self):
         """关闭已打开的 SFTP 和 SSH 终端窗口，避免连接失效后误操作"""
@@ -3867,6 +4407,12 @@ class MainWindow(FluentWindowBase):
             except Exception:
                 pass
             self._ssh_terminal_window = None
+        if self._rdp_window is not None:
+            try:
+                self._rdp_window.close()
+            except Exception:
+                pass
+            self._rdp_window = None
 
     def _save_ssh_credentials(self):
         """将当前 SSH 账号/密码保存到 settings.json，下次启动时自动恢复"""
@@ -3911,6 +4457,14 @@ class MainWindow(FluentWindowBase):
             self._append_log("[SFTP] 主机地址不能为空")
             return
         self._save_ssh_credentials()
+        # 先关闭已有的文件管理窗口，避免重复点击导致窗口/连接堆积，
+        # 也避免旧窗口引用被直接覆盖后处于无人管理状态
+        if self._sftp_window is not None:
+            try:
+                self._sftp_window.close()
+            except Exception:
+                pass
+            self._sftp_window = None
         self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
         self._sftp_window = SFTPWindow(
             host, port, username, password,
@@ -3948,6 +4502,13 @@ class MainWindow(FluentWindowBase):
             self._append_log("[SSH] 主机地址不能为空")
             return
         self._save_ssh_credentials()
+        # 先关闭已有的 SSH 终端窗口，避免重复点击导致窗口/连接堆积
+        if self._ssh_terminal_window is not None:
+            try:
+                self._ssh_terminal_window.close()
+            except Exception:
+                pass
+            self._ssh_terminal_window = None
         self._append_log(f"[SSH] 打开终端: {host}:{port}")
         self._ssh_terminal_window = SSHTerminalWindow(
             host, port, username, password,
@@ -3955,6 +4516,52 @@ class MainWindow(FluentWindowBase):
             parent=self
         )
         self._ssh_terminal_window.show()
+
+    def _on_rdp_btn_clicked(self):
+        """打开远程桌面窗口（嵌入 mstsc.exe）"""
+        if sys.platform != 'win32':
+            self._append_log("[RDP] 远程桌面仅支持 Windows")
+            return
+        mode = self.ui.p2p_mode_combo.currentText()
+        server_name = ''
+        if mode == "XTCP":
+            if not self._p2p_visitors:
+                self._append_log("[RDP] 请先添加 visitor 配置")
+                return
+            idx = self._p2p_current_index
+            if not (0 <= idx < len(self._p2p_visitors)):
+                self._append_log("[RDP] 请先在列表中选择一个 visitor")
+                return
+            host = "127.0.0.1"
+            port = self._p2p_visitors[idx]["bindPort"]
+            server_name = self._p2p_visitors[idx].get("serverName", "")
+        elif mode == "TCP":
+            host = self.ui.p2p_ssh_host.text().strip()
+            port = self.ui.p2p_ssh_port.value()
+        else:
+            self._append_log("[RDP] 远程桌面仅支持 XTCP/TCP 模式")
+            return
+        username = self.ui.p2p_ssh_user.text()
+        password = self.ui.p2p_ssh_pass.text()
+        if not host:
+            self._append_log("[RDP] 主机地址不能为空")
+            return
+        self._save_ssh_credentials()
+        # 先关闭已有的远程桌面窗口，避免重复点击导致多个 mstsc 进程/窗口堆积
+        if self._rdp_window is not None:
+            try:
+                self._rdp_window.close()
+            except Exception:
+                pass
+            self._rdp_window = None
+        self._append_log(f"[RDP] 打开远程桌面: {server_name or host}:{port}")
+        self._rdp_window = RDPWindow(
+            host, port, username, password,
+            server_name=server_name,
+            log_callback=lambda msg: self._append_log(msg),
+            parent=self
+        )
+        self._rdp_window.show()
 
     # ==================== 快捷键 ====================
 
@@ -4161,7 +4768,7 @@ class MainWindow(FluentWindowBase):
             self,
             "关于",
             "AutoWork - 自动化工作工具\n"
-            "版本: 1.4.0\n\n"
+            "版本: 1.5.6\n\n"
             "用于视频播放、日志管理与数据记录的桌面自动化工具。"
         )
 
@@ -4729,11 +5336,38 @@ class MainWindow(FluentWindowBase):
 
 def main():
     """主函数"""
+    # 全局异常钩子：主线程/后台线程未捕获异常先落盘日志，确保崩溃可追踪
+    def _global_exception_hook(exc_type, exc_value, exc_tb):
+        try:
+            conn_logger._write('FATAL', 'MAIN', '未捕获异常（主线程）',
+                               error_type=exc_type.__name__,
+                               detail=''.join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _thread_exception_hook(args):
+        try:
+            conn_logger._write('FATAL', 'THREAD',
+                               f'未捕获异常（线程 {args.thread.name if args.thread else "?"}）',
+                               error_type=args.exc_type.__name__,
+                               detail=''.join(traceback.format_exception(
+                                   args.exc_type, args.exc_value, args.exc_traceback)))
+        except Exception:
+            pass
+
+    sys.excepthook = _global_exception_hook
+    threading.excepthook = _thread_exception_hook
+
     # 应用 DPI 缩放（必须在 QApplication 创建前设置环境变量）
     settings_path = os.path.join(MainWindow._get_app_dir(), "settings.json")
     MainWindow.apply_dpi_scale(settings_path)
 
     app = QApplication(sys.argv)
+
+    # 安装 Qt 消息处理器：qFatal/critical/warning 落盘，
+    # 使 C 层崩溃（0xC0000409）的根因（qFatal 消息）可被事后追踪
+    qInstallMessageHandler(_qt_message_handler)
     
     # 设置应用程序样式
     app.setStyle("Fusion")

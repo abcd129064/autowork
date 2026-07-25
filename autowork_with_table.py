@@ -252,7 +252,9 @@ class Ui_MainWindow(object):
         p2p_main_layout.addWidget(p2p_header)
 
         # --- 模块1: 服务器/网络 ---
-        p2p_main_layout.addWidget(_make_section_label("◎ 服务器 / visitors"))
+        # 分区标题随连接模式切换文本（XTCP=visitors，TCP=保存的服务器），见 main.py _update_p2p_visibility
+        self.p2p_server_section_label = _make_section_label("◎ 服务器 / visitors")
+        p2p_main_layout.addWidget(self.p2p_server_section_label)
 
         self.p2p_visitor_list = ListWidget(self.p2p_panel)
         self.p2p_visitor_list.setObjectName(u"p2p_visitor_list")
@@ -289,21 +291,25 @@ class Ui_MainWindow(object):
         self.p2p_xtcp_form.addRow("secretKey:", self.p2p_form_key)
         p2p_main_layout.addLayout(self.p2p_xtcp_form)
 
-        # XTCP 专属控件列表
+        # XTCP 专属控件列表（visitor 列表与添加/删除按钮为两种模式共用，不在此列：
+        # TCP 模式下该列表复用为“保存的服务器”，见 main.py _update_p2p_visibility）
         self.p2p_xtcp_widgets = [
-            self.p2p_visitor_list, self.p2p_add_btn, self.p2p_delete_btn,
             self.p2p_form_server, self.p2p_form_port, self.p2p_form_key
         ]
 
-        # 连接/断开按钮
-        p2p_conn_layout = QHBoxLayout()
+        # 连接/断开按钮（XTCP 专属：TCP 模式由各功能按钮点击时直连，无需统一连接入口）
+        # 用容器包裹以便 TCP 模式下整体隐藏，避免留下空白布局间隙
+        self.p2p_conn_widget = QWidget(self.p2p_panel)
+        self.p2p_conn_widget.setObjectName(u"p2p_conn_widget")
+        p2p_conn_layout = QHBoxLayout(self.p2p_conn_widget)
+        p2p_conn_layout.setContentsMargins(0, 0, 0, 0)
         self.p2p_connect_btn = PrimaryPushButton("连接")
         self.p2p_connect_btn.setObjectName(u"p2p_connect_btn")
         self.p2p_disconnect_btn = FluentPushButton("断开")
         self.p2p_disconnect_btn.setObjectName(u"p2p_disconnect_btn")
         p2p_conn_layout.addWidget(self.p2p_connect_btn)
         p2p_conn_layout.addWidget(self.p2p_disconnect_btn)
-        p2p_main_layout.addLayout(p2p_conn_layout)
+        p2p_main_layout.addWidget(self.p2p_conn_widget)
 
         # 分割线
         p2p_main_layout.addWidget(_make_separator())
@@ -372,6 +378,11 @@ class Ui_MainWindow(object):
         self.p2p_ssh_terminal_btn.setObjectName(u"p2p_ssh_terminal_btn")
         self.p2p_ssh_terminal_btn.setEnabled(False)
         p2p_main_layout.addWidget(self.p2p_ssh_terminal_btn)
+
+        self.p2p_rdp_btn = FluentPushButton("远程桌面")
+        self.p2p_rdp_btn.setObjectName(u"p2p_rdp_btn")
+        self.p2p_rdp_btn.setEnabled(False)
+        p2p_main_layout.addWidget(self.p2p_rdp_btn)
 
         # 注意：尾部不再 addStretch()——剩余垂直空间全部由 p2p_visitor_list 吸收
         # （见上方 setStretchFactor），表单/按钮固定贴底，列表随窗口高度自由伸缩
