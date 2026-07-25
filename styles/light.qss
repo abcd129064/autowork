@@ -1,0 +1,33 @@
+/* ===== 分割器（浅色主题） ===== */
+QSplitter::handle {
+    background-color: #D6D6D6;
+}
+QSplitter::handle:horizontal {
+    width: 2px;
+}
+QSplitter::handle:vertical {
+    height: 2px;
+}
+QSplitter::handle:hover {
+    background-color: #00BCD4;
+}
+
+/* ===== 工具栏分割线（浅色主题） ===== */
+QFrame#toolbar_separator {
+    color: #C8C8C8;
+    margin: 4px 2px;
+}
+
+/* ===== 菜单栏紧凑样式（浅色主题） ===== */
+QMenuBar {
+    background: transparent;
+    padding: 1px;
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+QMenuBar::item:selected {
+    background-color: rgba(0, 0, 0, 0.06);
+}

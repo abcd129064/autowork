@@ -19,6 +19,7 @@ a = Analysis(
         ('settings.json', '.'),
         ('autowork_with_table.py', '.'),
         ('p2p.py', '.'),
+        ('styles', 'styles'),
     ],
     hiddenimports=[
         'PySide6.QtWidgets',
