@@ -10,6 +10,7 @@ import ctypes
 import stat
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QWidget, QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
@@ -17,12 +18,13 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QComboBox, QSpinBox, QListView, QAbstractItemView, QFrame, QFormLayout,
     QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog,
     QPushButton, QProgressDialog, QPlainTextEdit, QSplitter, QProgressBar,
-    QTableWidget, QTableWidgetItem)
+    QTableWidget, QTableWidgetItem, QMenuBar)
 from PySide6.QtCore import Slot, QProcess, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QFont, QAction, QActionGroup, QTextCursor
 from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
                             RoundMenu, Action, MenuAnimationType, FluentIcon,
-                            setFontFamilies)
+                            setFontFamilies, FluentTitleBar)
+from qfluentwidgets.window.fluent_window import FluentWindowBase
 from autowork_with_table import Ui_MainWindow
 from p2p import generate_random_port, is_port_in_use
 
@@ -54,6 +56,75 @@ if sys.platform == 'win32':
     _dwm = ctypes.WinDLL('dwmapi')
     _DwmSetWindowAttribute = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong)(
         ('DwmSetWindowAttribute', _dwm))
+
+    # ===== 显示设置 API（用于三端启动前捕获分辨率 / 关闭后恢复） =====
+    _user32 = ctypes.WinDLL('user32')
+
+    class DEVMODE(ctypes.Structure):
+        """Windows DEVMODEW 结构体（220 字节）。
+        字段偏移经本机实测校准：用 256 字节缓冲区调用 EnumDisplaySettingsW，
+        确认 dmBitsPerPel@168 / dmPelsWidth@172 / dmPelsHeight@176 /
+        dmDisplayFlags@180 / dmDisplayFrequency@184。
+        关键点：dmFields 与 dmFormName 之间的 union 区域实际占 24 字节（76-99），
+        而非文档表面的 16 字节，故需显式填充，否则后续字段整体错位 8 字节。"""
+        _fields_ = [
+            ("dmDeviceName", ctypes.c_wchar * 32),    # 0-63
+            ("dmSpecVersion", ctypes.c_ushort),        # 64
+            ("dmDriverVersion", ctypes.c_ushort),      # 66
+            ("dmSize", ctypes.c_ushort),               # 68
+            ("dmDriverExtra", ctypes.c_ushort),        # 70
+            ("dmFields", ctypes.c_ulong),              # 72
+            # union 区域（打印字段组 / 显示字段组），实测占 24 字节（76-99）
+            ("dmOrientation", ctypes.c_short),         # 76
+            ("dmPaperSize", ctypes.c_short),           # 78
+            ("dmPaperLength", ctypes.c_short),         # 80
+            ("dmPaperWidth", ctypes.c_short),          # 82
+            ("dmScale", ctypes.c_short),               # 84
+            ("dmCopies", ctypes.c_short),              # 86
+            ("dmDefaultSource", ctypes.c_short),       # 88
+            ("dmPrintQuality", ctypes.c_short),        # 90
+            ("_union_pad", ctypes.c_byte * 8),         # 92-99 填充至 24 字节
+            ("dmFormName", ctypes.c_wchar * 32),       # 100-163
+            ("dmLogPixels", ctypes.c_ushort),          # 164
+            ("_logpixels_pad", ctypes.c_ushort),       # 166 对齐填充
+            ("dmBitsPerPel", ctypes.c_ulong),          # 168
+            ("dmPelsWidth", ctypes.c_ulong),           # 172
+            ("dmPelsHeight", ctypes.c_ulong),          # 176
+            ("dmDisplayFlags", ctypes.c_ulong),        # 180
+            ("dmDisplayFrequency", ctypes.c_ulong),    # 184
+            ("dmICMMethod", ctypes.c_ulong),           # 188
+            ("dmICMIntent", ctypes.c_ulong),           # 192
+            ("dmMediaType", ctypes.c_ulong),           # 196
+            ("dmDitherType", ctypes.c_ulong),          # 200
+            ("dmReserved1", ctypes.c_ulong),           # 204
+            ("dmReserved2", ctypes.c_ulong),           # 208
+            ("dmPanningWidth", ctypes.c_ulong),        # 212
+            ("dmPanningHeight", ctypes.c_ulong),       # 216
+        ]  # sizeof = 220
+
+    _EnumDisplaySettingsW = ctypes.WINFUNCTYPE(
+        ctypes.c_int, ctypes.c_wchar_p, ctypes.c_ulong, ctypes.POINTER(DEVMODE))(
+        ('EnumDisplaySettingsW', _user32))
+    _ChangeDisplaySettingsW = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.POINTER(DEVMODE), ctypes.c_ulong)(
+        ('ChangeDisplaySettingsW', _user32))
+
+    # 显示设置常量
+    ENUM_CURRENT_SETTINGS = 0xFFFFFFFF   # (DWORD)-1：当前生效的显示模式
+    CDS_UPDATEREGISTRY = 0x1             # 写入注册表（持久化）
+    CDS_FULLSCREEN = 0x4                 # 全屏模式切换
+    DISP_CHANGE_SUCCESSFUL = 0
+    DM_BITSPERPEL = 0x40000
+    DM_PELSWIDTH = 0x80000
+    DM_PELSHEIGHT = 0x100000
+    DM_DISPLAYFREQUENCY = 0x400000
+
+
+def _natural_sort_key(s):
+    """自然排序 key：将字符串中的连续数字段按数值比较，非数字段按字符串比较。
+    例如 "23-10" 排在 "193" 前面（23 < 193），而非字典序的 "193" < "23-10"。"""
+    return [int(part) if part.isdigit() else part
+            for part in re.split(r'(\d+)', s)]
 
 
 class TCPWorker(QThread):
@@ -1939,29 +2010,48 @@ class SSHTerminalWindow(QDialog):
 
 
 
-class MainWindow(QMainWindow):
+class MainWindow(FluentWindowBase):
     def __init__(self):
         super().__init__()
+        # Fluent 风格自定义标题栏（无边框 + Mica 云母背景 + 主题自适应按钮）
+        self.setTitleBar(FluentTitleBar(self))
+        # 压缩标题栏高度：默认 48px → 32px，与菜单栏/工具栏形成紧凑顶部
+        self.titleBar.setFixedHeight(32)
+
+        # 主内容垂直布局：菜单栏 + 中心内容 + 状态栏
+        # （顶部 32px 留给 Fluent 标题栏）
+        self.vBoxLayout = QVBoxLayout()
+        self.vBoxLayout.setContentsMargins(0, 32, 0, 0)
+        self.vBoxLayout.setSpacing(0)
+        self.hBoxLayout.addLayout(self.vBoxLayout)
+        self.hBoxLayout.setStretchFactor(self.vBoxLayout, 1)
+
+        # 构建 UI（centralwidget 挂到 vBoxLayout 内）
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        
-        # 设置窗口标题
+
+        # 设置窗口标题（显示在 Fluent 标题栏上）
         self.setWindowTitle("AutoWork - 自动化工作工具")
-        
-        # 初始化UI
+
+        # 初始化UI（内部创建菜单栏/状态栏控件）
         self.init_ui()
-        
-        # 设置深色标题栏（Windows DWM）
-        self._set_dark_titlebar()
-        
+
+        # 菜单栏插到内容最上方，状态栏追加到最下方
+        self.vBoxLayout.insertWidget(0, self._menubar_widget)
+        self.vBoxLayout.addWidget(self._statusbar_widget)
+
         # 连接信号和槽
         self.connect_signals()
+
+        self.titleBar.raise_()
     
     # 默认路径配置，首次运行时自动写入 settings.json
     DEFAULT_PATHS = {
         "exe_dir": r"C:\Users\shen_zhe\Desktop\snooker\bin64",
         "videos_dir": r"C:\Users\shen_zhe\Desktop\videos",
         "cipher_tool": r"C:\Users\shen_zhe\Desktop\videos\AESBase64CipherTool.exe",
+        "front_exe": r"C:\Users\shen_zhe\Desktop\snooker\win-unpacked\SnookerNewbvMaster.exe",
+        "backend_exe": r"C:\Users\shen_zhe\Desktop\snooker\backend\SnookerServer.exe",
     }
     # 默认快捷键配置
     DEFAULT_SHORTCUTS = {
@@ -2018,6 +2108,8 @@ class MainWindow(QMainWindow):
         self.exe_dir = settings.get("exe_dir", self.DEFAULT_PATHS["exe_dir"])
         self.videos_dir = settings.get("videos_dir", self.DEFAULT_PATHS["videos_dir"])
         self.cipher_tool = settings.get("cipher_tool", self.DEFAULT_PATHS["cipher_tool"])
+        self.front_exe = settings.get("front_exe", self.DEFAULT_PATHS["front_exe"])
+        self.backend_exe = settings.get("backend_exe", self.DEFAULT_PATHS["backend_exe"])
         # 确保首次运行时将默认路径写入 settings.json
         if not os.path.exists(self._get_settings_path()):
             self._save_settings(self.DEFAULT_PATHS)
@@ -2083,6 +2175,10 @@ class MainWindow(QMainWindow):
         
         # 进程挂起状态
         self._process_suspended = False
+
+        # 三端启动切换状态（按钮在“启动三端”/“关闭三端”间切换）
+        self._three_running = False
+        self._three_saved_mode = None  # 启动前捕获的原始分辨率，关闭时恢复
         
         # 初始化状态栏、右键菜单、快捷键、菜单栏
         self._init_statusbar()
@@ -2217,12 +2313,39 @@ class MainWindow(QMainWindow):
             self._append_log(f"[警告] videos 目录下没有找到设备文件夹")
             return
         
-        # 清空并添加设备代码列表
+        # 清空并添加设备代码列表（自然排序：数字段按数值比较）
         self.ui.id_list.clear()
-        for code in sorted(device_codes):
+        for code in sorted(device_codes, key=_natural_sort_key):
             self.ui.id_list.addItem(code)
         
         self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
+
+    # ==================== 设备列表搜索 (Ctrl+F) ====================
+
+    def _on_id_search_shortcut(self):
+        """Ctrl+F：切换设备搜索框的显示/隐藏"""
+        if self.ui.id_search.isVisible():
+            self._hide_id_search()
+        else:
+            self.ui.id_search.show()
+            self.ui.id_search.setFocus()
+
+    def _hide_id_search(self):
+        """隐藏设备搜索框，清空内容并恢复完整设备列表"""
+        self.ui.id_search.blockSignals(True)
+        self.ui.id_search.clear()
+        self.ui.id_search.blockSignals(False)
+        self.ui.id_search.hide()
+        # 恢复所有项可见
+        for i in range(self.ui.id_list.count()):
+            self.ui.id_list.item(i).setHidden(False)
+
+    def _on_id_search_changed(self, text):
+        """实时过滤设备列表：不区分大小写子串匹配，用 setHidden 控制显隐（不重建列表）"""
+        kw = text.strip().lower()
+        for i in range(self.ui.id_list.count()):
+            item = self.ui.id_list.item(i)
+            item.setHidden(bool(kw) and kw not in item.text().lower())
 
     def _warmup_calendar_view(self):
         """预热日历面板：缓存 CalendarView 实例并复用，
@@ -2367,6 +2490,17 @@ class MainWindow(QMainWindow):
         self.ui.p2p_sftp_btn.clicked.connect(self._on_sftp_btn_clicked)
         self.ui.p2p_ssh_terminal_btn.clicked.connect(self._on_ssh_terminal_btn_clicked)
 
+        # 启动三端按钮
+        self.ui.start_three_btn.clicked.connect(self.on_start_three_clicked)
+
+        # 设备列表实时搜索（搜索框控件在 autowork_with_table.py 中创建）
+        self.ui.id_search.textChanged.connect(self._on_id_search_changed)
+        # Ctrl+F 切换设备搜索框显示/隐藏，Esc 隐藏
+        self._id_search_sc = QShortcut(QKeySequence('Ctrl+F'), self)
+        self._id_search_sc.activated.connect(self._on_id_search_shortcut)
+        self._id_search_esc = QShortcut(QKeySequence('Escape'), self)
+        self._id_search_esc.activated.connect(self._hide_id_search)
+
     @Slot()
     def on_flush_clicked(self):
         """刷新按钮点击事件"""
@@ -2483,6 +2617,219 @@ class MainWindow(QMainWindow):
         self.ui.pause_btn.setText("暂停")
         self._update_status_idle()
         
+    @Slot()
+    def on_start_three_clicked(self):
+        """启动三端按钮点击事件 - 在启动三端 / 关闭三端之间切换"""
+        if self._three_running:
+            self._stop_three_programs()
+        else:
+            self._start_three_programs()
+
+    def _start_three_programs(self):
+        """启动三端：捕获分辨率 → 修改 cfg.json → 错峰启动 → 按钮变为“关闭三端”"""
+        # 识别端路径：复用当前 exe_dir + choose_exe 下拉框选中项
+        exe_name = self.ui.choose_exe.currentText()
+        if not exe_name:
+            QMessageBox.warning(self, "警告", "请先在工具栏“程序”下拉框中选择识别端程序！")
+            return
+        tracking_path = os.path.join(self.exe_dir, exe_name)
+
+        # 三端路径列表（启动顺序：识别端 → 后端 → 前端）
+        programs = [
+            ("识别端", tracking_path),
+            ("后端", self.backend_exe),
+            ("前端", self.front_exe),
+        ]
+
+        # 启动前逐一检查路径是否存在
+        missing = [(name, path) for name, path in programs if not os.path.exists(path)]
+        if missing:
+            detail = "\n".join(f"  • {name}: {path}" for name, path in missing)
+            QMessageBox.warning(self, "程序缺失", f"以下程序路径不存在，无法启动：\n{detail}")
+            return
+
+        # 1. 捕获当前主屏幕分辨率（后端启动后会强制 1080p，关闭时恢复此分辨率）
+        self._three_saved_mode = self._capture_current_resolution()
+        if self._three_saved_mode:
+            _, (w, h, freq, bits) = self._three_saved_mode
+            self._append_log(f"[启动三端] 已捕获当前分辨率: {w}x{h} @ {freq}Hz, {bits}bit（关闭时将自动恢复）")
+
+        # 2. 修改 cfg.json：skip_ready_check true → false
+        self._set_skip_ready_check(False)
+
+        # 3. 标记运行中，按钮切换为“关闭三端”
+        self._three_running = True
+        self.ui.start_three_btn.setText("关闭三端")
+
+        # 4. 依次错峰启动三个进程（每个间隔 3 秒），避免同时启动造成资源竞争。
+        #    使用 QTimer.singleShot 而非 time.sleep，防止阻塞 UI 主线程。
+        interval_ms = 3000
+        attr_names = ["_tracking_process", "_backend_process", "_front_process"]
+        self._append_log("\n[启动三端] 将依次启动（每个间隔 3 秒）：")
+        for i, ((name, path), attr) in enumerate(zip(programs, attr_names)):
+            delay = i * interval_ms
+            # lambda 用默认参数固化循环变量，避免闭包延迟绑定问题
+            QTimer.singleShot(delay, lambda checked=False, n=name, p=path, a=attr:
+                              self._start_one_program(n, p, a))
+            self._append_log(f"  {i + 1}. {name}: {path}（{delay // 1000} 秒后启动）")
+        self._show_info_bar("三端程序将依次启动（间隔 3 秒）", "success")
+
+    def _stop_three_programs(self):
+        """关闭三端：结束进程 → 恢复 cfg.json → 恢复分辨率 → 按钮变为“启动三端”"""
+        # 1. 标记为非运行（同时阻止尚未触发的错峰启动定时器），按钮还原
+        self._three_running = False
+        self.ui.start_three_btn.setText("启动三端")
+
+        # 2. 结束三个进程
+        self._append_log("\n[关闭三端] 正在结束三端程序...")
+        for attr, name in [("_tracking_process", "识别端"),
+                           ("_backend_process", "后端"),
+                           ("_front_process", "前端")]:
+            process = getattr(self, attr, None)
+            if process is not None:
+                if process.state() != QProcess.NotRunning:
+                    process.kill()
+                    process.waitForFinished(1000)
+                    self._append_log(f"  已结束 {name}")
+                setattr(self, attr, None)
+
+        # 3. 恢复 cfg.json：skip_ready_check false → true
+        self._set_skip_ready_check(True)
+
+        # 4. 恢复启动前捕获的分辨率（延迟 500ms，等待后端完全释放显示模式）
+        saved = self._three_saved_mode
+        self._three_saved_mode = None
+        if saved:
+            _, (w, h, freq, bits) = saved
+            QTimer.singleShot(500, lambda checked=False, m=saved: self._restore_resolution(m))
+            self._append_log(f"[关闭三端] 0.5 秒后恢复分辨率为 {w}x{h} @ {freq}Hz")
+
+        self._show_info_bar("三端程序已关闭", "success")
+
+    def _start_one_program(self, name, path, attr_name):
+        """启动单个外部程序并保存 QProcess 引用防止 GC 回收"""
+        # 若用户在错峰等待期间已点击“关闭三端”，则不再启动
+        if not self._three_running:
+            return
+        process = QProcess(self)
+        process.setWorkingDirectory(os.path.dirname(path))
+        process.start(path)
+        setattr(self, attr_name, process)
+        self._append_log(f"[启动三端] 已启动 {name}: {path}")
+
+    def _capture_current_resolution(self):
+        """捕获当前主屏幕显示模式。
+        返回 (DEVMODE 原始字节快照, (宽, 高, 刷新率, 色深)) 或 None。
+        保存完整 DEVMODE 快照而非仅 4 个标量：恢复时可原样回传驱动报告的
+        全部字段（dmFields/dmDisplayFlags 等），避免非整数刷新率（如 239.99Hz
+        被读作 239）重建模式时与驱动实际支持的模式不匹配。"""
+        if sys.platform != 'win32':
+            return None
+        try:
+            dm = DEVMODE()
+            dm.dmSize = ctypes.sizeof(DEVMODE)
+            if _EnumDisplaySettingsW(None, ENUM_CURRENT_SETTINGS, ctypes.byref(dm)) == 0:
+                self._append_log("[分辨率] 读取当前显示模式失败")
+                return None
+            # 完整拷贝 DEVMODE 原始字节，防止后续被复用篡改
+            snapshot = ctypes.string_at(ctypes.addressof(dm), ctypes.sizeof(DEVMODE))
+            info = (dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency, dm.dmBitsPerPel)
+            return (snapshot, info)
+        except Exception as e:
+            self._append_log(f"[分辨率] 捕获失败: {e}")
+            return None
+
+    def _restore_resolution(self, mode):
+        """恢复启动前捕获的显示模式。mode = (DEVMODE 字节快照, (宽, 高, 刷新率, 色深))。
+        按优先级逐级尝试：①完整快照原样恢复 → ②枚举支持模式找最接近刷新率 →
+        ③仅恢复分辨率+色深（刷新率交驱动默认）→ ④传 NULL 恢复注册表默认。"""
+        if sys.platform != 'win32' or not mode:
+            return
+        try:
+            snapshot, (width, height, freq, bits) = mode
+
+            # ① 优先：用启动前捕获的完整 DEVMODE 快照原样恢复（保留全部原始字段）
+            dm = DEVMODE()
+            ctypes.memmove(ctypes.addressof(dm), snapshot, ctypes.sizeof(DEVMODE))
+            dm.dmSize = ctypes.sizeof(DEVMODE)  # 确保结构体尺寸字段正确
+            ret = _ChangeDisplaySettingsW(ctypes.byref(dm), CDS_UPDATEREGISTRY | CDS_FULLSCREEN)
+            if ret == DISP_CHANGE_SUCCESSFUL:
+                self._append_log(f"[分辨率] 已恢复为 {width}x{height} @ {freq}Hz")
+                return
+            self._append_log(f"[分辨率] 完整模式恢复返回 {ret}，尝试枚举支持模式寻找最佳匹配...")
+
+            # ② 枚举全部支持模式，找分辨率/色深一致且刷新率最接近的（处理 239↔240 取整差异）
+            best = self._find_best_mode(width, height, bits, freq)
+            if best is not None:
+                best.dmSize = ctypes.sizeof(DEVMODE)
+                ret = _ChangeDisplaySettingsW(ctypes.byref(best), CDS_UPDATEREGISTRY | CDS_FULLSCREEN)
+                if ret == DISP_CHANGE_SUCCESSFUL:
+                    self._append_log(f"[分辨率] 已恢复为 {best.dmPelsWidth}x{best.dmPelsHeight} "
+                                     f"@ {best.dmDisplayFrequency}Hz（最佳匹配）")
+                    return
+                self._append_log(f"[分辨率] 最佳匹配模式恢复返回 {ret}")
+
+            # ③ 仅恢复分辨率 + 色深，刷新率交给驱动默认
+            dm2 = DEVMODE()
+            dm2.dmSize = ctypes.sizeof(DEVMODE)
+            dm2.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL
+            dm2.dmPelsWidth = width
+            dm2.dmPelsHeight = height
+            dm2.dmBitsPerPel = bits
+            ret = _ChangeDisplaySettingsW(ctypes.byref(dm2), CDS_UPDATEREGISTRY | CDS_FULLSCREEN)
+            if ret == DISP_CHANGE_SUCCESSFUL:
+                self._append_log(f"[分辨率] 已恢复为 {width}x{height}（刷新率为驱动默认）")
+                return
+
+            # ④ 兜底：传 NULL 恢复注册表中的默认模式
+            self._append_log(f"[分辨率] 恢复返回 {ret}，尝试恢复系统默认模式...")
+            _ChangeDisplaySettingsW(None, CDS_UPDATEREGISTRY | CDS_FULLSCREEN)
+        except Exception as e:
+            self._append_log(f"[分辨率] 恢复失败: {e}")
+
+    def _find_best_mode(self, width, height, bits, freq):
+        """枚举主屏幕全部支持的显示模式，返回分辨率/色深匹配且刷新率与目标最接近的 DEVMODE；
+        找不到返回 None。用于处理非整数刷新率（239.99Hz 读作 239）与驱动实际支持值（240）的取整差异。"""
+        try:
+            best = None
+            best_score = None
+            i = 0
+            while True:
+                dm = DEVMODE()
+                dm.dmSize = ctypes.sizeof(DEVMODE)
+                if _EnumDisplaySettingsW(None, i, ctypes.byref(dm)) == 0:
+                    break
+                i += 1
+                if dm.dmPelsWidth != width or dm.dmPelsHeight != height:
+                    continue
+                if bits and dm.dmBitsPerPel != bits:
+                    continue
+                # 刷新率差值越小越好；差值相同优先更高刷新率
+                score = (abs(dm.dmDisplayFrequency - freq), -dm.dmDisplayFrequency)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best = dm
+            return best
+        except Exception as e:
+            self._append_log(f"[分辨率] 枚举显示模式失败: {e}")
+            return None
+
+    def _set_skip_ready_check(self, value):
+        """修改 cfg.json 中的 skip_ready_check 开关（true=跳过就绪检查，false=执行就绪检查）"""
+        cfg_path = os.path.join(self.exe_dir, "cfg.json")
+        if not os.path.exists(cfg_path):
+            self._append_log(f"[警告] cfg.json 不存在: {cfg_path}")
+            return
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            cfg.setdefault("sys", {})["skip_ready_check"] = value
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            self._append_log(f"[配置] cfg.json skip_ready_check 已设为 {str(value).lower()}")
+        except Exception as e:
+            self._append_log(f"[错误] 修改 skip_ready_check 失败: {e}")
+
     @Slot()
     def on_open_daily_clicked(self):
         """打开 CPP 日志文件"""
@@ -2849,13 +3196,17 @@ class MainWindow(QMainWindow):
         video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
         device_code = self.ui.id_list.currentItem().text()
         video_path_device = os.path.join(self.videos_dir, device_code, video_name)
-        if os.path.exists(video_path_primary):
-            video_path = video_path_primary.replace(os.sep, '/')
-        elif os.path.exists(video_path_device):
-            video_path = video_path_device.replace(os.sep, '/')
-        else:
-            # 都不存在时保持原有默认路径（videos/videos/）
-            video_path = video_path_primary.replace(os.sep, '/')
+        # 并行探测两个候选路径（exists 为 I/O 型 syscall，线程可真正重叠执行）
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            primary_exists = pool.submit(os.path.exists, video_path_primary)
+            device_exists = pool.submit(os.path.exists, video_path_device)
+            if primary_exists.result():
+                video_path = video_path_primary.replace(os.sep, '/')
+            elif device_exists.result():
+                video_path = video_path_device.replace(os.sep, '/')
+            else:
+                # 都不存在时保持原有默认路径（videos/videos/）
+                video_path = video_path_primary.replace(os.sep, '/')
         self.current_video = video_path
         
         # 根据单选按钮模式计算实际起始帧
@@ -2920,17 +3271,32 @@ class MainWindow(QMainWindow):
             pass
 
     def _init_statusbar(self):
-        """初始化底部状态栏，添加永久性标签"""
+        """初始化底部状态栏（自定义控件，替代 QMainWindow.statusBar）"""
+        self._statusbar_widget = QWidget()
+        self._statusbar_widget.setObjectName(u"statusbar_widget")
+        self._statusbar_widget.setFixedHeight(24)
+        _sb_layout = QHBoxLayout(self._statusbar_widget)
+        _sb_layout.setContentsMargins(8, 0, 8, 0)
+        _sb_layout.setSpacing(0)
+        self._status_message = QLabel("")
+        _sb_layout.addWidget(self._status_message, 1)
         self.status_device = QLabel("设备: 未选择")
         self.status_state = QLabel("状态: 空闲")
         self.status_logs = QLabel("日志: 0 行")
-        sb = self.statusBar()
-        sb.addPermanentWidget(self.status_device)
-        sb.addPermanentWidget(QLabel(" | "))
-        sb.addPermanentWidget(self.status_state)
-        sb.addPermanentWidget(QLabel(" | "))
-        sb.addPermanentWidget(self.status_logs)
-        sb.showMessage("就绪", 3000)
+        _sb_layout.addWidget(self.status_device)
+        _sb_layout.addWidget(QLabel(" | "))
+        _sb_layout.addWidget(self.status_state)
+        _sb_layout.addWidget(QLabel(" | "))
+        _sb_layout.addWidget(self.status_logs)
+        self._show_status_message("就绪", 3000)
+
+    def _show_status_message(self, msg, timeout=0):
+        """在状态栏左侧显示临时消息（timeout>0 时自动清除）"""
+        self._status_message.setText(msg)
+        if timeout > 0:
+            QTimer.singleShot(timeout, lambda: (
+                self._status_message.setText("")
+                if self._status_message.text() == msg else None))
 
     def _update_status_device(self, device_code):
         self.status_device.setText(f"设备: {device_code}")
@@ -3076,7 +3442,7 @@ class MainWindow(QMainWindow):
 
         def _do_copy():
             QApplication.clipboard().setText(item.text())
-            self.statusBar().showMessage("已复制到剪贴板", 2000)
+            self._show_status_message("已复制到剪贴板", 2000)
             self._append_log("[复制] 已复制当前行文本到剪贴板")
 
         def _do_copy_frame():
@@ -3084,7 +3450,7 @@ class MainWindow(QMainWindow):
             if frame_match:
                 frame_id = frame_match.group(1)
                 QApplication.clipboard().setText(frame_id)
-                self.statusBar().showMessage(f"帧数 {frame_id} 已复制到剪贴板", 2000)
+                self._show_status_message(f"帧数 {frame_id} 已复制到剪贴板", 2000)
                 self._append_log(f"[复制] 帧数 {frame_id} 已复制到剪贴板")
             else:
                 self._append_log("[提示] 当前行未找到 frame_id")
@@ -3115,7 +3481,7 @@ class MainWindow(QMainWindow):
         def _do_copy_name():
             pure_name = os.path.splitext(item.text())[0]
             QApplication.clipboard().setText(pure_name)
-            self.statusBar().showMessage(f"文件名 {pure_name} 已复制到剪贴板", 2000)
+            self._show_status_message(f"文件名 {pure_name} 已复制到剪贴板", 2000)
             self._append_log(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
 
         action_copy_name.triggered.connect(_do_copy_name)
@@ -3631,8 +3997,13 @@ class MainWindow(QMainWindow):
     # ==================== 菜单栏 ====================
 
     def _init_menubar(self):
-        """初始化顶部菜单栏"""
-        menubar = self.menuBar()
+        """初始化顶部菜单栏（独立 QMenuBar 控件，替代 QMainWindow.menuBar）"""
+        self._menubar_widget = QMenuBar()
+        self._menubar_widget.setObjectName(u"menubar_widget")
+        # 固定高度 24px：独立 QMenuBar 在 Fusion 风格下默认垂直度量偏大，
+        # 会导致菜单栏与工具栏之间出现多余空隙，固定高度确保顶部紧凑
+        self._menubar_widget.setFixedHeight(24)
+        menubar = self._menubar_widget
 
         # 「功能」菜单
         func_menu = menubar.addMenu("功能")
@@ -3790,7 +4161,7 @@ class MainWindow(QMainWindow):
             self,
             "关于",
             "AutoWork - 自动化工作工具\n"
-            "版本: 1.3.7\n\n"
+            "版本: 1.4.0\n\n"
             "用于视频播放、日志管理与数据记录的桌面自动化工具。"
         )
 
@@ -3938,6 +4309,20 @@ class MainWindow(QMainWindow):
                 color: #C8C8C8;
                 margin: 4px 2px;
             }
+
+            /* ===== 菜单栏紧凑样式（浅色主题） ===== */
+            QMenuBar {
+                background: transparent;
+                padding: 1px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 2px 8px;
+                border-radius: 4px;
+            }
+            QMenuBar::item:selected {
+                background-color: rgba(0, 0, 0, 0.06);
+            }
             """
             self.setStyleSheet(light_stylesheet)
             # 强制刷新所有控件样式，防止从深色切回时 Fluent 控件文字颜色残留
@@ -3950,22 +4335,25 @@ class MainWindow(QMainWindow):
             return
 
         # 补充 QSS：仅覆盖非 Fluent 的标准 Qt 控件
+        # 深色统一色板：基底 #202020（对齐 Fluent 深色窗口色）/ 悬浮面 #2C2C2C / 边框 #383838
         stylesheet = """
-        /* ===== 主窗口背景 ===== */
-        QMainWindow {
-            background-color: #1E1E24;
+        /* ===== 窗口自身底色（标题栏透明区域下方） ===== */
+        MainWindow {
+            background-color: #202020;
         }
+
+        /* ===== 主窗口背景 ===== */
         QWidget#centralwidget {
-            background-color: #1E1E24;
+            background-color: #202020;
         }
 
         /* ===== 工具栏 ===== */
         QWidget#toolbar_widget {
-            background-color: #202225;
-            border-bottom: 1px solid #33363D;
+            background-color: #202020;
+            border-bottom: 1px solid #383838;
         }
         QFrame#toolbar_separator {
-            color: #33363D;
+            color: #383838;
             margin: 4px 2px;
         }
 
@@ -3986,15 +4374,15 @@ class MainWindow(QMainWindow):
             background-color: #00838F;
         }
         QPushButton:disabled {
-            background-color: #33363D;
+            background-color: #383838;
             color: #555960;
         }
 
         /* ===== 输入框 ===== */
         QLineEdit {
-            background-color: #2C2F33;
+            background-color: #2C2C2C;
             color: #C8D0DC;
-            border: 1px solid #33363D;
+            border: 1px solid #383838;
             border-radius: 6px;
             padding: 4px 8px;
             selection-background-color: #00BCD4;
@@ -4005,14 +4393,14 @@ class MainWindow(QMainWindow):
         }
         QLineEdit:disabled {
             color: #555960;
-            background-color: #1E1E24;
+            background-color: #202020;
         }
 
         /* ===== 数字微调框 ===== */
         QSpinBox {
-            background-color: #2C2F33;
+            background-color: #2C2C2C;
             color: #C8D0DC;
-            border: 1px solid #33363D;
+            border: 1px solid #383838;
             border-radius: 6px;
             padding: 4px 6px;
         }
@@ -4020,7 +4408,7 @@ class MainWindow(QMainWindow):
             border: 1px solid #00BCD4;
         }
         QSpinBox::up-button, QSpinBox::down-button {
-            background-color: #2C2F33;
+            background-color: #2C2C2C;
             border: none;
             width: 16px;
         }
@@ -4033,7 +4421,7 @@ class MainWindow(QMainWindow):
            字体由 _apply_global_font() 统一通过 widget.setFont() 控制，
            避免 QSS 覆盖用户自选字体 */
         QPlainTextEdit#show_log {
-            background-color: #0D0D0D;
+            background-color: #202020;
             color: #B0BEC5;
             border: none;
             selection-background-color: #00BCD4;
@@ -4042,14 +4430,14 @@ class MainWindow(QMainWindow):
         /* 覆盖 Fluent 内置 hover/focus 变色，保持终端背景恒定 */
         QPlainTextEdit#show_log:hover,
         QPlainTextEdit#show_log:focus {
-            background-color: #0D0D0D;
+            background-color: #202020;
             border: none;
         }
 
         /* ===== 日志顶部状态条 ===== */
         QWidget#log_status_bar {
-            background-color: #2C2F33;
-            border-bottom: 1px solid #33363D;
+            background-color: #2C2C2C;
+            border-bottom: 1px solid #383838;
         }
         QLabel#log_status_device, QLabel#log_status_count {
             color: #8892a2;
@@ -4059,32 +4447,61 @@ class MainWindow(QMainWindow):
 
         /* ===== 左侧面板标题 ===== */
         QLabel#left_panel_header {
-            background-color: #202225;
+            background-color: #202020;
             color: #00BCD4;
             font-weight: bold;
             font-size: 9pt;
-            border-bottom: 1px solid #33363D;
+            border-bottom: 1px solid #383838;
             padding-left: 10px;
         }
 
         /* ===== 面板容器 ===== */
         QWidget#left_panel, QWidget#center_panel {
-            background-color: #1E1E24;
+            background-color: #202020;
+        }
+
+        /* ===== 列表/树/日期控件（统一基底色，禁止回退调色板产生杂色） ===== */
+        QListWidget, QTreeWidget {
+            background-color: #202020;
+            color: #C8D0DC;
+            border: none;
+            outline: none;
+        }
+        QListWidget::item:hover, QTreeWidget::item:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        QListWidget::item:selected, QTreeWidget::item:selected {
+            background-color: rgba(0, 188, 212, 0.20);
+            color: #00BCD4;
+        }
+        QDateEdit {
+            background-color: #2C2C2C;
+            color: #C8D0DC;
+            border: 1px solid #383838;
+            border-radius: 6px;
+            padding: 3px 8px;
+        }
+        QDateEdit::drop-down {
+            border: none;
+            width: 20px;
+        }
+        QDateEdit:focus {
+            border: 1px solid #00BCD4;
         }
 
         /* ===== 远程面板 ===== */
         QFrame#p2p_panel {
-            background-color: #2C2F33;
-            border-left: 1px solid #33363D;
+            background-color: #2C2C2C;
+            border-left: 1px solid #383838;
             border-radius: 6px;
             margin: 4px 4px 4px 0;
         }
         QLabel#p2p_panel_header {
-            background-color: #202225;
+            background-color: #202020;
             color: #00BCD4;
             font-weight: bold;
             font-size: 10pt;
-            border-bottom: 1px solid #33363D;
+            border-bottom: 1px solid #383838;
             border-radius: 6px 6px 0 0;
         }
         QLabel#section_label {
@@ -4097,7 +4514,7 @@ class MainWindow(QMainWindow):
 
         /* ===== 分割器 ===== */
         QSplitter::handle {
-            background-color: #33363D;
+            background-color: #383838;
         }
         QSplitter::handle:horizontal {
             width: 2px;
@@ -4117,14 +4534,14 @@ class MainWindow(QMainWindow):
 
         /* ===== 菜单栏 ===== */
         QMenuBar {
-            background-color: #1E1E24;
+            background-color: #202020;
             color: #C8D0DC;
-            border-bottom: 1px solid #33363D;
+            border-bottom: 1px solid #383838;
             padding: 1px;
         }
         QMenuBar::item {
             background: transparent;
-            padding: 3px 10px;
+            padding: 2px 8px;
             border-radius: 4px;
         }
         QMenuBar::item:selected {
@@ -4132,9 +4549,9 @@ class MainWindow(QMainWindow):
             color: #00BCD4;
         }
         QMenu {
-            background-color: #2C2F33;
+            background-color: #2C2C2C;
             color: #C8D0DC;
-            border: 1px solid #33363D;
+            border: 1px solid #383838;
             border-radius: 6px;
             padding: 4px;
         }
@@ -4148,19 +4565,19 @@ class MainWindow(QMainWindow):
         }
         QMenu::separator {
             height: 1px;
-            background-color: #33363D;
+            background-color: #383838;
             margin: 4px 8px;
         }
 
         /* ===== 滚动条 ===== */
         QScrollBar:vertical {
-            background-color: #1E1E24;
+            background-color: #202020;
             width: 8px;
             border: none;
             margin: 0;
         }
         QScrollBar::handle:vertical {
-            background-color: #33363D;
+            background-color: #383838;
             border-radius: 4px;
             min-height: 24px;
             margin: 2px;
@@ -4175,13 +4592,13 @@ class MainWindow(QMainWindow):
             background: none;
         }
         QScrollBar:horizontal {
-            background-color: #1E1E24;
+            background-color: #202020;
             height: 8px;
             border: none;
             margin: 0;
         }
         QScrollBar::handle:horizontal {
-            background-color: #33363D;
+            background-color: #383838;
             border-radius: 4px;
             min-width: 24px;
             margin: 2px;
@@ -4198,17 +4615,17 @@ class MainWindow(QMainWindow):
 
         /* ===== 工具提示 ===== */
         QToolTip {
-            background-color: #2C2F33;
+            background-color: #2C2C2C;
             color: #00BCD4;
-            border: 1px solid #33363D;
+            border: 1px solid #383838;
             border-radius: 6px;
             padding: 4px 8px;
         }
 
         /* ===== 进度条 ===== */
         QProgressBar {
-            background-color: #2C2F33;
-            border: 1px solid #33363D;
+            background-color: #2C2C2C;
+            border: 1px solid #383838;
             border-radius: 6px;
             text-align: center;
             color: #C8D0DC;

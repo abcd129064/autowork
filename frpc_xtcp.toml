@@ -38,3 +38,115 @@ serverName = "snk_4003"
 secretKey = "abc123"
 bindPort = 13823
 
+[[visitors]]
+name = "snk_1801"
+type = "xtcp"
+serverName = "snk_1801"
+secretKey = "abc123"
+bindPort = 46361
+
+[[visitors]]
+name = "snk_1802"
+type = "xtcp"
+serverName = "snk_1802"
+secretKey = "abc123"
+bindPort = 44502
+
+[[visitors]]
+name = "snk_1803"
+type = "xtcp"
+serverName = "snk_1803"
+secretKey = "abc123"
+bindPort = 19429
+
+[[visitors]]
+name = "snk_1804"
+type = "xtcp"
+serverName = "snk_1804"
+secretKey = "abc123"
+bindPort = 15096
+
+[[visitors]]
+name = "snk_1805"
+type = "xtcp"
+serverName = "snk_1805"
+secretKey = "abc123"
+bindPort = 59876
+
+[[visitors]]
+name = "snk_1806"
+type = "xtcp"
+serverName = "snk_1806"
+secretKey = "abc123"
+bindPort = 20089
+
+[[visitors]]
+name = "snk_1807"
+type = "xtcp"
+serverName = "snk_1807"
+secretKey = "abc123"
+bindPort = 65174
+
+[[visitors]]
+name = "snk_1808"
+type = "xtcp"
+serverName = "snk_1808"
+secretKey = "abc123"
+bindPort = 40476
+
+[[visitors]]
+name = "snk_1809"
+type = "xtcp"
+serverName = "snk_1809"
+secretKey = "abc123"
+bindPort = 15263
+
+[[visitors]]
+name = "snk_1810"
+type = "xtcp"
+serverName = "snk_1810"
+secretKey = "abc123"
+bindPort = 59688
+
+[[visitors]]
+name = "snk_1811"
+type = "xtcp"
+serverName = "snk_1811"
+secretKey = "abc123"
+bindPort = 41913
+
+[[visitors]]
+name = "snk_1901"
+type = "xtcp"
+serverName = "snk_1901"
+secretKey = "abc123"
+bindPort = 60712
+
+[[visitors]]
+name = "snk_1902"
+type = "xtcp"
+serverName = "snk_1902"
+secretKey = "abc123"
+bindPort = 30115
+
+[[visitors]]
+name = "snk_1903"
+type = "xtcp"
+serverName = "snk_1903"
+secretKey = "abc123"
+bindPort = 37862
+
+[[visitors]]
+name = "snk_1904"
+type = "xtcp"
+serverName = "snk_1904"
+secretKey = "abc123"
+bindPort = 58416
+
+[[visitors]]
+name = "snk_1905"
+type = "xtcp"
+serverName = "snk_1905"
+secretKey = "abc123"
+bindPort = 63816
+

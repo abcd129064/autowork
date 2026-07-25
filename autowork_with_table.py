@@ -27,6 +27,7 @@ from qfluentwidgets import (
     RadioButton,
     ListWidget,
     PlainTextEdit as FluentPlainTextEdit,
+    SearchLineEdit,
 )
 
 
@@ -56,7 +57,7 @@ class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(1280, 720)
+        MainWindow.resize(1440, 900)
         MainWindow.setMinimumSize(QSize(960, 540))
 
         # ===== Central Widget =====
@@ -159,6 +160,10 @@ class Ui_MainWindow(object):
         self.pause_btn.setText("暂停")
         self.horizontalLayout.addWidget(self.pause_btn)
 
+        self.start_three_btn = FluentPushButton(self.toolbar_widget)
+        self.start_three_btn.setObjectName(u"start_three_btn")
+        self.horizontalLayout.addWidget(self.start_three_btn)
+
         self.p2p_btn = ToggleButton(self.toolbar_widget)
         self.p2p_btn.setObjectName(u"p2p_btn")
         self.p2p_btn.setMaximumWidth(72)
@@ -180,6 +185,22 @@ class Ui_MainWindow(object):
         # 创建核心控件（两套布局共享，切换时复用实例）
         self.id_list = ListWidget()
         self.id_list.setObjectName(u"id_list")
+
+        # 设备搜索框（位于 id_list 正下方，默认隐藏，Ctrl+F 显示）
+        self.id_search = SearchLineEdit()
+        self.id_search.setObjectName(u"id_search")
+        self.id_search.setPlaceholderText("搜索设备代码...")
+        self.id_search.setClearButtonEnabled(True)
+        self.id_search.setVisible(False)
+
+        # 容器：id_list + 搜索框，布局切换时随 id_list 一起迁移
+        self.id_list_container = QWidget()
+        self.id_list_container.setObjectName(u"id_list_container")
+        _id_container_layout = QVBoxLayout(self.id_list_container)
+        _id_container_layout.setContentsMargins(0, 0, 0, 0)
+        _id_container_layout.setSpacing(0)
+        _id_container_layout.addWidget(self.id_list, 1)
+        _id_container_layout.addWidget(self.id_search)
 
         self.loacl_video_list = ListWidget()
         self.loacl_video_list.setObjectName(u"loacl_video_list")
@@ -235,8 +256,11 @@ class Ui_MainWindow(object):
 
         self.p2p_visitor_list = ListWidget(self.p2p_panel)
         self.p2p_visitor_list.setObjectName(u"p2p_visitor_list")
-        self.p2p_visitor_list.setMaximumHeight(100)
+        # 只保底下限（约3行），不设上限：列表随窗口高度自由伸缩，
+        # 并通过 setStretchFactor 优先吸收剩余垂直空间
+        self.p2p_visitor_list.setMinimumHeight(90)
         p2p_main_layout.addWidget(self.p2p_visitor_list)
+        p2p_main_layout.setStretchFactor(self.p2p_visitor_list, 1)
 
         p2p_list_btn_layout = QHBoxLayout()
         self.p2p_add_btn = FluentPushButton("添加")
@@ -349,8 +373,9 @@ class Ui_MainWindow(object):
         self.p2p_ssh_terminal_btn.setEnabled(False)
         p2p_main_layout.addWidget(self.p2p_ssh_terminal_btn)
 
-        p2p_main_layout.addStretch()
-
+        # 注意：尾部不再 addStretch()——剩余垂直空间全部由 p2p_visitor_list 吸收
+        # （见上方 setStretchFactor），表单/按钮固定贴底，列表随窗口高度自由伸缩
+        # 面板宽度 340px：保证表单字段（serverName/密码等）有足够呼吸空间
         self.p2p_panel.setFixedWidth(290)
         self.p2p_panel.setVisible(False)
 
@@ -358,7 +383,14 @@ class Ui_MainWindow(object):
 
         self.verticalLayout_2.addLayout(self.horizontalLayout_main)
 
-        MainWindow.setCentralWidget(self.centralwidget)
+        # 将中心控件挂到容器布局（兼容 QMainWindow 和 FluentWindowBase 容器模式）
+        if hasattr(MainWindow, 'setCentralWidget'):
+            MainWindow.setCentralWidget(self.centralwidget)
+        else:
+            # FluentWindowBase 模式：必须挂到 vBoxLayout（带 48px 标题栏预留的垂直布局），
+            # 而非 MainWindow.layout()（hBoxLayout）——后者会导致内容绕过标题栏预留区，
+            # 与菜单栏水平并排，造成顶部三行（标题栏/菜单栏/工具栏）挤压重叠
+            MainWindow.vBoxLayout.addWidget(self.centralwidget)
 
         self.retranslateUi(MainWindow)
 
@@ -368,7 +400,8 @@ class Ui_MainWindow(object):
     # setupUi
 
     def retranslateUi(self, MainWindow):
-        MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"AutoWork", None))
+        if hasattr(MainWindow, 'setCentralWidget'):  # 仅对真正的窗口设置标题
+            MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"AutoWork", None))
         self.flush.setText(QCoreApplication.translate("MainWindow", u"刷新", None))
         self.date.setDateFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
         self.write_table.setText(QCoreApplication.translate("MainWindow", u"打开目录", None))
@@ -382,6 +415,7 @@ class Ui_MainWindow(object):
         self.start.setText(QCoreApplication.translate("MainWindow", u"播放", None))
         self.end.setText(QCoreApplication.translate("MainWindow", u"结束", None))
         self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"暂停", None))
+        self.start_three_btn.setText(QCoreApplication.translate("MainWindow", u"启动三端", None))
         self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"远程", None))
     # retranslateUi
 
@@ -417,7 +451,7 @@ class Ui_MainWindow(object):
         id_header.setFixedHeight(26)
         id_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         id_layout.addWidget(id_header)
-        id_layout.addWidget(self.id_list, 1)
+        id_layout.addWidget(self.id_list_container, 1)
         self.left_top_splitter.addWidget(id_widget)
 
         file_widget = QWidget()
@@ -470,7 +504,7 @@ class Ui_MainWindow(object):
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self.centralwidget)
         self.splitter.setObjectName(u"splitter")
 
-        self.splitter.addWidget(self.id_list)
+        self.splitter.addWidget(self.id_list_container)
         self.splitter.addWidget(self.loacl_video_list)
         self.splitter.addWidget(self.log_list)
         self.splitter.addWidget(self.show_log)
@@ -484,7 +518,8 @@ class Ui_MainWindow(object):
             return
 
         # 1. 将核心控件从旧布局中脱离（设置 parent=None 防止被旧 splitter 删除）
-        self.id_list.setParent(None)
+        # id_list 与其搜索框同在 id_list_container 内，迁移容器即可一并带走
+        self.id_list_container.setParent(None)
         self.loacl_video_list.setParent(None)
         self.log_list.setParent(None)
         self.show_log.setParent(None)
