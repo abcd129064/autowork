@@ -13,6 +13,15 @@ from core.conn_logger import conn_logger
 from core.utils import safe_close_transport
 from workers.network_workers import SSHConnectWorker, SSHExecWorker
 
+# 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
+_pending_workers: set = set()
+
+
+def _safe_release_worker(w):
+    """将 worker 放入 pending 集合，线程结束后自动移除并 deleteLater"""
+    _pending_workers.add(w)
+    w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
+
 
 class SSHTerminalWindow(QDialog):
     """SSH 终端窗口（exec_command 模式，底部输入框）"""
@@ -101,14 +110,14 @@ class SSHTerminalWindow(QDialog):
         self._append_output(f"[连接失败] {error}\n")
 
     def _cleanup_connect_worker(self):
-        """非阻塞清理连接 worker"""
+        """非阻塞清理连接 worker（保持强引用直到线程真正结束）"""
         if self._connect_worker is not None:
             w = self._connect_worker
             self._connect_worker = None
             if hasattr(w, 'abort'):
                 w.abort()
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                _safe_release_worker(w)
             else:
                 w.deleteLater()
 
@@ -198,7 +207,7 @@ class SSHTerminalWindow(QDialog):
             w = self._exec_worker
             self._exec_worker = None
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                _safe_release_worker(w)
             else:
                 w.deleteLater()
         # 清理 connect worker

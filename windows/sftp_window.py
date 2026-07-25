@@ -19,6 +19,15 @@ from workers.network_workers import (
     SFTPConnectWorker, SFTPListWorker, SFTPOperationWorker, SFTPDirTransferWorker,
 )
 
+# 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
+_pending_workers: set = set()
+
+
+def _safe_release_worker(w):
+    """将 worker 放入 pending 集合，线程结束后自动移除并 deleteLater"""
+    _pending_workers.add(w)
+    w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
+
 
 class SFTPWindow(QDialog):
     """SFTP 文件管理窗口"""
@@ -246,7 +255,7 @@ class SFTPWindow(QDialog):
             if hasattr(w, 'abort'):
                 w.abort()
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                _safe_release_worker(w)
             else:
                 w.deleteLater()
 
@@ -268,7 +277,7 @@ class SFTPWindow(QDialog):
             except Exception:
                 pass
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                _safe_release_worker(w)
                 self._listing = False
             else:
                 w.deleteLater()
@@ -278,7 +287,7 @@ class SFTPWindow(QDialog):
         if info:
             w = info['worker']
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                _safe_release_worker(w)
             else:
                 w.deleteLater()
 

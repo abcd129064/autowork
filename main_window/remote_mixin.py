@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """MainWindow 远程连接 Mixin：P2P 面板、XTCP/TCP 连接、frpc 管理、SFTP/SSH/RDP 窗口启动"""
+from __future__ import annotations
 
 import os
 import sys
 import re
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QProcess, QTimer
+from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QFormLayout
 
-from core.app_paths import get_app_dir
+if TYPE_CHECKING:
+    from autowork_with_table import Ui_MainWindow
 
 try:
     import paramiko
@@ -20,11 +23,28 @@ from workers.network_workers import TCPWorker
 from windows.sftp_window import SFTPWindow
 from windows.ssh_terminal import SSHTerminalWindow
 from windows.rdp_window import RDPWindow
-from p2p import generate_random_port, is_port_in_use
+from p2p import generate_random_port
 
 
 class RemoteMixin:
-    """远程连接相关方法"""
+    """远程连接相关方法（Mixin，需与 FluentWindowBase 组合使用）"""
+
+    # 类型声明：由其他 Mixin / 主类提供，仅供 IDE 静态分析
+    if TYPE_CHECKING:
+        ui: Ui_MainWindow
+        _p2p_visitors: list
+        _p2p_current_index: int
+        _frpc_process: QProcess | None
+        _tcp_worker: TCPWorker | None
+        _sftp_window: SFTPWindow | None
+        _ssh_terminal_window: SSHTerminalWindow | None
+        _rdp_window: RDPWindow | None
+
+        def _load_settings(self) -> dict: ...
+        def _save_settings(self, data: dict) -> None: ...
+        def _get_app_dir(self) -> str: ...
+        def _append_log(self, msg: str) -> None: ...
+        def _show_info_bar(self, msg: str, level: str, duration: int = 2000) -> None: ...
 
     # frpc 服务器默认配置（settings.json 缺失时自动生成）
     _FRPC_SERVER_DEFAULTS = {
@@ -250,7 +270,7 @@ class RemoteMixin:
         elif mode == "TCP":
             self._on_tcp_disconnect()
 
-    def _on_p2p_mode_changed(self, index):
+    def _on_p2p_mode_changed(self, _index):
         """连接方式切换时更新 UI 显隐"""
         self._save_current_form()
         self._update_p2p_visibility()
@@ -442,7 +462,7 @@ class RemoteMixin:
             if error.strip():
                 self._append_log(f"[frpc] {error.strip()}")
 
-    def _on_frpc_finished(self, exit_code, exit_status):
+    def _on_frpc_finished(self, exit_code, _exit_status):
         self._append_log(f"[远程] frpc 已退出，退出码: {exit_code}")
         self._frpc_process = None
         self.ui.p2p_sftp_btn.setEnabled(False)
@@ -475,19 +495,19 @@ class RemoteMixin:
         if self._sftp_window is not None:
             try:
                 self._sftp_window.close()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
             self._sftp_window = None
         if self._ssh_terminal_window is not None:
             try:
                 self._ssh_terminal_window.close()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
             self._ssh_terminal_window = None
         if self._rdp_window is not None:
             try:
                 self._rdp_window.close()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
             self._rdp_window = None
 
@@ -536,7 +556,7 @@ class RemoteMixin:
         if self._sftp_window is not None:
             try:
                 self._sftp_window.close()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
             self._sftp_window = None
         self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
@@ -544,7 +564,7 @@ class RemoteMixin:
             host, port, username, password,
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
-            parent=self
+            parent=self  # type: ignore[arg-type]
         )
         self._sftp_window.show()
 
@@ -579,14 +599,14 @@ class RemoteMixin:
         if self._ssh_terminal_window is not None:
             try:
                 self._ssh_terminal_window.close()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
             self._ssh_terminal_window = None
         self._append_log(f"[SSH] 打开终端: {host}:{port}")
         self._ssh_terminal_window = SSHTerminalWindow(
             host, port, username, password,
             log_callback=lambda msg: self._append_log(msg),
-            parent=self
+            parent=self  # type: ignore[arg-type]
         )
         self._ssh_terminal_window.show()
 
@@ -623,7 +643,7 @@ class RemoteMixin:
         if self._rdp_window is not None:
             try:
                 self._rdp_window.close()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
             self._rdp_window = None
         self._append_log(f"[RDP] 打开远程桌面: {server_name or host}:{port}")
@@ -631,6 +651,6 @@ class RemoteMixin:
             host, port, username, password,
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
-            parent=self
+            parent=self  # type: ignore[arg-type]
         )
         self._rdp_window.show()

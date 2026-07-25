@@ -150,3 +150,24 @@ serverName = "snk_1905"
 secretKey = "abc123"
 bindPort = 63816
 
+[[visitors]]
+name = "snk_2019"
+type = "xtcp"
+serverName = "snk_2019"
+secretKey = "abc123"
+bindPort = 57602
+
+[[visitors]]
+name = "snk_2020"
+type = "xtcp"
+serverName = "snk_2020"
+secretKey = "abc123"
+bindPort = 10908
+
+[[visitors]]
+name = "snk_3803"
+type = "xtcp"
+serverName = "snk_3803"
+secretKey = "abc123"
+bindPort = 46064
+
