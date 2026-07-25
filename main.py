@@ -10,6 +10,7 @@ import ctypes
 import stat
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QLabel,
     QWidget, QListWidgetItem, QMenu, QColorDialog, QFontDialog, QInputDialog,
@@ -54,6 +55,13 @@ if sys.platform == 'win32':
     _dwm = ctypes.WinDLL('dwmapi')
     _DwmSetWindowAttribute = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong)(
         ('DwmSetWindowAttribute', _dwm))
+
+
+def _natural_sort_key(s):
+    """自然排序 key：将字符串中的连续数字段按数值比较，非数字段按字符串比较。
+    例如 "23-10" 排在 "193" 前面（23 < 193），而非字典序的 "193" < "23-10"。"""
+    return [int(part) if part.isdigit() else part
+            for part in re.split(r'(\d+)', s)]
 
 
 class TCPWorker(QThread):
@@ -2217,12 +2225,39 @@ class MainWindow(QMainWindow):
             self._append_log(f"[警告] videos 目录下没有找到设备文件夹")
             return
         
-        # 清空并添加设备代码列表
+        # 清空并添加设备代码列表（自然排序：数字段按数值比较）
         self.ui.id_list.clear()
-        for code in sorted(device_codes):
+        for code in sorted(device_codes, key=_natural_sort_key):
             self.ui.id_list.addItem(code)
         
         self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
+
+    # ==================== 设备列表搜索 (Ctrl+F) ====================
+
+    def _on_id_search_shortcut(self):
+        """Ctrl+F：切换设备搜索框的显示/隐藏"""
+        if self.ui.id_search.isVisible():
+            self._hide_id_search()
+        else:
+            self.ui.id_search.show()
+            self.ui.id_search.setFocus()
+
+    def _hide_id_search(self):
+        """隐藏设备搜索框，清空内容并恢复完整设备列表"""
+        self.ui.id_search.blockSignals(True)
+        self.ui.id_search.clear()
+        self.ui.id_search.blockSignals(False)
+        self.ui.id_search.hide()
+        # 恢复所有项可见
+        for i in range(self.ui.id_list.count()):
+            self.ui.id_list.item(i).setHidden(False)
+
+    def _on_id_search_changed(self, text):
+        """实时过滤设备列表：不区分大小写子串匹配，用 setHidden 控制显隐（不重建列表）"""
+        kw = text.strip().lower()
+        for i in range(self.ui.id_list.count()):
+            item = self.ui.id_list.item(i)
+            item.setHidden(bool(kw) and kw not in item.text().lower())
 
     def _warmup_calendar_view(self):
         """预热日历面板：缓存 CalendarView 实例并复用，
@@ -2366,6 +2401,14 @@ class MainWindow(QMainWindow):
         self.ui.p2p_mode_combo.currentIndexChanged.connect(self._on_p2p_mode_changed)
         self.ui.p2p_sftp_btn.clicked.connect(self._on_sftp_btn_clicked)
         self.ui.p2p_ssh_terminal_btn.clicked.connect(self._on_ssh_terminal_btn_clicked)
+
+        # 设备列表实时搜索（搜索框控件在 autowork_with_table.py 中创建）
+        self.ui.id_search.textChanged.connect(self._on_id_search_changed)
+        # Ctrl+F 切换设备搜索框显示/隐藏，Esc 隐藏
+        self._id_search_sc = QShortcut(QKeySequence('Ctrl+F'), self)
+        self._id_search_sc.activated.connect(self._on_id_search_shortcut)
+        self._id_search_esc = QShortcut(QKeySequence('Escape'), self)
+        self._id_search_esc.activated.connect(self._hide_id_search)
 
     @Slot()
     def on_flush_clicked(self):
@@ -2849,13 +2892,17 @@ class MainWindow(QMainWindow):
         video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
         device_code = self.ui.id_list.currentItem().text()
         video_path_device = os.path.join(self.videos_dir, device_code, video_name)
-        if os.path.exists(video_path_primary):
-            video_path = video_path_primary.replace(os.sep, '/')
-        elif os.path.exists(video_path_device):
-            video_path = video_path_device.replace(os.sep, '/')
-        else:
-            # 都不存在时保持原有默认路径（videos/videos/）
-            video_path = video_path_primary.replace(os.sep, '/')
+        # 并行探测两个候选路径（exists 为 I/O 型 syscall，线程可真正重叠执行）
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            primary_exists = pool.submit(os.path.exists, video_path_primary)
+            device_exists = pool.submit(os.path.exists, video_path_device)
+            if primary_exists.result():
+                video_path = video_path_primary.replace(os.sep, '/')
+            elif device_exists.result():
+                video_path = video_path_device.replace(os.sep, '/')
+            else:
+                # 都不存在时保持原有默认路径（videos/videos/）
+                video_path = video_path_primary.replace(os.sep, '/')
         self.current_video = video_path
         
         # 根据单选按钮模式计算实际起始帧
@@ -3790,7 +3837,7 @@ class MainWindow(QMainWindow):
             self,
             "关于",
             "AutoWork - 自动化工作工具\n"
-            "版本: 1.3.7\n\n"
+            "版本: 1.4.0\n\n"
             "用于视频播放、日志管理与数据记录的桌面自动化工具。"
         )
 

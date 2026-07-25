@@ -27,6 +27,7 @@ from qfluentwidgets import (
     RadioButton,
     ListWidget,
     PlainTextEdit as FluentPlainTextEdit,
+    SearchLineEdit,
 )
 
 
@@ -180,6 +181,22 @@ class Ui_MainWindow(object):
         # 创建核心控件（两套布局共享，切换时复用实例）
         self.id_list = ListWidget()
         self.id_list.setObjectName(u"id_list")
+
+        # 设备搜索框（位于 id_list 正下方，默认隐藏，Ctrl+F 显示）
+        self.id_search = SearchLineEdit()
+        self.id_search.setObjectName(u"id_search")
+        self.id_search.setPlaceholderText("搜索设备代码...")
+        self.id_search.setClearButtonEnabled(True)
+        self.id_search.setVisible(False)
+
+        # 容器：id_list + 搜索框，布局切换时随 id_list 一起迁移
+        self.id_list_container = QWidget()
+        self.id_list_container.setObjectName(u"id_list_container")
+        _id_container_layout = QVBoxLayout(self.id_list_container)
+        _id_container_layout.setContentsMargins(0, 0, 0, 0)
+        _id_container_layout.setSpacing(0)
+        _id_container_layout.addWidget(self.id_list, 1)
+        _id_container_layout.addWidget(self.id_search)
 
         self.loacl_video_list = ListWidget()
         self.loacl_video_list.setObjectName(u"loacl_video_list")
@@ -417,7 +434,7 @@ class Ui_MainWindow(object):
         id_header.setFixedHeight(26)
         id_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         id_layout.addWidget(id_header)
-        id_layout.addWidget(self.id_list, 1)
+        id_layout.addWidget(self.id_list_container, 1)
         self.left_top_splitter.addWidget(id_widget)
 
         file_widget = QWidget()
@@ -470,7 +487,7 @@ class Ui_MainWindow(object):
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self.centralwidget)
         self.splitter.setObjectName(u"splitter")
 
-        self.splitter.addWidget(self.id_list)
+        self.splitter.addWidget(self.id_list_container)
         self.splitter.addWidget(self.loacl_video_list)
         self.splitter.addWidget(self.log_list)
         self.splitter.addWidget(self.show_log)
@@ -484,7 +501,8 @@ class Ui_MainWindow(object):
             return
 
         # 1. 将核心控件从旧布局中脱离（设置 parent=None 防止被旧 splitter 删除）
-        self.id_list.setParent(None)
+        # id_list 与其搜索框同在 id_list_container 内，迁移容器即可一并带走
+        self.id_list_container.setParent(None)
         self.loacl_video_list.setParent(None)
         self.log_list.setParent(None)
         self.show_log.setParent(None)
