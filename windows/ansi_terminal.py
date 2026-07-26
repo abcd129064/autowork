@@ -6,8 +6,8 @@
 - 光标移动（上/下/左/右/行首）
 - 行擦除 / 屏幕清除
 - 回车 / 退格 / Tab 展开
-- 备用屏幕切换（nano/vim 全屏应用基础支持）
-- 键盘输入直接转发到远端 shell（类似 Windows Terminal 体验）
+- 备用屏幕切换
+- 键盘输入直接转发到远端 shell
 """
 
 from PySide6.QtWidgets import QTextEdit
