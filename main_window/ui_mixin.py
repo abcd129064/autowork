@@ -7,16 +7,100 @@ import json
 import ctypes
 import subprocess
 
-from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout,
-    QDialog, QVBoxLayout, QKeySequenceEdit, QDialogButtonBox,
-    QColorDialog, QFontDialog, QInputDialog, QMessageBox, QFrame)
+from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout)
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QFont, QActionGroup)
+from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QFont, QActionGroup,
+    QFontDatabase)
 from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
-    RoundMenu, Action, MenuAnimationType, FluentIcon, setFontFamilies,
-    TransparentDropDownPushButton, setCustomStyleSheet)
+    Action, MenuAnimationType, FluentIcon, setFontFamilies,
+    TransparentDropDownPushButton, setCustomStyleSheet,
+    MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
+    BodyLabel, setFont, isDarkTheme)
+from qfluentwidgets.components.material import AcrylicMenu
+from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
+    AcrylicMenuActionListWidget)
 
 from core.app_paths import get_app_dir, get_resource_dir
+
+
+def _patch_acrylic_exec(menu):
+    """PySide6/Shiboken 会将实例级 menu.exec 解析到 C++ QMenu.exec()，
+    导致 AcrylicMenuBase.exec()（截屏→模糊→绘制亚克力）永不执行。
+    给实例绑定 Python 级 exec 属性可绕过此劫持。"""
+    def _exec(pos, ani=True, aniType=MenuAnimationType.DROP_DOWN):
+        AcrylicMenuBase.exec(menu, pos, ani=ani, aniType=aniType)
+    menu.exec = _exec
+
+
+class _VisibleAcrylicView(AcrylicMenuActionListWidget):
+    """增强亚克力菜单视图：优化模糊半径/噪点/着色层参数，使磨砂玻璃效果清晰可见。
+
+    库默认参数（模糊半径35 + 噪点0.03 + 着色alpha 150/200）在浅色均匀背景上
+    会把模糊结果洗成近乎纯色，看不出磨砂感；此处调整为：
+    适度模糊保留背景轮廓 + 可见噪点纹理 + 更低着色不透明度。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 库默认模糊半径 35 过强，背景内容糊成均匀色；15 保留更多背景细节，
+        # 让磨砂层能透出背后内容的明暗变化
+        self.acrylicBrush.setBlurRadius(15)
+        # 库默认噪点不透明度 0.03 几乎不可见；0.15 呈现亚克力标志性颗粒感，
+        # 即使弹出位置背后是纯色背景（如设备列表空白区）也能看出材质纹理
+        self.acrylicBrush.noiseOpacity = 0.03
+
+    def _updateAcrylicColor(self):
+        if isDarkTheme():
+            # 深色模式：着色层 90/255≈35%，让模糊内容透出更多
+            self.acrylicBrush.tintColor = QColor(32, 32, 32, 90)
+            self.acrylicBrush.luminosityColor = QColor(0, 0, 0, 0)
+        else:
+            # 浅色模式：着色层 70/255≈27%，避免库默认 59% 白色把模糊细节洗白
+            self.acrylicBrush.tintColor = QColor(255, 255, 255, 70)
+            self.acrylicBrush.luminosityColor = QColor(255, 255, 255, 0)
+
+
+class VisibleAcrylicMenu(AcrylicMenu):
+    """亚克力菜单（增强可见度）：深色/浅色主题均有明显磨砂玻璃效果"""
+
+    def __init__(self, title="", parent=None):
+        super().__init__(title, parent)
+        self.setUpMenu(_VisibleAcrylicView(self))
+        _patch_acrylic_exec(self)
+
+class _ShortcutKeyEdit(LineEdit):
+    """Fluent 风格快捷键录入框：点击聚焦后按下目标组合键即记录，替代原生 QKeySequenceEdit。
+
+    Backspace/Delete 清空快捷键；单独按修饰键（Ctrl/Shift/Alt）不记录，等待实际按键。"""
+
+    def __init__(self, sequence="", parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setClearButtonEnabled(False)
+        self.setPlaceholderText("点击此处后按下组合键")
+        self._sequence = QKeySequence(sequence)
+        self.setText(self._sequence.toString())
+
+    def keySequence(self):
+        return self._sequence
+
+    def keyPressEvent(self, e):
+        key = e.key()
+        # 单独按下修饰键/锁定键时不记录，等待实际按键
+        if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta,
+                   Qt.Key_CapsLock, Qt.Key_NumLock, Qt.Key_ScrollLock):
+            return
+        # Backspace/Delete 清空快捷键
+        if key in (Qt.Key_Backspace, Qt.Key_Delete):
+            self._sequence = QKeySequence()
+            self.setText("")
+            e.accept()
+            return
+        if key == Qt.Key_unknown:
+            return
+        self._sequence = QKeySequence(e.modifiers() | Qt.Key(key))
+        self.setText(self._sequence.toString())
+        e.accept()
+
 
 if sys.platform == 'win32':
     from win_api.windows_api import _DwmSetWindowAttribute
@@ -101,8 +185,8 @@ class UIMixin:
         self.ui.loacl_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def _id_list_context_menu(self, pos):
-        """设备列表右键菜单"""
-        menu = RoundMenu(parent=self)
+        """设备列表右键菜单（亚克力材质）"""
+        menu = VisibleAcrylicMenu(parent=self)
         action_open_dir = Action(FluentIcon.FOLDER, "打开目录")
         action_cpp_log = Action(FluentIcon.DOCUMENT, "查看 CPP 日志")
         action_open_dir.triggered.connect(self.on_open_dir_clicked)
@@ -117,7 +201,7 @@ class UIMixin:
         item = self.ui.log_list.currentItem()
         if item is None:
             return
-        menu = RoundMenu(parent=self)
+        menu = VisibleAcrylicMenu(parent=self)
         action_copy = Action(FluentIcon.COPY, "复制此行")
         action_copy_frame = Action(FluentIcon.LIBRARY, "复制帧数")
         action_locate = Action(FluentIcon.PEOPLE, "在文件管理器中定位")
@@ -157,7 +241,7 @@ class UIMixin:
         item = self.ui.loacl_video_list.currentItem()
         if item is None:
             return
-        menu = RoundMenu(parent=self)
+        menu = VisibleAcrylicMenu(parent=self)
         action_copy_name = Action(FluentIcon.COPY, "复制视频名")
 
         def _do_copy_name():
@@ -173,16 +257,16 @@ class UIMixin:
     # ==================== 菜单栏 ====================
 
     def _init_menubar(self):
-        """初始化顶部菜单栏（Fluent 风格：TransparentDropDownPushButton + RoundMenu）"""
+        """初始化顶部菜单栏（Fluent 风格：TransparentDropDownPushButton + AcrylicMenu）"""
         self._menubar_widget = QWidget()
         self._menubar_widget.setObjectName(u"menubar_widget")
-        self._menubar_widget.setFixedHeight(26  )
+        self._menubar_widget.setFixedHeight(26)
         _mb_layout = QHBoxLayout(self._menubar_widget)
         _mb_layout.setContentsMargins(6, 0, 6, 0)
         _mb_layout.setSpacing(2)
 
-        # 「功能」菜单
-        func_menu = RoundMenu("功能", self)
+        # 「功能」菜单（亚克力材质）
+        func_menu = VisibleAcrylicMenu("功能", self)
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
         act_hc = Action(FluentIcon.HIGHTLIGHT, "高亮颜色设置", self)
@@ -193,12 +277,12 @@ class UIMixin:
         func_btn.setMenu(func_menu)
         _mb_layout.addWidget(func_btn)
 
-        # 「视图」菜单
-        view_menu = RoundMenu("视图", self)
+        # 「视图」菜单（亚克力材质）
+        view_menu = VisibleAcrylicMenu("视图", self)
         settings = self._load_settings()
 
         # 布局子菜单
-        layout_menu = RoundMenu("布局", self)
+        layout_menu = VisibleAcrylicMenu("布局", self)
         self._layout_group = QActionGroup(self)
         self._layout_group.setExclusive(True)
         self._act_layout_panel = Action(FluentIcon.TILES, "面板布局", self)
@@ -215,7 +299,7 @@ class UIMixin:
         view_menu.addMenu(layout_menu)
 
         # 主题子菜单
-        theme_menu = RoundMenu("主题", self)
+        theme_menu = VisibleAcrylicMenu("主题", self)
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
         _theme_mode = self._get_theme_mode(settings)
@@ -252,8 +336,8 @@ class UIMixin:
         view_btn.setMenu(view_menu)
         _mb_layout.addWidget(view_btn)
 
-        # 「帮助」菜单
-        help_menu = RoundMenu("帮助", self)
+        # 「帮助」菜单（亚克力材质）
+        help_menu = VisibleAcrylicMenu("帮助", self)
         act_about = Action(FluentIcon.INFO, "关于", self)
         act_about.triggered.connect(lambda: QTimer.singleShot(0, self._on_about))
         help_menu.addAction(act_about)
@@ -263,42 +347,49 @@ class UIMixin:
 
         _mb_layout.addStretch(1)
 
-    # ==================== 设置对话框 ====================
+    # ==================== 设置对话框（Fluent 风格） ====================
 
     def _on_modify_shortcuts(self):
-        """弹出快捷键修改对话框"""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("修改快捷键")
-        layout = QVBoxLayout(dlg)
+        """弹出快捷键修改对话框（Fluent MessageBoxBase）"""
+
+        class ShortcutDialog(MessageBoxBase):
+            def __init__(self, parent, fields):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("修改快捷键", self)
+                self.viewLayout.addWidget(self.titleLabel)
+                self.editors = {}
+                for label, key, default in fields:
+                    row = QHBoxLayout()
+                    lbl = BodyLabel(label + ":", self)
+                    lbl.setFixedWidth(80)
+                    row.addWidget(lbl)
+                    edit = _ShortcutKeyEdit(default, self)
+                    edit.setMinimumWidth(180)
+                    row.addWidget(edit)
+                    self.editors[key] = edit
+                    self.viewLayout.addLayout(row)
+
         sc = self._get_shortcut_settings()
         fields = [
             ("刷新", "shortcut_flush", sc["shortcut_flush"]),
             ("播放/结束", "shortcut_start", sc["shortcut_start"]),
             ("打开目录", "shortcut_open_dir", sc["shortcut_open_dir"]),
         ]
-        editors = {}
-        for label, key, default in fields:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label + ":"))
-            edit = QKeySequenceEdit(QKeySequence(default))
-            row.addWidget(edit)
-            editors[key] = edit
-            layout.addLayout(row)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        layout.addWidget(btns)
-        if dlg.exec() == QDialog.Accepted:
-            new_sc = {k: v.keySequence().toString() for k, v in editors.items()}
+        dlg = ShortcutDialog(self, fields)
+        dlg.yesButton.setText("确定")
+        dlg.cancelButton.setText("取消")
+        if dlg.exec():
+            new_sc = {k: v.keySequence().toString() for k, v in dlg.editors.items()}
             self._save_settings(new_sc)
             self._init_shortcuts()
             self._append_log(f"[配置] 已更新快捷键: {new_sc}")
 
     def _on_highlight_color(self):
-        """弹出颜色选择对话框"""
+        """弹出颜色选择对话框（Fluent ColorDialog）"""
         current = self.highlight_color
-        color = QColorDialog.getColor(current, self, "选择高亮颜色")
-        if color.isValid():
+        dlg = ColorDialog(current, "选择高亮颜色", self)
+        if dlg.exec():
+            color = dlg.color
             self.highlight_color = color
             self._save_settings({
                 "highlight_color": [color.red(), color.green(), color.blue()]
@@ -308,57 +399,105 @@ class UIMixin:
             self._show_info_bar(f"[配置] 已更新高亮颜色: RGB({color.red()},{color.green()},{color.blue()})")
 
     def _on_font_size(self):
-        """弹出字号选择对话框"""
+        """弹出字号选择对话框（Fluent SpinBox）"""
+
+        class FontSizeDialog(MessageBoxBase):
+            def __init__(self, parent, current):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("字号大小", self)
+                self.viewLayout.addWidget(self.titleLabel)
+                self.spinBox = SpinBox(self)
+                self.spinBox.setRange(10, 20)
+                self.spinBox.setValue(current)
+                self.spinBox.setSuffix(" pt")
+                self.viewLayout.addWidget(self.spinBox)
+
         settings = self._load_settings()
         current = settings.get("font_size", 10)
-        val, ok = QInputDialog.getInt(self, "字号大小", "请输入字号 (10~20):", current, 10, 20, 1)
-        if ok:
+        dlg = FontSizeDialog(self, current)
+        dlg.yesButton.setText("确定")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setMinimumWidth(320)
+        if dlg.exec():
+            val = dlg.spinBox.value()
             self._save_settings({"font_size": val})
             self._apply_font_size()
             self._append_log(f"[配置] 已更新字号: {val}pt")
             self._show_info_bar(f"[配置] 已更新字号: {val}pt")
 
     def _on_dpi_scale(self):
-        """弹出 DPI 缩放比例选择对话框"""
+        """弹出 DPI 缩放比例选择对话框（Fluent ComboBox）"""
+
+        class ScaleDialog(MessageBoxBase):
+            def __init__(self, parent, options, current_idx):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("界面缩放", self)
+                self.viewLayout.addWidget(self.titleLabel)
+                self.comboBox = ComboBox(self)
+                self.comboBox.addItems([f"{o}%" for o in options])
+                self.comboBox.setCurrentIndex(current_idx)
+                self.viewLayout.addWidget(self.comboBox)
+
         settings = self._load_settings()
         current = settings.get("dpi_scale", 100)
         options = [100, 125, 150, 175, 200]
-        idx, ok = QInputDialog.getItem(
-            self, "界面缩放", "选择缩放比例:",
-            [f"{o}%" for o in options],
-            options.index(current) if current in options else 0,
-            editable=False)
-        if ok:
-            val = int(idx.replace("%", ""))
+        dlg = ScaleDialog(self, options,
+                          options.index(current) if current in options else 0)
+        dlg.yesButton.setText("确定")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setMinimumWidth(320)
+        if dlg.exec():
+            val = int(dlg.comboBox.currentText().replace("%", ""))
             self._save_settings({"dpi_scale": val})
-            QMessageBox.information(self, "界面缩放", "缩放设置已保存，重启应用后生效。")
+            w = MessageBox("界面缩放", "缩放设置已保存，重启应用后生效。", self)
+            w.yesButton.setText("确定")
+            w.cancelButton.hide()
+            w.exec()
             self._append_log(f"[配置] 已设置缩放: {val}%（重启后生效）")
             self._show_info_bar(f"[配置] 已设置缩放: {val}%,需重启")
 
     def _on_font_family(self):
-        """弹出字体选择对话框"""
+        """弹出字体选择对话框（Fluent ComboBox 列出系统字体）"""
+
+        class FontFamilyDialog(MessageBoxBase):
+            def __init__(self, parent, current_family):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("选择字体", self)
+                self.viewLayout.addWidget(self.titleLabel)
+                self.comboBox = ComboBox(self)
+                db = QFontDatabase()
+                families = sorted(set(db.families()))
+                self.comboBox.addItems(families)
+                if current_family and current_family in families:
+                    self.comboBox.setCurrentIndex(families.index(current_family))
+                self.comboBox.setMinimumWidth(260)
+                self.viewLayout.addWidget(self.comboBox)
+
         settings = self._load_settings()
         current_family = settings.get("font_family", "")
-        current_font = QFont(current_family) if current_family else QFont()
-        result = QFontDialog.getFont(current_font, self, "选择字体")
-        if isinstance(result[0], QFont):
-            font, ok = result[0], result[1]
-        else:
-            ok, font = result[0], result[1]
-        if ok:
-            self._save_settings({"font_family": font.family()})
+        dlg = FontFamilyDialog(self, current_family)
+        dlg.yesButton.setText("确定")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setMinimumWidth(380)
+        if dlg.exec():
+            family = dlg.comboBox.currentText()
+            self._save_settings({"font_family": family})
             self._apply_font_family()
-            self._show_info_bar(f"[配置] 已更新字体: {font.family()}")
-            self._append_log(f"[配置] 已更新字体: {font.family()}")
+            self._show_info_bar(f"[配置] 已更新字体: {family}")
+            self._append_log(f"[配置] 已更新字体: {family}")
 
     def _on_about(self):
-        """显示关于对话框"""
-        QMessageBox.about(
-            self, "关于",
+        """显示关于对话框（Fluent MessageBox）"""
+        w = MessageBox(
+            "关于",
             "AutoWork - 自动化工作工具\n"
             "版本: 2.0.3\n\n"
-            "用于视频播放、日志管理与数据记录的桌面自动化工具。"
+            "用于视频播放、日志管理与数据记录的桌面自动化工具。",
+            self
         )
+        w.yesButton.setText("确定")
+        w.cancelButton.hide()
+        w.exec()
 
     # ==================== 设置应用 ====================
 

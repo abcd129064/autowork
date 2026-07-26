@@ -18,8 +18,9 @@ import time
 import ctypes
 import subprocess
 
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QWidget, QLabel
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QWidget
 from PySide6.QtCore import QTimer, Qt
+from qfluentwidgets import CaptionLabel
 
 from core.conn_logger import conn_logger
 
@@ -72,8 +73,8 @@ class RDPWindow(QDialog):
         self._container = QWidget()
         self._container.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         layout.addWidget(self._container, 1)
-        # 底部状态栏
-        self._status_label = QLabel('正在启动远程桌面...')
+        # 底部状态栏（Fluent CaptionLabel）
+        self._status_label = CaptionLabel('正在启动远程桌面...', self)
         self._status_label.setFixedHeight(24)
         self._status_label.setStyleSheet('padding: 2px 8px;')
         layout.addWidget(self._status_label)

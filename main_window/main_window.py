@@ -6,10 +6,11 @@ import re
 import glob
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
-    QListWidgetItem, QMessageBox)
+    QListWidgetItem)
 from PySide6.QtCore import Slot, QTimer, Qt, QDate
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
-from qfluentwidgets import InfoBar, InfoBarPosition, FluentTitleBar
+from qfluentwidgets import (InfoBar, InfoBarPosition, FluentTitleBar,
+    MessageBoxBase, BodyLabel, ComboBox)
 from qfluentwidgets.window.fluent_window import FluentWindowBase
 from concurrent.futures import ThreadPoolExecutor
 
@@ -558,25 +559,33 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     @Slot()
     def on_open_config_clicked(self):
-        """配置按钮点击事件 - 选择打开 settings.json / cfg.json / frpc_xtcp.toml"""
-        msg = QMessageBox(self)
-        msg.setWindowTitle("打开配置文件")
-        msg.setText("选择要打开的配置文件：")
-        settings_btn = msg.addButton("settings.json", QMessageBox.ActionRole)
-        cfg_btn = msg.addButton("cfg.json", QMessageBox.ActionRole)
-        frpc_btn = msg.addButton("frpc_xtcp.toml", QMessageBox.ActionRole)
-        msg.addButton(QMessageBox.Cancel)
-        msg.exec()
+        """配置按钮点击事件 - 选择打开 settings.json / cfg.json / frpc_xtcp.toml（Fluent 对话框）"""
 
-        clicked = msg.clickedButton()
-        if clicked == settings_btn:
-            path = self._get_settings_path()
-        elif clicked == cfg_btn:
-            path = os.path.join(self.exe_dir, "cfg.json")
-        elif clicked == frpc_btn:
-            path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
-        else:
+        class ConfigFileDialog(MessageBoxBase):
+            def __init__(self, parent, options):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("选择要打开的配置文件：", self)
+                self.viewLayout.addWidget(self.titleLabel)
+                self.comboBox = ComboBox(self)
+                self.comboBox.addItems(options)
+                self.comboBox.setMinimumWidth(260)
+                self.viewLayout.addWidget(self.comboBox)
+
+        options = ["settings.json", "cfg.json", "frpc_xtcp.toml"]
+        dlg = ConfigFileDialog(self, options)
+        dlg.yesButton.setText("打开")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setMinimumWidth(320)
+        if not dlg.exec():
             return
+
+        choice = dlg.comboBox.currentText()
+        if choice == "settings.json":
+            path = self._get_settings_path()
+        elif choice == "cfg.json":
+            path = os.path.join(self.exe_dir, "cfg.json")
+        else:  # frpc_xtcp.toml
+            path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
 
         if not os.path.exists(path):
             self._append_log(f"[配置] 文件不存在: {path}")

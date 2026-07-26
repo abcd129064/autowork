@@ -22,19 +22,68 @@ from qfluentwidgets import (
     PushButton as FluentPushButton,
     PrimaryPushButton,
     ToggleButton,
-    ComboBox as FluentComboBox,
     CalendarPicker,
     RadioButton,
     ListWidget,
     PlainTextEdit as FluentPlainTextEdit,
-    SearchLineEdit,
     LineEdit as FluentLineEdit,
     PasswordLineEdit,
     SpinBox as FluentSpinBox,
     FlowLayout,
+    CardWidget,
+    CaptionLabel,
+    BodyLabel,
     setFont,
     setCustomStyleSheet,
+    isDarkTheme,
 )
+from qfluentwidgets.components.material.acrylic_combo_box import (
+    AcrylicComboBox, AcrylicComboBoxMenu, AcrylicComboMenuActionListWidget)
+from qfluentwidgets.components.material.acrylic_menu import AcrylicMenuBase
+from qfluentwidgets.components.material import AcrylicSearchLineEdit
+
+
+class _VisibleAcrylicComboView(AcrylicComboMenuActionListWidget):
+    """增强亚克力下拉列表视图：优化模糊半径/噪点/着色层参数，使磨砂玻璃效果清晰可见"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 库默认模糊半径 35 过强，背景内容糊成均匀色；15 保留更多背景细节
+        self.acrylicBrush.setBlurRadius(15)
+        # 库默认噪点不透明度 0.03 几乎不可见；0.15 呈现亚克力标志性颗粒感
+        self.acrylicBrush.noiseOpacity = 0.03
+
+    def _updateAcrylicColor(self):
+        if isDarkTheme():
+            self.acrylicBrush.tintColor = QColor(32, 32, 32, 90)
+            self.acrylicBrush.luminosityColor = QColor(0, 0, 0, 0)
+        else:
+            self.acrylicBrush.tintColor = QColor(255, 255, 255, 70)
+            self.acrylicBrush.luminosityColor = QColor(255, 255, 255, 0)
+
+
+class _VisibleAcrylicComboMenu(AcrylicComboBoxMenu):
+    """亚克力下拉菜单（增强可见度）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setUpMenu(_VisibleAcrylicComboView(self))
+        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # PySide6/Shiboken 会将实例级 menu.exec 解析到 C++ QMenu.exec()，
+        # 导致 AcrylicMenuBase.exec()（截屏→模糊）永不执行；
+        # 绑定 Python 级 exec 实例属性可绕过此劫持
+        _menu = self
+
+        def _exec(pos, ani=True, aniType=None):
+            AcrylicMenuBase.exec(_menu, pos, ani=ani, aniType=aniType)
+        self.exec = _exec
+
+
+class VisibleAcrylicComboBox(AcrylicComboBox):
+    """亚克力下拉框：弹出列表带明显磨砂玻璃效果"""
+
+    def _createComboMenu(self):
+        return _VisibleAcrylicComboMenu(self)
 
 
 def _make_separator(vertical=False):
@@ -51,8 +100,8 @@ def _make_separator(vertical=False):
 
 
 def _make_section_label(text, parent=None):
-    """创建卡片模块标题标签"""
-    lbl = QLabel(text, parent)
+    """创建卡片模块标题标签（Fluent CaptionLabel）"""
+    lbl = CaptionLabel(text, parent)
     lbl.setObjectName(u"section_label")
     lbl.setFixedHeight(24)
     lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -197,7 +246,7 @@ class Ui_MainWindow(object):
         setFont(self.label_2, 11)
         self.horizontalLayout.addWidget(self.label_2)
 
-        self.choose_exe = FluentComboBox(self.toolbar_widget)
+        self.choose_exe = VisibleAcrylicComboBox(self.toolbar_widget)
         self.choose_exe.setObjectName(u"choose_exe")
         self.choose_exe.setMinimumWidth(145)
         self.horizontalLayout.addWidget(self.choose_exe)
@@ -264,7 +313,7 @@ class Ui_MainWindow(object):
         self.id_list.setObjectName(u"id_list")
 
         # 设备搜索框（位于 id_list 正下方，默认隐藏，Ctrl+F 显示）
-        self.id_search = SearchLineEdit()
+        self.id_search = AcrylicSearchLineEdit()
         self.id_search.setObjectName(u"id_search")
         self.id_search.setPlaceholderText("搜索设备代码...")
         self.id_search.setClearButtonEnabled(True)
@@ -309,21 +358,21 @@ class Ui_MainWindow(object):
         log_status_layout.addStretch()
 
         # 构建默认布局（新版）
+
         self._is_classic_layout = False
         self._build_modern_content()
 
         self.horizontalLayout_main.addWidget(self.splitter)
 
-        # ===== 右侧: 远程控制面板 (卡片模块化, 默认隐藏) =====
-        self.p2p_panel = QFrame(self.centralwidget)
+        # ===== 右侧: 远程控制面板 (Fluent 卡片模块化, 默认隐藏) =====
+        self.p2p_panel = CardWidget(self.centralwidget)
         self.p2p_panel.setObjectName(u"p2p_panel")
-        self.p2p_panel.setFrameShape(QFrame.Shape.StyledPanel)
         p2p_main_layout = QVBoxLayout(self.p2p_panel)
         p2p_main_layout.setContentsMargins(10, 10, 10, 10)
         p2p_main_layout.setSpacing(8)
 
-        # 面板标题
-        p2p_header = QLabel("远程控制面板")
+        # 面板标题（Fluent BodyLabel）
+        p2p_header = BodyLabel("远程控制面板", self.p2p_panel)
         p2p_header.setObjectName(u"p2p_panel_header")
         p2p_header.setFixedHeight(18)
         p2p_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -396,10 +445,10 @@ class Ui_MainWindow(object):
         p2p_main_layout.addWidget(_make_section_label("◎ 权限与配置"))
 
         mode_layout = QHBoxLayout()
-        mode_label = QLabel("连接方式:")
+        mode_label = CaptionLabel("连接方式:", self.p2p_panel)
         mode_label.setObjectName(u"p2p_mode_label")
         mode_layout.addWidget(mode_label)
-        self.p2p_mode_combo = FluentComboBox(self.p2p_panel)
+        self.p2p_mode_combo = VisibleAcrylicComboBox(self.p2p_panel)
         self.p2p_mode_combo.setObjectName(u"p2p_mode_combo")
         self.p2p_mode_combo.addItems(["XTCP", "TCP"])
         mode_layout.addWidget(self.p2p_mode_combo)
@@ -534,7 +583,7 @@ class Ui_MainWindow(object):
         id_layout = QVBoxLayout(id_widget)
         id_layout.setContentsMargins(0, 0, 0, 0)
         id_layout.setSpacing(0)
-        id_header = QLabel("  设备")
+        id_header = CaptionLabel("  设备", id_widget)
         id_header.setObjectName(u"left_panel_header")
         id_header.setFixedHeight(26)
         id_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -546,7 +595,7 @@ class Ui_MainWindow(object):
         file_layout = QVBoxLayout(file_widget)
         file_layout.setContentsMargins(0, 0, 0, 0)
         file_layout.setSpacing(0)
-        file_header = QLabel("  文件 / 日志")
+        file_header = CaptionLabel("  文件 / 日志", file_widget)
         file_header.setObjectName(u"left_panel_header")
         file_header.setFixedHeight(26)
         file_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -562,7 +611,7 @@ class Ui_MainWindow(object):
         log_layout = QVBoxLayout(log_widget)
         log_layout.setContentsMargins(0, 0, 0, 0)
         log_layout.setSpacing(0)
-        log_header = QLabel("  日志内容")
+        log_header = CaptionLabel("  日志内容", log_widget)
         log_header.setObjectName(u"left_panel_header")
         log_header.setFixedHeight(26)
         log_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)

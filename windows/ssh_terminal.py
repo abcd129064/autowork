@@ -20,9 +20,9 @@ import socket
 import subprocess
 import threading
 
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QFont
+from qfluentwidgets import PushButton, MessageBox, setFont
 
 from core.conn_logger import conn_logger
 from core.utils import safe_close_transport
@@ -80,19 +80,19 @@ class SSHTerminalWindow(QDialog):
         self._terminal.key_input.connect(self._on_key_input)
         layout.addWidget(self._terminal, stretch=1)
 
-        # 底部工具按钮（极简）
+        # 底部工具按钮（Fluent 风格，极简）
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(6)
         btn_layout.addStretch()
 
-        self._cmd_btn = QPushButton("CMD 打开")
-        self._cmd_btn.setFont(QFont("Microsoft YaHei UI", 8))
+        self._cmd_btn = PushButton("CMD 打开")
+        setFont(self._cmd_btn, 11)
         self._cmd_btn.setFocusPolicy(Qt.NoFocus)  # 不抢焦点
         self._cmd_btn.clicked.connect(self._open_in_cmd)
         btn_layout.addWidget(self._cmd_btn)
 
-        self._xshell_btn = QPushButton("Xshell 打开")
-        self._xshell_btn.setFont(QFont("Microsoft YaHei UI", 8))
+        self._xshell_btn = PushButton("Xshell 打开")
+        setFont(self._xshell_btn, 11)
         self._xshell_btn.setFocusPolicy(Qt.NoFocus)  # 不抢焦点
         self._xshell_btn.clicked.connect(self._open_in_xshell)
         btn_layout.addWidget(self._xshell_btn)
@@ -199,12 +199,15 @@ class SSHTerminalWindow(QDialog):
     def _open_in_cmd(self):
         """在系统 CMD 中打开 SSH 连接"""
         if not shutil.which('ssh'):
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(
-                self, "未找到 SSH 客户端",
+            w = MessageBox(
+                "未找到 SSH 客户端",
                 "系统中未安装 OpenSSH 客户端。\n"
-                "请在 Windows 设置 > 应用 > 可选功能 中安装 OpenSSH 客户端。"
+                "请在 Windows 设置 > 应用 > 可选功能 中安装 OpenSSH 客户端。",
+                self
             )
+            w.yesButton.setText("确定")
+            w.cancelButton.hide()
+            w.exec()
             return
         cmd = f'ssh -p {self._port} {self._username}@{self._host}'
         try:
