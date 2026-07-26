@@ -30,13 +30,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         super().__init__()
         # Fluent 风格自定义标题栏（无边框 + Mica 云母背景 + 主题自适应按钮）
         self.setTitleBar(FluentTitleBar(self))
-        # 压缩标题栏高度：默认 48px → 32px，与菜单栏/工具栏形成紧凑顶部
-        self.titleBar.setFixedHeight(32)
+        # 压缩标题栏高度：默认 48px → 34px，与菜单栏/工具栏形成紧凑顶部
+        self.titleBar.setFixedHeight(34)
 
         # 主内容垂直布局：菜单栏 + 中心内容 + 状态栏
-        # （顶部 32px 留给 Fluent 标题栏）
+        # （顶部 34px 留给 Fluent 标题栏）
         self.vBoxLayout = QVBoxLayout()
-        self.vBoxLayout.setContentsMargins(0, 32, 0, 0)
+        self.vBoxLayout.setContentsMargins(0, 34, 0, 0)
         self.vBoxLayout.setSpacing(0)
         self.hBoxLayout.addLayout(self.vBoxLayout)
         self.hBoxLayout.setStretchFactor(self.vBoxLayout, 1)
