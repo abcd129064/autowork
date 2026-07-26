@@ -87,18 +87,18 @@ class SFTPListWorker(QThread):
                 pass
             sftp = paramiko.SFTPClient.from_transport(self.transport)
             entries = []
-            for name in sftp.listdir(self.remote_path):
-                full_path = self.remote_path.rstrip('/') + '/' + name
+            # 【性能关键】使用 listdir_attr 一次性获取所有文件属性（单次网络往返），
+            # 避免逐文件 stat()（N 个文件 = N 次网络往返，大目录极慢）
+            for attr in sftp.listdir_attr(self.remote_path):
                 try:
-                    st = sftp.stat(full_path)
-                    is_dir = stat.S_ISDIR(st.st_mode) if st.st_mode else False
-                    size = st.st_size if st.st_size else 0
-                    mtime = datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M') if st.st_mtime else ''
-                    perm = stat.filemode(st.st_mode) if st.st_mode else ''
+                    is_dir = stat.S_ISDIR(attr.st_mode) if attr.st_mode else False
+                    size = attr.st_size if attr.st_size else 0
+                    mtime = datetime.fromtimestamp(attr.st_mtime).strftime('%Y-%m-%d %H:%M') if attr.st_mtime else ''
+                    perm = stat.filemode(attr.st_mode) if attr.st_mode else ''
                 except Exception:
                     is_dir, size, mtime, perm = False, 0, '', ''
                 entries.append({
-                    'name': name, 'is_dir': is_dir,
+                    'name': attr.filename, 'is_dir': is_dir,
                     'size': size, 'mtime': mtime, 'perm': perm
                 })
             self.result.emit(self.remote_path, entries)

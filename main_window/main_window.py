@@ -496,13 +496,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         saved_device_code = current_device.text() if current_device else None
         saved_exe = self.ui.choose_exe.currentText()
 
-        # 1. 重新扫描可执行程序下拉框
+        # 1. 重新扫描可执行程序下拉框（屏蔽信号，避免 clear/addItem 触发 _on_exe_changed 误保存）
+        self.ui.choose_exe.blockSignals(True)
         self._load_exe_list()
         # 恢复程序选择
         for i in range(self.ui.choose_exe.count()):
             if self.ui.choose_exe.itemText(i) == saved_exe:
                 self.ui.choose_exe.setCurrentIndex(i)
                 break
+        self.ui.choose_exe.blockSignals(False)
 
         # 2. 重新扫描设备列表（第一列）
         self._load_device_list()
