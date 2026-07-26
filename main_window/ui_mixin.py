@@ -498,7 +498,7 @@ class UIMixin:
         w = MessageBox(
             "关于",
             "AutoWork - 自动化工作工具\n"
-            "版本: 2.0.3\n\n"
+            "版本: 2.3.8\n\n"
             "用于视频播放、日志管理与数据记录的桌面自动化工具。",
             self
         )

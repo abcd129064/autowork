@@ -6,12 +6,16 @@ import time
 import shutil
 import subprocess
 
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QWidget, QMenu, QInputDialog, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QPushButton, QPlainTextEdit, QSplitter, QProgressBar,
-    QTableWidget, QTableWidgetItem, QAbstractItemView, QMessageBox, QApplication)
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+    QWidget, QTreeWidgetItem,
+    QHeaderView, QSplitter,
+    QTableWidgetItem, QAbstractItemView, QApplication)
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QFont
+from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
+    SearchLineEdit, setFont, TreeWidget, TableWidget, ProgressBar,
+    RoundMenu, Action, FluentIcon, MenuAnimationType,
+    MessageBox, MessageBoxBase)
 
 from core.conn_logger import conn_logger
 from core.utils import safe_close_transport
@@ -27,6 +31,24 @@ def _safe_release_worker(w):
     """将 worker 放入 pending 集合，线程结束后自动移除并 deleteLater"""
     _pending_workers.add(w)
     w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
+
+
+class _TextInputDialog(MessageBoxBase):
+    """Fluent 风格文本输入对话框，替代 QInputDialog.getText"""
+
+    def __init__(self, title, label, default='', parent=None):
+        super().__init__(parent)
+        self.titleLabel.setText(title)
+        CaptionLabel(label, self.view).setObjectName('fieldLabel')
+        self.view.layout.addWidget(self.titleLabel)
+        self.view.layout.addWidget(self.view.findChild(CaptionLabel, 'fieldLabel'))
+        self.edit = LineEdit(self)
+        self.edit.setText(default)
+        if default:
+            self.edit.selectAll()
+        self.edit.setMinimumWidth(280)
+        self.view.layout.addWidget(self.edit)
+        self.widget.setMinimumWidth(380)
 
 
 class SFTPWindow(QDialog):
@@ -70,22 +92,21 @@ class SFTPWindow(QDialog):
         left_lay = QVBoxLayout(self._left_panel)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_bar = QHBoxLayout()
-        self._btn_local_up = QPushButton('.. 上级')
-        self._btn_local_up.setAutoDefault(False)
+        self._btn_local_up = PushButton('.. 上级')
         self._btn_local_up.clicked.connect(self._local_go_up)
         left_bar.addWidget(self._btn_local_up)
-        left_bar.addWidget(QLabel('本地:'))
-        self._edit_local_path = QLineEdit(self._local_path)
-        self._edit_local_path.setStyleSheet('font-weight:bold;')
+        left_bar.addWidget(CaptionLabel('本地:'))
+        self._edit_local_path = LineEdit()
+        self._edit_local_path.setText(self._local_path)
+        setFont(self._edit_local_path, weight=QFont.Weight.Bold)
         self._edit_local_path.returnPressed.connect(self._on_local_path_entered)
         left_bar.addWidget(self._edit_local_path, 1)
-        self._btn_local_refresh = QPushButton('刷新')
-        self._btn_local_refresh.setAutoDefault(False)
+        self._btn_local_refresh = PushButton('刷新')
         self._btn_local_refresh.clicked.connect(self._local_refresh)
         left_bar.addWidget(self._btn_local_refresh)
         left_lay.addLayout(left_bar)
 
-        self._local_tree = QTreeWidget()
+        self._local_tree = TreeWidget()
         self._local_tree.setHeaderLabels(['文件名', '大小', '类型', '修改时间'])
         self._local_tree.setColumnCount(4)
         lh = self._local_tree.header()
@@ -97,22 +118,15 @@ class SFTPWindow(QDialog):
         self._local_tree.customContextMenuRequested.connect(self._on_local_context_menu)
         left_lay.addWidget(self._local_tree)
 
-        # 本地底部搜索框
+        # 本地底部搜索框（SearchLineEdit 自带搜索图标+清空按钮）
         self._local_search_frame = QWidget()
         local_sf = QHBoxLayout(self._local_search_frame)
         local_sf.setContentsMargins(0, 2, 0, 0)
-        self._local_search_edit = QLineEdit()
+        self._local_search_edit = SearchLineEdit()
         self._local_search_edit.setPlaceholderText('搜索本地文件...')
+        self._local_search_edit.searchSignal.connect(self._on_local_search)
         self._local_search_edit.returnPressed.connect(self._on_local_search)
         local_sf.addWidget(self._local_search_edit, 1)
-        btn_ls = QPushButton('搜索')
-        btn_ls.setAutoDefault(False)
-        btn_ls.clicked.connect(self._on_local_search)
-        local_sf.addWidget(btn_ls)
-        btn_lc = QPushButton('✕')
-        btn_lc.setAutoDefault(False)
-        btn_lc.clicked.connect(lambda: self._local_search_frame.hide())
-        local_sf.addWidget(btn_lc)
         left_lay.addWidget(self._local_search_frame)
         self._local_search_frame.hide()
 
@@ -121,22 +135,21 @@ class SFTPWindow(QDialog):
         right_lay = QVBoxLayout(self._right_panel)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_bar = QHBoxLayout()
-        self._btn_up = QPushButton('.. 上级目录')
-        self._btn_up.setAutoDefault(False)
+        self._btn_up = PushButton('.. 上级目录')
         self._btn_up.clicked.connect(self._go_up)
         right_bar.addWidget(self._btn_up)
-        right_bar.addWidget(QLabel('远程:'))
-        self._edit_remote_path = QLineEdit(self._remote_path)
-        self._edit_remote_path.setStyleSheet('font-weight:bold;')
+        right_bar.addWidget(CaptionLabel('远程:'))
+        self._edit_remote_path = LineEdit()
+        self._edit_remote_path.setText(self._remote_path)
+        setFont(self._edit_remote_path, weight=QFont.Weight.Bold)
         self._edit_remote_path.returnPressed.connect(self._on_remote_path_entered)
         right_bar.addWidget(self._edit_remote_path, 1)
-        self._btn_refresh = QPushButton('刷新')
-        self._btn_refresh.setAutoDefault(False)
+        self._btn_refresh = PushButton('刷新')
         self._btn_refresh.clicked.connect(self._refresh)
         right_bar.addWidget(self._btn_refresh)
         right_lay.addLayout(right_bar)
 
-        self._tree = QTreeWidget()
+        self._tree = TreeWidget()
         self._tree.setHeaderLabels(['文件名', '大小', '类型', '权限', '修改时间'])
         self._tree.setColumnCount(5)
         rh = self._tree.header()
@@ -148,22 +161,15 @@ class SFTPWindow(QDialog):
         self._tree.customContextMenuRequested.connect(self._on_remote_context_menu)
         right_lay.addWidget(self._tree)
 
-        # 远程底部搜索框
+        # 远程底部搜索框（SearchLineEdit 自带搜索图标+清空按钮）
         self._remote_search_frame = QWidget()
         remote_sf = QHBoxLayout(self._remote_search_frame)
         remote_sf.setContentsMargins(0, 2, 0, 0)
-        self._remote_search_edit = QLineEdit()
+        self._remote_search_edit = SearchLineEdit()
         self._remote_search_edit.setPlaceholderText('搜索远程文件...')
+        self._remote_search_edit.searchSignal.connect(self._on_remote_search)
         self._remote_search_edit.returnPressed.connect(self._on_remote_search)
         remote_sf.addWidget(self._remote_search_edit, 1)
-        btn_rs = QPushButton('搜索')
-        btn_rs.setAutoDefault(False)
-        btn_rs.clicked.connect(self._on_remote_search)
-        remote_sf.addWidget(btn_rs)
-        btn_rc = QPushButton('✕')
-        btn_rc.setAutoDefault(False)
-        btn_rc.clicked.connect(lambda: self._remote_search_frame.hide())
-        remote_sf.addWidget(btn_rc)
         right_lay.addWidget(self._remote_search_frame)
         self._remote_search_frame.hide()
 
@@ -174,7 +180,9 @@ class SFTPWindow(QDialog):
         root.addWidget(self._splitter, 1)
 
         # ---- 传输队列面板
-        self._transfer_table = QTableWidget(0, 4)
+        self._transfer_table = TableWidget()
+        self._transfer_table.setColumnCount(4)
+        self._transfer_table.setRowCount(0)
         self._transfer_table.setHorizontalHeaderLabels(['文件名', '进度', '速度', '状态'])
         hdr = self._transfer_table.horizontalHeader()
         for c in range(3):
@@ -195,28 +203,23 @@ class SFTPWindow(QDialog):
 
         # ---- 操作按钮栏
         btn_row = QHBoxLayout()
-        self._btn_upload = QPushButton('上传 ▶')
-        self._btn_upload.setAutoDefault(False)
+        self._btn_upload = PushButton('上传 ▶')
         self._btn_upload.clicked.connect(self._upload_file)
         btn_row.addWidget(self._btn_upload)
-        self._btn_download = QPushButton('◀ 下载')
-        self._btn_download.setAutoDefault(False)
+        self._btn_download = PushButton('◀ 下载')
         self._btn_download.clicked.connect(self._download_file)
         btn_row.addWidget(self._btn_download)
-        self._btn_delete = QPushButton('删除')
-        self._btn_delete.setAutoDefault(False)
+        self._btn_delete = PushButton('删除')
         self._btn_delete.clicked.connect(self._delete_selected)
         btn_row.addWidget(self._btn_delete)
-        self._btn_mkdir = QPushButton('新建目录')
-        self._btn_mkdir.setAutoDefault(False)
+        self._btn_mkdir = PushButton('新建目录')
         self._btn_mkdir.clicked.connect(self._create_directory)
         btn_row.addWidget(self._btn_mkdir)
-        self._btn_xftp = QPushButton('Xftp')
-        self._btn_xftp.setAutoDefault(False)
+        self._btn_xftp = PushButton('Xftp')
         self._btn_xftp.clicked.connect(self._open_in_xftp)
         btn_row.addWidget(self._btn_xftp)
         btn_row.addStretch()
-        self._lbl_status = QLabel('就绪')
+        self._lbl_status = BodyLabel('就绪')
         btn_row.addWidget(self._lbl_status)
         root.addLayout(btn_row)
 
@@ -567,7 +570,7 @@ class SFTPWindow(QDialog):
         row = self._transfer_table.rowCount()
         self._transfer_table.insertRow(row)
         self._transfer_table.setItem(row, 0, QTableWidgetItem(f'{op_label}: {filename}'))
-        pb = QProgressBar()
+        pb = ProgressBar()
         pb.setRange(0, 100)
         pb.setValue(0)
         self._transfer_table.setCellWidget(row, 1, pb)
@@ -631,7 +634,6 @@ class SFTPWindow(QDialog):
 
     # ------------------------------------------------------------------ 传输队列右键菜单
     def _on_transfer_context_menu(self, pos):
-        menu = QMenu(self)
         row = self._transfer_table.rowAt(pos.y())
         has_selection = row >= 0
         has_tasks = self._transfer_table.rowCount() > 0
@@ -640,34 +642,34 @@ class SFTPWindow(QDialog):
             status_item = self._transfer_table.item(row, 3)
             if status_item:
                 selected_status = status_item.text()
-        act_pause = menu.addAction('暂停')
-        act_pause_all = menu.addAction('全部暂停')
-        act_resume = menu.addAction('继续')
-        act_resume_all = menu.addAction('全部继续')
-        menu.addSeparator()
-        act_delete = menu.addAction('删除')
-        act_delete_all = menu.addAction('全部删除')
+        menu = RoundMenu(parent=self)
+        act_pause = Action(FluentIcon.PAUSE, '暂停')
         act_pause.setEnabled(has_selection and selected_status == '传输中')
+        act_pause.triggered.connect(lambda: self._transfer_pause_row(row))
+        menu.addAction(act_pause)
+        act_pause_all = Action(FluentIcon.PAUSE, '全部暂停')
         act_pause_all.setEnabled(has_tasks)
+        act_pause_all.triggered.connect(self._transfer_pause_all)
+        menu.addAction(act_pause_all)
+        act_resume = Action(FluentIcon.PLAY, '继续')
         act_resume.setEnabled(has_selection and selected_status == '已暂停')
+        act_resume.triggered.connect(lambda: self._transfer_resume_row(row))
+        menu.addAction(act_resume)
+        act_resume_all = Action(FluentIcon.PLAY, '全部继续')
         act_resume_all.setEnabled(has_tasks)
+        act_resume_all.triggered.connect(self._transfer_resume_all)
+        menu.addAction(act_resume_all)
+        menu.addSeparator()
+        act_delete = Action(FluentIcon.DELETE, '删除')
         act_delete.setEnabled(has_selection)
+        act_delete.triggered.connect(lambda: self._transfer_delete_row(row))
+        menu.addAction(act_delete)
+        act_delete_all = Action(FluentIcon.DELETE, '全部删除')
         act_delete_all.setEnabled(has_tasks)
-        action = menu.exec(self._transfer_table.viewport().mapToGlobal(pos))
-        if action is None:
-            return
-        if action == act_pause:
-            self._transfer_pause_row(row)
-        elif action == act_pause_all:
-            self._transfer_pause_all()
-        elif action == act_resume:
-            self._transfer_resume_row(row)
-        elif action == act_resume_all:
-            self._transfer_resume_all()
-        elif action == act_delete:
-            self._transfer_delete_row(row)
-        elif action == act_delete_all:
-            self._transfer_delete_all()
+        act_delete_all.triggered.connect(self._transfer_delete_all)
+        menu.addAction(act_delete_all)
+        menu.exec(self._transfer_table.viewport().mapToGlobal(pos),
+                  aniType=MenuAnimationType.DROP_DOWN)
 
     def _find_tid_by_row(self, row):
         for tid, info in self._transfer_workers.items():
@@ -792,8 +794,8 @@ class SFTPWindow(QDialog):
         worker.start()
 
     def _create_directory(self):
-        name, ok = QInputDialog.getText(self, '新建目录', '目录名:')
-        if not ok or not name:
+        name = self._ask_name('新建目录', '目录名:')
+        if not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
         self._log(f'[SFTP] 创建目录: {remote_path}')
@@ -811,7 +813,9 @@ class SFTPWindow(QDialog):
         if not shutil.which('xftp'):
             msg = "[提示] 未找到 Xftp，请确认已安装并加入系统 PATH"
             self._log(msg)
-            QMessageBox.warning(self, "未找到 Xftp", msg)
+            dlg = MessageBox('未找到 Xftp', msg, self)
+            dlg.cancelButton.setText('关闭')
+            dlg.exec()
             return
         xftp_url = f'sftp://{self._username}:{self._password}@{self._host}:{self._port}'
         try:
@@ -822,7 +826,9 @@ class SFTPWindow(QDialog):
             )
         except Exception as e:
             self._log(f"[提示] 启动 Xftp 失败: {e}")
-            QMessageBox.warning(self, "打开失败", f"无法启动 Xftp：{e}")
+            dlg = MessageBox('打开失败', f'无法启动 Xftp：{e}', self)
+            dlg.cancelButton.setText('关闭')
+            dlg.exec()
 
     # ------------------------------------------------------------------ 回调
     def _on_quick_op_success(self, msg):
@@ -835,6 +841,15 @@ class SFTPWindow(QDialog):
         self._log(f'[SFTP] 操作失败: {error}')
 
     # ------------------------------------------------------------------ 工具
+    def _ask_name(self, title, label, default=''):
+        """弹出 Fluent 文本输入对话框，返回输入文本（取消返回 None）"""
+        dlg = _TextInputDialog(title, label, default, self)
+        dlg.yesButton.setText('确定')
+        dlg.cancelButton.setText('取消')
+        if dlg.exec():
+            return dlg.edit.text().strip()
+        return None
+
     @staticmethod
     def _format_size(size):
         for unit in ['B', 'KB', 'MB', 'GB']:
@@ -847,82 +862,54 @@ class SFTPWindow(QDialog):
     def _on_local_context_menu(self, pos):
         """本地面板右键菜单"""
         item = self._local_tree.itemAt(pos)
-        menu = QMenu(self)
+        menu = RoundMenu(parent=self)
         if item:
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if not data:
                 return
-            act_transfer = menu.addAction('传输（上传）')
-            act_open = menu.addAction('打开')
-            act_copy = menu.addAction('复制路径')
-            act_rename = menu.addAction('重命名')
-            act_delete = menu.addAction('删除')
-            act_renew = menu.addAction('刷新')
-
+            menu.addAction(Action(FluentIcon.UP, '传输（上传）', triggered=lambda: self._upload_file(data)))
+            menu.addAction(Action(FluentIcon.LIBRARY, '打开', triggered=lambda: self._ctx_local_open(data)))
+            menu.addAction(Action(FluentIcon.COPY, '复制路径',
+                                  triggered=lambda: (QApplication.clipboard().setText(data['path']),
+                                                     self._log(f'[SFTP] 已复制路径: {data["path"]}'))))
+            menu.addAction(Action(FluentIcon.EDIT, '重命名', triggered=lambda: self._ctx_rename_local(data)))
+            menu.addAction(Action(FluentIcon.DELETE, '删除', triggered=lambda: self._ctx_delete_local(data)))
+            menu.addAction(Action(FluentIcon.SYNC, '刷新', triggered=lambda: self._list_local(self._local_path)))
             menu.addSeparator()
-        new_menu = menu.addMenu('新建')
-        act_new_file = new_menu.addAction('新建文件')
-        act_new_dir = new_menu.addAction('新建文件夹')
-        action = menu.exec(self._local_tree.viewport().mapToGlobal(pos))
-        if action is None:
-            return
-        if item and action == act_transfer:
-            self._upload_file(data)
-        elif item and action == act_open:
-            self._ctx_local_open(data)
-        elif item and action == act_copy:
-            QApplication.clipboard().setText(data['path'])
-            self._log(f'[SFTP] 已复制路径: {data["path"]}')
-        elif item and action == act_rename:
-            self._ctx_rename_local(data)
-        elif item and action == act_delete:
-            self._ctx_delete_local(data)
-        elif action == act_new_file:
-            self._ctx_new_file_local()
-        elif action == act_new_dir:
-            self._ctx_new_dir_local()
-        elif action == act_renew:
-            self._list_local(self._local_path)
+        new_menu = RoundMenu('新建', self)
+        new_menu.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_local))
+        new_menu.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_local))
+        menu.addMenu(new_menu)
+        menu.exec(self._local_tree.viewport().mapToGlobal(pos),
+                  aniType=MenuAnimationType.DROP_DOWN)
 
     def _on_remote_context_menu(self, pos):
         """远程面板右键菜单"""
         item = self._tree.itemAt(pos)
-        menu = QMenu(self)
+        menu = RoundMenu(parent=self)
         if item:
             entry = item.data(0, Qt.ItemDataRole.UserRole)
             if not entry:
                 return
-            act_transfer = menu.addAction('传输（下载）')
-            act_open = menu.addAction('打开')
-            act_copy = menu.addAction('复制路径')
-            act_rename = menu.addAction('重命名')
-            act_delete = menu.addAction('删除')
-            act_renew = menu.addAction('刷新')
+            menu.addAction(Action(FluentIcon.DOWN, '传输（下载）', triggered=lambda: self._download_file(entry)))
+            menu.addAction(Action(FluentIcon.LIBRARY, '打开', triggered=lambda: self._ctx_remote_open(entry)))
+
+            def _copy_remote_path(e=entry):
+                remote_full = self._remote_path.rstrip('/') + '/' + e['name']
+                QApplication.clipboard().setText(remote_full)
+                self._log(f'[SFTP] 已复制路径: {remote_full}')
+
+            menu.addAction(Action(FluentIcon.COPY, '复制路径', triggered=_copy_remote_path))
+            menu.addAction(Action(FluentIcon.EDIT, '重命名', triggered=lambda: self._ctx_rename_remote(entry)))
+            menu.addAction(Action(FluentIcon.DELETE, '删除', triggered=lambda: self._ctx_delete_remote(entry)))
+            menu.addAction(Action(FluentIcon.SYNC, '刷新', triggered=lambda: self._list_remote(self._remote_path)))
             menu.addSeparator()
-        new_menu = menu.addMenu('新建')
-        act_new_file = new_menu.addAction('新建文件')
-        act_new_dir = new_menu.addAction('新建文件夹')
-        action = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if action is None:
-            return
-        if item and action == act_transfer:
-            self._download_file(entry)
-        elif item and action == act_open:
-            self._ctx_remote_open(entry)
-        elif item and action == act_copy:
-            remote_full = self._remote_path.rstrip('/') + '/' + entry['name']
-            QApplication.clipboard().setText(remote_full)
-            self._log(f'[SFTP] 已复制路径: {remote_full}')
-        elif item and action == act_rename:
-            self._ctx_rename_remote(entry)
-        elif item and action == act_delete:
-            self._ctx_delete_remote(entry)
-        elif action == act_renew:
-            self._list_remote(self._remote_path)
-        elif action == act_new_file:
-            self._ctx_new_file_remote()
-        elif action == act_new_dir:
-            self._ctx_new_dir_remote()
+        new_menu = RoundMenu('新建', self)
+        new_menu.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_remote))
+        new_menu.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_remote))
+        menu.addMenu(new_menu)
+        menu.exec(self._tree.viewport().mapToGlobal(pos),
+                  aniType=MenuAnimationType.DROP_DOWN)
 
     # ---- 右键菜单操作实现 ----
     def _get_temp_dir(self):
@@ -966,8 +953,8 @@ class SFTPWindow(QDialog):
             self._log(f'[SFTP] 打开失败: {e}')
 
     def _ctx_rename_local(self, data):
-        new_name, ok = QInputDialog.getText(self, '重命名', '新名称:', text=data['name'])
-        if not ok or not new_name or new_name == data['name']:
+        new_name = self._ask_name('重命名', '新名称:', data['name'])
+        if not new_name or new_name == data['name']:
             return
         old_path = data['path']
         new_path = os.path.join(os.path.dirname(old_path), new_name)
@@ -981,8 +968,8 @@ class SFTPWindow(QDialog):
             self._log(f'[SFTP] 重命名失败: {e}')
 
     def _ctx_rename_remote(self, entry):
-        new_name, ok = QInputDialog.getText(self, '重命名', '新名称:', text=entry['name'])
-        if not ok or not new_name or new_name == entry['name']:
+        new_name = self._ask_name('重命名', '新名称:', entry['name'])
+        if not new_name or new_name == entry['name']:
             return
         old_path = self._remote_path.rstrip('/') + '/' + entry['name']
         new_path = self._remote_path.rstrip('/') + '/' + new_name
@@ -1002,9 +989,10 @@ class SFTPWindow(QDialog):
             msg = f'确定要删除本地目录 "{data["name"]}" 及其所有内容吗？'
         else:
             msg = f'确定要删除本地文件 "{data["name"]}" 吗？'
-        reply = QMessageBox.question(self, '确认删除', msg,
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply != QMessageBox.StandardButton.Yes:
+        dlg = MessageBox('确认删除', msg, self)
+        dlg.yesButton.setText('删除')
+        dlg.cancelButton.setText('取消')
+        if not dlg.exec():
             return
         path = data['path']
         try:
@@ -1024,9 +1012,10 @@ class SFTPWindow(QDialog):
             msg = f'确定要删除远程目录 "{entry["name"]}" 吗？\n注意：仅能删除空目录。'
         else:
             msg = f'确定要删除远程文件 "{entry["name"]}" 吗？'
-        reply = QMessageBox.question(self, '确认删除', msg,
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply != QMessageBox.StandardButton.Yes:
+        dlg = MessageBox('确认删除', msg, self)
+        dlg.yesButton.setText('删除')
+        dlg.cancelButton.setText('取消')
+        if not dlg.exec():
             return
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         op = 'rmdir' if entry['is_dir'] else 'delete'
@@ -1042,8 +1031,8 @@ class SFTPWindow(QDialog):
         worker.start()
 
     def _ctx_new_file_local(self):
-        name, ok = QInputDialog.getText(self, '新建文件', '文件名:')
-        if not ok or not name:
+        name = self._ask_name('新建文件', '文件名:')
+        if not name:
             return
         path = os.path.join(self._local_path, name)
         try:
@@ -1056,8 +1045,8 @@ class SFTPWindow(QDialog):
             self._log(f'[SFTP] 创建文件失败: {e}')
 
     def _ctx_new_dir_local(self):
-        name, ok = QInputDialog.getText(self, '新建文件夹', '文件夹名:')
-        if not ok or not name:
+        name = self._ask_name('新建文件夹', '文件夹名:')
+        if not name:
             return
         path = os.path.join(self._local_path, name)
         try:
@@ -1070,8 +1059,8 @@ class SFTPWindow(QDialog):
             self._log(f'[SFTP] 创建目录失败: {e}')
 
     def _ctx_new_file_remote(self):
-        name, ok = QInputDialog.getText(self, '新建文件', '文件名:')
-        if not ok or not name:
+        name = self._ask_name('新建文件', '文件名:')
+        if not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
         self._log(f'[SFTP] 创建远程文件: {remote_path}')
@@ -1086,8 +1075,8 @@ class SFTPWindow(QDialog):
         worker.start()
 
     def _ctx_new_dir_remote(self):
-        name, ok = QInputDialog.getText(self, '新建文件夹', '文件夹名:')
-        if not ok or not name:
+        name = self._ask_name('新建文件夹', '文件夹名:')
+        if not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
         self._log(f'[SFTP] 创建远程目录: {remote_path}')
