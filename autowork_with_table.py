@@ -176,6 +176,7 @@ class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
+        # 设置窗口大小以及窗口最小大小
         MainWindow.resize(1440, 900)
         MainWindow.setMinimumSize(QSize(640, 400))
 
@@ -345,7 +346,7 @@ class Ui_MainWindow(object):
         # 日志顶部状态条（仅新版布局显示）
         self.log_status_bar = QWidget()
         self.log_status_bar.setObjectName(u"log_status_bar")
-        self.log_status_bar.setFixedHeight(26)
+        self.log_status_bar.setFixedHeight(24)
         log_status_layout = QHBoxLayout(self.log_status_bar)
         log_status_layout.setContentsMargins(8, 2, 8, 2)
         log_status_layout.setSpacing(12)
