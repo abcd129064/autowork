@@ -14,12 +14,12 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('frpc.exe', '.'),
-        ('frpc_xtcp.toml', '.'),
-        ('settings.json', '.'),
-        ('autowork_with_table.py', '.'),
-        ('p2p.py', '.'),
+        # styles/ 为只读主题资源，打包后位于 _internal/styles/，
+        # 运行时通过 get_resource_dir()（sys._MEIPASS）读取
         ('styles', 'styles'),
+        # 注意：settings.json / frpc.exe / frpc_xtcp.toml 由 build_exe.py
+        # 构建后复制到 dist 根目录（exe 旁边），不放入 datas；
+        # autowork_with_table.py / p2p.py 已被 import 追踪编译进 PYZ，无需重复打包
     ],
     hiddenimports=[
         'PySide6.QtWidgets',

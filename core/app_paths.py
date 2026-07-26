@@ -17,3 +17,14 @@ def get_app_dir():
         return os.path.dirname(sys.executable)
     # 开发环境：本文件位于 core/ 子目录，向上一级即项目根目录
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_resource_dir():
+    """获取只读打包资源目录（styles/ 等随包分发的资源）。
+
+    - 打包环境：sys._MEIPASS（PyInstaller 6.x onedir 模式下为 _internal/，
+      Analysis datas 中的文件实际存放于此）
+    - 开发环境：与 get_app_dir() 相同（项目根目录）"""
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return get_app_dir()

@@ -16,7 +16,7 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosi
     RoundMenu, Action, MenuAnimationType, FluentIcon, setFontFamilies,
     TransparentDropDownPushButton, setCustomStyleSheet)
 
-from core.app_paths import get_app_dir
+from core.app_paths import get_app_dir, get_resource_dir
 
 if sys.platform == 'win32':
     from win_api.windows_api import _DwmSetWindowAttribute
@@ -469,8 +469,9 @@ class UIMixin:
             setCustomStyleSheet(rb, qss, qss)
 
     def _load_qss(self, theme_name):
-        """从 styles/ 目录加载 QSS 文件，找不到时返回空字符串"""
-        qss_path = os.path.join(get_app_dir(), 'styles', f'{theme_name}.qss')
+        """从 styles/ 目录加载 QSS 文件，找不到时返回空字符串。
+        打包环境下 styles/ 位于 sys._MEIPASS（_internal/），需用 get_resource_dir()"""
+        qss_path = os.path.join(get_resource_dir(), 'styles', f'{theme_name}.qss')
         try:
             with open(qss_path, 'r', encoding='utf-8') as f:
                 return f.read()
