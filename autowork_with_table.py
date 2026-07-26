@@ -325,7 +325,7 @@ class Ui_MainWindow(object):
         # 面板标题
         p2p_header = QLabel("远程控制面板")
         p2p_header.setObjectName(u"p2p_panel_header")
-        p2p_header.setFixedHeight(32)
+        p2p_header.setFixedHeight(18)
         p2p_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         p2p_main_layout.addWidget(p2p_header)
 
