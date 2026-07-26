@@ -857,6 +857,8 @@ class SFTPWindow(QDialog):
             act_copy = menu.addAction('复制路径')
             act_rename = menu.addAction('重命名')
             act_delete = menu.addAction('删除')
+            act_renew = menu.addAction('刷新')
+
             menu.addSeparator()
         new_menu = menu.addMenu('新建')
         act_new_file = new_menu.addAction('新建文件')
@@ -879,6 +881,8 @@ class SFTPWindow(QDialog):
             self._ctx_new_file_local()
         elif action == act_new_dir:
             self._ctx_new_dir_local()
+        elif action == act_renew:
+            self._list_local(self._local_path)
 
     def _on_remote_context_menu(self, pos):
         """远程面板右键菜单"""
@@ -893,6 +897,7 @@ class SFTPWindow(QDialog):
             act_copy = menu.addAction('复制路径')
             act_rename = menu.addAction('重命名')
             act_delete = menu.addAction('删除')
+            act_renew = menu.addAction('刷新')
             menu.addSeparator()
         new_menu = menu.addMenu('新建')
         act_new_file = new_menu.addAction('新建文件')
@@ -912,6 +917,8 @@ class SFTPWindow(QDialog):
             self._ctx_rename_remote(entry)
         elif item and action == act_delete:
             self._ctx_delete_remote(entry)
+        elif action == act_renew:
+            self._list_remote(self._remote_path)
         elif action == act_new_file:
             self._ctx_new_file_remote()
         elif action == act_new_dir:

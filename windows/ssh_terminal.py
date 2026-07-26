@@ -1,17 +1,33 @@
 # -*- coding: utf-8 -*-
-"""SSH 终端窗口（exec_command 模式，底部输入框）"""
+"""SSH 终端窗口（invoke_shell 交互式 PTY + ANSI 虚拟终端 + 直接键盘输入）
+
+体验与 Windows Terminal / Xshell 一致：
+- 直接在终端区域打字，shell 回显
+- Tab 命令/路径补全
+- 上下键命令历史
+- Ctrl+C/D/L 等控制键
+- ANSI 彩色输出正确渲染
+- nano/vim 全屏应用（备用屏幕切换）
+
+安全关闭策略（规避 C 层 Use-After-Free 崩溃）：
+- channel 上设置 0.1s recv 超时，reader 线程可被 stop 标志及时中断
+- closeEvent 仅设置 stop 标志并等待 reader 线程退出，绝不从主线程操作 channel
+- reader 线程退出后再关闭 transport，消除并发竞态
+"""
 
 import shutil
+import socket
 import subprocess
+import threading
 
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QPlainTextEdit, QMessageBox)
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton
+from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QFont
 
 from core.conn_logger import conn_logger
 from core.utils import safe_close_transport
-from workers.network_workers import SSHConnectWorker, SSHExecWorker
+from workers.network_workers import SSHConnectWorker
+from windows.ansi_terminal import ANSITerminalWidget
 
 # 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
 _pending_workers: set = set()
@@ -24,71 +40,70 @@ def _safe_release_worker(w):
 
 
 class SSHTerminalWindow(QDialog):
-    """SSH 终端窗口（exec_command 模式，底部输入框）"""
+    """SSH 终端窗口（invoke_shell 交互式 PTY + ANSI 渲染 + 直接键盘输入）"""
+
+    # reader 线程通过此信号将输出安全投递到 GUI 线程
+    _output_signal = Signal(str)
 
     def __init__(self, host, port, username, password, log_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"SSH 终端 - {host}:{port}")
-        self.resize(800, 500)
+        self.resize(900, 560)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
         self._log = log_callback or (lambda msg: None)
         self._client = None
+        self._channel = None
         self._connect_worker = None
-        self._exec_worker = None
+        self._reader_thread = None
+        self._stop_event = threading.Event()
+        self._closing = False
         self._init_ui()
+        self._output_signal.connect(self._on_shell_output)
         QTimer.singleShot(100, self._connect_ssh)
+
+    def focusNextPrevChild(self, next_: bool) -> bool:
+        """禁止对话框级别的 Tab 焦点导航，确保 Tab 始终发送到终端"""
+        return False
+
+    # ─── UI ───────────────────────────────────────────────────────────────
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
 
-        # 输出区域（字体通过 setFont 设置，不在 QSS 中指定，以便全局字体变更能生效）
-        self._output = QPlainTextEdit()
-        self._output.setReadOnly(True)
-        self._output.setFont(QFont("Consolas", 10))
-        self._output.setStyleSheet(
-            "QPlainTextEdit { background-color: #1e1e1e; color: #00ff00; }"
-        )
-        layout.addWidget(self._output)
+        # ANSI 终端（既是显示区域也是输入区域）
+        self._terminal = ANSITerminalWidget(self)
+        self._terminal.key_input.connect(self._on_key_input)
+        layout.addWidget(self._terminal, stretch=1)
 
-        # 输入区域
-        input_layout = QHBoxLayout()
-        self._prompt_label = QLabel("$")
-        self._prompt_label.setFont(QFont("Consolas", 10))
-        self._prompt_label.setStyleSheet("color: #00ff00;")
-        input_layout.addWidget(self._prompt_label)
+        # 底部工具按钮（极简）
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(6)
+        btn_layout.addStretch()
 
-        self._input = QLineEdit()
-        self._input.setFont(QFont("Consolas", 10))
-        self._input.setStyleSheet(
-            "QLineEdit { background-color: #2d2d2d; color: #00ff00; }"
-        )
-        self._input.setPlaceholderText("输入命令，回车执行...")
-        self._input.returnPressed.connect(self._execute_command)
-        self._input.setEnabled(False)  # 连接成功前禁用
-        input_layout.addWidget(self._input)
-
-        self._send_btn = QPushButton("执行")
-        self._send_btn.clicked.connect(self._execute_command)
-        self._send_btn.setEnabled(False)
-        input_layout.addWidget(self._send_btn)
-
-        self._cmd_btn = QPushButton("CMD")
+        self._cmd_btn = QPushButton("CMD 打开")
+        self._cmd_btn.setFont(QFont("Microsoft YaHei UI", 8))
+        self._cmd_btn.setFocusPolicy(Qt.NoFocus)  # 不抢焦点
         self._cmd_btn.clicked.connect(self._open_in_cmd)
-        input_layout.addWidget(self._cmd_btn)
+        btn_layout.addWidget(self._cmd_btn)
 
-        self._xshell_btn = QPushButton("Xshell")
+        self._xshell_btn = QPushButton("Xshell 打开")
+        self._xshell_btn.setFont(QFont("Microsoft YaHei UI", 8))
+        self._xshell_btn.setFocusPolicy(Qt.NoFocus)  # 不抢焦点
         self._xshell_btn.clicked.connect(self._open_in_xshell)
-        input_layout.addWidget(self._xshell_btn)
+        btn_layout.addWidget(self._xshell_btn)
 
-        layout.addLayout(input_layout)
+        layout.addLayout(btn_layout)
+
+    # ─── SSH 连接 ─────────────────────────────────────────────────────────
 
     def _connect_ssh(self):
         """异步建立 SSH 连接"""
-        self._append_output(f"正在连接 {self._host}:{self._port} ...\n")
+        self._terminal.write_output(f"正在连接 {self._host}:{self._port} ...\r\n")
         worker = SSHConnectWorker(self._host, self._port, self._username, self._password)
         worker.connected.connect(self._on_connected)
         worker.error.connect(self._on_connect_error)
@@ -96,18 +111,31 @@ class SSHTerminalWindow(QDialog):
         worker.start()
 
     def _on_connected(self, client):
-        """SSH 连接成功"""
+        """SSH 连接成功 → 创建交互式 shell"""
         self._client = client
         self._cleanup_connect_worker()
-        self._input.setEnabled(True)
-        self._send_btn.setEnabled(True)
-        self._input.setFocus()
-        self._append_output("[连接成功] 请输入命令\n")
+        try:
+            channel = client.invoke_shell(term='xterm-256color', width=120, height=40)
+            channel.settimeout(0.1)  # 短超时：reader 线程可及时响应 stop 标志
+            self._channel = channel
+            # 启动 reader 守护线程
+            self._stop_event.clear()
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop, daemon=True, name='ssh-shell-reader'
+            )
+            self._reader_thread.start()
+            # 启用终端键盘输入并聚焦
+            self._terminal.set_input_enabled(True)
+            self._terminal.setFocus()
+        except Exception as e:
+            self._terminal.write_output(f"[错误] 创建交互式 Shell 失败: {e}\r\n")
+            conn_logger.exception('SSH', '创建交互式 Shell 失败', exc=e,
+                                  host=self._host, port=self._port)
 
     def _on_connect_error(self, error):
         """SSH 连接失败"""
         self._cleanup_connect_worker()
-        self._append_output(f"[连接失败] {error}\n")
+        self._terminal.write_output(f"[连接失败] {error}\r\n")
 
     def _cleanup_connect_worker(self):
         """非阻塞清理连接 worker（保持强引用直到线程真正结束）"""
@@ -121,56 +149,57 @@ class SSHTerminalWindow(QDialog):
             else:
                 w.deleteLater()
 
-    def _execute_command(self):
-        """执行输入的命令"""
-        cmd = self._input.text().strip()
-        if not cmd or self._client is None:
+    # ─── 交互式 Shell I/O ─────────────────────────────────────────────────
+
+    def _reader_loop(self):
+        """后台线程：持续读取 shell 输出并通过信号投递到 GUI 线程
+
+        安全保证：
+        - channel 上已设置 0.1s 超时，recv 不会无限阻塞
+        - 所有 channel 操作仅在此线程内执行，主线程绝不触碰 channel
+        """
+        channel = self._channel
+        while not self._stop_event.is_set():
+            try:
+                if channel.recv_ready():
+                    data = channel.recv(65536)
+                    if not data:
+                        if not self._closing:
+                            self._output_signal.emit("\r\n[连接已断开]\r\n")
+                        break
+                    self._output_signal.emit(data.decode('utf-8', errors='replace'))
+                else:
+                    self._stop_event.wait(0.05)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception:
+                if not self._stop_event.is_set():
+                    self._output_signal.emit("\r\n[连接异常断开]\r\n")
+                break
+
+    def _on_shell_output(self, text: str):
+        """GUI 线程槽：将 shell 输出写入 ANSI 终端控件"""
+        if self._closing:
             return
-        self._input.clear()
-        self._append_output(f"$ {cmd}\n")
+        self._terminal.write_output(text)
 
-        # 清理上一个 exec worker
-        if self._exec_worker is not None:
-            if self._exec_worker.isRunning():
-                return  # 上一个命令还在执行
-            self._exec_worker = None
+    def _on_key_input(self, data: str):
+        """终端控件键盘输入 → 发送到远端 shell"""
+        if self._channel is None or self._channel.closed:
+            return
+        try:
+            self._channel.send(data)
+        except Exception:
+            pass
 
-        worker = SSHExecWorker(self._client, cmd)
-        worker.output.connect(self._on_output)
-        worker.error.connect(self._on_error)
-        worker.done.connect(self._on_exec_finished)
-        self._exec_worker = worker
-        worker.start()
-
-    def _on_output(self, text):
-        """命令标准输出"""
-        self._append_output(text)
-
-    def _on_error(self, text):
-        """命令标准错误"""
-        self._append_output(f"[错误] {text}")
-
-    def _on_exec_finished(self):
-        """命令执行完成"""
-        w = self._exec_worker
-        self._exec_worker = None
-        if w is not None:
-            if w.isRunning():
-                w.finished.connect(w.deleteLater)
-            else:
-                w.deleteLater()
-        self._append_output("---\n")
-        self._input.setFocus()
-
-    def _append_output(self, text):
-        """追加文本到输出区域"""
-        self._output.moveCursor(QTextCursor.End)
-        self._output.insertPlainText(text)
-        self._output.moveCursor(QTextCursor.End)
+    # ─── 外部客户端 ───────────────────────────────────────────────────────
 
     def _open_in_cmd(self):
-        """在系统 CMD 中打开 SSH 连接（交互式终端）"""
+        """在系统 CMD 中打开 SSH 连接"""
         if not shutil.which('ssh'):
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self, "未找到 SSH 客户端",
                 "系统中未安装 OpenSSH 客户端。\n"
@@ -183,36 +212,39 @@ class SSHTerminalWindow(QDialog):
         except Exception as e:
             conn_logger.exception('SSH', '启动 CMD 终端失败', exc=e,
                                   host=self._host, port=self._port)
-            QMessageBox.warning(self, "启动失败", f"无法打开 CMD 终端：{e}")
 
     def _open_in_xshell(self):
         """使用 Xshell 打开 SSH 连接"""
         xshell_path = shutil.which('xshell') or shutil.which('Xshell')
         if not xshell_path:
-            msg = "[提示] 未找到 Xshell，请确认已安装并加入系统 PATH"
-            self._log(msg)
-            QMessageBox.warning(self, "未找到 Xshell", msg)
+            self._log("[提示] 未找到 Xshell，请确认已安装并加入系统 PATH")
             return
         xshell_url = f'ssh://{self._username}:{self._password}@{self._host}:{self._port}'
         try:
-            # Xshell 是 GUI 程序，无需 shell=True 和 CREATE_NEW_CONSOLE
             subprocess.Popen([xshell_path, '-url', xshell_url])
         except Exception as e:
             self._log(f"[提示] 启动 Xshell 失败: {e}")
-            QMessageBox.warning(self, "打开失败", f"无法启动 Xshell：{e}")
+
+    # ─── 生命周期 ─────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        # 清理 exec worker
-        if self._exec_worker is not None:
-            w = self._exec_worker
-            self._exec_worker = None
-            if w.isRunning():
-                _safe_release_worker(w)
-            else:
-                w.deleteLater()
-        # 清理 connect worker
-        self._cleanup_connect_worker()
-        # 关闭 SSH client（close+join 等待 transport 后台线程退出，避免 C 层崩溃）
+        """安全关闭：先停 reader 线程，再关 transport，消除 C 层并发竞态"""
+        self._closing = True
+        self._terminal.set_input_enabled(False)
+        # 1. 通知 reader 线程退出
+        self._stop_event.set()
+        # 2. 等待 reader 线程结束（recv 超时 0.1s + 循环检查，最多 ~0.5s）
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2.0)
+        self._reader_thread = None
+        # 3. reader 已退出，安全关闭 channel（此时无并发访问）
+        if self._channel:
+            try:
+                self._channel.close()
+            except Exception:
+                pass
+            self._channel = None
+        # 4. 关闭 SSH client（close+join 等待 transport 后台线程退出）
         if self._client:
             try:
                 transport = self._client.get_transport()
@@ -224,4 +256,6 @@ class SSHTerminalWindow(QDialog):
             except Exception:
                 pass
             self._client = None
+        # 5. 清理 connect worker
+        self._cleanup_connect_worker()
         super().closeEvent(event)
