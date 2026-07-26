@@ -128,7 +128,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._init_system_theme_monitor()
         self._apply_layout()
         # Fluent ComboBox 使用自定义弹出视图，无需 setView
-        self.ui.choose_exe.setFixedWidth(190)  # 略宽于 SnookerTracking824.exe
+        self.ui.choose_exe.setMinimumWidth(150)  # 保证下拉框不被压成一条线
         # 远程状态
         self._frpc_process = None
         self._p2p_visitors = []

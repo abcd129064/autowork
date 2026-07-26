@@ -8,10 +8,13 @@ QWidget#centralwidget {
     background-color: #202020;
 }
 
-/* ===== 工具栏 ===== */
-QWidget#toolbar_widget {
+/* ===== 工具栏（流式布局 + 滚动区域） ===== */
+QScrollArea#toolbar_scroll {
     background-color: #202020;
     border-bottom: 1px solid #383838;
+}
+QWidget#toolbar_widget {
+    background-color: #202020;
 }
 QFrame#toolbar_separator {
     color: #383838;
@@ -40,42 +43,12 @@ QPushButton:disabled {
 }
 
 /* ===== 输入框 ===== */
-QLineEdit {
-    background-color: #2C2C2C;
-    color: #C8D0DC;
-    border: 1px solid #383838;
-    border-radius: 6px;
-    padding: 4px 8px;
-    selection-background-color: #00BCD4;
-    selection-color: #FFFFFF;
-}
-QLineEdit:focus {
-    border: 1px solid #00BCD4;
-}
-QLineEdit:disabled {
-    color: #555960;
-    background-color: #202020;
-}
+/* 已替换为 qfluentwidgets LineEdit/PasswordLineEdit，
+   内置深色/浅色双主题样式，无需 QSS 覆盖 */
 
 /* ===== 数字微调框 ===== */
-QSpinBox {
-    background-color: #2C2C2C;
-    color: #C8D0DC;
-    border: 1px solid #383838;
-    border-radius: 6px;
-    padding: 4px 6px;
-}
-QSpinBox:hover, QSpinBox:focus {
-    border: 1px solid #00BCD4;
-}
-QSpinBox::up-button, QSpinBox::down-button {
-    background-color: #2C2C2C;
-    border: none;
-    width: 16px;
-}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-    background-color: #00BCD4;
-}
+/* 已替换为 qfluentwidgets SpinBox，
+   内置深色/浅色双主题样式，无需 QSS 覆盖 */
 
 /* ===== 日志输出区域（终端风格） ===== */
 /* 注意：不在此处指定 font-family/font-size，
@@ -193,21 +166,10 @@ QLabel {
     background-color: transparent;
 }
 
-/* ===== 菜单栏 ===== */
-QMenuBar {
+/* ===== 菜单栏（Fluent 透明下拉按钮容器） ===== */
+QWidget#menubar_widget {
     background-color: #202020;
-    color: #C8D0DC;
     border-bottom: 1px solid #383838;
-    padding: 1px;
-}
-QMenuBar::item {
-    background: transparent;
-    padding: 2px 8px;
-    border-radius: 4px;
-}
-QMenuBar::item:selected {
-    background-color: rgba(0, 188, 212, 0.15);
-    color: #00BCD4;
 }
 QMenu {
     background-color: #2C2C2C;

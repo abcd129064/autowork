@@ -8,13 +8,13 @@ import ctypes
 import subprocess
 
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout,
-    QMenuBar, QDialog, QVBoxLayout, QKeySequenceEdit, QDialogButtonBox,
+    QDialog, QVBoxLayout, QKeySequenceEdit, QDialogButtonBox,
     QColorDialog, QFontDialog, QInputDialog, QMessageBox, QFrame)
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QFont,
-    QAction, QActionGroup)
+from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QFont, QActionGroup)
 from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
-    RoundMenu, Action, MenuAnimationType, FluentIcon, setFontFamilies)
+    RoundMenu, Action, MenuAnimationType, FluentIcon, setFontFamilies,
+    TransparentDropDownPushButton, setCustomStyleSheet)
 
 from core.app_paths import get_app_dir
 
@@ -173,74 +173,95 @@ class UIMixin:
     # ==================== 菜单栏 ====================
 
     def _init_menubar(self):
-        """初始化顶部菜单栏"""
-        self._menubar_widget = QMenuBar()
+        """初始化顶部菜单栏（Fluent 风格：TransparentDropDownPushButton + RoundMenu）"""
+        self._menubar_widget = QWidget()
         self._menubar_widget.setObjectName(u"menubar_widget")
-        self._menubar_widget.setFixedHeight(24)
-        menubar = self._menubar_widget
+        self._menubar_widget.setFixedHeight(26  )
+        _mb_layout = QHBoxLayout(self._menubar_widget)
+        _mb_layout.setContentsMargins(6, 0, 6, 0)
+        _mb_layout.setSpacing(2)
 
         # 「功能」菜单
-        func_menu = menubar.addMenu("功能")
-        act_sc = func_menu.addAction("修改快捷键")
+        func_menu = RoundMenu("功能", self)
+        act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
-        act_hc = func_menu.addAction("高亮颜色设置")
+        act_hc = Action(FluentIcon.HIGHTLIGHT, "高亮颜色设置", self)
         act_hc.triggered.connect(lambda: QTimer.singleShot(0, self._on_highlight_color))
+        func_menu.addAction(act_sc)
+        func_menu.addAction(act_hc)
+        func_btn = TransparentDropDownPushButton("功能", self._menubar_widget)
+        func_btn.setMenu(func_menu)
+        _mb_layout.addWidget(func_btn)
 
         # 「视图」菜单
-        view_menu = menubar.addMenu("视图")
+        view_menu = RoundMenu("视图", self)
         settings = self._load_settings()
 
         # 布局子菜单
-        layout_menu = view_menu.addMenu("布局")
+        layout_menu = RoundMenu("布局", self)
         self._layout_group = QActionGroup(self)
         self._layout_group.setExclusive(True)
-        self._act_layout_panel = QAction("面板布局", self)
+        self._act_layout_panel = Action(FluentIcon.TILES, "面板布局", self)
         self._act_layout_panel.setCheckable(True)
         self._act_layout_panel.setChecked(not settings.get("classic_layout", True))
         self._layout_group.addAction(self._act_layout_panel)
         layout_menu.addAction(self._act_layout_panel)
-        self._act_layout_classic = QAction("经典布局", self)
+        self._act_layout_classic = Action(FluentIcon.LAYOUT, "经典布局", self)
         self._act_layout_classic.setCheckable(True)
         self._act_layout_classic.setChecked(settings.get("classic_layout", True))
         self._layout_group.addAction(self._act_layout_classic)
         layout_menu.addAction(self._act_layout_classic)
         self._layout_group.triggered.connect(self._on_layout_selected)
+        view_menu.addMenu(layout_menu)
 
         # 主题子菜单
-        theme_menu = view_menu.addMenu("主题")
+        theme_menu = RoundMenu("主题", self)
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
         _theme_mode = self._get_theme_mode(settings)
-        self._act_theme_auto = QAction("跟随系统", self)
+        self._act_theme_auto = Action(FluentIcon.SYNC, "跟随系统", self)
         self._act_theme_auto.setCheckable(True)
         self._act_theme_auto.setChecked(_theme_mode == "auto")
         self._theme_group.addAction(self._act_theme_auto)
         theme_menu.addAction(self._act_theme_auto)
-        self._act_theme_light = QAction("浅色主题", self)
+        self._act_theme_light = Action(FluentIcon.BRIGHTNESS, "浅色主题", self)
         self._act_theme_light.setCheckable(True)
         self._act_theme_light.setChecked(_theme_mode == "light")
         self._theme_group.addAction(self._act_theme_light)
         theme_menu.addAction(self._act_theme_light)
-        self._act_theme_dark = QAction("深色主题", self)
+        self._act_theme_dark = Action(FluentIcon.QUIET_HOURS, "深色主题", self)
         self._act_theme_dark.setCheckable(True)
         self._act_theme_dark.setChecked(_theme_mode == "dark")
         self._theme_group.addAction(self._act_theme_dark)
         theme_menu.addAction(self._act_theme_dark)
         self._theme_group.triggered.connect(self._on_theme_selected)
+        view_menu.addMenu(theme_menu)
 
         # 字号/缩放/字体
         view_menu.addSeparator()
-        act_fs = view_menu.addAction("字号大小")
+        act_fs = Action(FluentIcon.FONT_SIZE, "字号大小", self)
         act_fs.triggered.connect(lambda: QTimer.singleShot(0, self._on_font_size))
-        act_scale = view_menu.addAction("界面缩放")
+        view_menu.addAction(act_fs)
+        act_scale = Action(FluentIcon.ZOOM, "界面缩放", self)
         act_scale.triggered.connect(lambda: QTimer.singleShot(0, self._on_dpi_scale))
-        act_ff = view_menu.addAction("字体设置")
+        view_menu.addAction(act_scale)
+        act_ff = Action(FluentIcon.FONT, "字体设置", self)
         act_ff.triggered.connect(lambda: QTimer.singleShot(0, self._on_font_family))
+        view_menu.addAction(act_ff)
+        view_btn = TransparentDropDownPushButton("视图", self._menubar_widget)
+        view_btn.setMenu(view_menu)
+        _mb_layout.addWidget(view_btn)
 
         # 「帮助」菜单
-        help_menu = menubar.addMenu("帮助")
-        act_about = help_menu.addAction("关于")
+        help_menu = RoundMenu("帮助", self)
+        act_about = Action(FluentIcon.INFO, "关于", self)
         act_about.triggered.connect(lambda: QTimer.singleShot(0, self._on_about))
+        help_menu.addAction(act_about)
+        help_btn = TransparentDropDownPushButton("帮助", self._menubar_widget)
+        help_btn.setMenu(help_menu)
+        _mb_layout.addWidget(help_btn)
+
+        _mb_layout.addStretch(1)
 
     # ==================== 设置对话框 ====================
 
@@ -426,19 +447,26 @@ class UIMixin:
         QApplication.styleHints().setColorScheme(
             Qt.ColorScheme.Dark if is_dark else Qt.ColorScheme.Light)
 
+        stylesheet = self._load_qss('dark' if is_dark else 'light')
+        self.setStyleSheet(stylesheet)
         if not is_dark:
-            light_stylesheet = self._load_qss('light')
-            self.setStyleSheet(light_stylesheet)
             self.style().unpolish(self)
             self.style().polish(self)
             for w in self.findChildren(QWidget):
                 w.update()
-            self._apply_global_font()
-            return
-
-        stylesheet = self._load_qss('dark')
-        self.setStyleSheet(stylesheet)
         self._apply_global_font()
+        # setTheme 会重置控件内部 QSS，重新强制工具栏单选按钮行高
+        self._enforce_toolbar_radio_height()
+
+    def _enforce_toolbar_radio_height(self):
+        """工具栏 RadioButton 固定 32px 行高（与按钮中线对齐）。
+        使用 setCustomStyleSheet 注册到主题管理器，setTheme 后自动重应用，
+        不会被库内部 QSS (min/max-height: 24px) 覆盖。"""
+        qss = "QRadioButton { min-height: 32px; max-height: 32px; }"
+        for rb in (self.ui.input_frame_before,
+                   self.ui.input_frame_set,
+                   self.ui.input_frame_custom):
+            setCustomStyleSheet(rb, qss, qss)
 
     def _load_qss(self, theme_name):
         """从 styles/ 目录加载 QSS 文件，找不到时返回空字符串"""

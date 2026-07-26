@@ -8,15 +8,15 @@
 
 from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QLocale,
     QMetaObject, QObject, QPoint, QRect,
-    QSize, QTime, QUrl, Qt)
+    QSize, QTime, QTimer, QUrl, Qt)
 from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QFont, QFontDatabase, QGradient, QIcon,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication,
-    QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QMainWindow,
-    QSizePolicy, QSpinBox, QSplitter, QVBoxLayout,
+    QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout,
+    QMainWindow, QScrollArea,
+    QSizePolicy, QSplitter, QVBoxLayout,
     QWidget, QStatusBar)
 from qfluentwidgets import (
     PushButton as FluentPushButton,
@@ -28,6 +28,12 @@ from qfluentwidgets import (
     ListWidget,
     PlainTextEdit as FluentPlainTextEdit,
     SearchLineEdit,
+    LineEdit as FluentLineEdit,
+    PasswordLineEdit,
+    SpinBox as FluentSpinBox,
+    FlowLayout,
+    setFont,
+    setCustomStyleSheet,
 )
 
 
@@ -53,12 +59,76 @@ def _make_section_label(text, parent=None):
     return lbl
 
 
+class _ToolbarRadioButton(RadioButton):
+    """工具栏专用单选按钮：强制 32px 行高，与 Fluent 按钮中线对齐。
+    通过 setCustomStyleSheet 将高度 QSS 注册到 qfluentwidgets 主题管理器，
+    setTheme() 切换主题时会自动重新追加，不会被内部 QSS 覆盖。"""
+
+    _HEIGHT_QSS = "QRadioButton { min-height: 32px; max-height: 32px; }"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        setCustomStyleSheet(self, self._HEIGHT_QSS, self._HEIGHT_QSS)
+
+
+class _FlowScrollArea(QScrollArea):
+    """工具栏专用滚动区域：根据自身宽度主动计算内容高度并锁定，
+    保证父布局精确按内容高度分配空间（单行=单行高，折行=多行高，超上限滚动）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 高度上限（约 3 行控件），setFixedHeight 会覆盖 maximumHeight，
+        # 因此用独立变量保存上限，避免窗口反复缩放时上限被“棘轮”压低
+        self._height_cap = self.maximumHeight()
+        # 垂直策略设为 Preferred（配合 HFW 标志，作为首次布局的兜底）
+        sp = self.sizePolicy()
+        sp.setVerticalPolicy(QSizePolicy.Policy.Preferred)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+
+    def setMaximumHeight(self, h):
+        """同步更新高度上限"""
+        self._height_cap = h
+        super().setMaximumHeight(h)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        w = self.widget()
+        if w is None:
+            return super().heightForWidth(width)
+        margins = self.contentsMargins()
+        sb = self.verticalScrollBar()
+        sb_w = sb.width() if sb.isVisible() else 0
+        inner_w = max(0, width - margins.left() - margins.right() - sb_w)
+        h = w.heightForWidth(inner_w)
+        return min(h, self._height_cap)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adjust_height()
+
+    def _adjust_height(self):
+        """按当前宽度计算流式内容实际高度，锁定自身高度，下方内容紧贴无空白"""
+        w = self.widget()
+        if w is None or self.width() <= 0:
+            return
+        margins = self.contentsMargins()
+        sb = self.verticalScrollBar()
+        sb_w = sb.width() if sb.isVisible() else 0
+        inner_w = max(1, self.width() - margins.left() - margins.right() - sb_w)
+        h = min(w.heightForWidth(inner_w), self._height_cap)
+        if h > 0 and h != self.height():
+            self.setFixedHeight(h)
+
+
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
         MainWindow.resize(1440, 900)
-        MainWindow.setMinimumSize(QSize(960, 540))
+        MainWindow.setMinimumSize(QSize(640, 400))
 
         # ===== Central Widget =====
         self.centralwidget = QWidget(MainWindow)
@@ -78,14 +148,26 @@ class Ui_MainWindow(object):
         self.verticalLayout_2.setContentsMargins(0, 0, 0, 0)
 
         # ============================================================
-        # 顶部工具栏 — 三组逻辑分区
+        # 顶部工具栏 — FlowLayout 流式布局（窗口缩窄时控件自动换行，严禁重叠）
+        # 包裹在 QScrollArea 中：折行过多时可上下滚动，不挤压下方日志区域
         # ============================================================
-        self.toolbar_widget = QWidget(self.centralwidget)
+        self.toolbar_scroll = _FlowScrollArea(self.centralwidget)
+        self.toolbar_scroll.setObjectName(u"toolbar_scroll")
+        self.toolbar_scroll.setWidgetResizable(True)
+        self.toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.toolbar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.toolbar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # 最多展示约 3 行控件（单行约 44px），超出部分滚动查看
+        self.toolbar_scroll.setMaximumHeight(132)
+
+        self.toolbar_widget = QWidget()
         self.toolbar_widget.setObjectName(u"toolbar_widget")
-        self.toolbar_widget.setFixedHeight(44)
-        self.horizontalLayout = QHBoxLayout(self.toolbar_widget)
+        self.horizontalLayout = FlowLayout(self.toolbar_widget)
         self.horizontalLayout.setObjectName(u"horizontalLayout")
-        self.horizontalLayout.setSpacing(6)
+        self.horizontalLayout.setHorizontalSpacing(6)
+        self.horizontalLayout.setVerticalSpacing(6)
         self.horizontalLayout.setContentsMargins(10, 6, 10, 6)
 
         # --- 组1: 文件操作 ---
@@ -95,7 +177,7 @@ class Ui_MainWindow(object):
 
         self.date = CalendarPicker(self.toolbar_widget)
         self.date.setObjectName(u"date")
-        self.date.setFixedWidth(150)
+        self.date.setMinimumWidth(150)
         self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
 
@@ -107,40 +189,37 @@ class Ui_MainWindow(object):
         self.open_config.setObjectName(u"open_config")
         self.horizontalLayout.addWidget(self.open_config)
 
-        # 分割线
-        self.horizontalLayout.addWidget(_make_separator(vertical=True))
-
         # --- 组2: 程序配置 ---
         self.label_2 = QLabel(self.toolbar_widget)
         self.label_2.setObjectName(u"label_2")
+        self.label_2.setFixedHeight(32)
+        self.label_2.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        setFont(self.label_2, 11)
         self.horizontalLayout.addWidget(self.label_2)
 
         self.choose_exe = FluentComboBox(self.toolbar_widget)
         self.choose_exe.setObjectName(u"choose_exe")
-        self.choose_exe.setMinimumWidth(140)
+        self.choose_exe.setMinimumWidth(145)
         self.horizontalLayout.addWidget(self.choose_exe)
 
-        # 帧控制
-        self.input_frame_before = RadioButton(self.toolbar_widget)
+        # 帧控制（_ToolbarRadioButton 强制 32px 行高与按钮中线对齐）
+        self.input_frame_before = _ToolbarRadioButton(self.toolbar_widget)
         self.input_frame_before.setObjectName(u"input_frame_before")
         self.input_frame_before.setChecked(True)
         self.horizontalLayout.addWidget(self.input_frame_before)
 
-        self.input_frame_set = RadioButton(self.toolbar_widget)
+        self.input_frame_set = _ToolbarRadioButton(self.toolbar_widget)
         self.input_frame_set.setObjectName(u"input_frame_set")
         self.horizontalLayout.addWidget(self.input_frame_set)
 
-        self.input_frame_custom = RadioButton(self.toolbar_widget)
+        self.input_frame_custom = _ToolbarRadioButton(self.toolbar_widget)
         self.input_frame_custom.setObjectName(u"input_frame_custom")
         self.horizontalLayout.addWidget(self.input_frame_custom)
 
-        self.input_frame = QLineEdit(self.toolbar_widget)
+        self.input_frame = FluentLineEdit(self.toolbar_widget)
         self.input_frame.setObjectName(u"input_frame")
-        self.input_frame.setFixedWidth(55)
+        self.input_frame.setFixedWidth(75)
         self.horizontalLayout.addWidget(self.input_frame)
-
-        # 分割线
-        self.horizontalLayout.addWidget(_make_separator(vertical=True))
 
         # --- 组3: 播放控制 ---
         self.open_daily = FluentPushButton(self.toolbar_widget)
@@ -169,10 +248,8 @@ class Ui_MainWindow(object):
         self.p2p_btn.setMaximumWidth(72)
         self.horizontalLayout.addWidget(self.p2p_btn)
 
-        # 弹性空间，将所有控件推向左侧
-        self.horizontalLayout.addStretch()
-
-        self.verticalLayout_2.addWidget(self.toolbar_widget)
+        self.toolbar_scroll.setWidget(self.toolbar_widget)
+        self.verticalLayout_2.addWidget(self.toolbar_scroll)
 
         # ============================================================
         # 三区域 Splitter: 左侧设备树 | 中间日志控制台 | 右侧远程面板
@@ -206,6 +283,7 @@ class Ui_MainWindow(object):
         self.loacl_video_list.setObjectName(u"loacl_video_list")
 
         self.log_list = ListWidget()
+        self.log_list.setObjectName(u"log_list")
         self.log_list.setObjectName(u"log_list")
 
         self.show_log = FluentPlainTextEdit()
@@ -274,13 +352,13 @@ class Ui_MainWindow(object):
         p2p_main_layout.addLayout(p2p_list_btn_layout)
 
         # XTCP 表单
-        self.p2p_form_server = QLineEdit(self.p2p_panel)
+        self.p2p_form_server = FluentLineEdit(self.p2p_panel)
         self.p2p_form_server.setObjectName(u"p2p_form_server")
         self.p2p_form_server.setPlaceholderText("snk_xxxx")
-        self.p2p_form_port = QSpinBox(self.p2p_panel)
+        self.p2p_form_port = FluentSpinBox(self.p2p_panel)
         self.p2p_form_port.setObjectName(u"p2p_form_port")
         self.p2p_form_port.setRange(1024, 65535)
-        self.p2p_form_key = QLineEdit(self.p2p_panel)
+        self.p2p_form_key = FluentLineEdit(self.p2p_panel)
         self.p2p_form_key.setObjectName(u"p2p_form_key")
         self.p2p_form_key.setText("abc123")
 
@@ -328,20 +406,19 @@ class Ui_MainWindow(object):
         p2p_main_layout.addLayout(mode_layout)
 
         # TCP 表单
-        self.p2p_ssh_host = QLineEdit(self.p2p_panel)
+        self.p2p_ssh_host = FluentLineEdit(self.p2p_panel)
         self.p2p_ssh_host.setObjectName(u"p2p_ssh_host")
         self.p2p_ssh_host.setPlaceholderText("127.0.0.1")
-        self.p2p_ssh_port = QSpinBox(self.p2p_panel)
+        self.p2p_ssh_port = FluentSpinBox(self.p2p_panel)
         self.p2p_ssh_port.setObjectName(u"p2p_ssh_port")
         self.p2p_ssh_port.setRange(1, 65535)
         self.p2p_ssh_port.setValue(22)
-        self.p2p_ssh_user = QLineEdit(self.p2p_panel)
+        self.p2p_ssh_user = FluentLineEdit(self.p2p_panel)
         self.p2p_ssh_user.setObjectName(u"p2p_ssh_user")
         self.p2p_ssh_user.setText("newbv")
-        self.p2p_ssh_pass = QLineEdit(self.p2p_panel)
+        self.p2p_ssh_pass = PasswordLineEdit(self.p2p_panel)
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
         self.p2p_ssh_pass.setText("Xqsjnbv155")
-        self.p2p_ssh_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.p2p_ssh_pass.setPlaceholderText("请输入密码")
 
         self.p2p_ssh_form = QFormLayout()
