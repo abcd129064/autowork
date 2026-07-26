@@ -8,7 +8,6 @@ import shutil
 import ctypes
 
 from PySide6.QtCore import QProcess, QTimer, Slot
-from PySide6.QtWidgets import QMessageBox
 
 from core.app_paths import get_app_dir
 
@@ -33,12 +32,12 @@ class ProcessMixin:
             return
         exe_name = self.ui.choose_exe.currentText()
         if not exe_name:
-            QMessageBox.warning(self, "警告", "请先选择程序！")
+            self._show_info_bar("请先选择程序！", "warning")
             return
         exe_dir = self.exe_dir
         exe_path = os.path.join(exe_dir, exe_name)
         if not os.path.exists(exe_path):
-            QMessageBox.warning(self, "警告", f"程序不存在: {exe_path}")
+            self._show_info_bar(f"程序不存在: {exe_path}", "warning")
             return
         self.running_process = QProcess()
         self.running_process.setWorkingDirectory(exe_dir)
@@ -100,7 +99,7 @@ class ProcessMixin:
     def _start_three_programs(self):
         exe_name = self.ui.choose_exe.currentText()
         if not exe_name:
-            QMessageBox.warning(self, "警告", '请先在工具栏“程序”下拉框中选择识别端程序！')
+            self._show_info_bar('请先在工具栏“程序”下拉框中选择识别端程序！', "warning")
             return
         tracking_path = os.path.join(self.exe_dir, exe_name)
         programs = [
@@ -111,7 +110,8 @@ class ProcessMixin:
         missing = [(name, path) for name, path in programs if not os.path.exists(path)]
         if missing:
             detail = "\n".join(f"  • {name}: {path}" for name, path in missing)
-            QMessageBox.warning(self, "程序缺失", f"以下程序路径不存在，无法启动：\n{detail}")
+            self._append_log(f"[警告] 以下程序路径不存在：\n{detail}")
+            self._show_info_bar("部分程序路径不存在，无法启动", "warning")
             return
         self._three_saved_mode = self._capture_current_resolution()
         if self._three_saved_mode:

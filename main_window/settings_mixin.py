@@ -4,7 +4,9 @@
 import os
 import json
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtWidgets import QLineEdit
 
 from core.app_paths import get_app_dir
 
@@ -25,6 +27,12 @@ class SettingsMixin:
         "shortcut_flush": "F5",
         "shortcut_start": "Space",
         "shortcut_open_dir": "Ctrl+O",
+        "shortcut_pause": "P",
+        "shortcut_focus_frame": "Ctrl+G",
+        "shortcut_start_three": "Ctrl+T",
+        "shortcut_open_daily": "Ctrl+L",
+        "shortcut_open_config": "Ctrl+,",
+        "shortcut_p2p_panel": "F9",
     }
     # 默认高亮颜色（橙色）
     DEFAULT_HIGHLIGHT_COLOR = [220, 80, 20]
@@ -98,6 +106,12 @@ class SettingsMixin:
             "shortcut_flush": settings.get("shortcut_flush", self.DEFAULT_SHORTCUTS["shortcut_flush"]),
             "shortcut_start": settings.get("shortcut_start", self.DEFAULT_SHORTCUTS["shortcut_start"]),
             "shortcut_open_dir": settings.get("shortcut_open_dir", self.DEFAULT_SHORTCUTS["shortcut_open_dir"]),
+            "shortcut_pause": settings.get("shortcut_pause", self.DEFAULT_SHORTCUTS["shortcut_pause"]),
+            "shortcut_focus_frame": settings.get("shortcut_focus_frame", self.DEFAULT_SHORTCUTS["shortcut_focus_frame"]),
+            "shortcut_start_three": settings.get("shortcut_start_three", self.DEFAULT_SHORTCUTS["shortcut_start_three"]),
+            "shortcut_open_daily": settings.get("shortcut_open_daily", self.DEFAULT_SHORTCUTS["shortcut_open_daily"]),
+            "shortcut_open_config": settings.get("shortcut_open_config", self.DEFAULT_SHORTCUTS["shortcut_open_config"]),
+            "shortcut_p2p_panel": settings.get("shortcut_p2p_panel", self.DEFAULT_SHORTCUTS["shortcut_p2p_panel"]),
         }
 
     def _init_shortcuts(self):
@@ -117,6 +131,54 @@ class SettingsMixin:
         self._space_shortcut = QShortcut(QKeySequence(sc["shortcut_start"]), self)
         self._space_shortcut.activated.connect(self._on_space_pressed)
         self._shortcuts.append(self._space_shortcut)
+        # 暂停/恢复
+        s_pause = QShortcut(QKeySequence(sc["shortcut_pause"]), self)
+        s_pause.activated.connect(self._on_pause_shortcut)
+        self._shortcuts.append(s_pause)
+        # 聚焦帧数输入框
+        s_frame = QShortcut(QKeySequence(sc["shortcut_focus_frame"]), self)
+        s_frame.activated.connect(self._on_focus_frame_shortcut)
+        self._shortcuts.append(s_frame)
+        # 启动三端
+        s_three = QShortcut(QKeySequence(sc["shortcut_start_three"]), self)
+        s_three.activated.connect(self.on_start_three_clicked)
+        self._shortcuts.append(s_three)
+        # 查看 CPP 日志
+        s_daily = QShortcut(QKeySequence(sc["shortcut_open_daily"]), self)
+        s_daily.activated.connect(self.on_open_daily_clicked)
+        self._shortcuts.append(s_daily)
+        # 打开配置文件（弹模态对话框，用 singleShot 避免事件循环冲突）
+        s_config = QShortcut(QKeySequence(sc["shortcut_open_config"]), self)
+        s_config.activated.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
+        self._shortcuts.append(s_config)
+        # 切换 P2P 远程面板
+        s_p2p = QShortcut(QKeySequence(sc["shortcut_p2p_panel"]), self)
+        s_p2p.activated.connect(self.ui.p2p_btn.toggle)
+        self._shortcuts.append(s_p2p)
+
+    def _on_pause_shortcut(self):
+        """暂停/恢复快捷键：焦点在输入框时不触发，避免打字误触"""
+        if isinstance(self.focusWidget(), QLineEdit):
+            return
+        self._on_pause_clicked()
+
+    def _on_focus_frame_shortcut(self):
+        """聚焦帧数输入框并全选，便于直接输入新帧号（自动切换为自定义模式，记住原焦点位置，回车可恢复）"""
+        w = self.focusWidget()
+        if w is not self.ui.input_frame:
+            self._frame_prev_focus = w
+        self.ui.input_frame_custom.setChecked(True)
+        self.ui.input_frame.setFocus()
+        self.ui.input_frame.selectAll()
+
+    def _on_frame_input_confirmed(self):
+        """帧数输入框按回车：恢复焦点到之前的位置，使空格可直接播放"""
+        prev = getattr(self, '_frame_prev_focus', None)
+        if prev is not None and prev is not self.ui.input_frame and prev.isVisible():
+            prev.setFocus()
+        else:
+            self.ui.input_frame.clearFocus()
+        self._frame_prev_focus = None
 
     def _on_space_pressed(self):
         """空格键切换播放/结束，焦点在输入框时不触发"""

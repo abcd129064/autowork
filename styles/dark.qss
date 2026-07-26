@@ -171,26 +171,8 @@ QWidget#menubar_widget {
     background-color: #202020;
     border-bottom: 1px solid #383838;
 }
-QMenu {
-    background-color: #2C2C2C;
-    color: #C8D0DC;
-    border: 1px solid #383838;
-    border-radius: 6px;
-    padding: 4px;
-}
-QMenu::item {
-    padding: 5px 28px 5px 12px;
-    border-radius: 4px;
-}
-QMenu::item:selected {
-    background-color: rgba(0, 188, 212, 0.15);
-    color: #00BCD4;
-}
-QMenu::separator {
-    height: 1px;
-    background-color: #383838;
-    margin: 4px 8px;
-}
+/* QMenu 样式已由 AcrylicMenu (qfluentwidgets) 内置接管，
+   不再需要自定义 QMenu QSS，避免干扰亚克力渲染 */
 
 /* ===== 滚动条 ===== */
 QScrollBar:vertical {
