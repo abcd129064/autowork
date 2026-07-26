@@ -58,7 +58,7 @@ class SFTPWindow(QDialog):
         super().__init__(parent)
         title = f"SFTP 文件管理 - {server_name} ({host}:{port})" if server_name else f"SFTP 文件管理 - {host}:{port}"
         self.setWindowTitle(title)
-        self.resize(1000, 620)
+        self.resize(1000, 620)  # 【窗口尺寸】SFTP 窗口默认宽×高
         self._host = host
         self._port = port
         self._username = username
@@ -110,9 +110,14 @@ class SFTPWindow(QDialog):
         self._local_tree.setHeaderLabels(['文件名', '大小', '类型', '修改时间'])
         self._local_tree.setColumnCount(4)
         lh = self._local_tree.header()
-        lh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        lh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         for c in [1, 2, 3]:
-            lh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            lh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        # 【列宽】本地文件列表各列初始宽度（px）
+        lh.resizeSection(0, 220)   # 文件名
+        lh.resizeSection(1, 80)    # 大小
+        lh.resizeSection(2, 60)    # 类型
+        lh.resizeSection(3, 100)   # 修改时间
         self._local_tree.itemDoubleClicked.connect(self._on_local_item_double_clicked)
         self._local_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._local_tree.customContextMenuRequested.connect(self._on_local_context_menu)
@@ -153,9 +158,15 @@ class SFTPWindow(QDialog):
         self._tree.setHeaderLabels(['文件名', '大小', '类型', '权限', '修改时间'])
         self._tree.setColumnCount(5)
         rh = self._tree.header()
-        rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         for c in [1, 2, 3, 4]:
-            rh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            rh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        # 【列宽】远程文件列表各列初始宽度（px）
+        rh.resizeSection(0, 220)   # 文件名
+        rh.resizeSection(1, 80)    # 大小
+        rh.resizeSection(2, 60)    # 类型
+        rh.resizeSection(3, 80)    # 权限
+        rh.resizeSection(4, 130)   # 修改时间
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_remote_context_menu)
@@ -175,8 +186,8 @@ class SFTPWindow(QDialog):
 
         self._splitter.addWidget(self._left_panel)
         self._splitter.addWidget(self._right_panel)
-        self._splitter.setStretchFactor(0, 1)
-        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(0, 1)  # 【左右比例】本地面板拉伸因子
+        self._splitter.setStretchFactor(1, 1)  # 【左右比例】远程面板拉伸因子（1:1 等分）
         root.addWidget(self._splitter, 1)
 
         # ---- 传输队列面板
@@ -188,15 +199,16 @@ class SFTPWindow(QDialog):
         for c in range(3):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        hdr.resizeSection(0, 280)
-        hdr.resizeSection(1, 180)
-        hdr.resizeSection(2, 100)
+        # 【列宽】传输队列各列初始宽度（px）
+        hdr.resizeSection(0, 280)   # 文件名
+        hdr.resizeSection(1, 180)   # 进度
+        hdr.resizeSection(2, 100)   # 速度
         self._transfer_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._transfer_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._transfer_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._transfer_table.verticalHeader().setDefaultSectionSize(24)
+        self._transfer_table.verticalHeader().setDefaultSectionSize(24)  # 【行高】每行 24px
         self._transfer_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._transfer_table.setFixedHeight(130)
+        self._transfer_table.setFixedHeight(130)  # 【面板高度】传输队列固定 130px
         self._transfer_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._transfer_table.customContextMenuRequested.connect(self._on_transfer_context_menu)
         root.addWidget(self._transfer_table)
@@ -355,19 +367,23 @@ class SFTPWindow(QDialog):
             self._list_remote(pending)
 
     def _populate_remote(self, entries):
-        self._tree.clear()
-        dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'])
-        files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'])
-        for entry in dirs + files:
-            item = QTreeWidgetItem()
-            prefix = '/ ' if entry['is_dir'] else ''
-            item.setText(0, prefix + entry['name'])
-            item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
-            item.setText(2, '目录' if entry['is_dir'] else '文件')
-            item.setText(3, entry['perm'])
-            item.setText(4, entry['mtime'])
-            item.setData(0, Qt.ItemDataRole.UserRole, entry)
-            self._tree.addTopLevelItem(item)
+        self._tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘，避免大列表卡顿
+        try:
+            self._tree.clear()
+            dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'])
+            files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'])
+            for entry in dirs + files:
+                item = QTreeWidgetItem()
+                prefix = '/ ' if entry['is_dir'] else ''
+                item.setText(0, prefix + entry['name'])
+                item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
+                item.setText(2, '目录' if entry['is_dir'] else '文件')
+                item.setText(3, entry['perm'])
+                item.setText(4, entry['mtime'])
+                item.setData(0, Qt.ItemDataRole.UserRole, entry)
+                self._tree.addTopLevelItem(item)
+        finally:
+            self._tree.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------ 搜索
     def _on_search_shortcut(self):
@@ -403,18 +419,22 @@ class SFTPWindow(QDialog):
         self._lbl_status.setText(f'搜索完成，找到 {len(matched)} 个匹配项')
 
     def _populate_local(self, entries):
-        self._local_tree.clear()
-        dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'].lower())
-        files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'].lower())
-        for entry in dirs + files:
-            item = QTreeWidgetItem()
-            prefix = '/ ' if entry['is_dir'] else ''
-            item.setText(0, prefix + entry['name'])
-            item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
-            item.setText(2, '目录' if entry['is_dir'] else '文件')
-            item.setText(3, entry['mtime'])
-            item.setData(0, Qt.ItemDataRole.UserRole, entry)
-            self._local_tree.addTopLevelItem(item)
+        self._local_tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘
+        try:
+            self._local_tree.clear()
+            dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'].lower())
+            files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'].lower())
+            for entry in dirs + files:
+                item = QTreeWidgetItem()
+                prefix = '/ ' if entry['is_dir'] else ''
+                item.setText(0, prefix + entry['name'])
+                item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
+                item.setText(2, '目录' if entry['is_dir'] else '文件')
+                item.setText(3, entry['mtime'])
+                item.setData(0, Qt.ItemDataRole.UserRole, entry)
+                self._local_tree.addTopLevelItem(item)
+        finally:
+            self._local_tree.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------ 路径输入跳转
     def _on_local_path_entered(self):

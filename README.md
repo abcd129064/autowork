@@ -1,25 +1,42 @@
 # AutoWork
 
-基于 PySide6 开发的桌面自动化工具，用于视频播放控制、日志管理、数据记录及远程文件传输。
+基于 PySide6 + qfluentwidgets 开发的桌面自动化工具，用于台球追踪视频播放控制、日志管理、数据记录及 P2P 远程文件传输。
 
 ## 功能特性
 
-- **视频帧控制**：支持"帧前"/"帧数"模式，精确控制视频播放帧位置
-- **日志管理**：实时日志显示、本地日志文件查看、按日期筛选
-- **错误提交**：支持错误类型/对象/描述/复现标记/新程序标记等信息提交
-- **数据导出**：支持将记录数据导出为表格
-- **远程连接（P2P）**：基于 frp XTCP 的 P2P 远程连接，支持 SSH 终端和 SFTP 文件管理
-- **SFTP 文件管理**：双面板文件浏览器，支持上传/下载/删除/创建目录，带传输进度和队列
-- **SSH 终端**：支持远程命令执行，ANSI 终端渲染
-- **快捷键**：支持自定义快捷键绑定
-- **主题切换**：支持深色/浅色主题切换
+### 核心业务
+- **视频帧控制**：支持"帧前"/"帧后"/"自定义"三种模式，精确控制视频播放起始帧
+- **三端联动**：一键启动/关闭识别端 + 后端 + 前端（自动切换分辨率，关闭后恢复）
+- **日志管理**：三列联动（设备 → 日志文件 → 日志内容），按日期筛选，关键词高亮
+- **进程管理**：启动/终止/挂起/恢复 SnookerTracking 程序
+- **detect.json 解码**：自动调用 AES 解码工具生成 detect.json
+
+### 远程连接（P2P）
+- **XTCP 模式**：基于 frp 的 P2P 内网穿透，支持多 visitor 管理
+- **TCP 模式**：直连服务器，保存服务器列表
+- **SFTP 文件管理**：双面板文件浏览器，上传/下载/删除/重命名/创建，整目录递归传输，传输队列（暂停/恢复/取消）
+- **SSH 终端**：交互式 PTY + ANSI 彩色渲染，Tab 补全，命令历史，Windows Terminal 风格
+- **RDP 远程桌面**：嵌入系统 mstsc.exe 窗口，持续看门狗自动重连
+
+### 界面与交互
+- **Fluent Design**：基于 qfluentwidgets 的现代化 UI
+- **深色/浅色/跟随系统**三种主题模式
+- **亚克力磨砂效果**：打包后通过 PIL 补丁替代 numpy/scipy 实现
+- **自定义快捷键**：9 个可配置快捷键
+- **设备搜索**：Ctrl+F 实时过滤设备列表
+- **双布局模式**：默认/经典布局一键切换
 
 ## 技术栈
 
-- **Python 3** + **PySide6** (Qt6)
-- **paramiko**：SSH/SFTP 远程连接
-- **frp (frpc)**：P2P 内网穿透
-- **PyInstaller**：打包为 Windows 可执行文件
+| 组件 | 技术 |
+|------|------|
+| GUI 框架 | PySide6 (Qt6) + PySide6-Fluent-Widgets |
+| SSH/SFTP | paramiko |
+| P2P 穿透 | frp (frpc) XTCP |
+| 远程桌面 | mstsc.exe + Win32 API 窗口嵌入 |
+| 打包 | PyInstaller (onedir) |
+| 进程管理 | QProcess + ctypes (NtSuspendProcess) |
+| 显示控制 | ctypes (EnumDisplaySettings/ChangeDisplaySettings) |
 
 ## 项目结构
 
@@ -28,14 +45,16 @@ autowork/
 ├── main.py                    # 主程序入口（薄启动器）
 ├── autowork_with_table.py     # UI 定义（由 .ui 编译生成，勿手动修改）
 ├── autowork_with_table.ui     # Qt Designer 界面文件
-├── p2p.py                     # P2P 连接模块（端口生成/检测/TOML 配置）
+├── p2p.py                     # P2P 工具（端口生成/检测）
 ├── settings.json              # 运行时配置文件
-├── frpc_xtcp.toml             # frp XTCP 连接配置
+├── frpc.exe                   # frp 客户端（P2P 穿透）
+├── frpc_xtcp.toml             # frp XTCP 连接配置（运行时生成）
 ├── requirements.txt           # Python 依赖
 ├── AutoWork.spec              # PyInstaller 打包配置
 ├── build_exe.py               # 打包构建脚本
 │
 ├── core/                      # 基础层（路径、日志、工具函数）
+│   ├── acrylic_patch.py       #   亚克力效果 PIL 替代补丁
 │   ├── app_paths.py           #   应用路径解析（兼容 PyInstaller）
 │   ├── conn_logger.py         #   连接日志记录器 + Qt 消息处理器
 │   └── utils.py               #   错误分类、自然排序、重试常量
@@ -49,12 +68,13 @@ autowork/
 ├── windows/                   # 独立窗口层
 │   ├── sftp_window.py         #   SFTP 双面板文件管理窗口
 │   ├── ssh_terminal.py        #   SSH 终端窗口（ANSI 渲染）
+│   ├── ansi_terminal.py       #   ANSI 虚拟终端控件
 │   └── rdp_window.py          #   RDP 远程桌面嵌入窗口
 │
 ├── main_window/               # 主窗口层（Mixin 拆分）
 │   ├── main_window.py         #   MainWindow 主类（组合所有 Mixin）
 │   ├── settings_mixin.py      #   配置读写、快捷键
-│   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停）
+│   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
 │   ├── remote_mixin.py        #   远程连接（frpc/SSH/SFTP/RDP）
 │   └── ui_mixin.py            #   状态栏/右键菜单/设置对话框/主题
 │
@@ -62,9 +82,12 @@ autowork/
 │   ├── dark.qss               #   深色主题
 │   └── light.qss              #   浅色主题
 │
-├── videos/                    # 视频文件目录
+├── docs/                      # 文档
+│   └── API.md                 #   接口文档
+│
+├── videos/                    # 视频/日志文件目录
 ├── database/                  # 数据库目录
-├── logs/                      # 日志目录
+├── logs/                      # 运行日志目录
 ├── build/                     # 构建临时输出
 └── dist/                      # 最终分发目录
 ```
@@ -75,7 +98,12 @@ autowork/
 core ← win_api ← workers ← windows ← main_window ← main.py
 ```
 
-## 安装与运行
+## 快速开始
+
+### 环境要求
+
+- Python 3.10+
+- Windows 10/11（RDP 嵌入、进程挂起等功能依赖 Win32 API）
 
 ### 安装依赖
 
@@ -95,15 +123,43 @@ python main.py
 python build_exe.py
 ```
 
-打包完成后，分发 `dist/AutoWork` 整个目录到目标机器。
+打包完成后，分发 `dist/AutoWork/` 整个目录到目标机器即可运行。
+
+> 构建脚本会自动将 `settings.json` 和 `frpc.exe` 复制到 dist 目录。
+
+## 快捷键
+
+| 功能 | 默认键 | 说明 |
+|------|--------|------|
+| 刷新数据 | `F5` | 重新扫描程序和设备列表 |
+| 播放/结束 | `Space` | 切换启动/终止程序 |
+| 打开目录 | `Ctrl+O` | 打开当前设备目录 |
+| 暂停/恢复 | `P` | 挂起/恢复运行中进程 |
+| 聚焦帧数框 | `Ctrl+G` | 聚焦并全选帧数输入框 |
+| 启动三端 | `Ctrl+T` | 启动/关闭三端程序 |
+| 查看CPP日志 | `Ctrl+L` | 打开 daily 日志文件 |
+| 打开配置 | `Ctrl+,` | 打开配置文件选择对话框 |
+| P2P面板 | `F9` | 切换远程面板显隐 |
+| 设备搜索 | `Ctrl+F` | 切换设备搜索框 |
+
+所有快捷键均可在设置对话框中自定义修改。
+
+## 配置说明
+
+配置文件 `settings.json` 位于 exe 同目录，首次运行自动生成。详见 [接口文档 - 配置文件](docs/API.md#配置文件-settingsjson)。
+
+## 接口文档
+
+完整的模块接口说明请参阅 [docs/API.md](docs/API.md)。
 
 ## 注意事项
 
-- `autowork_with_table.py` 由 Qt Designer 的 `.ui` 文件编译生成，修改界面请在 `.ui` 文件中操作后重新编译
-- `settings.json` 用于存储运行时配置（如解码工具路径、DPI 缩放等）
+- `autowork_with_table.py` 由 `.ui` 文件编译生成，修改界面请编辑 `.ui` 后重新编译
 - P2P 功能需要 `frpc.exe` 与主程序在同一目录下
-- 主题样式文件位于 `styles/` 目录，打包时通过 `AutoWork.spec` 中的 `datas` 配置包含
+- 打包排除了 numpy/scipy（避免 MKL DLL 245MB），亚克力效果由 PIL 补丁替代实现
+- 主题样式文件位于 `styles/`，打包时通过 `AutoWork.spec` 的 `datas` 包含
 - 新增模块请遵循单向依赖链，避免循环导入
+- 连接日志自动落盘到 `logs/autowork_conn.log`（2MB 轮转）
 
 ## 许可证
 

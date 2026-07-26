@@ -13,17 +13,22 @@ qfluentwidgets.common.image_utils 替代实现，使亚克力磨砂效果在打�
 
 import sys
 import types
+import importlib.util
 
 
 def _apply_patch():
-    """检测 numpy/scipy 是否可用，不可用则注入 PIL 替代实现。"""
-    try:
-        # 尝试导入真正的 image_utils（需要 numpy + scipy）
-        import qfluentwidgets.common.image_utils  # noqa: F401
-        return  # 真实模块可用（开发环境），无需补丁
-    except ImportError:
-        pass  # numpy/scipy 缺失（打包环境），继续注入补丁
+    """检测 numpy/scipy 是否可用，不可用则注入 PIL 替代实现。
 
+    使用 importlib.util.find_spec() 而非直接 import 来探测 numpy，
+    避免触发 qfluentwidgets.common 包初始化链导致 acrylic_label.py
+    提前将 isAcrylicAvailable 设为 False。
+    """
+    # find_spec 只查找模块是否存在，不执行任何导入（零副作用）
+    if importlib.util.find_spec('numpy') is not None \
+            and importlib.util.find_spec('scipy') is not None:
+        return  # 开发环境（numpy/scipy 可用），使用真实实现，无需补丁
+
+    # ---- 以下为打包环境（numpy/scipy 被 excludes 排除）----
     from PIL import Image, ImageFilter, ImageEnhance
     from PIL.ImageQt import fromqpixmap
     from PySide6.QtGui import QImage, QPixmap
@@ -60,7 +65,7 @@ def _apply_patch():
         qimg = QImage(data, w, h, 3 * w, QImage.Format_RGB888)
         return QPixmap.fromImage(qimg)
 
-    # 构造替代模块并注入 sys.modules
+    # 构造替代模块并注入 sys.modules（必须在 qfluentwidgets 导入前完成）
     mod = types.ModuleType('qfluentwidgets.common.image_utils')
     mod.gaussianBlur = gaussianBlur
     mod.__doc__ = 'PIL-based replacement (numpy/scipy unavailable)'
