@@ -46,7 +46,7 @@ class RemoteMixin:
         def _append_log(self, msg: str) -> None: ...
         def _show_info_bar(self, msg: str, level: str, duration: int = 2000) -> None: ...
 
-    # frpc 服务器默认配置（settings.json 缺失时自动生成）
+    # frpc 服务器默认配置
     _FRPC_SERVER_DEFAULTS = {
         "serverAddr": "49.235.34.253",
         "serverPort": 7900,
@@ -73,6 +73,7 @@ class RemoteMixin:
         """从已有的 frpc_xtcp.toml 解析 [[visitors]] 段恢复 visitor 列表"""
         toml_path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
         if not os.path.exists(toml_path):
+            self._append_log("[远程] 未找到 frpc_xtcp.toml")
             return
         try:
             with open(toml_path, 'r', encoding='utf-8') as f:

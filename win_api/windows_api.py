@@ -113,28 +113,242 @@ if sys.platform == 'win32':
     WS_THICKFRAME = 0x00040000
     _WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
-    def find_window_by_pid(pid):
-        """按进程 PID 查找第一个可见的顶层窗口句柄（用于嵌入 mstsc 窗口）"""
-        found = []
+    # SetParent 专用版本（自动捕获 GetLastError）：
+    # 必须通过 use_last_error=True 的 user32 实例调用，
+    # 调用后可用 ctypes.get_last_error() 获取错误码
+    _user32_err = ctypes.WinDLL('user32', use_last_error=True)
+    _SetParent_err = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(
+        ('SetParent', _user32_err))
+
+    # 跨进程嵌入辅助 API
+    _user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    _user32.GetClassNameW.restype = ctypes.c_int
+    _user32.AttachThreadInput.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_bool]
+    _user32.AttachThreadInput.restype = ctypes.c_bool
+    _user32.GetForegroundWindow.argtypes = []
+    _user32.GetForegroundWindow.restype = ctypes.c_void_p
+    _k32.GetCurrentThreadId = ctypes.WINFUNCTYPE(ctypes.c_ulong)(('GetCurrentThreadId', _k32))
+
+    # mstsc 窗口类名常量
+    RDP_WINDOW_CLASS = 'TscShellContainerClass'  # 经典会话容器（Win10/早期Win11）
+    # 已知的 mstsc 会话窗口类名（可安全嵌入）
+    RDP_SESSION_CLASSES = frozenset({
+        'TscShellContainerClass',   # 经典远程桌面客户端主容器
+        'RAIL_WINDOW',              # RemoteApp / 部分 Win11 24H2+ 会话窗口
+    })
+    # 已知的 mstsc 临时/辅助窗口类名（绝对不能嵌入，会被销毁）
+    RDP_HELPER_CLASSES = frozenset({
+        'BBarWindowClass',          # 连接状态栏（临时，连接后销毁）
+    })
+
+    class _RECT(ctypes.Structure):
+        _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long),
+                    ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
+
+    _user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+    _user32.GetWindowRect.restype = ctypes.c_bool
+    _user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    _user32.GetWindowTextW.restype = ctypes.c_int
+
+    # 进程快照 API（用于发现所有 mstsc.exe 进程，覆盖 Win11 进程委托场景）
+    _Process32FirstW = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(
+        ('Process32FirstW', _k32))
+    _Process32NextW = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(
+        ('Process32NextW', _k32))
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class _PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ('dwSize', ctypes.c_ulong),
+            ('cntUsage', ctypes.c_ulong),
+            ('th32ProcessID', ctypes.c_ulong),
+            ('th32DefaultHeapID', ctypes.POINTER(ctypes.c_ulong)),
+            ('th32ModuleID', ctypes.c_ulong),
+            ('cntThreads', ctypes.c_ulong),
+            ('th32ParentProcessID', ctypes.c_ulong),
+            ('pcPriClassBase', ctypes.c_long),
+            ('dwFlags', ctypes.c_ulong),
+            ('szExeFile', ctypes.c_wchar * 260),
+        ]
+
+    def get_window_class_name(hwnd):
+        """获取窗口类名（失败返回空字符串）"""
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            if _user32.GetClassNameW(hwnd, buf, 256):
+                return buf.value
+        except Exception:
+            pass
+        return ''
+
+    def _get_window_title(hwnd, max_len=128):
+        """获取窗口标题（失败返回空字符串）"""
+        try:
+            buf = ctypes.create_unicode_buffer(max_len)
+            _user32.GetWindowTextW(hwnd, buf, max_len)
+            return buf.value
+        except Exception:
+            return ''
+
+    def get_process_name(pid):
+        """按 PID 获取进程名（小写，失败返回空字符串）"""
+        try:
+            snap = _CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if not snap or snap == ctypes.c_void_p(-1).value:
+                return ''
+            pe = _PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            name = ''
+            if _Process32FirstW(snap, ctypes.byref(pe)):
+                while True:
+                    if pe.th32ProcessID == pid:
+                        name = pe.szExeFile.lower()
+                        break
+                    if not _Process32NextW(snap, ctypes.byref(pe)):
+                        break
+            _CloseHandle(snap)
+            return name
+        except Exception:
+            return ''
+
+    def find_mstsc_pids():
+        """查找系统中所有 mstsc.exe 进程的 PID 列表。
+
+        Windows 11 24H2+ 的 mstsc 可能将会话委托给另一个
+        mstsc 子进程（PID 与启动进程不同），此函数用于发现它们。
+        """
+        pids = []
+        try:
+            snap = _CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if not snap or snap == ctypes.c_void_p(-1).value:
+                return pids
+            pe = _PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            if _Process32FirstW(snap, ctypes.byref(pe)):
+                while True:
+                    if pe.szExeFile.lower() == 'mstsc.exe':
+                        pids.append(pe.th32ProcessID)
+                    if not _Process32NextW(snap, ctypes.byref(pe)):
+                        break
+            _CloseHandle(snap)
+        except Exception:
+            pass
+        return pids
+
+    def _score_rdp_window(hwnd, cls):
+        """评估窗口是否可能是 RDP 会话窗口（分数越高越可能）。
+
+        策略：白名单类名直接高分；黑名单（临时辅助窗口）0 分；
+        未知类名按窗口面积评分——Win11 25H2 的会话窗口类名可能
+        与经典值不同，但会话窗口一定足够大（≥640x480）。
+        """
+        if cls in RDP_SESSION_CLASSES:
+            return 10000
+        if cls in RDP_HELPER_CLASSES:
+            return 0
+        rect = _RECT()
+        if not _user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return 0
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        if w >= 640 and h >= 480:
+            return w * h  # 面积越大越可能是会话窗口
+        return 0
+
+    def _enum_windows_of_pid(pid):
+        """枚举指定进程的所有可见顶层窗口，返回带诊断信息的列表"""
+        wins = []
 
         def _enum_cb(hwnd, _lparam):
-            # 回调运行在 C 栈上，任何异常都必须就地吞掉，
-            # 否则异常穿透 EnumWindows 会导致进程崩溃
             try:
                 wpid = ctypes.c_ulong()
                 _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
                 if wpid.value == pid and _user32.IsWindowVisible(hwnd):
-                    found.append(hwnd)
-                    return False  # 停止枚举
+                    cls = get_window_class_name(hwnd)
+                    rect = _RECT()
+                    _user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                    wins.append({
+                        'hwnd': hwnd, 'class': cls,
+                        'title': _get_window_title(hwnd),
+                        'w': rect.right - rect.left,
+                        'h': rect.bottom - rect.top,
+                        'score': _score_rdp_window(hwnd, cls),
+                    })
             except Exception:
                 pass
-            return True
+            return True  # 枚举全部
 
         try:
             _user32.EnumWindows(_WNDENUMPROC(_enum_cb), 0)
         except Exception:
             pass
-        return found[0] if found else None
+        return wins
+
+    def find_rdp_window_by_pid(pid, log=None):
+        """按 PID 查找 mstsc 会话窗口（评分制 + 诊断日志）。
+
+        返回该进程得分最高的窗口；所有候选窗口均无有效得分
+        （全是辅助窗口或尺寸过小）时返回 None。
+        传入 log 回调可输出诊断信息，帮助定位正确的会话窗口类名。
+        """
+        wins = _enum_windows_of_pid(pid)
+        if not wins:
+            return None
+        wins.sort(key=lambda w: w['score'], reverse=True)
+        if log:
+            for w in wins:
+                log(f"[RDP诊断] pid={pid} hwnd=0x{w['hwnd']:X} "
+                    f"class={w['class']!r} title={w['title']!r} "
+                    f"size={w['w']}x{w['h']} score={w['score']}")
+        return wins[0]['hwnd'] if wins[0]['score'] > 0 else None
+
+    def find_rdp_session_window(log=None):
+        """全局查找 mstsc 会话窗口（不依赖启动 PID）。
+
+        Windows 11 24H2+ 的 mstsc 可能将会话委托给另一个
+        mstsc 子进程。此函数枚举所有可见顶层窗口，仅保留
+        属于 mstsc.exe 进程的窗口，按评分返回最佳候选。
+        """
+        mstsc_pids = set(find_mstsc_pids())
+        if not mstsc_pids:
+            return None
+        wins = []
+
+        def _enum_cb(hwnd, _lparam):
+            try:
+                if not _user32.IsWindowVisible(hwnd):
+                    return True
+                wpid = ctypes.c_ulong()
+                _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                if wpid.value not in mstsc_pids:
+                    return True
+                cls = get_window_class_name(hwnd)
+                rect = _RECT()
+                _user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                wins.append({
+                    'hwnd': hwnd, 'pid': wpid.value, 'class': cls,
+                    'title': _get_window_title(hwnd),
+                    'w': rect.right - rect.left,
+                    'h': rect.bottom - rect.top,
+                    'score': _score_rdp_window(hwnd, cls),
+                })
+            except Exception:
+                pass
+            return True  # 枚举全部
+
+        try:
+            _user32.EnumWindows(_WNDENUMPROC(_enum_cb), 0)
+        except Exception:
+            pass
+        if not wins:
+            return None
+        wins.sort(key=lambda w: w['score'], reverse=True)
+        if log:
+            for w in wins:
+                log(f"[RDP诊断-全局] pid={w['pid']} hwnd=0x{w['hwnd']:X} "
+                    f"class={w['class']!r} title={w['title']!r} "
+                    f"size={w['w']}x{w['h']} score={w['score']}")
+        return wins[0]['hwnd'] if wins[0]['score'] > 0 else None
 
     def win_set_process_threads(pid, thread_action):
         """Windows API: 对指定进程的所有线程执行操作（挂起/恢复）
