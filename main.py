@@ -14,6 +14,9 @@ import json
 import threading
 import traceback
 
+# 【关键】在 qfluentwidgets 导入前注入亚克力 PIL 补丁（打包环境无 numpy/scipy 时生效）
+import core.acrylic_patch  # noqa: F401
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, qInstallMessageHandler
 from PySide6.QtGui import QFont

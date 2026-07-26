@@ -32,6 +32,10 @@ a = Analysis(
         'bcrypt',
         'darkdetect',
         'darkdetect._windows_detect',
+        # 亚克力补丁依赖（打包环境无 numpy/scipy 时 PIL 替代实现需要）
+        'PIL.ImageQt',
+        'PIL.ImageFilter',
+        'PIL.ImageEnhance',
     ] + qfw_hiddenimports,
     hookspath=[],
     hooksconfig={},
