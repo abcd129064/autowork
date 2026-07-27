@@ -48,9 +48,9 @@ class _VisibleAcrylicComboView(AcrylicComboMenuActionListWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 库默认模糊半径 35 过强，背景内容糊成均匀色；15 保留更多背景细节
+        # 默认模糊半径 35，背景内容均匀色；15 保留更多背景细节
         self.acrylicBrush.setBlurRadius(15)
-        # 库默认噪点不透明度 0.03 几乎不可见；0.15 呈现亚克力标志性颗粒感
+        # 库默认噪点不透明度 0.03；0.15 磨砂玻璃
         self.acrylicBrush.noiseOpacity = 0.03
 
     def _updateAcrylicColor(self):
