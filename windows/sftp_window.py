@@ -58,7 +58,7 @@ class SFTPWindow(QDialog):
         super().__init__(parent)
         title = f"SFTP 文件管理 - {server_name} ({host}:{port})" if server_name else f"SFTP 文件管理 - {host}:{port}"
         self.setWindowTitle(title)
-        self.resize(1000, 620)  # 【窗口尺寸】SFTP 窗口默认宽×高
+        self.resize(1200, 800)  # 【窗口尺寸】SFTP 窗口默认宽×高
         self._host = host
         self._port = port
         self._username = username
