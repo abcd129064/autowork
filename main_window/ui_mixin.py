@@ -8,27 +8,56 @@ import ctypes
 import subprocess
 
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout)
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QRect
 from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QFont, QActionGroup,
-    QFontDatabase)
+    QFontDatabase, QPainter)
 from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
     Action, MenuAnimationType, FluentIcon, setFontFamilies,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
-    BodyLabel, setFont, isDarkTheme)
+    BodyLabel, setFont, isDarkTheme, RoundMenu, SwitchButton)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
+from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAnimationManager
 
 from core.app_paths import get_app_dir, get_resource_dir
+from core.perf import is_acrylic_enabled, is_animation_enabled
 
 
 def _patch_acrylic_exec(menu):
     """PySide6/Shiboken 会将实例级 menu.exec 解析到 C++ QMenu.exec()，
     导致 AcrylicMenuBase.exec()（截屏→模糊→绘制亚克力）永不执行。
-    给实例绑定 Python 级 exec 属性可绕过此劫持。"""
-    def _exec(pos, ani=True, aniType=MenuAnimationType.DROP_DOWN):
-        AcrylicMenuBase.exec(menu, pos, ani=ani, aniType=aniType)
+    给实例绑定 Python 级 exec 属性可绕过此劫持。
+
+    运行时动态判断：
+    - 亚克力开 → AcrylicMenuBase.exec（截屏→模糊→绘制）
+    - 亚克力关 → RoundMenu.exec（轻量纯色背景，零 GPU 开销）
+    - 动画关 → MenuAnimationType.NONE
+    切换开关后下一次弹出即生效，无需重启。"""
+    def _exec(pos, ani=True, aniType=None):
+        if aniType is None:
+            aniType = (MenuAnimationType.DROP_DOWN if is_animation_enabled()
+                       else MenuAnimationType.NONE)
+        if not is_animation_enabled():
+            # 无动画路径：绕过动画管理器，避免残留 mask / 视口不刷新
+            # 导致的幽灵矩形窗口（上次 DROP_DOWN 动画 setMask 从不清除）
+            mgr = MenuAnimationManager.make(menu, aniType)
+            p = mgr._endPosition(pos)
+            if is_acrylic_enabled():
+                menu.view.acrylicBrush.grabImage(
+                    QRect(p, menu.layout().sizeHint()))
+            menu.clearMask()
+            menu.move(p)
+            menu.show()
+            menu.view.viewport().update()
+            if menu.isSubMenu:
+                menu.menuItem.setSelected(True)
+            return
+        if is_acrylic_enabled():
+            AcrylicMenuBase.exec(menu, pos, ani=ani, aniType=aniType)
+        else:
+            RoundMenu.exec(menu, pos, ani=ani, aniType=aniType)
     menu.exec = _exec
 
 
@@ -37,7 +66,9 @@ class _VisibleAcrylicView(AcrylicMenuActionListWidget):
 
     库默认参数（模糊半径35 + 噪点0.03 + 着色alpha 150/200）在浅色均匀背景上
     会把模糊结果洗成近乎纯色，看不出磨砂感；此处调整为：
-    适度模糊保留背景轮廓 + 可见噪点纹理 + 更低着色不透明度。"""
+    适度模糊保留背景轮廓 + 可见噪点纹理 + 更低着色不透明度。
+
+    亚克力开关关闭时跳过 brush 绘制，直接使用普通菜单背景（即时生效）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,6 +78,19 @@ class _VisibleAcrylicView(AcrylicMenuActionListWidget):
         # 库默认噪点不透明度 0.03 几乎不可见；0.15 呈现亚克力标志性颗粒感，
         # 即使弹出位置背后是纯色背景（如设备列表空白区）也能看出材质纹理
         self.acrylicBrush.noiseOpacity = 0.03
+
+    def paintEvent(self, e):
+        if not is_acrylic_enabled():
+            # 亚克力关闭：绘制纯色背景替代截屏模糊（transparent 属性使
+            # QSS 背景透明，不手动填充会导致菜单整体不可见）
+            painter = QPainter(self.viewport())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(43, 43, 43) if isDarkTheme()
+                             else QColor(243, 243, 243))
+            painter.drawRect(self.viewport().rect())
+            MenuActionListWidget.paintEvent(self, e)
+            return
+        super().paintEvent(e)
 
     def _updateAcrylicColor(self):
         if isDarkTheme():
@@ -104,6 +148,18 @@ class _ShortcutKeyEdit(LineEdit):
 
 if sys.platform == 'win32':
     from win_api.windows_api import _DwmSetWindowAttribute
+
+
+def _create_menu(title="", parent=None):
+    """工厂函数：统一创建亚克力菜单实例。
+    亚克力/动画开关在弹出时动态判断（_patch_acrylic_exec），
+    因此无需根据配置选择不同控件类型，切换即时生效。"""
+    return VisibleAcrylicMenu(title, parent)
+
+
+def _exec_menu(menu, global_pos):
+    """统一菜单弹出：亚克力/动画行为由实例级 exec 动态决定"""
+    menu.exec(global_pos)
 
 
 class UIMixin:
@@ -185,15 +241,15 @@ class UIMixin:
         self.ui.loacl_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def _id_list_context_menu(self, pos):
-        """设备列表右键菜单（亚克力材质）"""
-        menu = VisibleAcrylicMenu(parent=self)
+        """设备列表右键菜单"""
+        menu = _create_menu(parent=self)
         action_open_dir = Action(FluentIcon.FOLDER, "打开目录")
         action_cpp_log = Action(FluentIcon.DOCUMENT, "查看 CPP 日志")
         action_open_dir.triggered.connect(self.on_open_dir_clicked)
         action_cpp_log.triggered.connect(self.on_open_daily_clicked)
         menu.addAction(action_open_dir)
         menu.addAction(action_cpp_log)
-        menu.exec(self.ui.id_list.mapToGlobal(pos), aniType=MenuAnimationType.DROP_DOWN)
+        _exec_menu(menu, self.ui.id_list.mapToGlobal(pos))
 
     def _log_list_context_menu(self, pos):
         """日志内容列表右键菜单"""
@@ -201,7 +257,7 @@ class UIMixin:
         item = self.ui.log_list.currentItem()
         if item is None:
             return
-        menu = VisibleAcrylicMenu(parent=self)
+        menu = _create_menu(parent=self)
         action_copy = Action(FluentIcon.COPY, "复制此行")
         action_copy_frame = Action(FluentIcon.LIBRARY, "复制帧数")
         action_locate = Action(FluentIcon.PEOPLE, "在文件管理器中定位")
@@ -234,15 +290,17 @@ class UIMixin:
         menu.addAction(action_copy_frame)
         menu.addSeparator()
         menu.addAction(action_locate)
-        menu.exec(self.ui.log_list.mapToGlobal(pos), aniType=MenuAnimationType.DROP_DOWN)
+        _exec_menu(menu, self.ui.log_list.mapToGlobal(pos))
 
     def _loacl_video_list_context_menu(self, pos):
         """日志文件列表右键菜单"""
         item = self.ui.loacl_video_list.currentItem()
         if item is None:
             return
-        menu = VisibleAcrylicMenu(parent=self)
+        menu = _create_menu(parent=self)
         action_copy_name = Action(FluentIcon.COPY, "复制视频名")
+        action_open_video_loc = Action(FluentIcon.FOLDER, "打开视频位置")
+        action_copy_video_loc = Action(FluentIcon.LINK, "复制视频位置")
 
         def _do_copy_name():
             pure_name = os.path.splitext(item.text())[0]
@@ -250,9 +308,49 @@ class UIMixin:
             self._show_status_message(f"文件名 {pure_name} 已复制到剪贴板", 2000)
             self._append_log(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
 
+        def _resolve_video_path():
+            """根据当前选中的日志文件名推断视频完整路径"""
+            log_filename = item.text()
+            video_name = os.path.splitext(log_filename)[0] + '.mp4'
+            video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
+            if os.path.exists(video_path_primary):
+                return video_path_primary
+            current_device = self.ui.id_list.currentItem()
+            if current_device:
+                device_code = current_device.text()
+                video_path_device = os.path.join(self.videos_dir, device_code, video_name)
+                if os.path.exists(video_path_device):
+                    return video_path_device
+            return video_path_primary
+
+        def _do_open_video_loc():
+            video_path = _resolve_video_path()
+            if os.path.exists(video_path):
+                subprocess.run(['explorer', '/select,', video_path])
+                self._append_log(f"[定位] 已定位视频: {video_path}")
+            else:
+                # 视频不存在时打开所在目录
+                video_dir = os.path.dirname(video_path)
+                if os.path.exists(video_dir):
+                    os.startfile(video_dir)
+                    self._append_log(f"[定位] 视频不存在，已打开目录: {video_dir}")
+                else:
+                    self._append_log(f"[提示] 视频路径不存在: {video_path}")
+
+        def _do_copy_video_loc():
+            video_path = _resolve_video_path()
+            QApplication.clipboard().setText(video_path)
+            self._show_status_message("视频路径已复制到剪贴板", 2000)
+            self._append_log(f"[复制] 视频路径: {video_path}")
+
         action_copy_name.triggered.connect(_do_copy_name)
+        action_open_video_loc.triggered.connect(_do_open_video_loc)
+        action_copy_video_loc.triggered.connect(_do_copy_video_loc)
         menu.addAction(action_copy_name)
-        menu.exec(self.ui.loacl_video_list.mapToGlobal(pos), aniType=MenuAnimationType.DROP_DOWN)
+        menu.addSeparator()
+        menu.addAction(action_open_video_loc)
+        menu.addAction(action_copy_video_loc)
+        _exec_menu(menu, self.ui.loacl_video_list.mapToGlobal(pos))
 
     # ==================== 菜单栏 ====================
 
@@ -265,8 +363,8 @@ class UIMixin:
         _mb_layout.setContentsMargins(6, 0, 6, 0)
         _mb_layout.setSpacing(2)
 
-        # 「功能」菜单（亚克力材质）
-        func_menu = VisibleAcrylicMenu("功能", self)
+        # 「功能」菜单
+        func_menu = _create_menu("功能", self)
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
         act_hc = Action(FluentIcon.HIGHTLIGHT, "高亮颜色设置", self)
@@ -277,12 +375,12 @@ class UIMixin:
         func_btn.setMenu(func_menu)
         _mb_layout.addWidget(func_btn)
 
-        # 「视图」菜单（亚克力材质）
-        view_menu = VisibleAcrylicMenu("视图", self)
+        # 「视图」菜单
+        view_menu = _create_menu("视图", self)
         settings = self._load_settings()
 
         # 布局子菜单
-        layout_menu = VisibleAcrylicMenu("布局", self)
+        layout_menu = _create_menu("布局", self)
         self._layout_group = QActionGroup(self)
         self._layout_group.setExclusive(True)
         self._act_layout_panel = Action(FluentIcon.TILES, "面板布局", self)
@@ -299,7 +397,7 @@ class UIMixin:
         view_menu.addMenu(layout_menu)
 
         # 主题子菜单
-        theme_menu = VisibleAcrylicMenu("主题", self)
+        theme_menu = _create_menu("主题", self)
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
         _theme_mode = self._get_theme_mode(settings)
@@ -332,12 +430,19 @@ class UIMixin:
         act_ff = Action(FluentIcon.FONT, "字体设置", self)
         act_ff.triggered.connect(lambda: QTimer.singleShot(0, self._on_font_family))
         view_menu.addAction(act_ff)
+
+        # 性能选项（亚克力/动画独立开关，即时生效无需重启）
+        view_menu.addSeparator()
+        act_perf = Action(FluentIcon.SPEED_HIGH, "性能选项...", self)
+        act_perf.triggered.connect(lambda: QTimer.singleShot(0, self._on_perf_options))
+        view_menu.addAction(act_perf)
+
         view_btn = TransparentDropDownPushButton("视图", self._menubar_widget)
         view_btn.setMenu(view_menu)
         _mb_layout.addWidget(view_btn)
 
-        # 「帮助」菜单（亚克力材质）
-        help_menu = VisibleAcrylicMenu("帮助", self)
+        # 「帮助」菜单
+        help_menu = _create_menu("帮助", self)
         act_about = Action(FluentIcon.INFO, "关于", self)
         act_about.triggered.connect(lambda: QTimer.singleShot(0, self._on_about))
         help_menu.addAction(act_about)
@@ -505,6 +610,61 @@ class UIMixin:
         w.yesButton.setText("确定")
         w.cancelButton.hide()
         w.exec()
+
+    def _on_perf_options(self):
+        """性能选项对话框：SwitchButton 独立控制亚克力/动画，切换即时生效无需重启"""
+        from core.perf import (is_acrylic_enabled, is_animation_enabled,
+                               set_acrylic_enabled, set_animation_enabled)
+
+        class PerfOptionsDialog(MessageBoxBase):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("性能选项", self)
+                self.viewLayout.addWidget(self.titleLabel)
+
+                # 亚克力效果开关
+                row1 = QHBoxLayout()
+                lbl1 = BodyLabel("亚克力磨砂效果", self)
+                lbl1.setToolTip("关闭后菜单/下拉框使用纯色背景，大幅降低核显开销")
+                row1.addWidget(lbl1, 1)
+                self.sw_acrylic = SwitchButton(self)
+                self.sw_acrylic.setOnText("开")
+                self.sw_acrylic.setOffText("关")
+                self.sw_acrylic.setChecked(is_acrylic_enabled())
+                row1.addWidget(self.sw_acrylic)
+                self.viewLayout.addLayout(row1)
+
+                # 弹出动画开关
+                row2 = QHBoxLayout()
+                lbl2 = BodyLabel("菜单弹出动画", self)
+                lbl2.setToolTip("关闭后菜单直接弹出，无过渡动画")
+                row2.addWidget(lbl2, 1)
+                self.sw_animation = SwitchButton(self)
+                self.sw_animation.setOnText("开")
+                self.sw_animation.setOffText("关")
+                self.sw_animation.setChecked(is_animation_enabled())
+                row2.addWidget(self.sw_animation)
+                self.viewLayout.addLayout(row2)
+
+        dlg = PerfOptionsDialog(self)
+        dlg.yesButton.setText("完成")
+        dlg.cancelButton.hide()
+        dlg.widget.setMinimumWidth(340)
+
+        # 实时应用：拨动开关的瞬间即生效并持久化
+        def _on_acrylic_toggled(checked):
+            set_acrylic_enabled(checked)
+            state = "开启" if checked else "关闭"
+            self._append_log(f"[性能] 亚克力效果已{state}（即时生效）")
+
+        def _on_animation_toggled(checked):
+            set_animation_enabled(checked)
+            state = "开启" if checked else "关闭"
+            self._append_log(f"[性能] 弹出动画已{state}（即时生效）")
+
+        dlg.sw_acrylic.checkedChanged.connect(_on_acrylic_toggled)
+        dlg.sw_animation.checkedChanged.connect(_on_animation_toggled)
+        dlg.exec()
 
     # ==================== 设置应用 ====================
 

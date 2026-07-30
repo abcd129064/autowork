@@ -8,6 +8,7 @@ import shutil
 import ctypes
 
 from PySide6.QtCore import QProcess, QTimer, Slot
+from qfluentwidgets import setCustomStyleSheet, isDarkTheme
 
 from core.app_paths import get_app_dir
 
@@ -23,13 +24,38 @@ if sys.platform == 'win32':
 class ProcessMixin:
     """进程管理相关方法"""
 
+    # “结束”状态红底样式（播放中）
+    _END_BTN_QSS_DARK = (
+        "QPushButton#start { background-color: #d13438; color: white; }"
+        "QPushButton#start:pressed { background-color: #a1282b; }"
+        "QPushButton#start:hover { background-color: #e04b4e; }"
+    )
+    _END_BTN_QSS_LIGHT = (
+        "QPushButton#start { background-color: #c42b1c; color: white; }"
+        "QPushButton#start:pressed { background-color: #9a2115; }"
+        "QPushButton#start:hover { background-color: #d63c2e; }"
+    )
+
+    def _update_play_btn(self, running):
+        """更新播放按钮状态：运行中显示红底“结束”，空闲显示默认“播放”"""
+        if running:
+            self.ui.start.setText("结束")
+            qss = self._END_BTN_QSS_DARK if isDarkTheme() else self._END_BTN_QSS_LIGHT
+            setCustomStyleSheet(self.ui.start, qss, qss)
+        else:
+            self.ui.start.setText("播放")
+            setCustomStyleSheet(self.ui.start, "", "")
+
     @Slot()
     def on_start_clicked(self):
-        """播放按钮点击事件 - 启动 SnookerTracking 程序"""
+        """播放/结束切换按钮 - 类似启动三端的切换逻辑"""
         if self.running_process is not None:
-            self._append_log("\n[警告] 已有程序正在运行，请先点击'结束'")
-            self._show_info_bar("已有程序正在运行，请先点击'结束'", "warning")
-            return
+            self.on_end_clicked()
+        else:
+            self._start_program()
+
+    def _start_program(self):
+        """启动 SnookerTracking 程序"""
         exe_name = self.ui.choose_exe.currentText()
         if not exe_name:
             self._show_info_bar("请先选择程序！", "warning")
@@ -45,6 +71,7 @@ class ProcessMixin:
         self.running_process.readyReadStandardError.connect(self._on_program_error)
         self.running_process.finished.connect(self._on_program_finished)
         self._pending_exe_path = exe_path
+        self._update_play_btn(True)
         need_decode = self._prepare_detect_json()
         if need_decode:
             self._append_log(f"\n[播放] 等待 detect.json 解码完成后启动...")
@@ -69,11 +96,12 @@ class ProcessMixin:
         self.running_process = None
         self._process_suspended = False
         self.ui.pause_btn.setText("暂停")
+        self._update_play_btn(False)
         self._update_status_idle()
 
     @Slot()
     def on_end_clicked(self):
-        """结束按钮点击事件 - 停止运行的程序"""
+        """结束正在运行的程序"""
         if self.running_process is None:
             self._append_log("\n[提示] 没有正在运行的程序")
             self._show_info_bar("没有正在运行的程序", "warning")
@@ -85,6 +113,7 @@ class ProcessMixin:
         self.running_process = None
         self._process_suspended = False
         self.ui.pause_btn.setText("暂停")
+        self._update_play_btn(False)
         self._update_status_idle()
 
     # ==================== 三端启动 ====================

@@ -45,6 +45,7 @@ class RemoteMixin:
         def _get_app_dir(self) -> str: ...
         def _append_log(self, msg: str) -> None: ...
         def _show_info_bar(self, msg: str, level: str, duration: int = 2000) -> None: ...
+        def _on_p2p_search_changed(self, text: str) -> None: ...
 
     # frpc 服务器默认配置
     _FRPC_SERVER_DEFAULTS = {
@@ -172,6 +173,8 @@ class RemoteMixin:
         self.ui.p2p_visitor_list.clear()
         for v in self._p2p_visitors:
             self.ui.p2p_visitor_list.addItem(v.get("serverName", ""))
+        # 重新应用搜索过滤
+        self._on_p2p_search_changed(self.ui.p2p_search.text())
 
     def _save_p2p_settings(self):
         """visitor 配置仅存于内存，连接时写入 TOML，不持久化到 settings.json"""
@@ -195,6 +198,8 @@ class RemoteMixin:
         self.ui.p2p_visitor_list.clear()
         for s in self._load_tcp_servers():
             self.ui.p2p_visitor_list.addItem(s)
+        # 重新应用搜索过滤
+        self._on_p2p_search_changed(self.ui.p2p_search.text())
 
     def _reload_p2p_list_for_mode(self):
         """按当前模式重载列表内容（XTCP=visitors，TCP=保存的服务器）"""

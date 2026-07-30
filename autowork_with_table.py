@@ -41,10 +41,14 @@ from qfluentwidgets.components.material.acrylic_combo_box import (
     AcrylicComboBox, AcrylicComboBoxMenu, AcrylicComboMenuActionListWidget)
 from qfluentwidgets.components.material.acrylic_menu import AcrylicMenuBase
 from qfluentwidgets.components.material import AcrylicSearchLineEdit
+from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAnimationManager
+
+from core.perf import is_acrylic_enabled, is_animation_enabled
 
 
 class _VisibleAcrylicComboView(AcrylicComboMenuActionListWidget):
-    """增强亚克力下拉列表视图：优化模糊半径/噪点/着色层参数，使磨砂玻璃效果清晰可见"""
+    """增强亚克力下拉列表视图：优化模糊半径/噪点/着色层参数，使磨砂玻璃效果清晰可见。
+    亚克力开关关闭时跳过 brush 绘制，直接使用普通列表背景（即时生效）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,17 +57,38 @@ class _VisibleAcrylicComboView(AcrylicComboMenuActionListWidget):
         # 库默认噪点不透明度 0.03；0.15 磨砂玻璃
         self.acrylicBrush.noiseOpacity = 0.03
 
+    def paintEvent(self, e):
+        if not is_acrylic_enabled():
+            # 亚克力关闭：绘制纯色背景替代截屏模糊（transparent 属性使
+            # QSS 背景透明，不手动填充会导致下拉列表整体不可见）
+            painter = QPainter(self.viewport())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(43, 43, 43) if isDarkTheme()
+                             else QColor(243, 243, 243))
+            painter.drawRect(self.viewport().rect())
+            MenuActionListWidget.paintEvent(self, e)
+            return
+        super().paintEvent(e)
+
     def _updateAcrylicColor(self):
+        """
+        更新亚克力（Acrylic）材质的背景颜色。
+        根据当前应用的主题（暗黑或明亮）动态调整色调（tintColor）和亮度颜色（luminosityColor），
+        以确保下拉菜单的磨砂玻璃效果在不同主题下都能保持良好的可见度与视觉一致性。
+        """
         if isDarkTheme():
+            # 暗黑主题：使用深灰色调（RGB: 32, 32, 32，透明度 90），亮度颜色设为完全透明
             self.acrylicBrush.tintColor = QColor(32, 32, 32, 90)
             self.acrylicBrush.luminosityColor = QColor(0, 0, 0, 0)
         else:
-            self.acrylicBrush.tintColor = QColor(255, 255, 255, 70)
+            # 明亮主题：使用白色调（RGB: 255, 255, 255，透明度 70），亮度颜色设为完全透明
+            self.acrylicBrush.tintColor = QColor(255, 255, 255, 90)
             self.acrylicBrush.luminosityColor = QColor(255, 255, 255, 0)
 
 
 class _VisibleAcrylicComboMenu(AcrylicComboBoxMenu):
-    """亚克力下拉菜单（增强可见度）"""
+    """亚克力下拉菜单（增强可见度）。
+    弹出时动态判断亚克力/动画开关，切换即时生效无需重启。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,7 +100,29 @@ class _VisibleAcrylicComboMenu(AcrylicComboBoxMenu):
         _menu = self
 
         def _exec(pos, ani=True, aniType=None):
-            AcrylicMenuBase.exec(_menu, pos, ani=ani, aniType=aniType)
+            from qfluentwidgets import MenuAnimationType, RoundMenu
+            if aniType is None:
+                aniType = (MenuAnimationType.DROP_DOWN if is_animation_enabled()
+                           else MenuAnimationType.NONE)
+            if not is_animation_enabled():
+                # 无动画路径：绕过动画管理器，清除残留 mask，
+                # 避免幽灵矩形窗口
+                mgr = MenuAnimationManager.make(_menu, aniType)
+                p = mgr._endPosition(pos)
+                if is_acrylic_enabled():
+                    _menu.view.acrylicBrush.grabImage(
+                        QRect(p, _menu.layout().sizeHint()))
+                _menu.clearMask()
+                _menu.move(p)
+                _menu.show()
+                _menu.view.viewport().update()
+                if _menu.isSubMenu:
+                    _menu.menuItem.setSelected(True)
+                return
+            if is_acrylic_enabled():
+                AcrylicMenuBase.exec(_menu, pos, ani=ani, aniType=aniType)
+            else:
+                RoundMenu.exec(_menu, pos, ani=ani, aniType=aniType)
         self.exec = _exec
 
 
@@ -84,6 +131,17 @@ class VisibleAcrylicComboBox(AcrylicComboBox):
 
     def _createComboMenu(self):
         return _VisibleAcrylicComboMenu(self)
+
+
+def _create_combo_box(parent=None):
+    """工厂函数：统一创建亚克力 ComboBox。
+    亚克力/动画开关在弹出时动态判断，切换即时生效无需重启。"""
+    return VisibleAcrylicComboBox(parent)
+
+
+def _create_search_line_edit(parent=None):
+    """工厂函数：统一创建亚克力 SearchLineEdit（其弹出行为同样受运行时开关控制）"""
+    return AcrylicSearchLineEdit(parent)
 
 
 def _make_separator(vertical=False):
@@ -247,7 +305,7 @@ class Ui_MainWindow(object):
         setFont(self.label_2, 11)
         self.horizontalLayout.addWidget(self.label_2)
 
-        self.choose_exe = VisibleAcrylicComboBox(self.toolbar_widget)
+        self.choose_exe = _create_combo_box(self.toolbar_widget)
         self.choose_exe.setObjectName(u"choose_exe")
         self.choose_exe.setMinimumWidth(145)
         self.horizontalLayout.addWidget(self.choose_exe)
@@ -280,10 +338,6 @@ class Ui_MainWindow(object):
         self.start.setObjectName(u"start")
         self.horizontalLayout.addWidget(self.start)
 
-        self.end = FluentPushButton(self.toolbar_widget)
-        self.end.setObjectName(u"end")
-        self.horizontalLayout.addWidget(self.end)
-
         self.pause_btn = FluentPushButton(self.toolbar_widget)
         self.pause_btn.setObjectName(u"pause_btn")
         self.pause_btn.setText("暂停")
@@ -314,7 +368,7 @@ class Ui_MainWindow(object):
         self.id_list.setObjectName(u"id_list")
 
         # 设备搜索框（位于 id_list 正下方，默认隐藏，Ctrl+F 显示）
-        self.id_search = AcrylicSearchLineEdit()
+        self.id_search = _create_search_line_edit()
         self.id_search.setObjectName(u"id_search")
         self.id_search.setPlaceholderText("搜索设备代码...")
         self.id_search.setClearButtonEnabled(True)
@@ -331,6 +385,22 @@ class Ui_MainWindow(object):
 
         self.loacl_video_list = ListWidget()
         self.loacl_video_list.setObjectName(u"loacl_video_list")
+
+        # 日志文件搜索框（位于 loacl_video_list 正下方，默认隐藏，Ctrl+F 显示）
+        self.video_search = _create_search_line_edit()
+        self.video_search.setObjectName(u"video_search")
+        self.video_search.setPlaceholderText("搜索日志文件...")
+        self.video_search.setClearButtonEnabled(True)
+        self.video_search.setVisible(False)
+
+        # 容器：loacl_video_list + 搜索框，布局切换时随列表一起迁移
+        self.video_list_container = QWidget()
+        self.video_list_container.setObjectName(u"video_list_container")
+        _video_container_layout = QVBoxLayout(self.video_list_container)
+        _video_container_layout.setContentsMargins(0, 0, 0, 0)
+        _video_container_layout.setSpacing(0)
+        _video_container_layout.addWidget(self.loacl_video_list, 1)
+        _video_container_layout.addWidget(self.video_search)
 
         self.log_list = ListWidget()
         self.log_list.setObjectName(u"log_list")
@@ -392,6 +462,13 @@ class Ui_MainWindow(object):
         p2p_main_layout.addWidget(self.p2p_visitor_list)
         p2p_main_layout.setStretchFactor(self.p2p_visitor_list, 1)
 
+        # 远程面板搜索框（常驻显示，实时过滤 visitor/服务器列表）
+        self.p2p_search = _create_search_line_edit(self.p2p_panel)
+        self.p2p_search.setObjectName(u"p2p_search")
+        self.p2p_search.setPlaceholderText("搜索服务器...")
+        self.p2p_search.setClearButtonEnabled(True)
+        p2p_main_layout.addWidget(self.p2p_search)
+
         p2p_list_btn_layout = QHBoxLayout()
         self.p2p_add_btn = FluentPushButton("添加")
         self.p2p_add_btn.setObjectName(u"p2p_add_btn")
@@ -449,7 +526,7 @@ class Ui_MainWindow(object):
         mode_label = CaptionLabel("连接方式:", self.p2p_panel)
         mode_label.setObjectName(u"p2p_mode_label")
         mode_layout.addWidget(mode_label)
-        self.p2p_mode_combo = VisibleAcrylicComboBox(self.p2p_panel)
+        self.p2p_mode_combo = _create_combo_box(self.p2p_panel)
         self.p2p_mode_combo.setObjectName(u"p2p_mode_combo")
         self.p2p_mode_combo.addItems(["XTCP", "TCP"])
         mode_layout.addWidget(self.p2p_mode_combo)
@@ -551,7 +628,6 @@ class Ui_MainWindow(object):
         self.input_frame.setText(QCoreApplication.translate("MainWindow", u"400", None))
         self.open_daily.setText(QCoreApplication.translate("MainWindow", u"CPP日志", None))
         self.start.setText(QCoreApplication.translate("MainWindow", u"播放", None))
-        self.end.setText(QCoreApplication.translate("MainWindow", u"结束", None))
         self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"暂停", None))
         self.start_three_btn.setText(QCoreApplication.translate("MainWindow", u"启动三端", None))
         self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"远程", None))
@@ -601,7 +677,7 @@ class Ui_MainWindow(object):
         file_header.setFixedHeight(26)
         file_header.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         file_layout.addWidget(file_header)
-        file_layout.addWidget(self.loacl_video_list, 1)
+        file_layout.addWidget(self.video_list_container, 1)
         self.left_top_splitter.addWidget(file_widget)
 
         self.left_top_splitter.setSizes([100, 120])
@@ -643,7 +719,7 @@ class Ui_MainWindow(object):
         self.splitter.setObjectName(u"splitter")
 
         self.splitter.addWidget(self.id_list_container)
-        self.splitter.addWidget(self.loacl_video_list)
+        self.splitter.addWidget(self.video_list_container)
         self.splitter.addWidget(self.log_list)
         self.splitter.addWidget(self.show_log)
 
@@ -658,7 +734,7 @@ class Ui_MainWindow(object):
         # 1. 将核心控件从旧布局中脱离（设置 parent=None 防止被旧 splitter 删除）
         # id_list 与其搜索框同在 id_list_container 内，迁移容器即可一并带走
         self.id_list_container.setParent(None)
-        self.loacl_video_list.setParent(None)
+        self.video_list_container.setParent(None)
         self.log_list.setParent(None)
         self.show_log.setParent(None)
         self.log_status_bar.setParent(None)

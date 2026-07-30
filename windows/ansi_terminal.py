@@ -10,9 +10,9 @@
 - 键盘输入直接转发到远端 shell
 """
 
-from PySide6.QtWidgets import QTextEdit
-from PySide6.QtGui import QFont, QKeyEvent
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QTextEdit, QApplication, QMenu
+from PySide6.QtGui import QFont, QKeyEvent, QAction
+from PySide6.QtCore import Qt, Signal, QTimer
 
 # 标准终端 16 色调色板
 _COLORS = [
@@ -89,6 +89,12 @@ class ANSITerminalWidget(QTextEdit):
         self._max_lines = 5000
         # 输入使能（连接成功前禁止键盘输入）
         self._input_enabled = False
+        # 渲染合并定时器：将高频 write_output 合并为一次 _render（~30fps）
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(33)  # 33ms ≈ 30fps
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render)
+        self._render_pending = False
 
     # ─── 公开接口 ─────────────────────────────────────────────────────────
 
@@ -97,9 +103,14 @@ class ANSITerminalWidget(QTextEdit):
         self._input_enabled = enabled
 
     def write_output(self, data: str):
-        """写入终端数据（解析 ANSI 序列并重新渲染）"""
+        """写入终端数据（解析 ANSI 序列，延迟合并渲染）"""
         self._parse(data)
-        self._render()
+        self._schedule_render()
+
+    def _schedule_render(self):
+        """调度渲染：33ms 内的多次 write_output 合并为一次 setHtml"""
+        if not self._render_timer.isActive():
+            self._render_timer.start()
 
     def clear_terminal(self):
         """清空终端"""
@@ -123,6 +134,24 @@ class ANSITerminalWidget(QTextEdit):
         alt = bool(modifiers & Qt.AltModifier)
         shift = bool(modifiers & Qt.ShiftModifier)
 
+        # ── 复制/粘贴快捷键（Windows Terminal 惯例） ──
+        if ctrl and key == Qt.Key_C:
+            # 有选中文本 → 复制；无选中 → 发送 Ctrl+C 中断
+            if self.textCursor().hasSelection():
+                self.copy()
+            else:
+                self.key_input.emit('\x03')
+            return
+        if ctrl and key == Qt.Key_V:
+            self._paste_from_clipboard()
+            return
+        if ctrl and key == Qt.Key_Insert:
+            self.copy()
+            return
+        if shift and key == Qt.Key_Insert:
+            self._paste_from_clipboard()
+            return
+
         # ── Ctrl + 字母 → 控制字符 ──
         if ctrl and Qt.Key_A <= key <= Qt.Key_Z:
             ch = chr(key - Qt.Key_A + 1)  # Ctrl+A=\x01 ... Ctrl+Z=\x1a
@@ -137,7 +166,6 @@ class ANSITerminalWidget(QTextEdit):
             if key == Qt.Key_BracketRight:  # Ctrl+]
                 self.key_input.emit('\x1d')
                 return
-            # 其他 Ctrl 组合忽略（如 Ctrl+V 粘贴由下方处理）
             super().keyPressEvent(event)
             return
 
@@ -226,6 +254,27 @@ class ANSITerminalWidget(QTextEdit):
         """点击终端区域时立即获取键盘焦点"""
         self.setFocus()
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event):
+        """右键菜单：复制 / 粘贴"""
+        menu = QMenu(self)
+        act_copy = QAction("复制", menu)
+        act_copy.setEnabled(self.textCursor().hasSelection())
+        act_copy.triggered.connect(self.copy)
+        menu.addAction(act_copy)
+        act_paste = QAction("粘贴", menu)
+        act_paste.setEnabled(bool(QApplication.clipboard().text()))
+        act_paste.triggered.connect(self._paste_from_clipboard)
+        menu.addAction(act_paste)
+        menu.exec(event.globalPos())
+
+    def _paste_from_clipboard(self):
+        """将剪贴板文本粘贴（发送）到远端 shell"""
+        text = QApplication.clipboard().text()
+        if text:
+            # 将换行符统一为 \r（终端粘贴惯例）
+            text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '\r')
+            self.key_input.emit(text)
 
     def focusNextPrevChild(self, next_: bool) -> bool:
         """禁止 Tab/Shift+Tab 触发焦点导航，确保 Tab 作为普通按键处理"""

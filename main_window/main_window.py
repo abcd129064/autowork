@@ -12,7 +12,6 @@ from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
 from qfluentwidgets import (InfoBar, InfoBarPosition, FluentTitleBar,
     MessageBoxBase, BodyLabel, ComboBox)
 from qfluentwidgets.window.fluent_window import FluentWindowBase
-from concurrent.futures import ThreadPoolExecutor
 
 from autowork_with_table import Ui_MainWindow
 from core.utils import natural_sort_key
@@ -21,6 +20,7 @@ from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
 from .remote_mixin import RemoteMixin
 from .ui_mixin import UIMixin
+from qfluentwidgets import Dialog
 
 
 class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindowBase):
@@ -145,7 +145,6 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 按钮点击事件
         self.ui.flush.clicked.connect(self.on_flush_clicked)
         self.ui.start.clicked.connect(self.on_start_clicked)
-        self.ui.end.clicked.connect(self.on_end_clicked)
         self.ui.open_daily.clicked.connect(self.on_open_daily_clicked)
         self.ui.write_table.clicked.connect(self.on_open_dir_clicked)
         self.ui.open_config.clicked.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
@@ -186,14 +185,26 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.input_frame.returnPressed.connect(self._on_frame_input_confirmed)
 
         # 设备列表实时搜索（搜索框控件在 autowork_with_table.py 中创建）
-        self.ui.id_search.textChanged.connect(self._on_id_search_changed)
-        # Ctrl+F 切换设备搜索框显示/隐藏，Esc 隐藏
+        self.ui.id_search.textChanged.connect(self._on_id_search_debounce)
+        # 日志文件列表实时搜索
+        self.ui.video_search.textChanged.connect(self._on_video_search_debounce)
+        # 远程面板列表实时搜索
+        self.ui.p2p_search.textChanged.connect(self._on_p2p_search_changed)
+        # 搜索防抖定时器（150ms 内的连续输入合并为一次过滤）
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setInterval(150)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_callback = None
+        self._search_debounce_timer.timeout.connect(self._search_debounce_fire)
+        # Ctrl+F 切换搜索框显示/隐藏，Esc 隐藏
         self._id_search_sc = QShortcut(QKeySequence('Ctrl+F'), self)
-        self._id_search_sc.activated.connect(self._on_id_search_shortcut)
+        self._id_search_sc.activated.connect(self._on_search_shortcut)
         self._id_search_esc = QShortcut(QKeySequence('Escape'), self)
-        self._id_search_esc.activated.connect(self._hide_id_search)
+        self._id_search_esc.activated.connect(self._hide_all_search)
 
     # ==================== 日志智能自动滚动 ====================
+
+    _LOG_MAX_LINES = 5000  # 日志控件最大行数，超出后截断旧内容
 
     def _init_log_auto_scroll(self):
         """初始化日志控件的智能自动滚动功能"""
@@ -203,6 +214,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._log_scroll_timer.setInterval(1000)
         self._log_scroll_timer.timeout.connect(self._scroll_log_to_bottom)
         self.ui.show_log.verticalScrollBar().valueChanged.connect(self._on_log_scroll_changed)
+        # 批量追加定时器：将 50ms 内的多次 _append_log 合并为一次 UI 更新
+        self._log_batch_timer = QTimer(self)
+        self._log_batch_timer.setInterval(50)
+        self._log_batch_timer.setSingleShot(True)
+        self._log_batch_timer.timeout.connect(self._flush_log_batch)
+        self._log_batch_buf: list[str] = []
 
     def _is_log_at_bottom(self):
         """判断日志滚动条是否在底部（允许 2px 误差）"""
@@ -222,13 +239,33 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         sb.setValue(sb.maximum())
 
     def _append_log(self, text):
-        """向日志控件追加文本，带智能自动滚动"""
-        self.ui.show_log.appendPlainText(text)
+        """向日志控件追加文本，带批量合并 + 智能自动滚动 + 行数上限"""
+        self._log_batch_buf.append(text)
+        if not self._log_batch_timer.isActive():
+            self._log_batch_timer.start()
+
+    def _flush_log_batch(self):
+        """将缓冲区内所有日志一次性写入控件（减少重绘次数）"""
+        if not self._log_batch_buf:
+            return
+        combined = '\n'.join(self._log_batch_buf)
+        self._log_batch_buf.clear()
+
+        self.ui.show_log.appendPlainText(combined)
+
+        # 行数上限截断（避免无限增长导致内存/布局开销）
+        doc = self.ui.show_log.document()
+        if doc.blockCount() > self._LOG_MAX_LINES:
+            cursor = self.ui.show_log.textCursor()
+            cursor.movePosition(cursor.Start)
+            cursor.movePosition(cursor.Down, cursor.KeepAnchor,
+                                doc.blockCount() - self._LOG_MAX_LINES)
+            cursor.removeSelectedText()
+            cursor.deleteChar()  # 删除多余换行
+
         if self._log_at_bottom:
-            # 用户在底部，立即滚动
             self._scroll_log_to_bottom()
         else:
-            # 用户不在底部，启动/重置延迟滚动定时器（debounce）
             self._log_scroll_timer.start()
 
     def _show_info_bar(self, message, message_type="info", title=None, duration=2500):
@@ -304,9 +341,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             return
 
         # 清空并添加设备代码列表（自然排序：数字段按数值比较）
+        self.ui.id_list.setUpdatesEnabled(False)
         self.ui.id_list.clear()
         for code in sorted(device_codes, key=natural_sort_key):
             self.ui.id_list.addItem(code)
+        self.ui.id_list.setUpdatesEnabled(True)
 
         self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
 
@@ -357,9 +396,14 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._show_info_bar(f"{device_code} 下未找到 {date_str} 的日志", "warning")
             return
 
+        self.ui.loacl_video_list.setUpdatesEnabled(False)
         for log_path in sorted(log_files):
             # 只显示文件名，如 20260705_131009.log
             self.ui.loacl_video_list.addItem(os.path.basename(log_path))
+        self.ui.loacl_video_list.setUpdatesEnabled(True)
+
+        # 列表重载后重新应用搜索过滤
+        self._on_video_search_changed(self.ui.video_search.text())
 
         self._append_log(f"[日志目录] {device_code}/{date_str} 下有 {len(log_files)} 个日志文件")
 
@@ -367,15 +411,42 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """初始化第三列为空，等待点击日志后展示内容"""
         self.ui.log_list.clear()
 
-    # ==================== 设备列表搜索 (Ctrl+F) ====================
+    # ==================== 列表搜索 (Ctrl+F) ====================
 
-    def _on_id_search_shortcut(self):
-        """Ctrl+F：切换设备搜索框的显示/隐藏"""
-        if self.ui.id_search.isVisible():
-            self._hide_id_search()
+    def _on_id_search_debounce(self, text):
+        """id_search 输入防抖：150ms 内的连续输入合并为一次过滤"""
+        self._search_debounce_callback = lambda: self._on_id_search_changed(text)
+        self._search_debounce_timer.start()
+
+    def _on_video_search_debounce(self, text):
+        """video_search 输入防抖"""
+        self._search_debounce_callback = lambda: self._on_video_search_changed(text)
+        self._search_debounce_timer.start()
+
+    def _search_debounce_fire(self):
+        if self._search_debounce_callback:
+            self._search_debounce_callback()
+            self._search_debounce_callback = None
+
+    def _on_search_shortcut(self):
+        """Ctrl+F：根据焦点所在列表切换对应搜索框的显示/隐藏"""
+        focused = self.focusWidget()
+        # 焦点在日志文件列表（或其搜索框）→ 操作 video_search
+        if (self.ui.loacl_video_list.isAncestorOf(focused)
+                or focused is self.ui.loacl_video_list
+                or focused is self.ui.video_search):
+            if self.ui.video_search.isVisible():
+                self._hide_video_search()
+            else:
+                self.ui.video_search.show()
+                self.ui.video_search.setFocus()
+        # 焦点在设备列表（或其搜索框）及其他情况 → 操作 id_search
         else:
-            self.ui.id_search.show()
-            self.ui.id_search.setFocus()
+            if self.ui.id_search.isVisible():
+                self._hide_id_search()
+            else:
+                self.ui.id_search.show()
+                self.ui.id_search.setFocus()
 
     def _hide_id_search(self):
         """隐藏设备搜索框，清空内容并恢复完整设备列表"""
@@ -383,15 +454,42 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.id_search.clear()
         self.ui.id_search.blockSignals(False)
         self.ui.id_search.hide()
-        # 恢复所有项可见
         for i in range(self.ui.id_list.count()):
             self.ui.id_list.item(i).setHidden(False)
+
+    def _hide_video_search(self):
+        """隐藏日志文件搜索框，清空内容并恢复完整列表"""
+        self.ui.video_search.blockSignals(True)
+        self.ui.video_search.clear()
+        self.ui.video_search.blockSignals(False)
+        self.ui.video_search.hide()
+        for i in range(self.ui.loacl_video_list.count()):
+            self.ui.loacl_video_list.item(i).setHidden(False)
+
+    def _hide_all_search(self):
+        """隐藏所有搜索框（Esc 触发）"""
+        self._hide_id_search()
+        self._hide_video_search()
 
     def _on_id_search_changed(self, text):
         """实时过滤设备列表：不区分大小写子串匹配，用 setHidden 控制显隐（不重建列表）"""
         kw = text.strip().lower()
         for i in range(self.ui.id_list.count()):
             item = self.ui.id_list.item(i)
+            item.setHidden(bool(kw) and kw not in item.text().lower())
+
+    def _on_video_search_changed(self, text):
+        """实时过滤日志文件列表：不区分大小写子串匹配"""
+        kw = text.strip().lower()
+        for i in range(self.ui.loacl_video_list.count()):
+            item = self.ui.loacl_video_list.item(i)
+            item.setHidden(bool(kw) and kw not in item.text().lower())
+
+    def _on_p2p_search_changed(self, text):
+        """实时过滤远程面板 visitor/服务器列表：不区分大小写子串匹配"""
+        kw = text.strip().lower()
+        for i in range(self.ui.p2p_visitor_list.count()):
+            item = self.ui.p2p_visitor_list.item(i)
             item.setHidden(bool(kw) and kw not in item.text().lower())
 
     # ==================== 日历预热 ====================
@@ -647,6 +745,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 content = f.read()
 
             self._current_log_path = full_log_path
+            self.ui.log_list.setUpdatesEnabled(False)
             self.ui.log_list.clear()
             highlight_patterns = [r'返回', r'add']
             for line in content.splitlines():
@@ -654,6 +753,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 if any(re.search(p, line) for p in highlight_patterns):
                     log_item.setForeground(QBrush(self.highlight_color))
                 self.ui.log_list.addItem(log_item)
+            self.ui.log_list.setUpdatesEnabled(True)
 
             line_count = len(content.splitlines())
             self._append_log(f"[日志内容] 已加载 {line_count} 行")
@@ -696,16 +796,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
         device_code = self.ui.id_list.currentItem().text()
         video_path_device = os.path.join(self.videos_dir, device_code, video_name)
-        # 并行探测两个候选路径
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            primary_exists = pool.submit(os.path.exists, video_path_primary)
-            device_exists = pool.submit(os.path.exists, video_path_device)
-            if primary_exists.result():
-                video_path = video_path_primary.replace(os.sep, '/')
-            elif device_exists.result():
-                video_path = video_path_device.replace(os.sep, '/')
-            else:
-                video_path = video_path_primary.replace(os.sep, '/')
+        if os.path.exists(video_path_primary):
+            video_path = video_path_primary.replace(os.sep, '/')
+        elif os.path.exists(video_path_device):
+            video_path = video_path_device.replace(os.sep, '/')
+        else:
+            video_path = video_path_primary.replace(os.sep, '/')
         self.current_video = video_path
 
         # 根据单选按钮模式计算实际起始帧

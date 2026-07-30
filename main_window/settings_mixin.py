@@ -184,7 +184,4 @@ class SettingsMixin:
         """空格键切换播放/结束，焦点在输入框时不触发"""
         if self.focusWidget() is self.ui.input_frame:
             return
-        if self.running_process is not None:
-            self.on_end_clicked()
-        else:
-            self.on_start_clicked()
+        self.on_start_clicked()

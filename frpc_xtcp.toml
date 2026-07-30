@@ -25,13 +25,6 @@ secretKey = "abc123"
 bindPort = 34472
 
 [[visitors]]
-name = "snk_4002"
-type = "xtcp"
-serverName = "snk_4002"
-secretKey = "abc123"
-bindPort = 53143
-
-[[visitors]]
 name = "snk_4003"
 type = "xtcp"
 serverName = "snk_4003"
@@ -183,7 +176,7 @@ name = "snk_4002"
 type = "xtcp"
 serverName = "snk_4002"
 secretKey = "abc123"
-bindPort = 58559
+bindPort = 58557
 
 [[visitors]]
 name = "snk_17908"
@@ -191,4 +184,18 @@ type = "xtcp"
 serverName = "snk_17908"
 secretKey = "abc123"
 bindPort = 65172
+
+[[visitors]]
+name = "snk_12101"
+type = "xtcp"
+serverName = "snk_12101"
+secretKey = "abc123"
+bindPort = 20311
+
+[[visitors]]
+name = "snk_12106"
+type = "xtcp"
+serverName = "snk_12106"
+secretKey = "abc123"
+bindPort = 51748
 
