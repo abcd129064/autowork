@@ -9,7 +9,7 @@ import subprocess
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
     QWidget, QTreeWidgetItem,
     QHeaderView, QSplitter,
-    QTableWidgetItem, QAbstractItemView, QApplication)
+    QTableWidgetItem, QAbstractItemView, QApplication, QPushButton)
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QShortcut, QKeySequence, QFont
 from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
@@ -248,6 +248,10 @@ class SFTPPanel(QWidget):
         sc.activated.connect(self._on_search_shortcut)
         esc = QShortcut(QKeySequence('Escape'), self)
         esc.activated.connect(self._hide_search_boxes)
+
+        # 修复误触发"上级"默认按钮，把本地目录推到上一级
+        for _btn in self.findChildren(QPushButton):
+            _btn.setAutoDefault(False)
 
     # ------------------------------------------------------------------ 连接
     def _connect_and_list(self):
