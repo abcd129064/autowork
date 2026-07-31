@@ -9,19 +9,19 @@ import subprocess
 
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout)
 from PySide6.QtCore import QTimer, Qt, QRect
-from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QFont, QActionGroup,
+from PySide6.QtGui import (QColor, QKeySequence, QFont, QActionGroup,
     QFontDatabase, QPainter)
-from qfluentwidgets import (setTheme, setThemeColor, Theme, InfoBar, InfoBarPosition,
+from qfluentwidgets import (setTheme, setThemeColor, Theme,
     Action, MenuAnimationType, FluentIcon, setFontFamilies,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
-    BodyLabel, setFont, isDarkTheme, RoundMenu, SwitchButton)
+    BodyLabel, isDarkTheme, RoundMenu, SwitchButton)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
 from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAnimationManager
 
-from core.app_paths import get_app_dir, get_resource_dir
+from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
 
 
@@ -41,7 +41,6 @@ def _patch_acrylic_exec(menu):
                        else MenuAnimationType.NONE)
         if not is_animation_enabled():
             # 无动画路径：绕过动画管理器，避免残留 mask / 视口不刷新
-            # 导致的幽灵矩形窗口（上次 DROP_DOWN 动画 setMask 从不清除）
             mgr = MenuAnimationManager.make(menu, aniType)
             p = mgr._endPosition(pos)
             if is_acrylic_enabled():
@@ -164,7 +163,8 @@ def _exec_menu(menu, global_pos):
 
 class UIMixin:
     """UI 相关方法：状态栏、右键菜单、菜单栏、主题、字体、布局"""
-
+    ui: 'Ui_MainWindow'
+    videos_dir: str
     # ==================== 状态栏 ====================
 
     def _set_dark_titlebar(self):
@@ -235,39 +235,48 @@ class UIMixin:
     # ==================== 右键菜单 ====================
 
     def _init_context_menus(self):
-        """为列表控件设置自定义右键菜单策略"""
+        """为列表控件设置自定义右键菜单策略，并预构建缓存菜单（避免每次右键重建）"""
         self.ui.id_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.ui.log_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.ui.loacl_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        # 预构建三个右键菜单（Action/图标/信号仅创建一次，后续右键直接弹出）
+        self._build_id_list_menu()
+        self._build_log_list_menu()
+        self._build_video_list_menu()
 
-    def _id_list_context_menu(self, pos):
-        """设备列表右键菜单"""
+    # ---------- 预构建菜单（初始化时一次性创建，右键时零开销弹出） ----------
+
+    def _build_id_list_menu(self):
+        """预构建：设备列表右键菜单（完全静态，可安全缓存复用）"""
         menu = _create_menu(parent=self)
-        action_open_dir = Action(FluentIcon.FOLDER, "打开目录")
-        action_cpp_log = Action(FluentIcon.DOCUMENT, "查看 CPP 日志")
+        action_open_dir = Action(FluentIcon.FOLDER, "打开目录", self)
+        action_cpp_log = Action(FluentIcon.DOCUMENT, "查看 CPP 日志", self)
         action_open_dir.triggered.connect(self.on_open_dir_clicked)
         action_cpp_log.triggered.connect(self.on_open_daily_clicked)
         menu.addAction(action_open_dir)
         menu.addAction(action_cpp_log)
-        _exec_menu(menu, self.ui.id_list.mapToGlobal(pos))
+        self._ctx_id_menu = menu
 
-    def _log_list_context_menu(self, pos):
-        """日志内容列表右键菜单"""
+    def _build_log_list_menu(self):
+        """预构建：日志内容列表右键菜单（触发时动态获取当前行）"""
         import re
-        item = self.ui.log_list.currentItem()
-        if item is None:
-            return
         menu = _create_menu(parent=self)
-        action_copy = Action(FluentIcon.COPY, "复制此行")
-        action_copy_frame = Action(FluentIcon.LIBRARY, "复制帧数")
-        action_locate = Action(FluentIcon.PEOPLE, "在文件管理器中定位")
+        action_copy = Action(FluentIcon.COPY, "复制此行", self)
+        action_copy_frame = Action(FluentIcon.LIBRARY, "复制帧数", self)
+        action_locate = Action(FluentIcon.PEOPLE, "在文件管理器中定位", self)
 
         def _do_copy():
+            item = self.ui.log_list.currentItem()
+            if not item:
+                return
             QApplication.clipboard().setText(item.text())
             self._show_status_message("已复制到剪贴板", 2000)
             self._append_log("[复制] 已复制当前行文本到剪贴板")
 
         def _do_copy_frame():
+            item = self.ui.log_list.currentItem()
+            if not item:
+                return
             frame_match = re.search(r'frame_id:(\d+)', item.text())
             if frame_match:
                 frame_id = frame_match.group(1)
@@ -290,19 +299,19 @@ class UIMixin:
         menu.addAction(action_copy_frame)
         menu.addSeparator()
         menu.addAction(action_locate)
-        _exec_menu(menu, self.ui.log_list.mapToGlobal(pos))
+        self._ctx_log_menu = menu
 
-    def _loacl_video_list_context_menu(self, pos):
-        """日志文件列表右键菜单"""
-        item = self.ui.loacl_video_list.currentItem()
-        if item is None:
-            return
+    def _build_video_list_menu(self):
+        """预构建：日志文件列表右键菜单（触发时动态获取当前项）"""
         menu = _create_menu(parent=self)
-        action_copy_name = Action(FluentIcon.COPY, "复制视频名")
-        action_open_video_loc = Action(FluentIcon.FOLDER, "打开视频位置")
-        action_copy_video_loc = Action(FluentIcon.LINK, "复制视频位置")
+        action_copy_name = Action(FluentIcon.COPY, "复制视频名", self)
+        action_open_video_loc = Action(FluentIcon.FOLDER, "打开视频位置", self)
+        action_copy_video_loc = Action(FluentIcon.LINK, "复制视频位置", self)
 
         def _do_copy_name():
+            item = self.ui.loacl_video_list.currentItem()
+            if not item:
+                return
             pure_name = os.path.splitext(item.text())[0]
             QApplication.clipboard().setText(pure_name)
             self._show_status_message(f"文件名 {pure_name} 已复制到剪贴板", 2000)
@@ -310,6 +319,9 @@ class UIMixin:
 
         def _resolve_video_path():
             """根据当前选中的日志文件名推断视频完整路径"""
+            item = self.ui.loacl_video_list.currentItem()
+            if not item:
+                return None
             log_filename = item.text()
             video_name = os.path.splitext(log_filename)[0] + '.mp4'
             video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
@@ -325,11 +337,12 @@ class UIMixin:
 
         def _do_open_video_loc():
             video_path = _resolve_video_path()
+            if not video_path:
+                return
             if os.path.exists(video_path):
                 subprocess.run(['explorer', '/select,', video_path])
                 self._append_log(f"[定位] 已定位视频: {video_path}")
             else:
-                # 视频不存在时打开所在目录
                 video_dir = os.path.dirname(video_path)
                 if os.path.exists(video_dir):
                     os.startfile(video_dir)
@@ -339,6 +352,8 @@ class UIMixin:
 
         def _do_copy_video_loc():
             video_path = _resolve_video_path()
+            if not video_path:
+                return
             QApplication.clipboard().setText(video_path)
             self._show_status_message("视频路径已复制到剪贴板", 2000)
             self._append_log(f"[复制] 视频路径: {video_path}")
@@ -350,7 +365,25 @@ class UIMixin:
         menu.addSeparator()
         menu.addAction(action_open_video_loc)
         menu.addAction(action_copy_video_loc)
-        _exec_menu(menu, self.ui.loacl_video_list.mapToGlobal(pos))
+        self._ctx_video_menu = menu
+
+    # ---------- 右键触发：直接弹出缓存菜单（零构建开销） ----------
+
+    def _id_list_context_menu(self, pos):
+        """设备列表右键菜单（预构建缓存，直接弹出）"""
+        _exec_menu(self._ctx_id_menu, self.ui.id_list.mapToGlobal(pos))
+
+    def _log_list_context_menu(self, pos):
+        """日志内容列表右键菜单（预构建缓存，直接弹出）"""
+        if self.ui.log_list.currentItem() is None:
+            return
+        _exec_menu(self._ctx_log_menu, self.ui.log_list.mapToGlobal(pos))
+
+    def _loacl_video_list_context_menu(self, pos):
+        """日志文件列表右键菜单（预构建缓存，直接弹出）"""
+        if self.ui.loacl_video_list.currentItem() is None:
+            return
+        _exec_menu(self._ctx_video_menu, self.ui.loacl_video_list.mapToGlobal(pos))
 
     # ==================== 菜单栏 ====================
 

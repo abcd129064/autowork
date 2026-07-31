@@ -470,7 +470,11 @@ class RemoteMixin:
 
     def _on_frpc_finished(self, exit_code, _exit_status):
         self._append_log(f"[远程] frpc 已退出，退出码: {exit_code}")
+        # 释放 QProcess 对象（避免 C++ 侧泄漏）
+        proc = self._frpc_process
         self._frpc_process = None
+        if proc is not None:
+            proc.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         self.ui.p2p_rdp_btn.setEnabled(False)

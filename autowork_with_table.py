@@ -6,7 +6,7 @@
 ## WARNING! 重新编译 .ui 文件会覆盖此文件
 ################################################################################
 
-from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QLocale,
+from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QEvent, QLocale,
     QMetaObject, QObject, QPoint, QRect,
     QSize, QTime, QTimer, QUrl, Qt)
 from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
@@ -152,9 +152,33 @@ def _make_separator(vertical=False):
     sep.setFrameShadow(QFrame.Shadow.Plain)
     if vertical:
         sep.setFixedWidth(1)
+        sep.setFixedHeight(24)  # 与 32px 按钮中线对齐
     else:
         sep.setFixedHeight(1)
     return sep
+
+
+class _ListEmptyHint(QLabel):
+    """列表空状态提示：覆盖在列表中央的灰色文字，跟随列表尺寸自动居中。
+    鼠标事件穿透，不影响列表正常交互。布局切换时随列表实例一起迁移。"""
+
+    def __init__(self, list_widget, text):
+        super().__init__(list_widget)
+        self.setObjectName(u"list_empty_hint")
+        self.setText(text)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._list = list_widget
+        list_widget.installEventFilter(self)
+        # 供 main_window 的 _update_empty_hint() 快速定位
+        list_widget._empty_hint = self
+        # 列表创建时为空，默认显示提示；加载数据后由 _update_empty_hint 隐藏
+        self.show()
+
+    def eventFilter(self, obj, event):
+        if obj is self._list and event.type() == QEvent.Type.Resize:
+            self.setGeometry(0, 0, self._list.width(), self._list.height())
+        return super().eventFilter(obj, event)
 
 
 def _make_section_label(text, parent=None):
@@ -297,6 +321,8 @@ class Ui_MainWindow(object):
         self.open_config.setObjectName(u"open_config")
         self.horizontalLayout.addWidget(self.open_config)
 
+        self.horizontalLayout.addWidget(_make_separator(vertical=True))
+
         # --- 组2: 程序配置 ---
         self.label_2 = QLabel(self.toolbar_widget)
         self.label_2.setObjectName(u"label_2")
@@ -328,6 +354,8 @@ class Ui_MainWindow(object):
         self.input_frame.setObjectName(u"input_frame")
         self.input_frame.setFixedWidth(75)
         self.horizontalLayout.addWidget(self.input_frame)
+
+        self.horizontalLayout.addWidget(_make_separator(vertical=True))
 
         # --- 组3: 播放控制 ---
         self.open_daily = FluentPushButton(self.toolbar_widget)
@@ -386,6 +414,10 @@ class Ui_MainWindow(object):
         self.loacl_video_list = ListWidget()
         self.loacl_video_list.setObjectName(u"loacl_video_list")
 
+        # 空状态提示（列表为空时中央显示灰色文字）
+        _ListEmptyHint(self.id_list, "暂无设备\n请检查 videos 目录")
+        _ListEmptyHint(self.loacl_video_list, "请选择设备")
+
         # 日志文件搜索框（位于 loacl_video_list 正下方，默认隐藏，Ctrl+F 显示）
         self.video_search = _create_search_line_edit()
         self.video_search.setObjectName(u"video_search")
@@ -404,7 +436,7 @@ class Ui_MainWindow(object):
 
         self.log_list = ListWidget()
         self.log_list.setObjectName(u"log_list")
-        self.log_list.setObjectName(u"log_list")
+        _ListEmptyHint(self.log_list, "请选择日志文件")
 
         self.show_log = FluentPlainTextEdit()
         self.show_log.setObjectName(u"show_log")

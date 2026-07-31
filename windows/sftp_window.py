@@ -9,8 +9,8 @@ import subprocess
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
     QWidget, QTreeWidgetItem,
     QHeaderView, QSplitter,
-    QTableWidgetItem, QAbstractItemView, QApplication)
-from PySide6.QtCore import QTimer, Qt
+    QTableWidgetItem, QAbstractItemView, QApplication, QPushButton)
+from PySide6.QtCore import QTimer, Qt, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QFont
 from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
     SearchLineEdit, setFont, TreeWidget, TableWidget, ProgressBar,
@@ -178,6 +178,9 @@ class SFTPPanel(QWidget):
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_remote_context_menu)
+        # 拖拽上传：接受从资源管理器拖入的文件/目录，自动上传到当前远程目录
+        self._tree.setAcceptDrops(True)
+        self._tree.installEventFilter(self)
         right_lay.addWidget(self._tree)
 
         # 远程底部搜索框（SearchLineEdit 自带搜索图标+清空按钮）
@@ -248,6 +251,13 @@ class SFTPPanel(QWidget):
         sc.activated.connect(self._on_search_shortcut)
         esc = QShortcut(QKeySequence('Escape'), self)
         esc.activated.connect(self._hide_search_boxes)
+
+        # 修复误触发“上级”默认按钮，把本地目录推到上一级
+        for _btn in self.findChildren(QPushButton):
+            _btn.setAutoDefault(False)
+        
+        # 预构建右键菜单（Action/图标/信号仅创建一次，后续右键零开销弹出）
+        self._build_context_menus()
 
     # ------------------------------------------------------------------ 连接
     def _connect_and_list(self):
@@ -531,6 +541,48 @@ class SFTPPanel(QWidget):
         else:
             self._download_file(entry)
 
+    # ------------------------------------------------------------------ 拖拽上传
+    def eventFilter(self, obj, event):
+        """远程文件列表拖放事件：从资源管理器拖入文件/目录即上传到当前远程目录"""
+        if obj is self._tree:
+            etype = event.type()
+            if etype == QEvent.Type.DragEnter:
+                if event.mimeData().hasUrls():
+                    event.acceptProposedAction()
+                    return True
+            elif etype == QEvent.Type.DragMove:
+                if event.mimeData().hasUrls():
+                    event.acceptProposedAction()
+                    return True
+            elif etype == QEvent.Type.Drop:
+                event.acceptProposedAction()
+                self._handle_drop_files(event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _handle_drop_files(self, event):
+        """解析拖入的 QUrl 列表，逐个触发上传到当前远程目录"""
+        if self._transport is None or not self._transport.is_active():
+            self._lbl_status.setText('未连接，无法上传')
+            self._log('[SFTP] 拖拽上传失败：未连接')
+            return
+        paths = []
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p and os.path.exists(p):
+                paths.append(p)
+        if not paths:
+            self._log('[SFTP] 拖入的内容不含有效的本地文件')
+            return
+        for p in paths:
+            data = {
+                'name': os.path.basename(p.rstrip('/\\')),
+                'is_dir': os.path.isdir(p),
+                'path': p,
+            }
+            self._upload_file(data)
+        self._log(f'[SFTP] 拖拽上传 {len(paths)} 项 -> {self._remote_path}')
+
     # ------------------------------------------------------------------ 上传 / 下载
     def _upload_file(self, data=None):
         if not isinstance(data, dict):
@@ -660,6 +712,112 @@ class SFTPPanel(QWidget):
         self._lbl_status.setText(f'操作失败: {error}')
         self._log(f'[SFTP] 操作失败: {error}')
 
+    # ------------------------------------------------------------------ 右键菜单预构建
+    def _build_context_menus(self):
+        """初始化时预构建所有右键菜单（Action/图标/信号仅创建一次，右键时直接弹出）"""
+        # ---- 传输队列菜单（完全静态，仅更新 enabled 状态）
+        self._ctx_transfer_row = -1
+        menu = RoundMenu(parent=self)
+        self._act_t_pause = Action(FluentIcon.PAUSE, '暂停', self)
+        self._act_t_pause.triggered.connect(lambda: self._transfer_pause_row(self._ctx_transfer_row))
+        menu.addAction(self._act_t_pause)
+        self._act_t_pause_all = Action(FluentIcon.PAUSE, '全部暂停', self)
+        self._act_t_pause_all.triggered.connect(self._transfer_pause_all)
+        menu.addAction(self._act_t_pause_all)
+        self._act_t_resume = Action(FluentIcon.PLAY, '继续', self)
+        self._act_t_resume.triggered.connect(lambda: self._transfer_resume_row(self._ctx_transfer_row))
+        menu.addAction(self._act_t_resume)
+        self._act_t_resume_all = Action(FluentIcon.PLAY, '全部继续', self)
+        self._act_t_resume_all.triggered.connect(self._transfer_resume_all)
+        menu.addAction(self._act_t_resume_all)
+        menu.addSeparator()
+        self._act_t_delete = Action(FluentIcon.DELETE, '删除', self)
+        self._act_t_delete.triggered.connect(lambda: self._transfer_delete_row(self._ctx_transfer_row))
+        menu.addAction(self._act_t_delete)
+        self._act_t_delete_all = Action(FluentIcon.DELETE, '全部删除', self)
+        self._act_t_delete_all.triggered.connect(self._transfer_delete_all)
+        menu.addAction(self._act_t_delete_all)
+        self._ctx_transfer_menu = menu
+
+        # ---- 本地面板菜单（item 相关 + 新建子菜单）
+        self._ctx_local_data = None
+        self._ctx_local_menu_full = RoundMenu(parent=self)  # 右键点击文件时
+        self._ctx_local_menu_empty = RoundMenu(parent=self)  # 右键点击空白时
+        act = Action(FluentIcon.UP, '传输（上传）', self)
+        act.triggered.connect(lambda: self._upload_file(self._ctx_local_data))
+        self._ctx_local_menu_full.addAction(act)
+        act = Action(FluentIcon.LIBRARY, '打开', self)
+        act.triggered.connect(lambda: self._ctx_local_open(self._ctx_local_data))
+        self._ctx_local_menu_full.addAction(act)
+        act = Action(FluentIcon.COPY, '复制路径', self)
+        act.triggered.connect(self._ctx_copy_local_path)
+        self._ctx_local_menu_full.addAction(act)
+        act = Action(FluentIcon.EDIT, '重命名', self)
+        act.triggered.connect(lambda: self._ctx_rename_local(self._ctx_local_data))
+        self._ctx_local_menu_full.addAction(act)
+        act = Action(FluentIcon.DELETE, '删除', self)
+        act.triggered.connect(lambda: self._ctx_delete_local(self._ctx_local_data))
+        self._ctx_local_menu_full.addAction(act)
+        act = Action(FluentIcon.SYNC, '刷新', self)
+        act.triggered.connect(lambda: self._list_local(self._local_path))
+        self._ctx_local_menu_full.addAction(act)
+        self._ctx_local_menu_full.addSeparator()
+        new_local = RoundMenu('新建', self)
+        new_local.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_local))
+        new_local.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_local))
+        self._ctx_local_menu_full.addMenu(new_local)
+        # 空白菜单（仅新建）
+        new_local2 = RoundMenu('新建', self)
+        new_local2.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_local))
+        new_local2.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_local))
+        self._ctx_local_menu_empty.addMenu(new_local2)
+
+        # ---- 远程面板菜单（item 相关 + 新建子菜单）
+        self._ctx_remote_entry = None
+        self._ctx_remote_menu_full = RoundMenu(parent=self)
+        self._ctx_remote_menu_empty = RoundMenu(parent=self)
+        act = Action(FluentIcon.DOWN, '传输（下载）', self)
+        act.triggered.connect(lambda: self._download_file(self._ctx_remote_entry))
+        self._ctx_remote_menu_full.addAction(act)
+        act = Action(FluentIcon.LIBRARY, '打开', self)
+        act.triggered.connect(lambda: self._ctx_remote_open(self._ctx_remote_entry))
+        self._ctx_remote_menu_full.addAction(act)
+        act = Action(FluentIcon.COPY, '复制路径', self)
+        act.triggered.connect(self._ctx_copy_remote_path)
+        self._ctx_remote_menu_full.addAction(act)
+        act = Action(FluentIcon.EDIT, '重命名', self)
+        act.triggered.connect(lambda: self._ctx_rename_remote(self._ctx_remote_entry))
+        self._ctx_remote_menu_full.addAction(act)
+        act = Action(FluentIcon.DELETE, '删除', self)
+        act.triggered.connect(lambda: self._ctx_delete_remote(self._ctx_remote_entry))
+        self._ctx_remote_menu_full.addAction(act)
+        act = Action(FluentIcon.SYNC, '刷新', self)
+        act.triggered.connect(lambda: self._list_remote(self._remote_path))
+        self._ctx_remote_menu_full.addAction(act)
+        self._ctx_remote_menu_full.addSeparator()
+        new_remote = RoundMenu('新建', self)
+        new_remote.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_remote))
+        new_remote.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_remote))
+        self._ctx_remote_menu_full.addMenu(new_remote)
+        # 空白菜单（仅新建）
+        new_remote2 = RoundMenu('新建', self)
+        new_remote2.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_remote))
+        new_remote2.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_remote))
+        self._ctx_remote_menu_empty.addMenu(new_remote2)
+
+    def _ctx_copy_local_path(self):
+        data = self._ctx_local_data
+        if data:
+            QApplication.clipboard().setText(data['path'])
+            self._log(f'[SFTP] 已复制路径: {data["path"]}')
+
+    def _ctx_copy_remote_path(self):
+        entry = self._ctx_remote_entry
+        if entry:
+            remote_full = self._remote_path.rstrip('/') + '/' + entry['name']
+            QApplication.clipboard().setText(remote_full)
+            self._log(f'[SFTP] 已复制路径: {remote_full}')
+
     # ------------------------------------------------------------------ 传输队列右键菜单
     def _on_transfer_context_menu(self, pos):
         row = self._transfer_table.rowAt(pos.y())
@@ -670,34 +828,17 @@ class SFTPPanel(QWidget):
             status_item = self._transfer_table.item(row, 3)
             if status_item:
                 selected_status = status_item.text()
-        menu = RoundMenu(parent=self)
-        act_pause = Action(FluentIcon.PAUSE, '暂停')
-        act_pause.setEnabled(has_selection and selected_status == '传输中')
-        act_pause.triggered.connect(lambda: self._transfer_pause_row(row))
-        menu.addAction(act_pause)
-        act_pause_all = Action(FluentIcon.PAUSE, '全部暂停')
-        act_pause_all.setEnabled(has_tasks)
-        act_pause_all.triggered.connect(self._transfer_pause_all)
-        menu.addAction(act_pause_all)
-        act_resume = Action(FluentIcon.PLAY, '继续')
-        act_resume.setEnabled(has_selection and selected_status == '已暂停')
-        act_resume.triggered.connect(lambda: self._transfer_resume_row(row))
-        menu.addAction(act_resume)
-        act_resume_all = Action(FluentIcon.PLAY, '全部继续')
-        act_resume_all.setEnabled(has_tasks)
-        act_resume_all.triggered.connect(self._transfer_resume_all)
-        menu.addAction(act_resume_all)
-        menu.addSeparator()
-        act_delete = Action(FluentIcon.DELETE, '删除')
-        act_delete.setEnabled(has_selection)
-        act_delete.triggered.connect(lambda: self._transfer_delete_row(row))
-        menu.addAction(act_delete)
-        act_delete_all = Action(FluentIcon.DELETE, '全部删除')
-        act_delete_all.setEnabled(has_tasks)
-        act_delete_all.triggered.connect(self._transfer_delete_all)
-        menu.addAction(act_delete_all)
-        menu.exec(self._transfer_table.viewport().mapToGlobal(pos),
-                  aniType=MenuAnimationType.DROP_DOWN)
+        # 更新缓存菜单的 enabled 状态
+        self._ctx_transfer_row = row
+        self._act_t_pause.setEnabled(has_selection and selected_status == '传输中')
+        self._act_t_pause_all.setEnabled(has_tasks)
+        self._act_t_resume.setEnabled(has_selection and selected_status == '已暂停')
+        self._act_t_resume_all.setEnabled(has_tasks)
+        self._act_t_delete.setEnabled(has_selection)
+        self._act_t_delete_all.setEnabled(has_tasks)
+        self._ctx_transfer_menu.exec(
+            self._transfer_table.viewport().mapToGlobal(pos),
+            aniType=MenuAnimationType.DROP_DOWN)
 
     def _find_tid_by_row(self, row):
         for tid, info in self._transfer_workers.items():
@@ -886,58 +1027,38 @@ class SFTPPanel(QWidget):
             size /= 1024
         return f'{size:.1f} TB'
 
-    # ------------------------------------------------------------------ 右键菜单
+    # ------------------------------------------------------------------ 右键菜单（预构建缓存，直接弹出）
     def _on_local_context_menu(self, pos):
-        """本地面板右键菜单"""
+        """本地面板右键菜单（预构建缓存，零构建开销）"""
         item = self._local_tree.itemAt(pos)
-        menu = RoundMenu(parent=self)
         if item:
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if not data:
                 return
-            menu.addAction(Action(FluentIcon.UP, '传输（上传）', triggered=lambda: self._upload_file(data)))
-            menu.addAction(Action(FluentIcon.LIBRARY, '打开', triggered=lambda: self._ctx_local_open(data)))
-            menu.addAction(Action(FluentIcon.COPY, '复制路径',
-                                  triggered=lambda: (QApplication.clipboard().setText(data['path']),
-                                                     self._log(f'[SFTP] 已复制路径: {data["path"]}'))))
-            menu.addAction(Action(FluentIcon.EDIT, '重命名', triggered=lambda: self._ctx_rename_local(data)))
-            menu.addAction(Action(FluentIcon.DELETE, '删除', triggered=lambda: self._ctx_delete_local(data)))
-            menu.addAction(Action(FluentIcon.SYNC, '刷新', triggered=lambda: self._list_local(self._local_path)))
-            menu.addSeparator()
-        new_menu = RoundMenu('新建', self)
-        new_menu.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_local))
-        new_menu.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_local))
-        menu.addMenu(new_menu)
-        menu.exec(self._local_tree.viewport().mapToGlobal(pos),
-                  aniType=MenuAnimationType.DROP_DOWN)
+            self._ctx_local_data = data
+            self._ctx_local_menu_full.exec(
+                self._local_tree.viewport().mapToGlobal(pos),
+                aniType=MenuAnimationType.DROP_DOWN)
+        else:
+            self._ctx_local_menu_empty.exec(
+                self._local_tree.viewport().mapToGlobal(pos),
+                aniType=MenuAnimationType.DROP_DOWN)
 
     def _on_remote_context_menu(self, pos):
-        """远程面板右键菜单"""
+        """远程面板右键菜单（预构建缓存，零构建开销）"""
         item = self._tree.itemAt(pos)
-        menu = RoundMenu(parent=self)
         if item:
             entry = item.data(0, Qt.ItemDataRole.UserRole)
             if not entry:
                 return
-            menu.addAction(Action(FluentIcon.DOWN, '传输（下载）', triggered=lambda: self._download_file(entry)))
-            menu.addAction(Action(FluentIcon.LIBRARY, '打开', triggered=lambda: self._ctx_remote_open(entry)))
-
-            def _copy_remote_path(e=entry):
-                remote_full = self._remote_path.rstrip('/') + '/' + e['name']
-                QApplication.clipboard().setText(remote_full)
-                self._log(f'[SFTP] 已复制路径: {remote_full}')
-
-            menu.addAction(Action(FluentIcon.COPY, '复制路径', triggered=_copy_remote_path))
-            menu.addAction(Action(FluentIcon.EDIT, '重命名', triggered=lambda: self._ctx_rename_remote(entry)))
-            menu.addAction(Action(FluentIcon.DELETE, '删除', triggered=lambda: self._ctx_delete_remote(entry)))
-            menu.addAction(Action(FluentIcon.SYNC, '刷新', triggered=lambda: self._list_remote(self._remote_path)))
-            menu.addSeparator()
-        new_menu = RoundMenu('新建', self)
-        new_menu.addAction(Action(FluentIcon.DOCUMENT, '新建文件', triggered=self._ctx_new_file_remote))
-        new_menu.addAction(Action(FluentIcon.FOLDER, '新建文件夹', triggered=self._ctx_new_dir_remote))
-        menu.addMenu(new_menu)
-        menu.exec(self._tree.viewport().mapToGlobal(pos),
-                  aniType=MenuAnimationType.DROP_DOWN)
+            self._ctx_remote_entry = entry
+            self._ctx_remote_menu_full.exec(
+                self._tree.viewport().mapToGlobal(pos),
+                aniType=MenuAnimationType.DROP_DOWN)
+        else:
+            self._ctx_remote_menu_empty.exec(
+                self._tree.viewport().mapToGlobal(pos),
+                aniType=MenuAnimationType.DROP_DOWN)
 
     # ---- 右键菜单操作实现 ----
     def _get_temp_dir(self):

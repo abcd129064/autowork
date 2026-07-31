@@ -199,3 +199,17 @@ serverName = "snk_12106"
 secretKey = "abc123"
 bindPort = 51748
 
+[[visitors]]
+name = "snk_2303"
+type = "xtcp"
+serverName = "snk_2303"
+secretKey = "abc123"
+bindPort = 51081
+
+[[visitors]]
+name = "snk_rm08"
+type = "xtcp"
+serverName = "snk_rm08"
+secretKey = "abc123"
+bindPort = 65293
+

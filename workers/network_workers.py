@@ -431,6 +431,8 @@ class SFTPConnectWorker(QThread):
                 transport.banner_timeout = 15
                 transport.auth_timeout = 15
                 transport.connect(username=self.username, password=self.password)
+                # keepalive：防止空闲连接被 NAT/防火墙静默丢弃
+                transport.set_keepalive(30)
                 conn_logger.info('SFTP', f'连接成功 (第{attempt}次尝试)',
                                  host=self.host, port=self.port, user=self.username)
                 self.connected.emit(transport)
@@ -493,6 +495,10 @@ class SSHConnectWorker(QThread):
                     username=self.username, password=self.password,
                     timeout=10, banner_timeout=15, auth_timeout=15
                 )
+                # keepalive：防止空闲连接被 NAT/防火墙静默丢弃
+                transport = client.get_transport()
+                if transport:
+                    transport.set_keepalive(30)
                 conn_logger.info('SSH', f'连接成功 (第{attempt}次尝试)',
                                  host=self.host, port=self.port, user=self.username)
                 self.connected.emit(client)

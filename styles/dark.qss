@@ -166,6 +166,13 @@ QLabel {
     background-color: transparent;
 }
 
+/* ===== 列表空状态提示 ===== */
+QLabel#list_empty_hint {
+    color: #555f6b;
+    font-size: 9pt;
+    background: transparent;
+}
+
 /* ===== 菜单栏（Fluent 透明下拉按钮容器） ===== */
 QWidget#menubar_widget {
     background-color: #202020;

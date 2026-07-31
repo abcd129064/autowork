@@ -29,3 +29,10 @@ QWidget#menubar_widget {
     background: transparent;
     border-bottom: 1px solid #E0E0E0;
 }
+
+/* ===== 列表空状态提示（浅色主题） ===== */
+QLabel#list_empty_hint {
+    color: #9E9E9E;
+    font-size: 9pt;
+    background: transparent;
+}

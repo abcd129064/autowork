@@ -256,17 +256,18 @@ class ANSITerminalWidget(QTextEdit):
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
-        """右键菜单：复制 / 粘贴"""
-        menu = QMenu(self)
-        act_copy = QAction("复制", menu)
-        act_copy.setEnabled(self.textCursor().hasSelection())
-        act_copy.triggered.connect(self.copy)
-        menu.addAction(act_copy)
-        act_paste = QAction("粘贴", menu)
-        act_paste.setEnabled(bool(QApplication.clipboard().text()))
-        act_paste.triggered.connect(self._paste_from_clipboard)
-        menu.addAction(act_paste)
-        menu.exec(event.globalPos())
+        """右键菜单：复制 / 粘贴（预构建缓存，避免每次右键重建）"""
+        if not hasattr(self, '_ctx_menu'):
+            self._ctx_menu = QMenu(self)
+            self._act_copy = QAction("复制", self._ctx_menu)
+            self._act_copy.triggered.connect(self.copy)
+            self._ctx_menu.addAction(self._act_copy)
+            self._act_paste = QAction("粘贴", self._ctx_menu)
+            self._act_paste.triggered.connect(self._paste_from_clipboard)
+            self._ctx_menu.addAction(self._act_paste)
+        self._act_copy.setEnabled(self.textCursor().hasSelection())
+        self._act_paste.setEnabled(bool(QApplication.clipboard().text()))
+        self._ctx_menu.exec(event.globalPos())
 
     def _paste_from_clipboard(self):
         """将剪贴板文本粘贴（发送）到远端 shell"""

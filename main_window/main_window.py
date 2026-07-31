@@ -7,7 +7,7 @@ import glob
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem)
-from PySide6.QtCore import Slot, QTimer, Qt, QDate
+from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
 from qfluentwidgets import (InfoBar, InfoBarPosition, FluentTitleBar,
     MessageBoxBase, BodyLabel, ComboBox)
@@ -295,6 +295,21 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     # ==================== 列表加载 ====================
 
+    def _update_empty_hint(self, list_widget):
+        """更新列表空状态提示：无可见项时显示灰色占位文字，有可见项时隐藏"""
+        hint = getattr(list_widget, '_empty_hint', None)
+        if hint is None:
+            return
+        n = list_widget.count()
+        if n == 0:
+            hint.show()
+            return
+        for i in range(n):
+            if not list_widget.item(i).isHidden():
+                hint.hide()
+                return
+        hint.show()
+
     def _load_exe_list(self):
         """加载 snooker/bin64 目录下的 SnookerTracking*.exe 到程序下拉框"""
         exe_dir = self.exe_dir
@@ -329,13 +344,19 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         # 获取所有子目录（设备代码）
         device_codes = []
-        for item in os.listdir(videos_dir):
-            item_path = os.path.join(videos_dir, item)
-            if os.path.isdir(item_path):
-                device_codes.append(item)
+        try:
+            for item in os.listdir(videos_dir):
+                item_path = os.path.join(videos_dir, item)
+                if os.path.isdir(item_path):
+                    device_codes.append(item)
+        except OSError as e:
+            self._append_log(f"[警告] 无法读取目录 {videos_dir}: {e}")
+            self._show_info_bar(f"无法读取 videos 目录: {e}", "warning", duration=4000)
+            return
 
         if not device_codes:
             self._append_log(f"[警告] videos 目录下没有找到设备文件夹")
+            self._update_empty_hint(self.ui.id_list)
             return
 
         # 清空并添加设备代码列表（自然排序：数字段按数值比较）
@@ -345,6 +366,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self.ui.id_list.addItem(code)
         self.ui.id_list.setUpdatesEnabled(True)
 
+        self._update_empty_hint(self.ui.id_list)
         self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
 
     def _load_videos_for_device(self, device_code):
@@ -394,6 +416,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._show_info_bar(f"扫描 {device_code} 设备目录失败: {e}", "warning", duration=4000)
 
         if not log_files:
+            self._update_empty_hint(self.ui.loacl_video_list)
             self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir} 及设备根目录)")
             self._show_info_bar(f"{device_code} 下未找到 {date_str} 的日志", "warning")
             return
@@ -406,12 +429,14 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         # 列表重载后重新应用搜索过滤
         self._on_video_search_changed(self.ui.video_search.text())
+        self._update_empty_hint(self.ui.loacl_video_list)
 
         self._append_log(f"[日志目录] {device_code}/{date_str} 下有 {len(log_files)} 个日志文件")
 
     def _load_logs_for_device(self, device_code):
         """初始化第三列为空，等待点击日志后展示内容"""
         self.ui.log_list.clear()
+        self._update_empty_hint(self.ui.log_list)
 
     # ==================== 列表搜索 (Ctrl+F) ====================
 
@@ -458,6 +483,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.id_search.hide()
         for i in range(self.ui.id_list.count()):
             self.ui.id_list.item(i).setHidden(False)
+        self._update_empty_hint(self.ui.id_list)
 
     def _hide_video_search(self):
         """隐藏日志文件搜索框，清空内容并恢复完整列表"""
@@ -467,6 +493,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.video_search.hide()
         for i in range(self.ui.loacl_video_list.count()):
             self.ui.loacl_video_list.item(i).setHidden(False)
+        self._update_empty_hint(self.ui.loacl_video_list)
 
     def _hide_all_search(self):
         """隐藏所有搜索框（Esc 触发）"""
@@ -479,6 +506,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         for i in range(self.ui.id_list.count()):
             item = self.ui.id_list.item(i)
             item.setHidden(bool(kw) and kw not in item.text().lower())
+        self._update_empty_hint(self.ui.id_list)
 
     def _on_video_search_changed(self, text):
         """实时过滤日志文件列表：不区分大小写子串匹配"""
@@ -486,6 +514,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         for i in range(self.ui.loacl_video_list.count()):
             item = self.ui.loacl_video_list.item(i)
             item.setHidden(bool(kw) and kw not in item.text().lower())
+        self._update_empty_hint(self.ui.loacl_video_list)
 
     def _on_p2p_search_changed(self, text):
         """实时过滤远程面板 visitor/服务器列表：不区分大小写子串匹配"""
@@ -756,6 +785,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                     log_item.setForeground(QBrush(self.highlight_color))
                 self.ui.log_list.addItem(log_item)
             self.ui.log_list.setUpdatesEnabled(True)
+            self._update_empty_hint(self.ui.log_list)
 
             line_count = len(content.splitlines())
             self._append_log(f"[日志内容] 已加载 {line_count} 行")
@@ -765,6 +795,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._append_log(f"[错误] 无法读取日志文件: {str(e)}")
             self._show_info_bar(f"无法读取日志文件: {e}", "error")
             self.ui.log_list.clear()
+            self._update_empty_hint(self.ui.log_list)
             self._current_log_path = None
 
     @Slot()
@@ -840,3 +871,77 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._save_settings({"last_exe": exe_name})
             self._append_log(f"[配置] 已保存程序选择: {exe_name}")
             self._show_info_bar(f"已保存程序选择: {exe_name}", "success")
+
+    # ==================== 窗口关闭清理 ====================
+
+    def closeEvent(self, event):
+        """主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程"""
+        # 1. 终止 frpc 进程
+        proc = getattr(self, '_frpc_process', None)
+        if proc is not None:
+            self._frpc_process = None
+            try:
+                proc.kill()
+                proc.waitForFinished(2000)
+            except (RuntimeError, OSError):
+                pass
+            try:
+                proc.deleteLater()
+            except RuntimeError:
+                pass
+
+        # 2. 关闭远程会话标签容器（触发各面板 shutdown：SFTP/SSH/RDP）
+        win = getattr(self, '_remote_session_window', None)
+        if win is not None:
+            self._remote_session_window = None
+            try:
+                win.close()  # closeEvent → shutdown_all()
+            except (RuntimeError, OSError):
+                pass
+
+        # 3. 终止正在运行的 SnookerTracking 程序
+        rp = getattr(self, 'running_process', None)
+        if rp is not None:
+            self.running_process = None
+            try:
+                rp.kill()
+                rp.waitForFinished(1000)
+            except (RuntimeError, OSError):
+                pass
+
+        # 4. 终止三端进程
+        for attr in ('_tracking_process', '_backend_process', '_front_process'):
+            p = getattr(self, attr, None)
+            if p is not None:
+                setattr(self, attr, None)
+                try:
+                    if p.state() != QProcess.NotRunning:
+                        p.kill()
+                        p.waitForFinished(1000)
+                except (RuntimeError, OSError):
+                    pass
+
+        # 5. 清理 TCP worker
+        tw = getattr(self, '_tcp_worker', None)
+        if tw is not None:
+            self._tcp_worker = None
+            try:
+                if tw.isRunning():
+                    tw.finished.connect(tw.deleteLater)
+                else:
+                    tw.deleteLater()
+            except RuntimeError:
+                pass
+
+        # 6. 终止异步解码进程
+        dp = getattr(self, '_decode_process', None)
+        if dp is not None:
+            self._decode_process = None
+            try:
+                if dp.state() != QProcess.NotRunning:
+                    dp.kill()
+                    dp.waitForFinished(1000)
+            except (RuntimeError, OSError):
+                pass
+
+        super().closeEvent(event)

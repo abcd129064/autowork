@@ -33,7 +33,8 @@ class RemoteSessionWindow(QDialog):
         self._tab_widget = TabWidget(self)
         self._tab_widget.setTabsClosable(True)
         self._tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
-        self._tab_widget.tabBar.tabAddRequested.connect(self._on_tab_add_requested)
+        # 隐藏标签栏的+号按钮，只显示标签
+        self._tab_widget.tabBar.setAddButtonVisible(False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -46,13 +47,6 @@ class RemoteSessionWindow(QDialog):
     # ------------------------------------------------------------------ 公开 API
 
     def add_session(self, panel, title: str = '', icon=None):
-        """添加一个会话面板为新标签页并切换到它
-
-        Args:
-            panel: SFTPPanel / SSHTerminalPanel / RDPPanel 实例
-            title: 标签标题（默认使用 panel.tab_title）
-            icon: 标签图标（可选）
-        """
         if not title:
             title = getattr(panel, 'tab_title', '会话')
         self._panels.append(panel)
@@ -63,6 +57,15 @@ class RemoteSessionWindow(QDialog):
         """当前打开的会话数量"""
         return self._tab_widget.stackedWidget.count()
 
+    def remove_session(self, panel):
+        """移除一个会话面板并关闭它"""
+        for i in range(self._tab_widget.stackedWidget.count()):
+            widget = self._tab_widget.stackedWidget.widget(i)
+            if widget is panel:
+                self._remove_tab_at(i)
+                self._shutdown_panel(panel)
+                return
+
     def shutdown_all(self):
         """关闭所有会话面板并释放资源"""
         for panel in list(self._panels):
@@ -71,19 +74,12 @@ class RemoteSessionWindow(QDialog):
 
     # ------------------------------------------------------------------ 内部逻辑
 
-    def _on_tab_close_requested(self, route_key: str):
-        """用户点击标签关闭按钮"""
-        # 通过 routeKey 找到对应的 widget index
-        stacked = self._tab_widget.stackedWidget
-        for i in range(stacked.count()):
-            widget = stacked.widget(i)
-            if widget.property('routeKey') == route_key:
-                self._remove_tab_at(i)
-                return
-
-    def _on_tab_add_requested(self):
-        """用户点击 '+' 按钮（暂不实现新建会话，仅忽略）"""
-        pass
+    def _on_tab_close_requested(self, index: int):
+        """用户点击标签关闭按钮
+        qfluentwidgets TabWidget 的 tabCloseRequested 信号直接发出标签索引（int），
+        而非 routeKey，因此直接按索引移除即可。
+        """
+        self._remove_tab_at(index)
 
     def _remove_tab_at(self, index: int):
         """移除指定索引的标签页并关闭对应面板"""
