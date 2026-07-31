@@ -187,9 +187,34 @@ class ProcessMixin:
             return
         process = QProcess(self)
         process.setWorkingDirectory(os.path.dirname(path))
+        process.finished.connect(
+            lambda exit_code, exit_status, n=name, a=attr_name:
+            self._on_three_process_finished(n, a, exit_code, exit_status))
         process.start(path)
         setattr(self, attr_name, process)
         self._append_log(f"[启动三端] 已启动 {name}: {path}")
+
+    def _on_three_process_finished(self, name, attr_name, exit_code, exit_status):
+        """三端进程退出回调：主动关闭时静默处理，异常退出时记录日志并更新按钮状态"""
+        if not self._three_running:
+            return  # 用户主动关闭，_stop_three_programs 已处理
+        # 仍在“运行中”状态 → 属于意外退出
+        status_text = "正常退出" if exit_status == QProcess.NormalExit else "异常崩溃"
+        self._append_log(f"[警告] {name} 已退出（{status_text}，退出码: {exit_code}）")
+        if getattr(self, attr_name, None) is self.sender():
+            setattr(self, attr_name, None)
+        self._show_info_bar(f"{name} 已退出（退出码: {exit_code}）", "warning", duration=4000)
+        # 三端全部退出 → 复位按钮状态并恢复分辨率
+        if all(getattr(self, a, None) is None
+               for a in ("_tracking_process", "_backend_process", "_front_process")):
+            self._three_running = False
+            self.ui.start_three_btn.setText("启动三端")
+            self._append_log("[启动三端] 三端程序已全部退出，按钮已复位")
+            self._set_skip_ready_check(True)
+            saved = self._three_saved_mode
+            self._three_saved_mode = None
+            if saved:
+                QTimer.singleShot(500, lambda checked=False, m=saved: self._restore_resolution(m))
 
     # ==================== 分辨率捕获/恢复 ====================
 

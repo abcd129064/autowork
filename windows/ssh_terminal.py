@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SSH 终端窗口（invoke_shell 交互式 PTY + ANSI 虚拟终端 + 直接键盘输入）
+"""SSH 终端（invoke_shell 交互式 PTY + ANSI 虚拟终端 + 直接键盘输入）
 
 体验与 Windows Terminal / Xshell 一致：
 - 直接在终端区域打字，shell 回显
@@ -11,8 +11,12 @@
 
 安全关闭策略（规避 C 层 Use-After-Free 崩溃）：
 - channel 上设置 0.1s recv 超时，reader 线程可被 stop 标志及时中断
-- closeEvent 仅设置 stop 标志并等待 reader 线程退出，绝不从主线程操作 channel
+- shutdown() 仅设置 stop 标志并等待 reader 线程退出，绝不从主线程操作 channel
 - reader 线程退出后再关闭 transport，消除并发竞态
+
+架构：
+- SSHTerminalPanel(QWidget)：可嵌入标签页的核心面板
+- SSHTerminalWindow(QDialog)：独立窗口薄壳（向后兼容）
 """
 
 import shutil
@@ -20,7 +24,7 @@ import socket
 import subprocess
 import threading
 
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QWidget
 from PySide6.QtCore import QTimer, Qt, Signal
 from qfluentwidgets import PushButton, MessageBox, setFont
 
@@ -39,16 +43,18 @@ def _safe_release_worker(w):
     w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
 
 
-class SSHTerminalWindow(QDialog):
-    """SSH 终端窗口（invoke_shell 交互式 PTY + ANSI 渲染 + 直接键盘输入）"""
+class SSHTerminalPanel(QWidget):
+    """SSH 终端面板（可嵌入标签页容器，也可独立使用）
+
+    核心逻辑：invoke_shell 交互式 PTY + ANSI 渲染 + 直接键盘输入。
+    资源清理统一由 shutdown() 方法负责，容器关闭标签时调用。
+    """
 
     # reader 线程通过此信号将输出安全投递到 GUI 线程
     _output_signal = Signal(str)
 
     def __init__(self, host, port, username, password, log_callback=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"SSH 终端 - {host}:{port}")
-        self.resize(900, 560)
         self._host = host
         self._port = port
         self._username = username
@@ -65,8 +71,13 @@ class SSHTerminalWindow(QDialog):
         QTimer.singleShot(100, self._connect_ssh)
 
     def focusNextPrevChild(self, next_: bool) -> bool:
-        """禁止对话框级别的 Tab 焦点导航，确保 Tab 始终发送到终端"""
+        """禁止 Tab 焦点导航，确保 Tab 始终发送到终端"""
         return False
+
+    @property
+    def tab_title(self) -> str:
+        """返回适合标签页显示的标题"""
+        return f"SSH - {self._host}:{self._port}"
 
     # ─── UI ───────────────────────────────────────────────────────────────
 
@@ -230,8 +241,13 @@ class SSHTerminalWindow(QDialog):
 
     # ─── 生命周期 ─────────────────────────────────────────────────────────
 
-    def closeEvent(self, event):
-        """安全关闭：先停 reader 线程，再关 transport，消除 C 层并发竞态"""
+    def shutdown(self):
+        """安全关闭：先停 reader 线程，再关 transport，消除 C 层并发竞态。
+
+        由容器（标签页关闭）或 QDialog.closeEvent 调用。可重复调用，幂等安全。
+        """
+        if self._closing:
+            return
         self._closing = True
         self._terminal.set_input_enabled(False)
         # 1. 通知 reader 线程退出
@@ -261,4 +277,26 @@ class SSHTerminalWindow(QDialog):
             self._client = None
         # 5. 清理 connect worker
         self._cleanup_connect_worker()
+
+
+class SSHTerminalWindow(QDialog):
+    """SSH 终端独立窗口（向后兼容的薄壳，内部委托 SSHTerminalPanel）"""
+
+    def __init__(self, host, port, username, password, log_callback=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"SSH 终端 - {host}:{port}")
+        self.resize(900, 560)
+        self._panel = SSHTerminalPanel(
+            host, port, username, password,
+            log_callback=log_callback, parent=self
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._panel)
+
+    def focusNextPrevChild(self, next_: bool) -> bool:
+        return False
+
+    def closeEvent(self, event):
+        self._panel.shutdown()
         super().closeEvent(event)

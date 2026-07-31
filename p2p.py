@@ -1,22 +1,7 @@
-import os
-import json
 import socket
 import random
 import subprocess
-import sys
 import time
-try:
-    import toml
-    TOML_AVAILABLE = True
-except ImportError:
-    TOML_AVAILABLE = False
-
-try:
-    import win32gui
-    import win32con
-    WIN32_AVAILABLE = True
-except ImportError:
-    WIN32_AVAILABLE = False
 
 def generate_random_port(exclude_ports=None):
     """生成随机端口号，排除常用端口和已使用的端口"""

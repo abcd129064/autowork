@@ -51,14 +51,14 @@ class _TextInputDialog(MessageBoxBase):
         self.widget.setMinimumWidth(380)
 
 
-class SFTPWindow(QDialog):
-    """SFTP 文件管理窗口"""
+class SFTPPanel(QWidget):
+    """SFTP 文件管理面板（可嵌入标签页容器，也可独立使用）
+
+    资源清理统一由 shutdown() 方法负责，容器关闭标签时调用。
+    """
 
     def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
         super().__init__(parent)
-        title = f"SFTP 文件管理 - {server_name} ({host}:{port})" if server_name else f"SFTP 文件管理 - {host}:{port}"
-        self.setWindowTitle(title)
-        self.resize(1200, 800)  # 【窗口尺寸】SFTP 窗口默认宽×高
         self._host = host
         self._port = port
         self._username = username
@@ -79,8 +79,16 @@ class SFTPWindow(QDialog):
         self._pending_remote_path = None
         self._transfer_workers = {}
         self._next_transfer_id = 0
+        self._closing = False
         self._init_ui()
         QTimer.singleShot(100, self._connect_and_list)
+
+    @property
+    def tab_title(self) -> str:
+        """返回适合标签页显示的标题"""
+        if self._server_name:
+            return f"SFTP - {self._server_name}"
+        return f"SFTP - {self._host}:{self._port}"
 
     # ------------------------------------------------------------------ UI 构建
     def _init_ui(self):
@@ -1111,7 +1119,14 @@ class SFTPWindow(QDialog):
         worker.start()
 
     # ------------------------------------------------------------------ 关闭
-    def closeEvent(self, event):
+    def shutdown(self):
+        """安全关闭所有连接和 worker。由容器（标签页关闭）或 QDialog.closeEvent 调用。
+
+        可重复调用，幂等安全。
+        """
+        if self._closing:
+            return
+        self._closing = True
         transport = self._transport
         self._transport = None
         self._cleanup_connect_worker()
@@ -1124,5 +1139,26 @@ class SFTPWindow(QDialog):
         safe_close_transport(transport)
         if transport:
             self._log('[SFTP] 已断开连接')
+
+
+class SFTPWindow(QDialog):
+    """SFTP 文件管理独立窗口（向后兼容的薄壳，内部委托 SFTPPanel）"""
+
+    def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
+        super().__init__(parent)
+        title = f"SFTP 文件管理 - {server_name} ({host}:{port})" if server_name else f"SFTP 文件管理 - {host}:{port}"
+        self.setWindowTitle(title)
+        self.resize(1200, 800)
+        self._panel = SFTPPanel(
+            host, port, username, password,
+            server_name=server_name,
+            log_callback=log_callback, parent=self
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._panel)
+
+    def closeEvent(self, event):
+        self._panel.shutdown()
         super().closeEvent(event)
 

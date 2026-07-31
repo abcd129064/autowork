@@ -22,7 +22,7 @@ name = "snk_4001"
 type = "xtcp"
 serverName = "snk_4001"
 secretKey = "abc123"
-bindPort = 34472
+bindPort = 34471
 
 [[visitors]]
 name = "snk_4003"

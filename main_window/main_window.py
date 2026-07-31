@@ -135,9 +135,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._p2p_visitors = []
         self._p2p_current_index = -1
         self._tcp_worker = None
-        self._sftp_window = None
-        self._ssh_terminal_window = None
-        self._rdp_window = None
+        self._remote_session_window = None
         self._init_p2p_panel()
 
     def connect_signals(self):
@@ -379,17 +377,21 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         # 路径2：设备根目录下文件名以 YYYYMMDD_ 开头的日志文件
         date_prefix = date_str.replace('-', '')  # e.g. "20251128"
-        for fname in os.listdir(device_dir):
-            fpath = os.path.join(device_dir, fname)
-            if not os.path.isfile(fpath):
-                continue
-            if not (fname.endswith('.txt') or fname.endswith('.log')):
-                continue
-            # 匹配 YYYYMMDD_ 前缀
-            if fname.startswith(date_prefix + '_'):
-                # 避免与日期子目录中已找到的文件重复（按文件名去重）
-                if not any(os.path.basename(p) == fname for p in log_files):
-                    log_files.append(fpath)
+        try:
+            for fname in os.listdir(device_dir):
+                fpath = os.path.join(device_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                if not (fname.endswith('.txt') or fname.endswith('.log')):
+                    continue
+                # 匹配 YYYYMMDD_ 前缀
+                if fname.startswith(date_prefix + '_'):
+                    # 避免与日期子目录中已找到的文件重复（按文件名去重）
+                    if not any(os.path.basename(p) == fname for p in log_files):
+                        log_files.append(fpath)
+        except OSError as e:
+            self._append_log(f"[警告] 扫描设备目录失败: {device_code} ({e})")
+            self._show_info_bar(f"扫描 {device_code} 设备目录失败: {e}", "warning", duration=4000)
 
         if not log_files:
             self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir} 及设备根目录)")

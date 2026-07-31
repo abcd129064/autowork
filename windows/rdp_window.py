@@ -32,8 +32,8 @@ if sys.platform == 'win32':
     )
 
 
-class RDPWindow(QDialog):
-    """远程桌面窗口（嵌入系统 mstsc.exe 窗口到应用内）
+class RDPPanel(QWidget):
+    """远程桌面面板（嵌入系统 mstsc.exe 窗口到应用内，可嵌入标签页容器）
 
     实现思路：
     1. 通过 cmdkey 静默注册 RDP 凭据（免密码弹窗）
@@ -41,6 +41,8 @@ class RDPWindow(QDialog):
     3. 持续看门狗轮询：查找 mstsc 窗口（PID + 类名双通道）
     4. AttachThreadInput + SetParent 嵌入容器控件
     5. 去除标题栏样式、同步窗口尺寸、进程退出检测
+
+    资源清理统一由 shutdown() 方法负责。
     """
 
     # 进程退出后，连续多少轮找不到窗口才判定会话结束（每轮 800ms）
@@ -48,22 +50,28 @@ class RDPWindow(QDialog):
 
     def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
         super().__init__(parent)
-        title = f"远程桌面 - {server_name} ({host}:{port})" if server_name else f"远程桌面 - {host}:{port}"
-        self.setWindowTitle(title)
-        self.resize(1280, 800)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        self._server_name = server_name
         self._log = log_callback or (lambda msg: None)
         self._mstsc_proc = None
         self._embedded_hwnd = None
         self._watch_timer = None
-        self._dead_count = 0          # 连续"无窗口"轮次
+        self._dead_count = 0          # 连续“无窗口”轮次
         self._cred_removed = False
         self._session_ended = False
+        self._closing = False
         self._init_ui()
         QTimer.singleShot(100, self._start_rdp)
+    
+    @property
+    def tab_title(self) -> str:
+        """返回适合标签页显示的标题"""
+        if hasattr(self, '_server_name') and self._server_name:
+            return f"RDP - {self._server_name}"
+        return f"RDP - {self._host}:{self._port}"
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -252,7 +260,14 @@ class RDPWindow(QDialog):
         except Exception:
             pass
 
-    def closeEvent(self, event):
+    def shutdown(self):
+        """安全关闭：停止看门狗、摘除嵌入窗口、终止 mstsc 进程。
+
+        由容器（标签页关闭）或 QDialog.closeEvent 调用。可重复调用，幂等安全。
+        """
+        if self._closing:
+            return
+        self._closing = True
         try:
             if self._watch_timer is not None and self._watch_timer.isActive():
                 self._watch_timer.stop()
@@ -283,4 +298,25 @@ class RDPWindow(QDialog):
             self._remove_cred()
         except Exception:
             pass
+
+
+class RDPWindow(QDialog):
+    """远程桌面独立窗口（向后兼容的薄壳，内部委托 RDPPanel）"""
+
+    def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
+        super().__init__(parent)
+        title = f"远程桌面 - {server_name} ({host}:{port})" if server_name else f"远程桌面 - {host}:{port}"
+        self.setWindowTitle(title)
+        self.resize(1280, 800)
+        self._panel = RDPPanel(
+            host, port, username, password,
+            server_name=server_name,
+            log_callback=log_callback, parent=self
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._panel)
+
+    def closeEvent(self, event):
+        self._panel.shutdown()
         super().closeEvent(event)

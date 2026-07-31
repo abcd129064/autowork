@@ -20,9 +20,10 @@ except ImportError:
     PARAMIKO_AVAILABLE = False
 
 from workers.network_workers import TCPWorker
-from windows.sftp_window import SFTPWindow
-from windows.ssh_terminal import SSHTerminalWindow
-from windows.rdp_window import RDPWindow
+from windows.sftp_window import SFTPPanel
+from windows.ssh_terminal import SSHTerminalPanel
+from windows.rdp_window import RDPPanel
+from windows.remote_session_window import RemoteSessionWindow
 from p2p import generate_random_port
 
 
@@ -36,9 +37,7 @@ class RemoteMixin:
         _p2p_current_index: int
         _frpc_process: QProcess | None
         _tcp_worker: TCPWorker | None
-        _sftp_window: SFTPWindow | None
-        _ssh_terminal_window: SSHTerminalWindow | None
-        _rdp_window: RDPWindow | None
+        _remote_session_window: RemoteSessionWindow | None
 
         def _load_settings(self) -> dict: ...
         def _save_settings(self, data: dict) -> None: ...
@@ -46,6 +45,7 @@ class RemoteMixin:
         def _append_log(self, msg: str) -> None: ...
         def _show_info_bar(self, msg: str, level: str, duration: int = 2000) -> None: ...
         def _on_p2p_search_changed(self, text: str) -> None: ...
+        def _resolve_remote_target(self, tag: str, feature_name: str) -> tuple[str, int, str, str, str] | None: ...
 
     # frpc 服务器默认配置
     _FRPC_SERVER_DEFAULTS = {
@@ -497,25 +497,14 @@ class RemoteMixin:
             self.ui.p2p_rdp_btn.setEnabled(False)
 
     def _close_p2p_windows(self):
-        """关闭已打开的 SFTP 和 SSH 终端窗口"""
-        if self._sftp_window is not None:
+        """关闭远程会话标签容器窗口（释放所有会话面板）"""
+        win = getattr(self, '_remote_session_window', None)
+        if win is not None:
+            self._remote_session_window = None
             try:
-                self._sftp_window.close()
+                win.close()
             except (RuntimeError, OSError):
                 pass
-            self._sftp_window = None
-        if self._ssh_terminal_window is not None:
-            try:
-                self._ssh_terminal_window.close()
-            except (RuntimeError, OSError):
-                pass
-            self._ssh_terminal_window = None
-        if self._rdp_window is not None:
-            try:
-                self._rdp_window.close()
-            except (RuntimeError, OSError):
-                pass
-            self._rdp_window = None
 
     def _save_ssh_credentials(self):
         """将当前 SSH 账号/密码保存到 settings.json"""
@@ -529,134 +518,109 @@ class RemoteMixin:
         if data:
             self._save_settings(data)
 
+    # ------------------------------------------------------------------ 远程窗口通用逻辑
+
+    def _resolve_remote_target(self, tag: str, feature_name: str):
+        """解析当前远程连接模式的目标参数（通用逻辑，供三个远程窗口按钮复用）
+
+        根据 p2p_mode_combo 当前模式获取 host/port/server_name，校验必填项。
+
+        Returns:
+            (host, port, server_name, username, password) 元组；校验失败时记录日志并返回 None。
+        """
+        mode = self.ui.p2p_mode_combo.currentText()
+        server_name = ''
+        if mode == "XTCP":
+            if not self._p2p_visitors:
+                self._append_log(f"[{tag}] 请先添加 visitor 配置")
+                return None
+            idx = self._p2p_current_index
+            if not (0 <= idx < len(self._p2p_visitors)):
+                self._append_log(f"[{tag}] 请先在列表中选择一个 visitor")
+                return None
+            host = "127.0.0.1"
+            port = self._p2p_visitors[idx]["bindPort"]
+            server_name = self._p2p_visitors[idx].get("serverName", "")
+        elif mode == "TCP":
+            host = self.ui.p2p_ssh_host.text().strip()
+            port = self.ui.p2p_ssh_port.value()
+        else:
+            self._append_log(f"[{tag}] {feature_name}仅支持 XTCP/TCP 模式")
+            return None
+        username = self.ui.p2p_ssh_user.text()
+        password = self.ui.p2p_ssh_pass.text()
+        if not host:
+            self._append_log(f"[{tag}] 主机地址不能为空")
+            return None
+        return host, port, server_name, username, password
+
+    def _ensure_session_window(self) -> RemoteSessionWindow:
+        """获取或创建远程会话标签容器窗口（单例复用）"""
+        win = getattr(self, '_remote_session_window', None)
+        if win is not None:
+            try:
+                # 检查 C++ 对象是否已被销毁
+                win.isVisible()
+                return win
+            except RuntimeError:
+                self._remote_session_window = None
+        win = RemoteSessionWindow(parent=self)  # type: ignore[arg-type]
+        win.destroyed.connect(lambda: setattr(self, '_remote_session_window', None))
+        self._remote_session_window = win
+        win.show()
+        return win
+
+    # ------------------------------------------------------------------ 远程窗口按钮
+
     def _on_sftp_btn_clicked(self):
-        """打开 SFTP 文件管理窗口"""
+        """打开 SFTP 文件管理标签页"""
         if not PARAMIKO_AVAILABLE:
             self._append_log("[SFTP] paramiko 未安装")
             return
-        mode = self.ui.p2p_mode_combo.currentText()
-        server_name = ''
-        if mode == "XTCP":
-            if not self._p2p_visitors:
-                self._append_log("[SFTP] 请先添加 visitor 配置")
-                return
-            idx = self._p2p_current_index
-            if not (0 <= idx < len(self._p2p_visitors)):
-                self._append_log("[SFTP] 请先在列表中选择一个 visitor")
-                return
-            host = "127.0.0.1"
-            port = self._p2p_visitors[idx]["bindPort"]
-            server_name = self._p2p_visitors[idx].get("serverName", "")
-        elif mode == "TCP":
-            host = self.ui.p2p_ssh_host.text().strip()
-            port = self.ui.p2p_ssh_port.value()
-        else:
-            self._append_log("[SFTP] SFTP 仅支持 XTCP/TCP 模式")
+        target = self._resolve_remote_target("SFTP", "SFTP")
+        if target is None:
             return
-        username = self.ui.p2p_ssh_user.text()
-        password = self.ui.p2p_ssh_pass.text()
-        if not host:
-            self._append_log("[SFTP] 主机地址不能为空")
-            return
+        host, port, server_name, username, password = target
         self._save_ssh_credentials()
-        if self._sftp_window is not None:
-            try:
-                self._sftp_window.close()
-            except (RuntimeError, OSError):
-                pass
-            self._sftp_window = None
         self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
-        self._sftp_window = SFTPWindow(
+        panel = SFTPPanel(
             host, port, username, password,
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
-            parent=self  # type: ignore[arg-type]
         )
-        self._sftp_window.show()
+        self._ensure_session_window().add_session(panel)
 
     def _on_ssh_terminal_btn_clicked(self):
-        """打开 SSH 终端窗口"""
+        """打开 SSH 终端标签页"""
         if not PARAMIKO_AVAILABLE:
             self._append_log("[SSH] paramiko 未安装")
             return
-        mode = self.ui.p2p_mode_combo.currentText()
-        if mode == "XTCP":
-            if not self._p2p_visitors:
-                self._append_log("[SSH] 请先添加 visitor 配置")
-                return
-            idx = self._p2p_current_index
-            if not (0 <= idx < len(self._p2p_visitors)):
-                self._append_log("[SSH] 请先在列表中选择一个 visitor")
-                return
-            host = "127.0.0.1"
-            port = self._p2p_visitors[idx]["bindPort"]
-        elif mode == "TCP":
-            host = self.ui.p2p_ssh_host.text().strip()
-            port = self.ui.p2p_ssh_port.value()
-        else:
-            self._append_log("[SSH] SSH 终端仅支持 XTCP/TCP 模式")
+        target = self._resolve_remote_target("SSH", "SSH 终端")
+        if target is None:
             return
-        username = self.ui.p2p_ssh_user.text()
-        password = self.ui.p2p_ssh_pass.text()
-        if not host:
-            self._append_log("[SSH] 主机地址不能为空")
-            return
+        host, port, server_name, username, password = target
         self._save_ssh_credentials()
-        if self._ssh_terminal_window is not None:
-            try:
-                self._ssh_terminal_window.close()
-            except (RuntimeError, OSError):
-                pass
-            self._ssh_terminal_window = None
-        self._append_log(f"[SSH] 打开终端: {host}:{port}")
-        self._ssh_terminal_window = SSHTerminalWindow(
+        self._append_log(f"[SSH] 打开终端: {server_name or host}:{port}")
+        panel = SSHTerminalPanel(
             host, port, username, password,
             log_callback=lambda msg: self._append_log(msg),
-            parent=self  # type: ignore[arg-type]
         )
-        self._ssh_terminal_window.show()
+        self._ensure_session_window().add_session(panel)
 
     def _on_rdp_btn_clicked(self):
-        """打开远程桌面窗口（嵌入 mstsc.exe）"""
+        """打开远程桌面标签页（嵌入 mstsc.exe）"""
         if sys.platform != 'win32':
             self._append_log("[RDP] 远程桌面仅支持 Windows")
             return
-        mode = self.ui.p2p_mode_combo.currentText()
-        server_name = ''
-        if mode == "XTCP":
-            if not self._p2p_visitors:
-                self._append_log("[RDP] 请先添加 visitor 配置")
-                return
-            idx = self._p2p_current_index
-            if not (0 <= idx < len(self._p2p_visitors)):
-                self._append_log("[RDP] 请先在列表中选择一个 visitor")
-                return
-            host = "127.0.0.1"
-            port = self._p2p_visitors[idx]["bindPort"]
-            server_name = self._p2p_visitors[idx].get("serverName", "")
-        elif mode == "TCP":
-            host = self.ui.p2p_ssh_host.text().strip()
-            port = self.ui.p2p_ssh_port.value()
-        else:
-            self._append_log("[RDP] 远程桌面仅支持 XTCP/TCP 模式")
+        target = self._resolve_remote_target("RDP", "远程桌面")
+        if target is None:
             return
-        username = self.ui.p2p_ssh_user.text()
-        password = self.ui.p2p_ssh_pass.text()
-        if not host:
-            self._append_log("[RDP] 主机地址不能为空")
-            return
+        host, port, server_name, username, password = target
         self._save_ssh_credentials()
-        if self._rdp_window is not None:
-            try:
-                self._rdp_window.close()
-            except (RuntimeError, OSError):
-                pass
-            self._rdp_window = None
         self._append_log(f"[RDP] 打开远程桌面: {server_name or host}:{port}")
-        self._rdp_window = RDPWindow(
+        panel = RDPPanel(
             host, port, username, password,
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
-            parent=self  # type: ignore[arg-type]
         )
-        self._rdp_window.show()
+        self._ensure_session_window().add_session(panel)
