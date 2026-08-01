@@ -149,6 +149,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.write_table.clicked.connect(self.on_open_dir_clicked)
         self.ui.open_config.clicked.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
         self.ui.pause_btn.clicked.connect(self._on_pause_clicked)
+        # 球桌管理面板入口
+        self.ui.table_panel_btn.clicked.connect(lambda: QTimer.singleShot(0, self._on_open_table_panel))
         # 列表项选择事件
         self.ui.id_list.currentItemChanged.connect(self._on_id_current_changed)
         self.ui.loacl_video_list.currentItemChanged.connect(self._on_video_current_changed)
