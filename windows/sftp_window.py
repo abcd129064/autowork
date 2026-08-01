@@ -26,11 +26,120 @@ from workers.network_workers import (
 # 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
 _pending_workers: set = set()
 
+# ------------------------------------------------------------------ 文件类型图标映射
+_ICON_CACHE: dict = {}
+
+# 扩展名 → FluentIcon 映射
+_EXT_ICON_MAP = {
+    # 图片
+    '.jpg': FluentIcon.PHOTO, '.jpeg': FluentIcon.PHOTO, '.png': FluentIcon.PHOTO,
+    '.gif': FluentIcon.PHOTO, '.bmp': FluentIcon.PHOTO, '.svg': FluentIcon.PHOTO,
+    '.webp': FluentIcon.PHOTO, '.ico': FluentIcon.PHOTO, '.tiff': FluentIcon.PHOTO,
+    # 视频
+    '.mp4': FluentIcon.VIDEO, '.avi': FluentIcon.VIDEO, '.mkv': FluentIcon.VIDEO,
+    '.mov': FluentIcon.VIDEO, '.wmv': FluentIcon.VIDEO, '.flv': FluentIcon.VIDEO,
+    '.webm': FluentIcon.VIDEO, '.m4v': FluentIcon.VIDEO, '.mpg': FluentIcon.VIDEO,
+    # 音频
+    '.mp3': FluentIcon.MUSIC, '.wav': FluentIcon.MUSIC, '.flac': FluentIcon.MUSIC,
+    '.ogg': FluentIcon.MUSIC, '.aac': FluentIcon.MUSIC, '.wma': FluentIcon.MUSIC,
+    '.m4a': FluentIcon.MUSIC,
+    # 压缩包
+    '.zip': FluentIcon.ZIP_FOLDER, '.tar': FluentIcon.ZIP_FOLDER,
+    '.gz': FluentIcon.ZIP_FOLDER, '.rar': FluentIcon.ZIP_FOLDER,
+    '.7z': FluentIcon.ZIP_FOLDER, '.bz2': FluentIcon.ZIP_FOLDER,
+    '.xz': FluentIcon.ZIP_FOLDER, '.tgz': FluentIcon.ZIP_FOLDER,
+    # 代码
+    '.py': FluentIcon.CODE, '.js': FluentIcon.CODE, '.ts': FluentIcon.CODE,
+    '.java': FluentIcon.CODE, '.c': FluentIcon.CODE, '.cpp': FluentIcon.CODE,
+    '.h': FluentIcon.CODE, '.go': FluentIcon.CODE, '.rs': FluentIcon.CODE,
+    '.sh': FluentIcon.CODE, '.bat': FluentIcon.CODE, '.ps1': FluentIcon.CODE,
+    '.rb': FluentIcon.CODE, '.php': FluentIcon.CODE, '.swift': FluentIcon.CODE,
+    '.kt': FluentIcon.CODE, '.cs': FluentIcon.CODE, '.lua': FluentIcon.CODE,
+    '.html': FluentIcon.CODE, '.css': FluentIcon.CODE, '.vue': FluentIcon.CODE,
+    # 文档
+    '.doc': FluentIcon.DOCUMENT, '.docx': FluentIcon.DOCUMENT,
+    '.txt': FluentIcon.DOCUMENT, '.rtf': FluentIcon.DOCUMENT,
+    '.pdf': FluentIcon.DOCUMENT, '.odt': FluentIcon.DOCUMENT,
+    '.md': FluentIcon.DOCUMENT, '.log': FluentIcon.DOCUMENT,
+    # 表格
+    '.xls': FluentIcon.PIE_SINGLE, '.xlsx': FluentIcon.PIE_SINGLE,
+    '.csv': FluentIcon.PIE_SINGLE, '.ods': FluentIcon.PIE_SINGLE,
+    # 配置
+    '.json': FluentIcon.SETTING, '.xml': FluentIcon.SETTING,
+    '.yaml': FluentIcon.SETTING, '.yml': FluentIcon.SETTING,
+    '.toml': FluentIcon.SETTING, '.ini': FluentIcon.SETTING,
+    '.conf': FluentIcon.SETTING, '.cfg': FluentIcon.SETTING,
+    '.env': FluentIcon.SETTING,
+    # 可执行 / 应用
+    '.exe': FluentIcon.APPLICATION, '.msi': FluentIcon.APPLICATION,
+    '.app': FluentIcon.APPLICATION, '.bin': FluentIcon.APPLICATION,
+    '.run': FluentIcon.APPLICATION, '.deb': FluentIcon.APPLICATION,
+    '.rpm': FluentIcon.APPLICATION, '.apk': FluentIcon.APPLICATION,
+    # 字体
+    '.ttf': FluentIcon.FONT, '.otf': FluentIcon.FONT,
+    '.woff': FluentIcon.FONT, '.woff2': FluentIcon.FONT,
+    # 数据库
+    '.db': FluentIcon.LIBRARY, '.sqlite': FluentIcon.LIBRARY,
+    '.sql': FluentIcon.LIBRARY, '.mdb': FluentIcon.LIBRARY,
+}
+
+
+def _file_icon(name: str, is_dir: bool):
+    """根据文件名/扩展名返回对应的 FluentIcon（带缓存）"""
+    if is_dir:
+        fi = FluentIcon.FOLDER
+    else:
+        ext = os.path.splitext(name)[1].lower()
+        fi = _EXT_ICON_MAP.get(ext, FluentIcon.DOCUMENT)
+    # 缓存 QIcon 实例避免重复创建
+    if fi not in _ICON_CACHE:
+        _ICON_CACHE[fi] = fi.icon()
+    return _ICON_CACHE[fi]
+
 
 def _safe_release_worker(w):
     """将 worker 放入 pending 集合，线程结束后自动移除并 deleteLater"""
     _pending_workers.add(w)
     w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
+
+
+class _TransferTable(TableWidget):
+    """传输队列专用表格：纯鼠标事件实现拖拽调序，
+    完全不使用 Qt 内置 drag-drop（避免 InternalMove 在模型层删除行）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._panel = None  # 由 SFTPPanel 设置反向引用
+        self._drag_row = -1
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            row = self.rowAt(event.position().toPoint().y())
+            if row >= 0:
+                self._drag_row = row
+                self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 检测到拖拽意图：切换光标提示可拖拽
+        if self._press_pos is not None and self._drag_row >= 0:
+            if (event.position().toPoint() - self._press_pos).manhattanLength() > 10:
+                self.viewport().setCursor(Qt.CursorShape.SizeVerCursor)
+                return  # 不调用 super，阻止 Qt 启动内置 drag
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_row >= 0:
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            target_row = self.rowAt(event.position().toPoint().y())
+            if target_row < 0:
+                target_row = self.rowCount() - 1
+            if target_row >= 0 and target_row != self._drag_row and self._panel:
+                self._panel._move_transfer_row(self._drag_row, target_row)
+            self._drag_row = -1
+            self._press_pos = None
+        super().mouseReleaseEvent(event)
 
 
 class _TextInputDialog(MessageBoxBase):
@@ -57,7 +166,7 @@ class SFTPPanel(QWidget):
     资源清理统一由 shutdown() 方法负责，容器关闭标签时调用。
     """
 
-    def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
+    def __init__(self, host, port, username, password, server_name='', log_callback=None, default_remote_path=None, parent=None):
         super().__init__(parent)
         self._host = host
         self._port = port
@@ -66,7 +175,7 @@ class SFTPPanel(QWidget):
         self._server_name = server_name
         self._conn_params = (host, port, username, password)
         self._transport = None
-        self._remote_path = '/home'
+        self._remote_path = default_remote_path or '/home'
         self._remote_entries = []
         _desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
         self._local_path = _desktop if os.path.isdir(_desktop) else os.path.expanduser('~')
@@ -79,6 +188,7 @@ class SFTPPanel(QWidget):
         self._pending_remote_path = None
         self._transfer_workers = {}
         self._next_transfer_id = 0
+        self._drag_source_row = -1
         self._closing = False
         self._init_ui()
         QTimer.singleShot(100, self._connect_and_list)
@@ -137,8 +247,7 @@ class SFTPPanel(QWidget):
         local_sf.setContentsMargins(0, 2, 0, 0)
         self._local_search_edit = SearchLineEdit()
         self._local_search_edit.setPlaceholderText('搜索本地文件...')
-        self._local_search_edit.searchSignal.connect(self._on_local_search)
-        self._local_search_edit.returnPressed.connect(self._on_local_search)
+        self._local_search_edit.textChanged.connect(self._on_local_search)
         local_sf.addWidget(self._local_search_edit, 1)
         left_lay.addWidget(self._local_search_frame)
         self._local_search_frame.hide()
@@ -148,7 +257,7 @@ class SFTPPanel(QWidget):
         right_lay = QVBoxLayout(self._right_panel)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_bar = QHBoxLayout()
-        self._btn_up = PushButton('.. 上级目录')
+        self._btn_up = PushButton('.. 上级')
         self._btn_up.clicked.connect(self._go_up)
         right_bar.addWidget(self._btn_up)
         right_bar.addWidget(CaptionLabel('远程:'))
@@ -189,8 +298,7 @@ class SFTPPanel(QWidget):
         remote_sf.setContentsMargins(0, 2, 0, 0)
         self._remote_search_edit = SearchLineEdit()
         self._remote_search_edit.setPlaceholderText('搜索远程文件...')
-        self._remote_search_edit.searchSignal.connect(self._on_remote_search)
-        self._remote_search_edit.returnPressed.connect(self._on_remote_search)
+        self._remote_search_edit.textChanged.connect(self._on_remote_search)
         remote_sf.addWidget(self._remote_search_edit, 1)
         right_lay.addWidget(self._remote_search_frame)
         self._remote_search_frame.hide()
@@ -199,10 +307,10 @@ class SFTPPanel(QWidget):
         self._splitter.addWidget(self._right_panel)
         self._splitter.setStretchFactor(0, 1)  # 【左右比例】本地面板拉伸因子
         self._splitter.setStretchFactor(1, 1)  # 【左右比例】远程面板拉伸因子（1:1 等分）
-        root.addWidget(self._splitter, 1)
 
         # ---- 传输队列面板
-        self._transfer_table = TableWidget()
+        self._transfer_table = _TransferTable()
+        self._transfer_table._panel = self
         self._transfer_table.setColumnCount(4)
         self._transfer_table.setRowCount(0)
         self._transfer_table.setHorizontalHeaderLabels(['文件名', '进度', '速度', '状态'])
@@ -219,10 +327,23 @@ class SFTPPanel(QWidget):
         self._transfer_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._transfer_table.verticalHeader().setDefaultSectionSize(24)  # 【行高】每行 24px
         self._transfer_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._transfer_table.setFixedHeight(130)  # 【面板高度】传输队列固定 130px
+        self._transfer_table.setMinimumHeight(80)  # 【面板高度】传输队列最小 80px，可拖拽调节
         self._transfer_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._transfer_table.customContextMenuRequested.connect(self._on_transfer_context_menu)
-        root.addWidget(self._transfer_table)
+        # 拖拽调序：纯鼠标事件实现（_TransferTable 子类），禁用 Qt 内置 drag-drop
+        self._transfer_table.setDragEnabled(False)
+        self._transfer_table.setAcceptDrops(False)
+        self._transfer_table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self._transfer_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+        # 垂直 Splitter：文件区域（上） + 传输队列（下），支持上下拖拽调节
+        self._v_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._v_splitter.addWidget(self._splitter)
+        self._v_splitter.addWidget(self._transfer_table)
+        self._v_splitter.setStretchFactor(0, 4)  # 文件区域占大部分
+        self._v_splitter.setStretchFactor(1, 1)  # 传输队列占小部分
+        self._v_splitter.setSizes([400, 130])    # 初始比例
+        root.addWidget(self._v_splitter, 1)
 
         # ---- 操作按钮栏
         btn_row = QHBoxLayout()
@@ -242,9 +363,20 @@ class SFTPPanel(QWidget):
         self._btn_xftp.clicked.connect(self._open_in_xftp)
         btn_row.addWidget(self._btn_xftp)
         btn_row.addStretch()
+        # 连接健康指示器（状态圆点 + 延迟）
+        self._lbl_health = BodyLabel('●')
+        self._lbl_health.setStyleSheet('color: gray; font-size: 14px;')
+        self._lbl_health.setToolTip('连接状态: 未连接')
+        btn_row.addWidget(self._lbl_health)
         self._lbl_status = BodyLabel('就绪')
         btn_row.addWidget(self._lbl_status)
         root.addLayout(btn_row)
+
+        # 连接健康检测定时器（每 5s 检测一次）
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(5000)
+        self._health_timer.timeout.connect(self._check_connection_health)
+        self._health_timer.start()
 
         # ---- Ctrl+F 快捷键
         sc = QShortcut(QKeySequence('Ctrl+F'), self)
@@ -292,7 +424,35 @@ class SFTPPanel(QWidget):
             else:
                 w.deleteLater()
 
-    # ------------------------------------------------------------------ Worker 管理
+    # ------------------------------------------------------------------ 连接健康检测
+    def _check_connection_health(self):
+        """定时检测连接状态，更新健康指示器（绿/黄/红圆点）"""
+        if self._transport is None or not self._transport.is_active():
+            self._set_health_indicator('red', '未连接')
+            return
+        # 尝试发送轻量请求检测延迟
+        try:
+            import time as _time
+            start = _time.time()
+            # stat 根目录作为轻量 ping
+            self._transport.open_session().close()
+            latency_ms = int((_time.time() - start) * 1000)
+            if latency_ms < 200:
+                self._set_health_indicator('green', f'已连接 ({latency_ms}ms)')
+            elif latency_ms < 1000:
+                self._set_health_indicator('orange', f'延迟较高 ({latency_ms}ms)')
+            else:
+                self._set_health_indicator('red', f'延迟过高 ({latency_ms}ms)')
+        except Exception:
+            self._set_health_indicator('red', '连接异常')
+
+    def _set_health_indicator(self, color, tooltip):
+        """设置健康指示器颜色和提示"""
+        color_map = {'green': '#4CAF50', 'orange': '#FF9800', 'red': '#F44336', 'gray': 'gray'}
+        self._lbl_health.setStyleSheet(f'color: {color_map.get(color, "gray")}; font-size: 14px;')
+        self._lbl_health.setToolTip(f'连接状态: {tooltip}')
+
+    # ------------------------------------------------------------------ Wozrker 管理
     def _cleanup_list_worker(self):
         if self._list_worker is not None:
             w = self._list_worker
@@ -363,6 +523,11 @@ class SFTPPanel(QWidget):
         self._remote_entries = entries
         self._edit_remote_path.setText(path)
         self._populate_remote(entries)
+        # 目录切换后清空远程搜索框
+        if self._remote_search_edit.text():
+            self._remote_search_edit.blockSignals(True)
+            self._remote_search_edit.clear()
+            self._remote_search_edit.blockSignals(False)
         dirs = [e for e in entries if e['is_dir']]
         files = [e for e in entries if not e['is_dir']]
         self._lbl_status.setText(f'{len(dirs)} 个目录, {len(files)} 个文件')
@@ -392,8 +557,8 @@ class SFTPPanel(QWidget):
             files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'])
             for entry in dirs + files:
                 item = QTreeWidgetItem()
-                prefix = '/ ' if entry['is_dir'] else ''
-                item.setText(0, prefix + entry['name'])
+                item.setIcon(0, _file_icon(entry['name'], entry['is_dir']))
+                item.setText(0, entry['name'])
                 item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
                 item.setText(2, '目录' if entry['is_dir'] else '文件')
                 item.setText(3, entry['perm'])
@@ -417,24 +582,35 @@ class SFTPPanel(QWidget):
     def _hide_search_boxes(self):
         self._local_search_frame.hide()
         self._remote_search_frame.hide()
+        # 清空搜索文本，恢复完整列表
+        if self._local_search_edit.text():
+            self._local_search_edit.clear()
+        if self._remote_search_edit.text():
+            self._remote_search_edit.clear()
 
-    def _on_remote_search(self):
-        keyword = self._remote_search_edit.text().strip()
+    def _on_remote_search(self, text=''):
+        keyword = text.strip()
         if not keyword:
+            # 清空搜索：恢复完整列表
+            self._populate_remote(self._remote_entries)
+            self._lbl_status.setText('就绪')
             return
         kw = keyword.lower()
         matched = [e for e in self._remote_entries if kw in e['name'].lower()]
         self._populate_remote(matched)
-        self._lbl_status.setText(f'搜索完成，找到 {len(matched)} 个匹配项')
+        self._lbl_status.setText(f'找到 {len(matched)} 个匹配项')
 
-    def _on_local_search(self):
-        keyword = self._local_search_edit.text().strip()
+    def _on_local_search(self, text=''):
+        keyword = text.strip()
         if not keyword:
+            # 清空搜索：恢复完整列表
+            self._populate_local(self._local_entries)
+            self._lbl_status.setText('就绪')
             return
         kw = keyword.lower()
         matched = [e for e in self._local_entries if kw in e['name'].lower()]
         self._populate_local(matched)
-        self._lbl_status.setText(f'搜索完成，找到 {len(matched)} 个匹配项')
+        self._lbl_status.setText(f'找到 {len(matched)} 个匹配项')
 
     def _populate_local(self, entries):
         self._local_tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘
@@ -444,8 +620,8 @@ class SFTPPanel(QWidget):
             files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'].lower())
             for entry in dirs + files:
                 item = QTreeWidgetItem()
-                prefix = '/ ' if entry['is_dir'] else ''
-                item.setText(0, prefix + entry['name'])
+                item.setIcon(0, _file_icon(entry['name'], entry['is_dir']))
+                item.setText(0, entry['name'])
                 item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
                 item.setText(2, '目录' if entry['is_dir'] else '文件')
                 item.setText(3, entry['mtime'])
@@ -501,6 +677,11 @@ class SFTPPanel(QWidget):
             }
             self._local_entries.append(edata)
         self._populate_local(self._local_entries)
+        # 目录切换后清空本地搜索框
+        if self._local_search_edit.text():
+            self._local_search_edit.blockSignals(True)
+            self._local_search_edit.clear()
+            self._local_search_edit.blockSignals(False)
 
     def _local_refresh(self):
         self._list_local(self._local_path)
@@ -559,6 +740,66 @@ class SFTPPanel(QWidget):
                 self._handle_drop_files(event)
                 return True
         return super().eventFilter(obj, event)
+
+    def _move_transfer_row(self, from_row, to_row):
+        """将传输队列的 from_row 整行移动到 to_row 位置（item + cellWidget 一起搬）"""
+        table = self._transfer_table
+        if from_row < 0 or from_row >= table.rowCount():
+            return
+        if from_row == to_row:
+            return
+
+        # 1. 保存源行所有数据
+        col_count = table.columnCount()
+        items_data = []
+        for c in range(col_count):
+            item = table.item(from_row, c)
+            items_data.append(item.text() if item else '')
+        # 保存进度条值
+        pb_widget = table.cellWidget(from_row, 1)
+        pb_value = pb_widget.value() if pb_widget else 0
+
+        # 2. 删除源行
+        table.removeRow(from_row)
+
+        # 3. 调整目标行索引（删除后索引可能变化）
+        if from_row < to_row:
+            to_row -= 1
+        # 插入新行
+        table.insertRow(to_row)
+
+        # 4. 恢复数据到新行
+        table.setItem(to_row, 0, QTableWidgetItem(items_data[0]))
+        pb = ProgressBar()
+        pb.setRange(0, 100)
+        pb.setValue(pb_value)
+        table.setCellWidget(to_row, 1, pb)
+        table.setItem(to_row, 2, QTableWidgetItem(items_data[2]))
+        table.setItem(to_row, 3, QTableWidgetItem(items_data[3]))
+
+        # 5. 重建所有行的 row 映射
+        self._rebuild_transfer_row_map()
+
+    def _rebuild_transfer_row_map(self):
+        """根据文件名重建 _transfer_workers 中的 row 映射"""
+        # 构建“文件名 -> tid”的映射
+        name_to_tid = {}
+        for tid, info in self._transfer_workers.items():
+            worker = info.get('worker')
+            if worker:
+                fname = getattr(worker, '_filename', '') or getattr(worker, '_dir_name', '')
+                if fname:
+                    name_to_tid[fname] = tid
+        # 遍历表格行，更新 row 映射
+        for row in range(self._transfer_table.rowCount()):
+            item = self._transfer_table.item(row, 0)
+            if not item:
+                continue
+            text = item.text()
+            for fname, tid in name_to_tid.items():
+                if fname in text:
+                    self._transfer_workers[tid]['row'] = row
+                    break
 
     def _handle_drop_files(self, event):
         """解析拖入的 QUrl 列表，逐个触发上传到当前远程目录"""
@@ -1248,6 +1489,9 @@ class SFTPPanel(QWidget):
         if self._closing:
             return
         self._closing = True
+        # 停止健康检测定时器
+        if hasattr(self, '_health_timer'):
+            self._health_timer.stop()
         transport = self._transport
         self._transport = None
         self._cleanup_connect_worker()

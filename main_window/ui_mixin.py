@@ -7,7 +7,8 @@ import json
 import ctypes
 import subprocess
 
-from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout)
+from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout,
+    QVBoxLayout, QFormLayout, QFileDialog, QFrame)
 from PySide6.QtCore import QTimer, Qt, QRect
 from PySide6.QtGui import (QColor, QKeySequence, QFont, QActionGroup,
     QFontDatabase, QPainter)
@@ -15,7 +16,8 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     Action, MenuAnimationType, FluentIcon, setFontFamilies,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
-    BodyLabel, isDarkTheme, RoundMenu, SwitchButton)
+    BodyLabel, CaptionLabel, isDarkTheme, RoundMenu, SwitchButton,
+    PushButton, ToolButton, ScrollArea)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
@@ -398,6 +400,10 @@ class UIMixin:
 
         # 「功能」菜单
         func_menu = _create_menu("功能", self)
+        act_settings = Action(FluentIcon.SETTING, "设置", self)
+        act_settings.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_settings))
+        func_menu.addAction(act_settings)
+        func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
         act_hc = Action(FluentIcon.HIGHTLIGHT, "高亮颜色设置", self)
@@ -630,6 +636,205 @@ class UIMixin:
             self._apply_font_family()
             self._show_info_bar(f"[配置] 已更新字体: {family}")
             self._append_log(f"[配置] 已更新字体: {family}")
+
+    def _on_open_settings(self):
+        """统一设置面板：分组展示所有可配置项，支持路径浏览、即时编辑"""
+        settings = self._load_settings()
+
+        class SettingsDialog(MessageBoxBase):
+            def __init__(self, parent, cfg):
+                super().__init__(parent)
+                self.titleLabel = BodyLabel("设置", self)
+                self.viewLayout.addWidget(self.titleLabel)
+
+                # 滚动区域（Fluent 风格滚动条）
+                scroll = ScrollArea(self)
+                scroll.setWidgetResizable(True)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                scroll.setMaximumHeight(520)
+                scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+                container = QWidget()
+                self.main_layout = QVBoxLayout(container)
+                self.main_layout.setContentsMargins(4, 4, 14, 4)
+                self.main_layout.setSpacing(12)
+                scroll.setWidget(container)
+                self.viewLayout.addWidget(scroll)
+
+                self._cfg = cfg
+                self._path_edits = {}
+                self._build_paths_section(cfg)
+                self._build_remote_section(cfg)
+                self._build_frpc_section(cfg)
+                self._build_appearance_section(cfg)
+                self.main_layout.addStretch()
+
+            # ---------- 路径配置 ----------
+            def _build_paths_section(self, cfg):
+                self._add_section_header("📂 路径配置")
+                path_items = [
+                    ("exe_dir", "程序目录", cfg.get("exe_dir", ""), "dir"),
+                    ("videos_dir", "视频/日志目录", cfg.get("videos_dir", ""), "dir"),
+                    ("cipher_tool", "加密工具", cfg.get("cipher_tool", ""), "file"),
+                    ("front_exe", "前端程序", cfg.get("front_exe", ""), "file"),
+                    ("backend_exe", "后端程序", cfg.get("backend_exe", ""), "file"),
+                ]
+                for key, label, value, mode in path_items:
+                    row = QHBoxLayout()
+                    lbl = BodyLabel(label, self)
+                    lbl.setFixedWidth(90)
+                    row.addWidget(lbl)
+                    edit = LineEdit(self)
+                    edit.setText(value)
+                    edit.setPlaceholderText(f"请选择{label}...")
+                    row.addWidget(edit, 1)
+                    btn = ToolButton(FluentIcon.FOLDER, self)
+                    btn.setFixedSize(32, 32)
+                    btn.setToolTip("浏览...")
+                    btn.clicked.connect(lambda checked, e=edit, m=mode: self._browse(e, m))
+                    row.addWidget(btn)
+                    self._path_edits[key] = edit
+                    self.main_layout.addLayout(row)
+
+            # ---------- 远程连接 ----------
+            def _build_remote_section(self, cfg):
+                self._add_section_header("🌐 远程连接")
+                form = QFormLayout()
+                form.setSpacing(8)
+
+                self._edit_ssh_user = LineEdit(self)
+                self._edit_ssh_user.setText(cfg.get("ssh_user", ""))
+                self._edit_ssh_user.setPlaceholderText("SSH 用户名")
+                form.addRow("SSH 用户名:", self._edit_ssh_user)
+
+                self._edit_ssh_pass = LineEdit(self)
+                self._edit_ssh_pass.setText(cfg.get("ssh_pass", ""))
+                self._edit_ssh_pass.setEchoMode(LineEdit.EchoMode.Password)
+                self._edit_ssh_pass.setPlaceholderText("SSH 密码")
+                form.addRow("SSH 密码:", self._edit_ssh_pass)
+
+                self._edit_sftp_path = LineEdit(self)
+                self._edit_sftp_path.setText(cfg.get("sftp_default_remote_path", ""))
+                self._edit_sftp_path.setPlaceholderText("如 /home/user/project")
+                form.addRow("SFTP默认路径:", self._edit_sftp_path)
+
+                self._edit_tcp_servers = LineEdit(self)
+                servers = cfg.get("tcp_servers", [])
+                self._edit_tcp_servers.setText(", ".join(servers))
+                self._edit_tcp_servers.setPlaceholderText("多个用逗号分隔，如 ip:port, ip:port")
+                form.addRow("TCP服务器:", self._edit_tcp_servers)
+
+                self.main_layout.addLayout(form)
+
+            # ---------- FRPC 服务器 ----------
+            def _build_frpc_section(self, cfg):
+                self._add_section_header("🔗 FRPC 穿透服务器")
+                frpc = cfg.get("frpc_server", {})
+                form = QFormLayout()
+                form.setSpacing(8)
+
+                self._edit_frpc_addr = LineEdit(self)
+                self._edit_frpc_addr.setText(frpc.get("serverAddr", ""))
+                self._edit_frpc_addr.setPlaceholderText("服务器 IP")
+                form.addRow("服务器地址:", self._edit_frpc_addr)
+
+                self._edit_frpc_port = LineEdit(self)
+                self._edit_frpc_port.setText(str(frpc.get("serverPort", 7000)))
+                self._edit_frpc_port.setPlaceholderText("端口号")
+                form.addRow("服务器端口:", self._edit_frpc_port)
+
+                self._edit_frpc_token = LineEdit(self)
+                self._edit_frpc_token.setText(frpc.get("auth_token", ""))
+                self._edit_frpc_token.setPlaceholderText("认证 Token")
+                form.addRow("认证 Token:", self._edit_frpc_token)
+
+                self.main_layout.addLayout(form)
+
+            # ---------- 外观 ----------
+            def _build_appearance_section(self, cfg):
+                self._add_section_header("🎨 外观")
+                form = QFormLayout()
+                form.setSpacing(8)
+
+                self._spin_font_size = SpinBox(self)
+                self._spin_font_size.setRange(10, 20)
+                self._spin_font_size.setValue(cfg.get("font_size", 11))
+                self._spin_font_size.setSuffix(" pt")
+                form.addRow("字号大小:", self._spin_font_size)
+
+                self._combo_dpi = ComboBox(self)
+                dpi_options = [100, 125, 150, 175, 200]
+                self._combo_dpi.addItems([f"{d}%" for d in dpi_options])
+                cur_dpi = cfg.get("dpi_scale", 100)
+                if cur_dpi in dpi_options:
+                    self._combo_dpi.setCurrentIndex(dpi_options.index(cur_dpi))
+                form.addRow("界面缩放:", self._combo_dpi)
+
+                self._edit_font_family = LineEdit(self)
+                self._edit_font_family.setText(cfg.get("font_family", "Microsoft YaHei UI"))
+                self._edit_font_family.setPlaceholderText("字体名称")
+                form.addRow("字体:", self._edit_font_family)
+
+                self.main_layout.addLayout(form)
+
+            # ---------- 工具 ----------
+            def _add_section_header(self, text):
+                lbl = CaptionLabel(text, self)
+                lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 4px;")
+                self.main_layout.addWidget(lbl)
+
+            def _browse(self, edit, mode):
+                if mode == "dir":
+                    path = QFileDialog.getExistingDirectory(self, "选择目录", edit.text())
+                else:
+                    path, _ = QFileDialog.getOpenFileName(self, "选择文件", edit.text())
+                if path:
+                    edit.setText(path)
+
+            def collect(self):
+                """收集所有编辑结果"""
+                data = {}
+                # 路径
+                for key, edit in self._path_edits.items():
+                    data[key] = edit.text().strip()
+                # 远程
+                data["ssh_user"] = self._edit_ssh_user.text().strip()
+                data["ssh_pass"] = self._edit_ssh_pass.text().strip()
+                data["sftp_default_remote_path"] = self._edit_sftp_path.text().strip()
+                servers_text = self._edit_tcp_servers.text().strip()
+                data["tcp_servers"] = [s.strip() for s in servers_text.split(",") if s.strip()]
+                # FRPC
+                data["frpc_server"] = {
+                    "serverAddr": self._edit_frpc_addr.text().strip(),
+                    "serverPort": int(self._edit_frpc_port.text().strip() or 7000),
+                    "auth_method": "token",
+                    "auth_token": self._edit_frpc_token.text().strip(),
+                }
+                # 外观
+                data["font_size"] = self._spin_font_size.value()
+                dpi_text = self._combo_dpi.currentText().replace("%", "")
+                data["dpi_scale"] = int(dpi_text)
+                data["font_family"] = self._edit_font_family.text().strip()
+                return data
+
+        dlg = SettingsDialog(self, settings)
+        dlg.yesButton.setText("保存")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setMinimumWidth(520)
+        if dlg.exec():
+            new_data = dlg.collect()
+            old_dpi = settings.get("dpi_scale", 100)
+            old_font_size = settings.get("font_size", 11)
+            old_font_family = settings.get("font_family", "")
+            self._save_settings(new_data)
+            self._reload_settings_cache()
+            self._load_paths()
+            # 外观变更即时应用
+            if new_data.get("font_size") != old_font_size or new_data.get("font_family") != old_font_family:
+                self._apply_global_font()
+            if new_data.get("dpi_scale") != old_dpi:
+                self._show_info_bar("缩放已修改，重启后生效")
+            self._append_log("[配置] 设置面板已保存")
+            self._show_info_bar("设置已保存")
 
     def _on_about(self):
         """显示关于对话框（Fluent MessageBox）"""

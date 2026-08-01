@@ -137,6 +137,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._tcp_worker = None
         self._remote_session_window = None
         self._init_p2p_panel()
+        # 恢复上次关闭前的远程会话（延迟执行，等待主窗口就绪）
+        self._restore_remote_sessions()
 
     def connect_signals(self):
         """连接信号和槽"""
@@ -890,7 +892,10 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except RuntimeError:
                 pass
 
-        # 2. 关闭远程会话标签容器（触发各面板 shutdown：SFTP/SSH/RDP）
+        # 2. 保存远程会话信息（在关闭窗口之前）
+        self._save_remote_sessions()
+
+        # 3. 关闭远程会话标签容器（触发各面板 shutdown：SFTP/SSH/RDP）
         win = getattr(self, '_remote_session_window', None)
         if win is not None:
             self._remote_session_window = None

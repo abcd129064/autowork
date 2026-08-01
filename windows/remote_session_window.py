@@ -29,6 +29,13 @@ class RemoteSessionWindow(QDialog):
         self.setWindowTitle("远程会话")
         self.resize(1300, 850)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        # 启用最小化/最大化/关闭按钮（QDialog 带 parent 时默认只有 X）
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
 
         self._tab_widget = TabWidget(self)
         self._tab_widget.setTabsClosable(True)

@@ -586,11 +586,14 @@ class RemoteMixin:
             return
         host, port, server_name, username, password = target
         self._save_ssh_credentials()
+        # 从配置读取默认远程路径（如 /home/newbv/snooker）
+        default_path = self._load_settings().get("sftp_default_remote_path", "")
         self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
         panel = SFTPPanel(
             host, port, username, password,
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
+            default_remote_path=default_path or None,
         )
         self._ensure_session_window().add_session(panel)
 
@@ -628,3 +631,101 @@ class RemoteMixin:
             log_callback=lambda msg: self._append_log(msg),
         )
         self._ensure_session_window().add_session(panel)
+
+    # ------------------------------------------------------------------ 会话恢复
+
+    def _save_remote_sessions(self):
+        """关闭前保存当前远程会话信息到 settings.json，下次启动可自动恢复"""
+        win = getattr(self, '_remote_session_window', None)
+        sessions = []
+        if win is not None:
+            try:
+                for panel in win._panels:
+                    info = self._extract_session_info(panel)
+                    if info:
+                        sessions.append(info)
+            except (RuntimeError, AttributeError):
+                pass
+        self._save_settings({"remote_sessions": sessions})
+
+    def _extract_session_info(self, panel):
+        """从面板提取会话信息（类型/主机/端口/用户名/服务器名/当前路径）"""
+        panel_type = type(panel).__name__
+        if panel_type == 'SFTPPanel':
+            return {
+                'type': 'sftp',
+                'host': panel._host,
+                'port': panel._port,
+                'username': panel._username,
+                'server_name': panel._server_name,
+                'remote_path': panel._remote_path,
+            }
+        elif panel_type == 'SSHTerminalPanel':
+            return {
+                'type': 'ssh',
+                'host': getattr(panel, '_host', ''),
+                'port': getattr(panel, '_port', 0),
+                'username': getattr(panel, '_username', ''),
+                'server_name': getattr(panel, '_server_name', ''),
+            }
+        elif panel_type == 'RDPPanel':
+            return {
+                'type': 'rdp',
+                'host': getattr(panel, '_host', ''),
+                'port': getattr(panel, '_port', 0),
+                'username': getattr(panel, '_username', ''),
+                'server_name': getattr(panel, '_server_name', ''),
+            }
+        return None
+
+    def _restore_remote_sessions(self):
+        """启动时从 settings.json 恢复上次的远程会话（延迟 1s 执行，等待主窗口就绪）"""
+        from PySide6.QtCore import QTimer
+        sessions = self._load_settings().get("remote_sessions", [])
+        if not sessions or not isinstance(sessions, list):
+            return
+        if not PARAMIKO_AVAILABLE:
+            return
+        password = self.ui.p2p_ssh_pass.text()
+        QTimer.singleShot(1000, lambda: self._do_restore_sessions(sessions, password))
+
+    def _do_restore_sessions(self, sessions, password):
+        """实际执行会话恢复"""
+        restored = 0
+        for s in sessions:
+            try:
+                stype = s.get('type', '')
+                host = s.get('host', '')
+                port = s.get('port', 0)
+                username = s.get('username', '')
+                server_name = s.get('server_name', '')
+                if not host or not port:
+                    continue
+                if stype == 'sftp':
+                    panel = SFTPPanel(
+                        host, port, username, password,
+                        server_name=server_name,
+                        log_callback=lambda msg: self._append_log(msg),
+                        default_remote_path=s.get('remote_path', ''),
+                    )
+                    self._ensure_session_window().add_session(panel)
+                    restored += 1
+                elif stype == 'ssh':
+                    panel = SSHTerminalPanel(
+                        host, port, username, password,
+                        log_callback=lambda msg: self._append_log(msg),
+                    )
+                    self._ensure_session_window().add_session(panel)
+                    restored += 1
+                elif stype == 'rdp' and sys.platform == 'win32':
+                    panel = RDPPanel(
+                        host, port, username, password,
+                        server_name=server_name,
+                        log_callback=lambda msg: self._append_log(msg),
+                    )
+                    self._ensure_session_window().add_session(panel)
+                    restored += 1
+            except Exception as e:
+                self._append_log(f"[会话恢复] 失败: {e}")
+        if restored:
+            self._append_log(f"[会话恢复] 已恢复 {restored} 个远程会话")
