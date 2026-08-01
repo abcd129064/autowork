@@ -403,6 +403,10 @@ class UIMixin:
         act_settings = Action(FluentIcon.SETTING, "设置", self)
         act_settings.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_settings))
         func_menu.addAction(act_settings)
+        act_add_table = Action(FluentIcon.ADD, "手动添加", self)
+        act_add_table.setToolTip("手动添加一条球桌记录到本地数据库")
+        act_add_table.triggered.connect(lambda: QTimer.singleShot(0, self._on_add_table_record))
+        func_menu.addAction(act_add_table)
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
@@ -636,6 +640,35 @@ class UIMixin:
             self._apply_font_family()
             self._show_info_bar(f"[配置] 已更新字体: {family}")
             self._append_log(f"[配置] 已更新字体: {family}")
+
+    def _on_add_table_record(self):
+        """手动添加球桌记录（API 失效时的兜底录入入口）"""
+        from windows.table_panel import AddRecordDialog
+        from database import table_db
+        dlg = AddRecordDialog(self)
+        if not dlg.exec():
+            return
+        record = dlg.get_record()
+        table_db.insert_one(record)
+        # 球桌面板已打开时同步刷新展示
+        panel = getattr(self, '_table_panel', None)
+        if panel is not None:
+            panel._page_no = 1
+            panel._load_local()
+        self._show_status_message("已添加记录到本地数据库", 3000)
+        self._append_log("[添加] 手动添加一条球桌记录到本地数据库")
+
+    def _on_open_table_panel(self):
+        """打开球桌管理面板（非模态独立窗口）"""
+       # from windows.table_panel import TablePanelWindow
+        from windows.management_panel import ManagementPanelWindow
+        if not hasattr(self, '_table_panel') or self._table_panel is None:
+            self._table_panel = ManagementPanelWindow(self)
+            self._table_panel.destroyed.connect(
+                lambda: setattr(self, '_table_panel', None))
+        self._table_panel.show()
+        self._table_panel.raise_()
+        self._table_panel.activateWindow()
 
     def _on_open_settings(self):
         """统一设置面板：分组展示所有可配置项，支持路径浏览、即时编辑"""

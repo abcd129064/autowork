@@ -10,3 +10,8 @@ from .network_workers import (
     SSHConnectWorker,
     SSHExecWorker,
 )
+from .table_worker import (
+    TableFetchWorker,
+    SnookerOmFetchWorker,
+    DevicesFetchWorker,
+)

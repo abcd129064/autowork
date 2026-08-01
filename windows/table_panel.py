@@ -1,0 +1,436 @@
+# -*- coding: utf-8 -*-
+"""球桌管理面板（独立窗口模块，与原有业务代码解耦）
+
+数据模式：
+- 打开面板 → 读取本地 SQLite 缓存秒开（首次无数据时自动触发同步）
+- 点「刷新」→ API 拉全量 → 写入 SQLite → 本地查询展示
+- 搜索/翻页/列切换 → 纯本地 SQL 查询，零网络延迟
+- 搜索为 textChanged 实时过滤（全字段模糊匹配）
+"""
+
+import math
+from datetime import datetime
+
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
+    QTextEdit)
+from PySide6.QtCore import Qt, QItemSelectionModel
+from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette
+from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
+    PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
+    Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit)
+from qfluentwidgets.components.widgets.table_view import TableItemDelegate
+
+from workers.table_worker import TableFetchWorker
+from database import table_db
+
+# 表格列定义：(字段key, 表头文字, 默认宽度)
+COLUMNS = [
+    ("name", "球桌号", 90),
+    ("roomName", "球房名称", 200),
+    ("onlineStatusName", "在线状态", 80),
+    ("remark", "备注", 470),
+    ("cameraPassExt", "相机密码", 220),
+]
+
+# 在线状态着色
+_STATUS_COLORS = {
+    "运行中": QColor(16, 137, 62),   # 绿
+    "空闲": QColor(0, 120, 212),     # 蓝
+    "下线": QColor(130, 130, 130),   # 灰
+}
+
+
+class _ReadOnlySelectDelegate(TableItemDelegate):
+    """双击单元格进入只读编辑态：支持光标拖选文本并复制，但禁止修改数据
+
+    必须继承 TableItemDelegate（而非 QStyledItemDelegate），
+    因为 qfluentwidgets TableWidget 内部会调用 setHoverRow/setSelectedRows。
+    """
+
+    def createEditor(self, parent, option, index):
+        editor = QTextEdit(parent)
+        editor.setReadOnly(True)  # 只读：可选中文本、Ctrl+C 复制，不能改内容
+        editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 显式设置前景色，避免继承表格选中态白色文字
+        pal = editor.palette()
+        pal.setColor(QPalette.ColorRole.Text, self.parent().palette().color(QPalette.ColorRole.Text))
+        editor.setPalette(pal)
+        editor.setStyleSheet(
+            "QTextEdit { background: palette(base); border: 1px solid palette(highlight);"
+            " border-radius: 4px; padding: 2px;"
+            " selection-background-color: palette(highlight);"
+            " selection-color: palette(highlighted-text); }")
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.setPlainText(index.data(Qt.ItemDataRole.DisplayRole) or "")
+
+    def setModelData(self, editor, model, index):
+        pass  # 只读，永不回写数据
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
+class AddRecordDialog(QDialog):
+    """手动添加记录弹窗（API 失效时的兜底录入入口）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("手动添加记录")
+        self.setFixedSize(420, 320)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        # 球桌号（必填）
+        self._edit_name = LineEdit(self)
+        form.addRow("球桌号:", self._edit_name)
+
+        # 球房名称
+        self._edit_room = LineEdit(self)
+        form.addRow("球房名称:", self._edit_room)
+
+        # 相机密码
+        self._edit_camera = LineEdit(self)
+        form.addRow("相机密码:", self._edit_camera)
+
+        # 备注（多行）
+        self._edit_remark = PlainTextEdit(self)
+        self._edit_remark.setFixedHeight(80)
+        form.addRow("备注:", self._edit_remark)
+
+        layout.addLayout(form)
+        layout.addStretch(1)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self._btn_cancel = PushButton("取消", self)
+        self._btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(self._btn_cancel)
+        self._btn_ok = PrimaryPushButton("添加", self)
+        self._btn_ok.clicked.connect(self._on_ok)
+        btn_row.addWidget(self._btn_ok)
+        layout.addLayout(btn_row)
+
+    def _on_ok(self):
+        if not self._edit_name.text().strip():
+            self._edit_name.setPlaceholderText("球桌号不能为空")
+            self._edit_name.setFocus()
+            return
+        self.accept()
+
+    def get_record(self) -> dict:
+        """返回表单数据（与 COLUMNS 字段 key 对应）"""
+        return {
+            "name": self._edit_name.text().strip(),
+            "roomName": self._edit_room.text().strip(),
+            "onlineStatusName": "",
+            "remark": self._edit_remark.toPlainText().strip(),
+            "cameraPassExt": self._edit_camera.text().strip(),
+        }
+
+
+class TablePanelWindow(QDialog):
+    """球桌管理面板"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("球桌管理")
+        self.resize(1050, 560)
+        self.setMinimumSize(700, 400)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
+
+        self._page_no: int = 1         # 当前页
+        self._page_size: int = 30      # 每页条数
+        self._total: int = 0           # 当前查询总条数
+        self._worker: TableFetchWorker = None
+        self._hidden_cols: set = {2}   # 默认隐藏「在线状态」列
+
+        self._init_ui()
+        self._load_local()
+
+        # 本地无数据时自动触发首次同步
+        db_total, _ = table_db.get_meta()
+        if db_total == 0:
+            self._sync_from_api()
+
+    # ==================== UI 构建 ====================
+
+    def _init_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 8)
+        root.setSpacing(8)
+
+        # --- 工具栏 ---
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
+
+        self._search_edit = SearchLineEdit(self)
+        self._search_edit.setPlaceholderText("搜索")
+        self._search_edit.setFixedWidth(280)
+        self._search_edit.textChanged.connect(self._on_search)
+        toolbar.addWidget(self._search_edit)
+
+        toolbar.addStretch(1)
+
+        # 筛选按钮（列显隐，CheckBox 子菜单）
+        self._col_btn = TransparentDropDownPushButton("筛选", self)
+        self._col_btn.setIcon(FluentIcon.FILTER.icon())
+        self._build_col_menu()
+        toolbar.addWidget(self._col_btn)
+
+        # 刷新按钮（从API同步）
+        self._refresh_btn = PushButton(FluentIcon.SYNC, "同步数据", self)
+        self._refresh_btn.setToolTip("从服务器拉取全量数据")
+        self._refresh_btn.clicked.connect(self._sync_from_api)
+        toolbar.addWidget(self._refresh_btn)
+
+        root.addLayout(toolbar)
+
+        # --- 数据表格 ---
+        self._table = TableWidget(self)
+        self._table.setColumnCount(len(COLUMNS))
+        self._table.setHorizontalHeaderLabels([c[1] for c in COLUMNS])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # 双击进入只读编辑态：光标可选择单元格内部分文本复制
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self._table.setItemDelegate(_ReadOnlySelectDelegate(self._table))
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setWordWrap(True)  # 备注列超宽自动换行
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_copy_menu)
+
+        # Ctrl+C 复制选中内容（鼠标左键拖选后直接复制）
+        QShortcut(QKeySequence.StandardKey.Copy, self._table).activated.connect(self._copy_selected)
+
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)  # 末列自动填满剩余宽度：拉宽无缝隙、缩窄不溢出
+        header.sectionResized.connect(self._fit_row_heights)
+        for i, (_, _, w) in enumerate(COLUMNS):
+            self._table.setColumnWidth(i, w)
+        for i in self._hidden_cols:
+            self._table.setColumnHidden(i, True)
+
+        root.addWidget(self._table, 1)
+
+        # --- 底部分页栏 ---
+        pager = QHBoxLayout()
+        pager.setSpacing(6)
+
+        self._lbl_info = QLabel("正在加载...", self)
+        pager.addWidget(self._lbl_info)
+
+        pager.addStretch(1)
+
+        # 每页条数
+        pager.addWidget(QLabel("每页:", self))
+        self._size_combo = ComboBox(self)
+        self._size_combo.addItems(["30", "50", "100", "200"])
+        self._size_combo.setFixedWidth(70)
+        self._size_combo.currentTextChanged.connect(self._on_page_size_changed)
+        pager.addWidget(self._size_combo)
+
+        self._btn_prev = ToolButton(FluentIcon.LEFT_ARROW, self)
+        self._btn_prev.setToolTip("上一页")
+        self._btn_prev.clicked.connect(self._on_prev_page)
+        pager.addWidget(self._btn_prev)
+
+        self._lbl_page = QLabel("1/1", self)
+        self._lbl_page.setMinimumWidth(50)
+        self._lbl_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pager.addWidget(self._lbl_page)
+
+        self._btn_next = ToolButton(FluentIcon.RIGHT_ARROW, self)
+        self._btn_next.setToolTip("下一页")
+        self._btn_next.clicked.connect(self._on_next_page)
+        pager.addWidget(self._btn_next)
+
+        self._lbl_time = QLabel("", self)
+        pager.addWidget(self._lbl_time)
+
+        root.addLayout(pager)
+
+    def _build_col_menu(self):
+        """构建列显隐筛选菜单（CheckBox 复选框）"""
+        menu = RoundMenu("筛选列", self)
+        for i, (_, title, _) in enumerate(COLUMNS):
+            cb = CheckBox(title, self)
+            cb.setChecked(i not in self._hidden_cols)
+            # 新建未布局的 CheckBox 默认 640x480 会导致菜单溢出截断，
+            cb.setFixedSize(max(cb.sizeHint().width() + 30, 120), 36)
+            cb.checkStateChanged.connect(lambda state, idx=i: self._toggle_col(idx, state == Qt.CheckState.Checked))
+            menu.addWidget(cb, selectable=False)
+        self._col_btn.setMenu(menu)
+
+    # ==================== 本地查询 ====================
+
+    def _load_local(self):
+        """从本地 SQLite 查询当前页并展示"""
+        keyword = self._search_edit.text().strip()
+        total, rows = table_db.query_page(self._page_no, self._page_size, keyword)
+        self._total = total
+        self._populate(rows)
+        self._update_pager(keyword)
+        # 显示数据同步时间
+        _, sync_time = table_db.get_meta()
+        self._lbl_time.setText(f"数据时间: {sync_time}" if sync_time else "未同步")
+
+    # ==================== API 同步 ====================
+
+    def _sync_from_api(self):
+        """启动 Worker 拉取全量数据写入本地库"""
+        if self._worker and self._worker.isRunning():
+            return
+        self._refresh_btn.setEnabled(False)
+        self._lbl_info.setText("正在从服务器同步...")
+        self._worker = TableFetchWorker()
+        self._worker.result_ready.connect(self._on_sync_done)
+        self._worker.error.connect(self._on_sync_error)
+        self._worker.start()
+
+    def _on_sync_done(self, rows):
+        """API 数据到手：写入本地库 → 刷新展示"""
+        count = table_db.save_all(rows)
+        self._page_no = 1
+        self._load_local()
+        self._refresh_btn.setEnabled(True)
+        self._lbl_info.setText(f"同步完成，共 {count} 条")
+
+    def _on_sync_error(self, msg):
+        self._refresh_btn.setEnabled(True)
+        self._lbl_info.setText(f"同步失败: {msg}")
+
+    # ==================== 表格填充 ====================
+
+    def _populate(self, rows):
+        self._table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            for c, (key, _, _) in enumerate(COLUMNS):
+                val = item.get(key) or ""
+                val = str(val).replace("\n", " ").strip()
+                cell = QTableWidgetItem(val)
+                cell.setToolTip(str(item.get(key) or ""))
+                # 在线状态着色
+                if key == "onlineStatusName":
+                    color = _STATUS_COLORS.get(val)
+                    if color:
+                        cell.setForeground(color)
+                self._table.setItem(r, c, cell)
+        self._fit_row_heights()
+
+    def _update_pager(self, keyword=""):
+        total_pages = max(1, math.ceil(self._total / self._page_size))
+        self._page_no = min(self._page_no, total_pages)
+        self._lbl_page.setText(f"{self._page_no}/{total_pages}")
+        self._btn_prev.setEnabled(self._page_no > 1)
+        self._btn_next.setEnabled(self._page_no < total_pages)
+        kw_tip = f"（搜索: {keyword}）" if keyword else ""
+        self._lbl_info.setText(
+            f"共 {self._total} 条{kw_tip}，当前第 {self._page_no}/{total_pages} 页")
+
+    # ==================== 交互事件 ====================
+
+    def _on_search(self, text=""):
+        """实时搜索：输入即过滤（本地全字段模糊匹配）"""
+        self._page_no = 1
+        self._load_local()
+
+    def _on_prev_page(self):
+        if self._page_no > 1:
+            self._page_no -= 1
+            self._load_local()
+
+    def _on_next_page(self):
+        total_pages = max(1, math.ceil(self._total / self._page_size))
+        if self._page_no < total_pages:
+            self._page_no += 1
+            self._load_local()
+
+    def _on_page_size_changed(self, text):
+        try:
+            size = int(text)
+        except ValueError:
+            return
+        if size != self._page_size:
+            self._page_size = size
+            self._page_no = 1
+            self._load_local()
+
+    def _toggle_col(self, col_idx, visible):
+        """列显隐切换"""
+        if visible:
+            self._hidden_cols.discard(col_idx)
+        else:
+            self._hidden_cols.add(col_idx)
+        self._table.setColumnHidden(col_idx, not visible)
+
+    # ==================== 复制功能 ====================
+
+    def _fit_row_heights(self):
+        """行高自适应换行内容，并追加上下留白避免文字紧凑挤压"""
+        self._table.resizeRowsToContents()
+        for r in range(self._table.rowCount()):
+            self._table.setRowHeight(r, max(self._table.rowHeight(r) + 14, 40))
+
+    def _show_copy_menu(self, pos):
+        """右键菜单：Fluent 风格复制（无选中时先选中右键点击的单元格）"""
+        if not self._table.selectedItems():
+            idx = self._table.indexAt(pos)
+            if not idx.isValid():
+                return
+            self._table.selectionModel().select(
+                idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        menu = RoundMenu(parent=self._table)
+        act = Action(FluentIcon.COPY, "复制", self._table)
+        act.triggered.connect(self._copy_selected)
+        menu.addAction(act)
+        menu.exec_(self._table.viewport().mapToGlobal(pos))
+
+    def _copy_selected(self):
+        """复制选中文本：编辑态优先复制光标选中部分，否则复制选中单元格"""
+        # 若当前焦点在表格内的编辑器上且光标选中了部分文本，优先复制该部分
+        focus = QApplication.focusWidget()
+        if focus is not None and self._table.isAncestorOf(focus):
+            tc_getter = getattr(focus, "textCursor", None)
+            if tc_getter is not None:
+                tc = focus.textCursor()
+                if tc.hasSelection():
+                    text = tc.selectedText().replace("\u2029", "\n")
+                    QApplication.clipboard().setText(text)
+                    return
+        items = self._table.selectedItems()
+        if not items:
+            return
+        cells = sorted((it.row(), it.column(), it.text()) for it in items)
+        lines, cur_row, parts = [], None, []
+        for row, col, text in cells:
+            if row != cur_row:
+                if parts:
+                    lines.append("\t".join(parts))
+                cur_row, parts = row, []
+            parts.append(text)
+        if parts:
+            lines.append("\t".join(parts))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    # ==================== 资源清理 ====================
+
+    def closeEvent(self, event):
+        if self._worker and self._worker.isRunning():
+            self._worker.result_ready.disconnect()
+            self._worker.error.disconnect()
+            self._worker.quit()
+            self._worker.wait(2000)
+        super().closeEvent(event)

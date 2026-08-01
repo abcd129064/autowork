@@ -313,6 +313,10 @@ class Ui_MainWindow(object):
         self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
 
+        self.table_panel_btn = FluentPushButton(self.toolbar_widget)
+        self.table_panel_btn.setObjectName(u"table_panel_btn")
+        self.horizontalLayout.addWidget(self.table_panel_btn)
+
         self.write_table = FluentPushButton(self.toolbar_widget)
         self.write_table.setObjectName(u"write_table")
         self.horizontalLayout.addWidget(self.write_table)
@@ -651,6 +655,7 @@ class Ui_MainWindow(object):
             MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"AutoWork", None))
         self.flush.setText(QCoreApplication.translate("MainWindow", u"刷新", None))
         self.date.setDateFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
+        self.table_panel_btn.setText(QCoreApplication.translate("MainWindow", u"球桌管理", None))
         self.write_table.setText(QCoreApplication.translate("MainWindow", u"打开目录", None))
         self.open_config.setText(QCoreApplication.translate("MainWindow", u"配置", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"程序:", None))
