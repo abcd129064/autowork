@@ -19,10 +19,10 @@ import core.acrylic_patch  # noqa: F401
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, qInstallMessageHandler
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 
-from core.app_paths import get_app_dir
+from core.app_paths import get_app_dir, get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler
 from main_window import MainWindow
 
@@ -63,6 +63,11 @@ def main():
 
     # 设置应用程序样式
     app.setStyle("Fusion")
+
+    # 设置应用图标（窗口标题栏/任务栏，.ico 内含多尺寸）
+    _icon_path = os.path.join(get_resource_dir(), "app_icon.ico")
+    if os.path.isfile(_icon_path):
+        app.setWindowIcon(QIcon(_icon_path))
 
     # 【关键】在创建任何 Fluent 控件之前设定主题
     try:
