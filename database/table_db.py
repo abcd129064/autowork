@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -21,7 +22,18 @@ DB_PATH = os.path.join(_DB_DIR, "tables.db")
 # ==================== 原有球桌表（wechat2-billiard 接口） ====================
 
 # 存储的字段（与面板展示列一致）
-FIELDS = ("name", "roomName", "onlineStatusName", "remark", "cameraPassExt")
+FIELDS = ("name", "roomName", "onlineStatusName", "remark", "cameraPassExt", "snk_code")
+
+# remark 中 snk 标识的提取规则（如 "... snk_001 ..." → "snk_001"），
+# 用于 frp xtcp 远程连接时定位设备（visitor serverName）
+_SNK_PATTERN = re.compile(r"snk[\w\-]*", re.IGNORECASE)
+
+
+def parse_snk_code(remark: str) -> str:
+    """从球桌 remark 中提取 snk 标识（如 snk_001），无则返回空串"""
+    m = _SNK_PATTERN.search(str(remark or ""))
+    return m.group(0) if m else ""
+
 
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS billiard_tables (
@@ -30,7 +42,8 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     roomName TEXT DEFAULT '',
     onlineStatusName TEXT DEFAULT '',
     remark  TEXT DEFAULT '',
-    cameraPassExt TEXT DEFAULT ''
+    cameraPassExt TEXT DEFAULT '',
+    snk_code TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
@@ -64,6 +77,31 @@ KD_FILE_FIELDS = (
 
 # kd_status 历史数据保留天数（按日期分区快照，过期自动清理，防止体积无限膨胀）
 _KD_KEEP_DAYS = 60
+
+# 数值型字段（以 TEXT 存储，排序时需 CAST 成数值，否则按字典序 "100" < "20"）
+_NUMERIC_SORT_FIELDS = frozenset({
+    "status", "pic_total", "normal_count", "normal_total", "except_count",
+    "untreated_count", "operation_count", "accuracy_count", "already_count",
+    "rubbish_count", "operation_rate", "error_rate",
+})
+
+# 两张运维数据表允许排序的列白名单（防 SQL 注入，列名只能来自此集合）
+_SORTABLE_COLUMNS = frozenset(STATUS_FIELDS) | {"id", "table_id", "club_name", "status"}
+
+
+def _build_order_clause(order_by: str, desc: bool) -> str:
+    """构造 ORDER BY 子句（含白名单校验与数值列 CAST）
+
+    数值字段以 TEXT 存储，直接排序会按字典序（"9" > "100"），
+    需 CAST(col AS REAL)；非数字内容 CAST 后为 0.0，自然排在数值最小端。
+    非法/未知列名回退为默认 id 排序，杜绝 SQL 注入。
+    """
+    direction = "DESC" if desc else "ASC"
+    if not order_by or order_by not in _SORTABLE_COLUMNS:
+        return f" ORDER BY id {direction}"
+    if order_by in _NUMERIC_SORT_FIELDS:
+        return f" ORDER BY CAST({order_by} AS REAL) {direction}"
+    return f" ORDER BY {order_by} {direction}"
 
 _CREATE_STATUS_SQL = """
 CREATE TABLE IF NOT EXISTS xqzg_status (
@@ -130,6 +168,16 @@ def _ensure_initialized(conn: sqlite3.Connection):
     if cols and "name" not in cols:
         conn.execute("DROP TABLE billiard_tables")
         conn.executescript(_CREATE_SQL)
+        cols = []
+    # 迁移：旧表无 snk_code 列时自动补列，并从已有 remark 回填 snk 标识
+    if cols and "snk_code" not in cols:
+        conn.execute("ALTER TABLE billiard_tables ADD COLUMN snk_code TEXT DEFAULT ''")
+        for rid, remark in conn.execute("SELECT id, remark FROM billiard_tables"):
+            snk = parse_snk_code(remark)
+            if snk:
+                conn.execute(
+                    "UPDATE billiard_tables SET snk_code = ? WHERE id = ?", (snk, rid))
+        conn.commit()
     # 迁移：kd_status 旧表可能缺少扩展字段，自动 ALTER ADD
     kd_cols = [r[1] for r in conn.execute("PRAGMA table_info(kd_status)").fetchall()]
     if kd_cols and "device_code" not in kd_cols:
@@ -156,23 +204,26 @@ def _get_conn() -> sqlite3.Connection:
 # ==================== 原有球桌表操作 ====================
 
 def save_all(rows: list) -> int:
-    """全量替换数据，返回写入条数"""
+    """全量替换数据，返回写入条数（自动从 remark 解析 snk_code 单独存列）"""
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM billiard_tables")
         data = []
         for item in rows:
+            remark = str(item.get("remark") or "")
             data.append((
                 item.get("id") or 0,
                 str(item.get("name") or ""),
                 str(item.get("roomName") or ""),
                 str(item.get("onlineStatusName") or ""),
-                str(item.get("remark") or ""),
+                remark,
                 str(item.get("cameraPassExt") or ""),
+                parse_snk_code(remark),
             ))
         conn.executemany(
-            "INSERT OR REPLACE INTO billiard_tables (id, name, roomName, onlineStatusName, remark, cameraPassExt) "
-            "VALUES (?, ?, ?, ?, ?, ?)", data)
+            "INSERT OR REPLACE INTO billiard_tables "
+            "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)", data)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
             "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
@@ -204,7 +255,7 @@ def query_page(page_no: int, page_size: int, keyword: str = "") -> tuple:
 
         offset = (page_no - 1) * page_size
         cursor = conn.execute(
-            f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt "
+            f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code "
             f"FROM billiard_tables{where} ORDER BY id DESC LIMIT ? OFFSET ?",
             params + [page_size, offset])
         cols = [d[0] for d in cursor.description]
@@ -218,18 +269,39 @@ def insert_one(record: dict) -> int:
     """手动插入单条记录（API 失效时的兜底入口），返回新记录 id"""
     conn = _get_conn()
     try:
+        remark = str(record.get("remark") or "")
         cur = conn.execute(
-            "INSERT INTO billiard_tables (name, roomName, onlineStatusName, remark, cameraPassExt) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO billiard_tables "
+            "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 str(record.get("name") or ""),
                 str(record.get("roomName") or ""),
                 str(record.get("onlineStatusName") or ""),
-                str(record.get("remark") or ""),
+                remark,
                 str(record.get("cameraPassExt") or ""),
+                parse_snk_code(remark),
             ))
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_snk_by_name(name: str) -> str:
+    """按球桌号查 snk 标识（设备状态页 table_id ↔ 球桌管理 name 关联）
+
+    未匹配或该球桌 remark 无 snk 时返回空串。
+    """
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT snk_code FROM billiard_tables WHERE TRIM(name) = ? LIMIT 1",
+            (name,)).fetchone()
+        return str(row[0] or "") if row else ""
     finally:
         conn.close()
 
@@ -254,9 +326,16 @@ def save_xqzg(rows: list) -> int:
     return _save_status_table("xqzg_status", rows, "last_sync_xqzg")
 
 
-def query_xqzg_page(page_no: int, page_size: int, keyword: str = "") -> tuple:
-    """接口1数据分页查询"""
-    return _query_status_page("xqzg_status", page_no, page_size, keyword)
+def query_xqzg_page(page_no: int, page_size: int, keyword: str = "",
+                    order_by: str = "", desc: bool = False) -> tuple:
+    """接口1数据分页查询
+
+    Args:
+        order_by: 排序字段名（白名单校验）；为空按 id 排序
+        desc: 是否降序
+    """
+    return _query_status_page("xqzg_status", page_no, page_size, keyword,
+                              order_by, desc)
 
 
 # ==================== 接口2 kd_status 表操作 ====================
@@ -327,11 +406,14 @@ def prune_kd_history(keep_days: int = 60) -> int:
         conn.close()
 
 
-def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: str = "") -> tuple:
+def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: str = "",
+                  order_by: str = "", desc: bool = False) -> tuple:
     """接口2数据分页查询（含扩展字段）
 
     Args:
         file_path: 日期路径筛选，如 "2026/08/02"；为空则查全部日期
+        order_by: 排序字段名（白名单校验）；为空按 id 排序
+        desc: 是否降序
     """
     conn = _get_conn()
     try:
@@ -358,9 +440,10 @@ def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: st
 
         offset = (page_no - 1) * page_size
         select_cols = "id, " + ", ".join(all_fields)
+        order_sql = _build_order_clause(order_by, desc)
         cursor = conn.execute(
             f"SELECT {select_cols} "
-            f"FROM kd_status{where} ORDER BY id LIMIT ? OFFSET ?",
+            f"FROM kd_status{where}{order_sql} LIMIT ? OFFSET ?",
             params + [page_size, offset])
         cols = [d[0] for d in cursor.description]
         rows = []
@@ -414,8 +497,9 @@ def _save_status_table(table_name: str, rows: list, meta_key: str) -> int:
         conn.close()
 
 
-def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: str = "") -> tuple:
-    """运维数据表通用分页查询"""
+def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: str = "",
+                       order_by: str = "", desc: bool = False) -> tuple:
+    """运维数据表通用分页查询（order_by/desc 见 _build_order_clause）"""
     conn = _get_conn()
     try:
         where = ""
@@ -432,9 +516,10 @@ def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: s
 
         offset = (page_no - 1) * page_size
         select_cols = "id, " + ", ".join(STATUS_FIELDS)
+        order_sql = _build_order_clause(order_by, desc)
         cursor = conn.execute(
             f"SELECT {select_cols} "
-            f"FROM {table_name}{where} ORDER BY id LIMIT ? OFFSET ?",
+            f"FROM {table_name}{where}{order_sql} LIMIT ? OFFSET ?",
             params + [page_size, offset])
         cols = [d[0] for d in cursor.description]
         rows = [dict(zip(cols, r)) for r in cursor.fetchall()]

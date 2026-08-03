@@ -26,10 +26,11 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
     FluentWindow, NavigationItemPosition, InfoBar, ProgressBar, TitleLabel,
     BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
-    CardWidget, setCustomStyleSheet)
+    CardWidget, setCustomStyleSheet, qconfig, isDarkTheme)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
+from core.frp_remote import FrpRemoteBridge
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
@@ -43,8 +44,9 @@ TABLE_COLUMNS = [
     ("name", "球桌号", 90),
     ("roomName", "球房名称", 200),
     ("onlineStatusName", "在线状态", 80),
-    ("remark", "备注", 470),
+    ("remark", "备注", 360),
     ("cameraPassExt", "相机密码", 220),
+    ("snk_code", "SNK标识", 110),
 ]
 
 _STATUS_COLORS = {
@@ -93,33 +95,28 @@ FIELD_CATEGORY = dict(FILE_FIELD_CATEGORIES)
 # 迁移目标选项（面板底部四个文字按钮，点击直接迁移）
 MIGRATE_DEST_OPTIONS = ["使用", "精度", "问题", "废弃"]
 
-# 迁移按钮固定背景色（参考主窗口播放/结束控件：setCustomStyleSheet 底色 + hover/pressed 变化）
-# 使用=绿 #00ff1a、精度=橙 #fa8c16、问题=红 #ff0000、废弃=白 #ffffff
+# 迁移按钮固定背景色（setCustomStyleSheet 底色 + hover/pressed 变化，深浅主题通用）
+# 低饱和高级配色：使用=翡翠绿、精度=琥珀金、问题=玫瑰红、废弃=石板灰
+_MIGRATE_BTN_QSS_TMPL = (
+    "QPushButton {{ background-color: {base}; color: #ffffff; border: none;"
+    " border-radius: 5px; font-weight: 600; padding: 5px 0; }}"
+    "QPushButton:hover {{ background-color: {hover}; }}"
+    "QPushButton:pressed {{ background-color: {pressed}; }}"
+    "QPushButton:disabled {{ background-color: #8a8f98; color: #d5d7da; }}"
+)
 _MIGRATE_BTN_QSS = {
-    "使用": (
-        "QPushButton { background-color: #00ff1a; color: #000000; border: none; }"
-        "QPushButton:hover { background-color: #33ff4d; }"
-        "QPushButton:pressed { background-color: #00cc15; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
-    "精度": (
-        "QPushButton { background-color: #fa8c16; color: #ffffff; border: none; }"
-        "QPushButton:hover { background-color: #ffa13a; }"
-        "QPushButton:pressed { background-color: #d9770d; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
-    "问题": (
-        "QPushButton { background-color: #ff0000; color: #ffffff; border: none; }"
-        "QPushButton:hover { background-color: #ff4040; }"
-        "QPushButton:pressed { background-color: #cc0000; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
-    "废弃": (
-        "QPushButton { background-color: #ffffff; color: #000000; border: 1px solid #d0d0d0; }"
-        "QPushButton:hover { background-color: #f0f0f0; }"
-        "QPushButton:pressed { background-color: #e0e0e0; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
+    # 翡翠绿：正常/在用类语义
+    "使用": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#1a9e6c", hover="#22b27b", pressed="#147f56"),
+    # 琥珀金：精度/校准类语义
+    "精度": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#c98a2d", hover="#d99a3d", pressed="#a87123"),
+    # 玫瑰红：问题/告警类语义
+    "问题": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#cf4452", hover="#da5a66", pressed="#ab3641"),
+    # 石板灰：废弃/归档类语义
+    "废弃": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#5c6675", hover="#6b7585", pressed="#4a5361"),
 }
 
 # 可迁移的文件分类字段（其余分类点开后仅查看，不显示迁移按钮）
@@ -161,6 +158,28 @@ def _save_settings(data: dict):
 
 
 # ==================== 通用组件 ====================
+
+class _SortableTableWidget(TableWidget):
+    """服务端分页排序表格：拦截客户端排序，改由页面携带排序参数重查数据库
+
+    设备状态数据由 SQLite 分页查询（LIMIT/OFFSET），若用 QTableView 默认的
+    客户端排序只会重排当前页，跨页数据错乱。重写 sortByColumn 拦截一切
+    客户端模型排序（含 Qt 内部 C++ 路径），只更新表头箭头。
+    注意：排序入口必须走 _on_header_clicked 直连路径，不能用 sortByColumn
+    触发（Qt 内部 C++ 调用不走 Python 重写，会直接排序模型）。
+    """
+
+    def sortByColumn(self, column, order):
+        # 永远不做客户端排序，仅同步表头箭头
+        hh = self.horizontalHeader()
+        hh.setSortIndicatorShown(column >= 0)
+        if column >= 0:
+            hh.setSortIndicator(column, order)
+
+    def setSortIndicator(self, column, order):
+        """仅更新表头箭头（不触发任何排序）"""
+        self.sortByColumn(column, order)
+
 
 class _ReadOnlySelectDelegate(TableItemDelegate):
     """双击单元格进入只读编辑态：支持光标拖选文本并复制，禁止修改"""
@@ -558,9 +577,15 @@ class FileListPanel(QWidget):
         self.setObjectName("fileListPanel")
         # 自定义 QWidget 子类必须开启该属性，stylesheet 背景才会被绘制（否则透明）
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(
-            "QWidget#fileListPanel { background: palette(window);"
-            " border-left: 1px solid palette(mid); }")
+        # 背景不能用 palette(...)：Qt 只在 setStyleSheet 当时解析一次，主题切换后
+        # 不会重新解析（面板会残留旧主题背景）。
+        # 也不能用 setCustomStyleSheet：它只写动态属性，实际应用依赖
+        # CustomStyleSheetWatcher，而该 watcher 仅在控件注册过 styleSheetManager
+        # （qfluentwidgets 组件自带 QSS）时才会安装，普通 QWidget 上永远不生效
+        # （导致背景透明）。
+        # 正确做法：直接 setStyleSheet 显式色值 + 监听 qconfig.themeChanged 重应用。
+        qconfig.themeChanged.connect(self._apply_theme)
+        self._apply_theme()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -618,6 +643,17 @@ class FileListPanel(QWidget):
 
         hint = CaptionLabel("双击或右键进行复制", self)
         layout.addWidget(hint)
+
+    def _apply_theme(self):
+        """按当前主题应用面板背景（显式色值，不依赖 palette 引用）"""
+        if isDarkTheme():
+            self.setStyleSheet(
+                "QWidget#fileListPanel { background: #2b2b2b;"
+                " border-left: 1px solid #3f3f3f; }")
+        else:
+            self.setStyleSheet(
+                "QWidget#fileListPanel { background: #ffffff;"
+                " border-left: 1px solid #e0e0e0; }")
 
     # ---------- 展示 ----------
 
@@ -832,7 +868,9 @@ class DevicePage(QWidget):
         root.addLayout(toolbar)
 
         # --- 表格 ---
-        self._table = TableWidget(self)
+        self._table = _SortableTableWidget(self)
+        self._sort_key = ""   # 当前排序字段（DEVICE_COLUMNS key），空=默认 id 顺序
+        self._sort_desc = False
         self._table.setColumnCount(len(DEVICE_COLUMNS))
         self._table.setHorizontalHeaderLabels([c[1] for c in DEVICE_COLUMNS])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -841,6 +879,10 @@ class DevicePage(QWidget):
         self._table.setItemDelegate(_ReadOnlySelectDelegate(self._table))
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
+        # 点击表头排序：直连 sectionClicked 手动处理（更新箭头 + SQL 重查），
+        # 绝不走 QTableView 内置排序链路（客户端排序只重排当前页，且 Qt 内部
+        # C++ 路径会绕过 Python 重写直接排序模型）
+        self._table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.cellClicked.connect(self._on_cell_clicked)
@@ -968,11 +1010,15 @@ class DevicePage(QWidget):
     def _load_local(self):
         keyword = self._search_edit.text().strip()
         if self._active_source() == "xqzg":
-            total, rows = table_db.query_xqzg_page(self._page_no, self._page_size, keyword)
+            total, rows = table_db.query_xqzg_page(
+                self._page_no, self._page_size, keyword,
+                self._sort_key, self._sort_desc)
             date = ""  # xqzg 不按日期筛选
         else:
             date = self._current_date()
-            total, rows = table_db.query_kd_page(self._page_no, self._page_size, keyword, date)
+            total, rows = table_db.query_kd_page(
+                self._page_no, self._page_size, keyword, date,
+                self._sort_key, self._sort_desc)
         self._total = total
         self._populate(rows)
         self._update_pager(date, keyword)
@@ -1043,6 +1089,25 @@ class DevicePage(QWidget):
                 self._table.setItem(r, c, cell)
         _fit_table_rows(self._table)
 
+    def _on_header_clicked(self, column):
+        """表头点击：同列切换升/降序，新列默认升序；更新箭头后重查数据库"""
+        if not (0 <= column < len(DEVICE_COLUMNS)):
+            return
+        key = DEVICE_COLUMNS[column][0]
+        if key == self._sort_key:
+            desc = not self._sort_desc
+        else:
+            desc = False
+        order = (Qt.SortOrder.DescendingOrder if desc
+                 else Qt.SortOrder.AscendingOrder)
+        self._table.setSortIndicator(column, order)
+        if key == self._sort_key and desc == self._sort_desc:
+            return
+        self._sort_key = key
+        self._sort_desc = desc
+        self._page_no = 1
+        self._load_local()
+
     def _update_pager(self, date="", keyword=""):
         total_pages = max(1, math.ceil(self._total / self._page_size))
         self._page_no = min(self._page_no, total_pages)
@@ -1110,7 +1175,43 @@ class DevicePage(QWidget):
         act_copy = Action(FluentIcon.COPY, "复制单元格", self._table)
         act_copy.triggered.connect(lambda: _copy_table_selection(self._table))
         menu.addAction(act_copy)
+
+        # 远程连接：按球桌号关联球桌管理 remark 中的 snk 标识（frp xtcp
+        # visitor serverName），无 snk 的设备菜单项保留可见但置灰并说明原因
+        self._add_remote_actions(menu, idx.row())
         menu.exec_(self._table.viewport().mapToGlobal(pos))
+
+    def _add_remote_actions(self, menu, row_idx):
+        """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件 / 远程桌面）"""
+        row = self._get_row_at(row_idx)
+        table_id = str(row.get("table_id") or "").strip()
+        snk = table_db.get_snk_by_name(table_id)
+        menu.addSeparator()
+        remote_items = [
+            ("ssh", FluentIcon.COMMAND_PROMPT, "SSH 终端"),
+            ("sftp", FluentIcon.FOLDER, "SFTP 文件管理"),
+            ("rdp", FluentIcon.VIDEO, "远程桌面"),
+        ]
+        if not snk:
+            # 置灰但可见：提示功能存在，仅该设备缺 snk 配置不可用
+            tip = Action(FluentIcon.INFO, "该设备无 snk 标识，无法远程", self._table)
+            tip.setEnabled(False)
+            menu.addAction(tip)
+        for kind, icon, label in remote_items:
+            act = Action(icon, label if snk else f"{label}（无 snk）", self._table)
+            act.setEnabled(bool(snk))
+            if snk:
+                act.triggered.connect(
+                    lambda _=False, k=kind: self._open_remote_session(k, snk, table_id))
+            menu.addAction(act)
+
+    def _open_remote_session(self, kind, snk, table_id):
+        """委托运维面板窗口的 FrpRemoteBridge 建立 xtcp 隧道并打开会话"""
+        bridge = getattr(self.window(), "_remote_bridge", None)
+        if bridge is None:
+            InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
+            return
+        bridge.open_session(kind, snk, table_id)
 
     def _show_files_dialog(self, row_idx):
         row = self._get_row_at(row_idx)
@@ -1495,6 +1596,9 @@ class ManagementPanelWindow(FluentWindow):
         self.navigationInterface.setAcrylicEnabled(True)
         self.navigationInterface.setCurrentItem(self.table_page.objectName())
 
+        # 远程桥接：设备状态页右键菜单按 snk 建立 frp xtcp 隧道并打开会话
+        self._remote_bridge = FrpRemoteBridge(self)
+
     def showEvent(self, event):
         super().showEvent(event)
         self._reset_titlebar_button_state()
@@ -1517,7 +1621,10 @@ class ManagementPanelWindow(FluentWindow):
             pass
 
     def closeEvent(self, event):
-        """关闭窗口时清理所有 Worker"""
+        """关闭窗口时清理所有 Worker 与远程桥接（frpc 进程/会话窗口）"""
+        bridge = getattr(self, "_remote_bridge", None)
+        if bridge is not None:
+            bridge.shutdown()
         for page in (self.table_page, self.device_page, self.settings_page):
             for attr in ("_worker", "_migrate_worker", "_refresh_worker", "_test_worker"):
                 worker = getattr(page, attr, None)

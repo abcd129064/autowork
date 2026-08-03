@@ -53,12 +53,14 @@ class SSHTerminalPanel(QWidget):
     # reader 线程通过此信号将输出安全投递到 GUI 线程
     _output_signal = Signal(str)
 
-    def __init__(self, host, port, username, password, log_callback=None, parent=None):
+    def __init__(self, host, port, username, password, log_callback=None, parent=None,
+                 server_name=''):
         super().__init__(parent)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        self._server_name = server_name
         self._log = log_callback or (lambda msg: None)
         self._client = None
         self._channel = None
@@ -77,6 +79,8 @@ class SSHTerminalPanel(QWidget):
     @property
     def tab_title(self) -> str:
         """返回适合标签页显示的标题"""
+        if getattr(self, '_server_name', ''):
+            return f"SSH - {self._server_name}"
         return f"SSH - {self._host}:{self._port}"
 
     # ─── UI ───────────────────────────────────────────────────────────────
