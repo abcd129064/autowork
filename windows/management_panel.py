@@ -17,7 +17,7 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
-    QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser)
+    QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser, QTreeWidgetItem)
 from PySide6.QtCore import (Qt, QItemSelectionModel, QDate, QPoint, QPropertyAnimation,
     QEasingCurve, QTimer, QEvent)
 from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette, QCursor
@@ -26,14 +26,18 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
     FluentWindow, NavigationItemPosition, InfoBar, ProgressBar, TitleLabel,
     BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
-    CardWidget, setCustomStyleSheet)
+    CardWidget, setCustomStyleSheet, qconfig, isDarkTheme, MessageBox, TreeWidget,
+    MessageBoxBase)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
+from core.frp_remote import FrpRemoteBridge
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
                                   CATEGORY_DIRS)
+from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
+                                    clip_base_name)
 from database import table_db
 
 # ==================== 常量定义 ====================
@@ -43,8 +47,9 @@ TABLE_COLUMNS = [
     ("name", "球桌号", 90),
     ("roomName", "球房名称", 200),
     ("onlineStatusName", "在线状态", 80),
-    ("remark", "备注", 470),
+    ("remark", "备注", 360),
     ("cameraPassExt", "相机密码", 220),
+    ("snk_code", "SNK标识", 110),
 ]
 
 _STATUS_COLORS = {
@@ -93,33 +98,28 @@ FIELD_CATEGORY = dict(FILE_FIELD_CATEGORIES)
 # 迁移目标选项（面板底部四个文字按钮，点击直接迁移）
 MIGRATE_DEST_OPTIONS = ["使用", "精度", "问题", "废弃"]
 
-# 迁移按钮固定背景色（参考主窗口播放/结束控件：setCustomStyleSheet 底色 + hover/pressed 变化）
-# 使用=绿 #00ff1a、精度=橙 #fa8c16、问题=红 #ff0000、废弃=白 #ffffff
+# 迁移按钮固定背景色（setCustomStyleSheet 底色 + hover/pressed 变化，深浅主题通用）
+# 低饱和高级配色：使用=翡翠绿、精度=琥珀金、问题=玫瑰红、废弃=石板灰
+_MIGRATE_BTN_QSS_TMPL = (
+    "QPushButton {{ background-color: {base}; color: #ffffff; border: none;"
+    " border-radius: 5px; font-weight: 600; padding: 5px 0; }}"
+    "QPushButton:hover {{ background-color: {hover}; }}"
+    "QPushButton:pressed {{ background-color: {pressed}; }}"
+    "QPushButton:disabled {{ background-color: #8a8f98; color: #d5d7da; }}"
+)
 _MIGRATE_BTN_QSS = {
-    "使用": (
-        "QPushButton { background-color: #00ff1a; color: #000000; border: none; }"
-        "QPushButton:hover { background-color: #33ff4d; }"
-        "QPushButton:pressed { background-color: #00cc15; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
-    "精度": (
-        "QPushButton { background-color: #fa8c16; color: #ffffff; border: none; }"
-        "QPushButton:hover { background-color: #ffa13a; }"
-        "QPushButton:pressed { background-color: #d9770d; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
-    "问题": (
-        "QPushButton { background-color: #ff0000; color: #ffffff; border: none; }"
-        "QPushButton:hover { background-color: #ff4040; }"
-        "QPushButton:pressed { background-color: #cc0000; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
-    "废弃": (
-        "QPushButton { background-color: #ffffff; color: #000000; border: 1px solid #d0d0d0; }"
-        "QPushButton:hover { background-color: #f0f0f0; }"
-        "QPushButton:pressed { background-color: #e0e0e0; }"
-        "QPushButton:disabled { background-color: #9e9e9e; color: #cfcfcf; }"
-    ),
+    # 翡翠绿：正常/在用类语义
+    "使用": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#1a9e6c", hover="#22b27b", pressed="#147f56"),
+    # 琥珀金：精度/校准类语义
+    "精度": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#c98a2d", hover="#d99a3d", pressed="#a87123"),
+    # 玫瑰红：问题/告警类语义
+    "问题": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#cf4452", hover="#da5a66", pressed="#ab3641"),
+    # 石板灰：废弃/归档类语义
+    "废弃": _MIGRATE_BTN_QSS_TMPL.format(
+        base="#5c6675", hover="#6b7585", pressed="#4a5361"),
 }
 
 # 可迁移的文件分类字段（其余分类点开后仅查看，不显示迁移按钮）
@@ -160,7 +160,39 @@ def _save_settings(data: dict):
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
+def _fmt_size(n: float) -> str:
+    """字节数格式化为人类可读大小（B/KB/MB/GB）"""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
 # ==================== 通用组件 ====================
+
+class _SortableTableWidget(TableWidget):
+    """服务端分页排序表格：拦截客户端排序，改由页面携带排序参数重查数据库
+
+    设备状态数据由 SQLite 分页查询（LIMIT/OFFSET），若用 QTableView 默认的
+    客户端排序只会重排当前页，跨页数据错乱。重写 sortByColumn 拦截一切
+    客户端模型排序（含 Qt 内部 C++ 路径），只更新表头箭头。
+    注意：排序入口必须走 _on_header_clicked 直连路径，不能用 sortByColumn
+    触发（Qt 内部 C++ 调用不走 Python 重写，会直接排序模型）。
+    """
+
+    def sortByColumn(self, column, order):
+        # 永远不做客户端排序，仅同步表头箭头
+        hh = self.horizontalHeader()
+        hh.setSortIndicatorShown(column >= 0)
+        if column >= 0:
+            hh.setSortIndicator(column, order)
+
+    def setSortIndicator(self, column, order):
+        """仅更新表头箭头（不触发任何排序）"""
+        self.sortByColumn(column, order)
+
 
 class _ReadOnlySelectDelegate(TableItemDelegate):
     """双击单元格进入只读编辑态：支持光标拖选文本并复制，禁止修改"""
@@ -231,7 +263,7 @@ class AddRecordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("手动添加记录")
-        self.setFixedSize(420, 320)
+        self.setFixedSize(420, 356)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
@@ -246,6 +278,9 @@ class AddRecordDialog(QDialog):
         form.addRow("球房名称:", self._edit_room)
         self._edit_camera = LineEdit(self)
         form.addRow("相机密码:", self._edit_camera)
+        self._edit_snk = LineEdit(self)
+        self._edit_snk.setPlaceholderText("如 snk_001（留空则从备注解析）")
+        form.addRow("SNK标识:", self._edit_snk)
         self._edit_remark = PlainTextEdit(self)
         self._edit_remark.setFixedHeight(80)
         form.addRow("备注:", self._edit_remark)
@@ -276,7 +311,22 @@ class AddRecordDialog(QDialog):
             "onlineStatusName": "",
             "remark": self._edit_remark.toPlainText().strip(),
             "cameraPassExt": self._edit_camera.text().strip(),
+            "snk_code": self._edit_snk.text().strip(),
         }
+
+
+class EditSnkDialog(MessageBoxBase):
+    """SNK 标识手动写入/修改对话框（留空保存即清空）"""
+
+    def __init__(self, parent, table_name: str, current: str):
+        super().__init__(parent)
+        self.titleLabel = BodyLabel(f"修改 SNK 标识 · 球桌 {table_name}", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.edit = LineEdit(self)
+        self.edit.setText(current)
+        self.edit.setPlaceholderText("如 snk_001（留空则清空）")
+        self.edit.setMinimumWidth(280)
+        self.viewLayout.addWidget(self.edit)
 
 
 class DeviceFilesDialog(QDialog):
@@ -320,6 +370,94 @@ class DeviceFilesDialog(QDialog):
                 parts.append(f"  {f}")
             parts.append("")
         return "\n".join(parts)
+
+
+class UploadListDialog(QDialog):
+    """上传清单弹窗：树形展示 {videos_dir}/upload 下待上传文件（设备→文件）"""
+
+    def __init__(self, upload_root: str, parent=None):
+        super().__init__(parent)
+        self._upload_root = upload_root
+        self.setWindowTitle("上传清单")
+        self.resize(560, 460)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(8)
+        layout.addWidget(BodyLabel(f"收集目录: {upload_root}", self))
+
+        self._tree = TreeWidget(self)
+        self._tree.setColumnCount(2)
+        self._tree.setHeaderLabels(["文件", "大小"])
+        self._tree.setAlternatingRowColors(True)
+        self._tree.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self._tree, 1)
+
+        bottom = QHBoxLayout()
+        self._lbl_total = CaptionLabel("", self)
+        bottom.addWidget(self._lbl_total)
+        bottom.addStretch(1)
+        btn_open = PushButton(FluentIcon.FOLDER, "打开目录", self)
+        btn_open.clicked.connect(self._open_dir)
+        bottom.addWidget(btn_open)
+        btn_close = PushButton("关闭", self)
+        btn_close.clicked.connect(self.accept)
+        bottom.addWidget(btn_close)
+        layout.addLayout(bottom)
+
+        # 填充放最后：_populate 需要 _lbl_total 已存在
+        self._populate()
+
+    def _populate(self):
+        total_files = 0
+        total_size = 0
+        try:
+            entries = sorted(os.listdir(self._upload_root))
+        except OSError:
+            entries = []
+        for dev in entries:
+            dev_dir = os.path.join(self._upload_root, dev)
+            if not os.path.isdir(dev_dir):
+                continue
+            dev_item = QTreeWidgetItem([dev, ""])
+            dev_size = 0
+            for fname in sorted(os.listdir(dev_dir)):
+                full = os.path.join(dev_dir, fname)
+                if not os.path.isfile(full):
+                    continue
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = 0
+                dev_size += size
+                total_files += 1
+                dev_item.addChild(QTreeWidgetItem([fname, _fmt_size(size)]))
+            dev_item.setText(1, _fmt_size(dev_size))
+            dev_item.setExpanded(True)
+            self._tree.addTopLevelItem(dev_item)
+            total_size += dev_size
+        self._lbl_total.setText(f"共 {total_files} 个文件，总大小 {_fmt_size(total_size)}")
+
+    def _open_dir(self):
+        if os.path.isdir(self._upload_root):
+            os.startfile(self._upload_root)
+
+    @staticmethod
+    def file_count(upload_root: str) -> int:
+        """清单中的文件总数（供外部确认弹窗展示）"""
+        count = 0
+        try:
+            entries = os.listdir(upload_root)
+        except OSError:
+            return 0
+        for dev in entries:
+            dev_dir = os.path.join(upload_root, dev)
+            if os.path.isdir(dev_dir):
+                count += sum(1 for f in os.listdir(dev_dir)
+                             if os.path.isfile(os.path.join(dev_dir, f)))
+        return count
 
 
 # ==================== 页面1: 球桌管理 ====================
@@ -522,8 +660,8 @@ class TablePage(QWidget):
         self._table.setColumnHidden(col_idx, not visible)
 
     def _show_copy_menu(self, pos):
+        idx = self._table.indexAt(pos)
         if not self._table.selectedItems():
-            idx = self._table.indexAt(pos)
             if not idx.isValid():
                 return
             self._table.selectionModel().select(
@@ -532,7 +670,36 @@ class TablePage(QWidget):
         act = Action(FluentIcon.COPY, "复制", self._table)
         act.triggered.connect(lambda: _copy_table_selection(self._table))
         menu.addAction(act)
+        # 右键 SNK 标识列：支持手动写入/修改（无 snk 设备的远程入口依赖此值）
+        if idx.isValid() and TABLE_COLUMNS[idx.column()][0] == "snk_code":
+            row = idx.row()
+            name_item = self._table.item(row, 0)
+            table_name = name_item.text().strip() if name_item else ""
+            if table_name:
+                snk_item = self._table.item(row, idx.column())
+                current = snk_item.text().strip() if snk_item else ""
+                act_snk = Action(FluentIcon.EDIT, "修改 SNK 标识", self._table)
+                act_snk.triggered.connect(
+                    lambda _=False, n=table_name, c=current: self._edit_snk(n, c))
+                menu.addAction(act_snk)
         menu.exec_(self._table.viewport().mapToGlobal(pos))
+
+    def _edit_snk(self, table_name, current):
+        """弹窗手动写入/修改指定球桌的 snk 标识，保存后刷新当前页"""
+        dlg = EditSnkDialog(self, table_name, current)
+        dlg.yesButton.setText("保存")
+        dlg.cancelButton.setText("取消")
+        if not dlg.exec():
+            return
+        new_snk = dlg.edit.text().strip()
+        affected = table_db.update_snk_by_name(table_name, new_snk)
+        if affected:
+            self._load_local()
+            InfoBar.success("已保存",
+                            f"球桌「{table_name}」SNK 标识已更新为「{new_snk or '空'}」",
+                            parent=self, duration=2500)
+        else:
+            InfoBar.warning("未修改", "未找到匹配的球桌记录", parent=self, duration=2500)
 
 
 # ==================== 文件列表面板（右侧滑出） ====================
@@ -558,9 +725,15 @@ class FileListPanel(QWidget):
         self.setObjectName("fileListPanel")
         # 自定义 QWidget 子类必须开启该属性，stylesheet 背景才会被绘制（否则透明）
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(
-            "QWidget#fileListPanel { background: palette(window);"
-            " border-left: 1px solid palette(mid); }")
+        # 背景不能用 palette(...)：Qt 只在 setStyleSheet 当时解析一次，主题切换后
+        # 不会重新解析（面板会残留旧主题背景）。
+        # 也不能用 setCustomStyleSheet：它只写动态属性，实际应用依赖
+        # CustomStyleSheetWatcher，而该 watcher 仅在控件注册过 styleSheetManager
+        # （qfluentwidgets 组件自带 QSS）时才会安装，普通 QWidget 上永远不生效
+        # （导致背景透明）。
+        # 正确做法：直接 setStyleSheet 显式色值 + 监听 qconfig.themeChanged 重应用。
+        qconfig.themeChanged.connect(self._apply_theme)
+        self._apply_theme()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -618,6 +791,17 @@ class FileListPanel(QWidget):
 
         hint = CaptionLabel("双击或右键进行复制", self)
         layout.addWidget(hint)
+
+    def _apply_theme(self):
+        """按当前主题应用面板背景（显式色值，不依赖 palette 引用）"""
+        if isDarkTheme():
+            self.setStyleSheet(
+                "QWidget#fileListPanel { background: #2b2b2b;"
+                " border-left: 1px solid #3f3f3f; }")
+        else:
+            self.setStyleSheet(
+                "QWidget#fileListPanel { background: #ffffff;"
+                " border-left: 1px solid #e0e0e0; }")
 
     # ---------- 展示 ----------
 
@@ -786,6 +970,8 @@ class DevicePage(QWidget):
         self._migrate_worker = None
         self._refresh_worker = None
         self._hourly_worker = None  # 每小时定时拉取专用，与手动搜索 _worker 隔离
+        self._collect_workers = []   # 收集 Worker 列表（不同设备可并行）
+        self._upload_worker = None   # 打包上传 Worker（全局唯一）
         self._init_ui()
         # 默认日期为昨天（与主窗口一致）
         yesterday = QDate.currentDate().addDays(-1)
@@ -825,6 +1011,16 @@ class DevicePage(QWidget):
         toolbar.addWidget(self._search_edit)
         toolbar.addStretch(1)
 
+        self._btn_upload_list = PushButton(FluentIcon.LIBRARY, "上传清单", self)
+        self._btn_upload_list.setToolTip("查看已收集待上传的文件（videos_dir/upload）")
+        self._btn_upload_list.clicked.connect(self._show_upload_list)
+        toolbar.addWidget(self._btn_upload_list)
+
+        self._btn_package = PushButton(FluentIcon.SEND, "打包上传", self)
+        self._btn_package.setToolTip("将收集的文件打包 zip 上传服务器，成功后清空本地 upload 目录")
+        self._btn_package.clicked.connect(self._on_package_upload)
+        toolbar.addWidget(self._btn_package)
+
         self._sync_btn = PushButton(FluentIcon.SYNC, "同步数据", self)
         self._sync_btn.setToolTip("从服务器拉取所选日期的设备数据")
         self._sync_btn.clicked.connect(self._search_from_api)
@@ -832,7 +1028,9 @@ class DevicePage(QWidget):
         root.addLayout(toolbar)
 
         # --- 表格 ---
-        self._table = TableWidget(self)
+        self._table = _SortableTableWidget(self)
+        self._sort_key = ""   # 当前排序字段（DEVICE_COLUMNS key），空=默认 id 顺序
+        self._sort_desc = False
         self._table.setColumnCount(len(DEVICE_COLUMNS))
         self._table.setHorizontalHeaderLabels([c[1] for c in DEVICE_COLUMNS])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -841,6 +1039,10 @@ class DevicePage(QWidget):
         self._table.setItemDelegate(_ReadOnlySelectDelegate(self._table))
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
+        # 点击表头排序：直连 sectionClicked 手动处理（更新箭头 + SQL 重查），
+        # 绝不走 QTableView 内置排序链路（客户端排序只重排当前页，且 Qt 内部
+        # C++ 路径会绕过 Python 重写直接排序模型）
+        self._table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.cellClicked.connect(self._on_cell_clicked)
@@ -968,11 +1170,15 @@ class DevicePage(QWidget):
     def _load_local(self):
         keyword = self._search_edit.text().strip()
         if self._active_source() == "xqzg":
-            total, rows = table_db.query_xqzg_page(self._page_no, self._page_size, keyword)
+            total, rows = table_db.query_xqzg_page(
+                self._page_no, self._page_size, keyword,
+                self._sort_key, self._sort_desc)
             date = ""  # xqzg 不按日期筛选
         else:
             date = self._current_date()
-            total, rows = table_db.query_kd_page(self._page_no, self._page_size, keyword, date)
+            total, rows = table_db.query_kd_page(
+                self._page_no, self._page_size, keyword, date,
+                self._sort_key, self._sort_desc)
         self._total = total
         self._populate(rows)
         self._update_pager(date, keyword)
@@ -1043,6 +1249,25 @@ class DevicePage(QWidget):
                 self._table.setItem(r, c, cell)
         _fit_table_rows(self._table)
 
+    def _on_header_clicked(self, column):
+        """表头点击：同列切换升/降序，新列默认升序；更新箭头后重查数据库"""
+        if not (0 <= column < len(DEVICE_COLUMNS)):
+            return
+        key = DEVICE_COLUMNS[column][0]
+        if key == self._sort_key:
+            desc = not self._sort_desc
+        else:
+            desc = False
+        order = (Qt.SortOrder.DescendingOrder if desc
+                 else Qt.SortOrder.AscendingOrder)
+        self._table.setSortIndicator(column, order)
+        if key == self._sort_key and desc == self._sort_desc:
+            return
+        self._sort_key = key
+        self._sort_desc = desc
+        self._page_no = 1
+        self._load_local()
+
     def _update_pager(self, date="", keyword=""):
         total_pages = max(1, math.ceil(self._total / self._page_size))
         self._page_no = min(self._page_no, total_pages)
@@ -1110,7 +1335,43 @@ class DevicePage(QWidget):
         act_copy = Action(FluentIcon.COPY, "复制单元格", self._table)
         act_copy.triggered.connect(lambda: _copy_table_selection(self._table))
         menu.addAction(act_copy)
+
+        # 远程连接：按球桌号关联球桌管理 remark 中的 snk 标识（frp xtcp
+        # visitor serverName），无 snk 的设备菜单项保留可见但置灰并说明原因
+        self._add_remote_actions(menu, idx.row())
         menu.exec_(self._table.viewport().mapToGlobal(pos))
+
+    def _add_remote_actions(self, menu, row_idx):
+        """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件 / 远程桌面）"""
+        row = self._get_row_at(row_idx)
+        table_id = str(row.get("table_id") or "").strip()
+        snk = table_db.get_snk_by_name(table_id)
+        menu.addSeparator()
+        remote_items = [
+            ("ssh", FluentIcon.COMMAND_PROMPT, "SSH 终端"),
+            ("sftp", FluentIcon.FOLDER, "SFTP 文件管理"),
+            ("rdp", FluentIcon.VIDEO, "远程桌面"),
+        ]
+        if not snk:
+            # 置灰但可见：提示功能存在，仅该设备缺 snk 配置不可用
+            tip = Action(FluentIcon.INFO, "该设备无 snk 标识，无法远程", self._table)
+            tip.setEnabled(False)
+            menu.addAction(tip)
+        for kind, icon, label in remote_items:
+            act = Action(icon, label if snk else f"{label}（无 snk）", self._table)
+            act.setEnabled(bool(snk))
+            if snk:
+                act.triggered.connect(
+                    lambda _=False, k=kind: self._open_remote_session(k, snk, table_id))
+            menu.addAction(act)
+
+    def _open_remote_session(self, kind, snk, table_id):
+        """委托运维面板窗口的 FrpRemoteBridge 建立 xtcp 隧道并打开会话"""
+        bridge = getattr(self.window(), "_remote_bridge", None)
+        if bridge is None:
+            InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
+            return
+        bridge.open_session(kind, snk, table_id)
 
     def _show_files_dialog(self, row_idx):
         row = self._get_row_at(row_idx)
@@ -1146,6 +1407,10 @@ class DevicePage(QWidget):
         title, fields = cfg
         can_migrate = bool(fields) and all(f in _MIGRATABLE_FIELDS for f in fields)
         self._file_panel.show_files(data, title, fields, can_migrate=can_migrate)
+        # 点击精度/问题后自动收集该设备的视频/日志/CPP日志/detect.bin 到 upload 工作区
+        if key in ("accuracy_count", "already_count"):
+            field = "accuracy_files" if key == "accuracy_count" else "already_files"
+            self._auto_collect(data, field)
 
     def migrate_file(self, fname, src_cat, dest_cat):
         """迁移单个文件到目标分类（调用 migrate_image API）"""
@@ -1173,6 +1438,129 @@ class DevicePage(QWidget):
     def _on_migrate_fail(self, msg):
         InfoBar.error("迁移失败", msg.split("\n")[0], parent=self, duration=4000)
         self._silent_refresh()
+
+    # ---------- 收集与上传 ----------
+
+    def _upload_root(self) -> str:
+        """返回上传收集目录 {videos_dir}/upload；未配置 videos_dir 时提示并返回空串"""
+        videos_dir = (_load_settings().get("videos_dir") or "").strip()
+        if not videos_dir:
+            InfoBar.warning("提示", "未配置 videos_dir，请先在设置中配置视频/日志目录",
+                            parent=self, duration=3000)
+            return ""
+        return os.path.join(videos_dir, "upload")
+
+    def _auto_collect(self, row: dict, field: str):
+        """点击精度/问题后自动收集设备文件到 upload 工作区
+
+        视频/日志按文件列表的基础名收集；detect.bin 与 CPP 日志（daily_*.txt）
+        只收集一次（目标已存在即跳过）。设备目录优先按 table_id 匹配，
+        失败回退 device_code。
+        """
+        videos_dir = (_load_settings().get("videos_dir") or "").strip()
+        if not videos_dir or not os.path.isdir(videos_dir):
+            InfoBar.warning("无法收集", "videos_dir 未配置或目录不存在",
+                            parent=self, duration=3000)
+            return
+        candidates = [str(row.get("table_id") or "").strip(),
+                      str(row.get("device_code") or "").strip()]
+        device_id = next((n for n in dict.fromkeys(candidates)
+                          if n and os.path.isdir(os.path.join(videos_dir, n))), "")
+        if not device_id:
+            InfoBar.warning("无法收集",
+                            "本地设备目录不存在: " + " / ".join(c for c in candidates if c),
+                            parent=self, duration=3000)
+            return
+        bases = sorted({b for b in (clip_base_name(f) for f in (row.get(field) or [])) if b})
+        if not bases:
+            return
+        worker = CollectFilesWorker(videos_dir, device_id, bases)
+        worker.done.connect(
+            lambda dev, n, miss, w=worker: self._on_collect_done(dev, n, miss, w))
+        worker.error.connect(
+            lambda msg: InfoBar.error("收集失败", msg.split(chr(10))[0],
+                                      parent=self, duration=4000))
+        self._collect_workers.append(worker)
+        worker.start()
+        InfoBar.info("收集中",
+                     f"{device_id} · {len(bases)} 个视频/日志 → upload 目录",
+                     parent=self, duration=1500)
+
+    def _on_collect_done(self, device_id, copied, missing, worker):
+        if worker in self._collect_workers:
+            self._collect_workers.remove(worker)
+        if missing:
+            shown = ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else "")
+            InfoBar.warning("收集完成",
+                            f"{device_id}: 复制 {copied} 个（已存在跳过），缺失 {len(missing)} 个: {shown}",
+                            parent=self, duration=4000)
+        else:
+            InfoBar.success("收集完成",
+                            f"{device_id}: 复制 {copied} 个文件到 upload 目录（已存在跳过）",
+                            parent=self, duration=3000)
+
+    def _show_upload_list(self):
+        root = self._upload_root()
+        if not root:
+            return
+        if not os.path.isdir(root) or not os.listdir(root):
+            InfoBar.info("上传清单", "暂无待上传文件，请先点击精度/问题收集文件",
+                         parent=self, duration=3000)
+            return
+        UploadListDialog(root, self).exec()
+
+    def _on_package_upload(self):
+        """打包 upload 目录为 zip 并 SFTP 上传，成功后清空本地目录"""
+        root = self._upload_root()
+        if not root:
+            return
+        if not os.path.isdir(root) or not os.listdir(root):
+            InfoBar.info("提示", "upload 目录为空，请先点击精度/问题收集文件",
+                         parent=self, duration=3000)
+            return
+        if self._upload_worker is not None and self._upload_worker.isRunning():
+            InfoBar.warning("提示", "已有上传进行中，请稍候", parent=self, duration=2000)
+            return
+        settings = _load_settings()
+        host = str(settings.get("upload_host") or "49.235.34.253").strip()
+        try:
+            port = int(settings.get("upload_port") or 22)
+        except (TypeError, ValueError):
+            port = 22
+        remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
+        username = settings.get("ssh_user", "")
+        password = settings.get("ssh_pass", "")
+
+        count = UploadListDialog.file_count(root)
+        box = MessageBox(
+            "打包上传",
+            f"将把 upload 目录中的 {count} 个文件打包为 zip，上传到\n"
+            f"{host}:{remote_dir}\n\n上传成功后将清空本地 upload 目录，确定继续？",
+            self)
+        box.yesButton.setText("上传")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+
+        self._btn_package.setEnabled(False)
+        self._upload_worker = ZipUploadWorker(
+            root, host, port, username, password, remote_dir)
+        # 阶段提示显示在底部状态栏，避免多个 InfoBar 叠加
+        self._upload_worker.progress.connect(self._lbl_time.setText)
+        self._upload_worker.done.connect(self._on_upload_done)
+        self._upload_worker.error.connect(self._on_upload_fail)
+        self._upload_worker.start()
+
+    def _on_upload_done(self, info):
+        self._btn_package.setEnabled(True)
+        self._lbl_time.setText("")
+        InfoBar.success("上传成功", f"{info} · 本地 upload 目录已清空",
+                        parent=self, duration=5000)
+
+    def _on_upload_fail(self, msg):
+        self._btn_package.setEnabled(True)
+        self._lbl_time.setText("")
+        InfoBar.error("上传失败", msg.split(chr(10))[0], parent=self, duration=5000)
 
     def _silent_refresh(self):
         """迁移后静默重新拉取当前日期数据，刷新表格与文件面板"""
@@ -1316,11 +1704,13 @@ class AdminSettingsPage(QWidget):
             "onlineStatusName": "",
             "remark": self._add_edit_remark.toPlainText().strip(),
             "cameraPassExt": self._add_edit_camera.text().strip(),
+            "snk_code": self._add_edit_snk.text().strip(),
         }
         table_db.insert_one(record)
         self._add_edit_name.clear()
         self._add_edit_room.clear()
         self._add_edit_camera.clear()
+        self._add_edit_snk.clear()
         self._add_edit_remark.clear()
         win = self.window()
         page = getattr(win, "table_page", None)
@@ -1350,6 +1740,9 @@ class AdminSettingsPage(QWidget):
         self._add_edit_camera = LineEdit(card)
         self._add_edit_camera.setPlaceholderText("相机密码")
         form.addRow("相机密码:", self._add_edit_camera)
+        self._add_edit_snk = LineEdit(card)
+        self._add_edit_snk.setPlaceholderText("如 snk_001（留空则从备注解析）")
+        form.addRow("SNK标识:", self._add_edit_snk)
         self._add_edit_remark = PlainTextEdit(card)
         self._add_edit_remark.setFixedHeight(72)
         form.addRow("备注:", self._add_edit_remark)
@@ -1495,6 +1888,9 @@ class ManagementPanelWindow(FluentWindow):
         self.navigationInterface.setAcrylicEnabled(True)
         self.navigationInterface.setCurrentItem(self.table_page.objectName())
 
+        # 远程桥接：设备状态页右键菜单按 snk 建立 frp xtcp 隧道并打开会话
+        self._remote_bridge = FrpRemoteBridge(self)
+
     def showEvent(self, event):
         super().showEvent(event)
         self._reset_titlebar_button_state()
@@ -1517,9 +1913,13 @@ class ManagementPanelWindow(FluentWindow):
             pass
 
     def closeEvent(self, event):
-        """关闭窗口时清理所有 Worker"""
+        """关闭窗口时清理所有 Worker 与远程桥接（frpc 进程/会话窗口）"""
+        bridge = getattr(self, "_remote_bridge", None)
+        if bridge is not None:
+            bridge.shutdown()
         for page in (self.table_page, self.device_page, self.settings_page):
-            for attr in ("_worker", "_migrate_worker", "_refresh_worker", "_test_worker"):
+            for attr in ("_worker", "_migrate_worker", "_refresh_worker", "_test_worker",
+                         "_upload_worker"):
                 worker = getattr(page, attr, None)
                 if worker and worker.isRunning():
                     try:
@@ -1528,6 +1928,15 @@ class ManagementPanelWindow(FluentWindow):
                         pass
                     worker.quit()
                     worker.wait(2000)
+        # 收集 Worker（不同设备可并行，列表管理）
+        for worker in list(getattr(self.device_page, "_collect_workers", [])):
+            if worker.isRunning():
+                try:
+                    worker.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                worker.quit()
+                worker.wait(2000)
         super().closeEvent(event)
 
 

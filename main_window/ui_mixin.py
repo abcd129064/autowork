@@ -698,6 +698,7 @@ class UIMixin:
                 self._path_edits = {}
                 self._build_paths_section(cfg)
                 self._build_remote_section(cfg)
+                self._build_upload_section(cfg)
                 self._build_frpc_section(cfg)
                 self._build_appearance_section(cfg)
                 self.main_layout.addStretch()
@@ -758,6 +759,33 @@ class UIMixin:
                 form.addRow("TCP服务器:", self._edit_tcp_servers)
 
                 self.main_layout.addLayout(form)
+
+            # ---------- 收集与上传（运维面板精度/问题文件收集打包上传） ----------
+            def _build_upload_section(self, cfg):
+                self._add_section_header("📦 收集与上传")
+                form = QFormLayout()
+                form.setSpacing(8)
+
+                self._edit_upload_host = LineEdit(self)
+                self._edit_upload_host.setText(cfg.get("upload_host", "49.235.34.253"))
+                self._edit_upload_host.setPlaceholderText("上传服务器 IP")
+                form.addRow("上传服务器:", self._edit_upload_host)
+
+                self._edit_upload_port = LineEdit(self)
+                self._edit_upload_port.setText(str(cfg.get("upload_port", 22)))
+                self._edit_upload_port.setPlaceholderText("端口号（默认 22）")
+                form.addRow("上传端口:", self._edit_upload_port)
+
+                self._edit_upload_dir = LineEdit(self)
+                self._edit_upload_dir.setText(
+                    cfg.get("upload_remote_dir", "/lhcos-data/videos"))
+                self._edit_upload_dir.setPlaceholderText("如 /lhcos-data/videos")
+                form.addRow("远程目录:", self._edit_upload_dir)
+
+                self.main_layout.addLayout(form)
+                self.main_layout.addWidget(CaptionLabel(
+                    "上传凭据复用上方 SSH 用户名/密码；文件收集到 视频/日志目录/upload",
+                    self))
 
             # ---------- FRPC 服务器 ----------
             def _build_frpc_section(self, cfg):
@@ -836,6 +864,13 @@ class UIMixin:
                 data["sftp_default_remote_path"] = self._edit_sftp_path.text().strip()
                 servers_text = self._edit_tcp_servers.text().strip()
                 data["tcp_servers"] = [s.strip() for s in servers_text.split(",") if s.strip()]
+                # 收集与上传
+                data["upload_host"] = self._edit_upload_host.text().strip()
+                try:
+                    data["upload_port"] = int(self._edit_upload_port.text().strip() or 22)
+                except ValueError:
+                    data["upload_port"] = 22
+                data["upload_remote_dir"] = self._edit_upload_dir.text().strip()
                 # FRPC
                 data["frpc_server"] = {
                     "serverAddr": self._edit_frpc_addr.text().strip(),

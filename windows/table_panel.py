@@ -80,7 +80,7 @@ class AddRecordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("手动添加记录")
-        self.setFixedSize(420, 320)
+        self.setFixedSize(420, 356)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
@@ -101,6 +101,11 @@ class AddRecordDialog(QDialog):
         # 相机密码
         self._edit_camera = LineEdit(self)
         form.addRow("相机密码:", self._edit_camera)
+
+        # SNK 标识（远程连接用，可留空自动从备注解析）
+        self._edit_snk = LineEdit(self)
+        self._edit_snk.setPlaceholderText("如 snk_001（留空则从备注解析）")
+        form.addRow("SNK标识:", self._edit_snk)
 
         # 备注（多行）
         self._edit_remark = PlainTextEdit(self)
@@ -136,6 +141,7 @@ class AddRecordDialog(QDialog):
             "onlineStatusName": "",
             "remark": self._edit_remark.toPlainText().strip(),
             "cameraPassExt": self._edit_camera.text().strip(),
+            "snk_code": self._edit_snk.text().strip(),
         }
 
 
