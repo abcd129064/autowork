@@ -17,7 +17,7 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     Action, MenuAnimationType, FluentIcon, setFontFamilies,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
-    BodyLabel, CaptionLabel, isDarkTheme, RoundMenu, SwitchButton,
+    BodyLabel, CaptionLabel, TitleLabel, isDarkTheme, RoundMenu, SwitchButton,
     PushButton, ToolButton, ScrollArea)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
@@ -27,6 +27,69 @@ from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAni
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from workers.collect_worker import CollectFilesWorker
+
+# ==================== 版本信息（帮助→关于） ====================
+# 仓库暂无 git tag，版本号按语义化手工维护：新增功能→小版本+1
+# 2.4.0 之后新增：收集上传工作流、上传清单、打包上传字节进度、SNK 标识等
+APP_VERSION = "2.5.0"
+GITHUB_REPO = "https://github.com/abcd129064/autowork"
+
+# 关于弹窗「链接」区
+ABOUT_LINKS = [
+    ("源代码 (GitHub)", GITHUB_REPO),
+    ("问题反馈 (Issues)", f"{GITHUB_REPO}/issues"),
+    ("更新日志 (Commits)", f"{GITHUB_REPO}/commits"),
+]
+
+# 关于弹窗「开源库」区（运行时依赖）
+ABOUT_OSS_LIBS = [
+    ("PySide6 (Qt for Python)", "https://www.qt.io/qt-for-python"),
+    ("PyQt-Fluent-Widgets", "https://github.com/zhiyiYo/PyQt-Fluent-Widgets"),
+    ("paramiko", "https://github.com/paramiko/paramiko"),
+    ("darkdetect", "https://github.com/albertosottile/darkdetect"),
+    ("PyInstaller", "https://github.com/pyinstaller/pyinstaller"),
+]
+
+
+class AboutDialog(MessageBoxBase):
+    """关于弹窗：应用名/版本号 + GitHub 链接 + 开源依赖库清单
+
+    链接用 QLabel 富文本 <a href> 实现（openExternalLinks，系统默认浏览器打开）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.titleLabel = TitleLabel("AutoWork", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(CaptionLabel(
+            "用于视频播放、日志管理与数据记录的桌面自动化工具", self))
+        self.viewLayout.addWidget(BodyLabel(
+            f"版本: {APP_VERSION} for Windows (x64)", self))
+
+        # 链接区
+        self.viewLayout.addSpacing(8)
+        self.viewLayout.addWidget(CaptionLabel("链接", self))
+        links_lbl = QLabel(self._links_html(ABOUT_LINKS), self)
+        links_lbl.setOpenExternalLinks(True)
+        self.viewLayout.addWidget(links_lbl)
+
+        # 开源库区
+        self.viewLayout.addSpacing(6)
+        self.viewLayout.addWidget(CaptionLabel("开源库", self))
+        oss_lbl = QLabel(self._links_html(ABOUT_OSS_LIBS), self)
+        oss_lbl.setOpenExternalLinks(True)
+        oss_lbl.setWordWrap(True)
+        self.viewLayout.addWidget(oss_lbl)
+
+        self.viewLayout.addSpacing(8)
+        self.viewLayout.addWidget(CaptionLabel(
+            "© 2026 AutoWork · 基于 Qt/PySide6 等开源项目构建", self))
+
+    @staticmethod
+    def _links_html(links) -> str:
+        """[(标题, url), ...] → 以竖线分隔的富文本链接串"""
+        return "&nbsp;&nbsp;|&nbsp;&nbsp;".join(
+            f'<a href="{url}">{title}</a>' for title, url in links)
 
 
 def _patch_acrylic_exec(menu):
@@ -1045,17 +1108,12 @@ class UIMixin:
             self._show_info_bar("设置已保存")
 
     def _on_about(self):
-        """显示关于对话框（Fluent MessageBox）"""
-        w = MessageBox(
-            "关于",
-            "AutoWork - 自动化工作工具\n"
-            "版本: 2.4.0\n\n"
-            "用于视频播放、日志管理与数据记录的桌面自动化工具。",
-            self
-        )
-        w.yesButton.setText("确定")
-        w.cancelButton.hide()
-        w.exec()
+        """显示关于对话框（版本号随 git 发布手工递增，含 GitHub 与开源库链接）"""
+        dlg = AboutDialog(self)
+        dlg.yesButton.setText("确定")
+        dlg.cancelButton.hide()
+        dlg.widget.setMinimumWidth(560)
+        dlg.exec()
 
     def _on_perf_options(self):
         """性能选项对话框：SwitchButton 独立控制亚克力/动画，切换即时生效无需重启"""
