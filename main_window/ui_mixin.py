@@ -403,10 +403,10 @@ class UIMixin:
         act_settings = Action(FluentIcon.SETTING, "设置", self)
         act_settings.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_settings))
         func_menu.addAction(act_settings)
-        act_add_table = Action(FluentIcon.ADD, "手动添加", self)
-        act_add_table.setToolTip("手动添加一条球桌记录到本地数据库")
-        act_add_table.triggered.connect(lambda: QTimer.singleShot(0, self._on_add_table_record))
-        func_menu.addAction(act_add_table)
+        #act_add_table = Action(FluentIcon.ADD, "手动添加", self)
+        #act_add_table.setToolTip("手动添加一条球桌记录到本地数据库")
+        #act_add_table.triggered.connect(lambda: QTimer.singleShot(0, self._on_add_table_record))
+        #func_menu.addAction(act_add_table)
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
@@ -663,7 +663,8 @@ class UIMixin:
        # from windows.table_panel import TablePanelWindow
         from windows.management_panel import ManagementPanelWindow
         if not hasattr(self, '_table_panel') or self._table_panel is None:
-            self._table_panel = ManagementPanelWindow(self)
+            # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上（始终置顶）
+            self._table_panel = ManagementPanelWindow()
             self._table_panel.destroyed.connect(
                 lambda: setattr(self, '_table_panel', None))
         self._table_panel.show()

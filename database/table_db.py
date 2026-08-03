@@ -12,7 +12,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 数据库文件路径：database/tables.db（随项目目录）
 _DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database")
@@ -48,9 +48,9 @@ STATUS_FIELDS = (
     "already_count", "rubbish_count", "error_rate",
 )
 
-# kd_status 额外字段（文件列表 + 路径信息）
+# kd_status 额外字段（文件列表 + 路径信息 + 设备状态）
 KD_EXTRA_FIELDS = (
-    "device_code", "target_directory",
+    "device_code", "target_directory", "status",
     "normal_files", "except_files", "untreated_files",
     "operation_files", "accuracy_files", "already_files",
     "rubbish_files", "version_files",
@@ -61,6 +61,9 @@ KD_FILE_FIELDS = (
     "operation_files", "accuracy_files", "already_files",
     "rubbish_files", "version_files",
 )
+
+# kd_status 历史数据保留天数（按日期分区快照，过期自动清理，防止体积无限膨胀）
+_KD_KEEP_DAYS = 60
 
 _CREATE_STATUS_SQL = """
 CREATE TABLE IF NOT EXISTS xqzg_status (
@@ -97,6 +100,7 @@ CREATE TABLE IF NOT EXISTS kd_status (
     error_rate      TEXT DEFAULT '',
     device_code     TEXT DEFAULT '',
     target_directory TEXT DEFAULT '',
+    status          TEXT DEFAULT '',
     normal_files    TEXT DEFAULT '[]',
     except_files    TEXT DEFAULT '[]',
     untreated_files TEXT DEFAULT '[]',
@@ -109,9 +113,16 @@ CREATE TABLE IF NOT EXISTS kd_status (
 """
 
 
-def _get_conn() -> sqlite3.Connection:
-    os.makedirs(_DB_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+# 模块级初始化标志：建表脚本与迁移检查只在首次连接时执行一次，
+# 避免高频 query_page（搜索防抖逐字触发）重复执行 DDL/PRAGMA 带来的开销
+_initialized = False
+
+
+def _ensure_initialized(conn: sqlite3.Connection):
+    """首次连接时执行建表与迁移检查（整个进程生命周期只跑一次）"""
+    global _initialized
+    if _initialized:
+        return
     conn.executescript(_CREATE_SQL)
     conn.executescript(_CREATE_STATUS_SQL)
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
@@ -129,6 +140,16 @@ def _get_conn() -> sqlite3.Connection:
     if kd_cols and "file_path" not in kd_cols:
         conn.execute("ALTER TABLE kd_status ADD COLUMN file_path TEXT DEFAULT ''")
         conn.commit()
+    if kd_cols and "status" not in kd_cols:
+        conn.execute("ALTER TABLE kd_status ADD COLUMN status TEXT DEFAULT ''")
+        conn.commit()
+    _initialized = True
+
+
+def _get_conn() -> sqlite3.Connection:
+    os.makedirs(_DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    _ensure_initialized(conn)
     return conn
 
 
@@ -275,7 +296,33 @@ def save_kd(rows: list, file_path: str = "") -> int:
         conn.execute(
             "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
         conn.commit()
-        return len(data)
+        inserted = len(data)
+    finally:
+        conn.close()
+    # 保存后顺手清理 60 天前的历史分区，避免数据库随天数无限膨胀
+    prune_kd_history(_KD_KEEP_DAYS)
+    return inserted
+
+
+def prune_kd_history(keep_days: int = 60) -> int:
+    """清理 kd_status 中超过保留天数的旧日期分区数据，返回删除条数
+
+    kd 数据按日期分区（file_path 如 "2026/08/02"）每日快照，体积随天数线性增长。
+    设备状态属“快照”性质，过期数据业务价值低，定期清理可将数据库体积封顶在
+    keep_days 天内，避免无限膨胀。
+
+    Args:
+        keep_days: 保留最近多少天的数据（含今天），默认 60 天
+    """
+    conn = _get_conn()
+    try:
+        cutoff = (datetime.now() - timedelta(days=keep_days - 1)).strftime("%Y/%m/%d")
+        cur = conn.execute(
+            "DELETE FROM kd_status WHERE file_path != '' AND file_path < ?", (cutoff,))
+        deleted = cur.rowcount
+        if deleted:
+            conn.commit()
+        return deleted
     finally:
         conn.close()
 

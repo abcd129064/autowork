@@ -272,7 +272,6 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     def _show_info_bar(self, message, message_type="info", title=None, duration=2500):
         """弹出 Fluent InfoBar 消息条（右上角），与 _append_log 互不干涉。
-
         参数:
             message: 消息内容
             message_type: 'success' / 'info' / 'warning' / 'error'
@@ -775,9 +774,24 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 full_log_path = alt_path
 
         # 读取日志文件内容并显示在第三列
+        # 大文件只读尾部 _LOG_TAIL_BYTES，避免一次性加载整个文件导致 UI 卡顿/内存暴涨
+        _LOG_TAIL_BYTES = 2 * 1024 * 1024  # 2MB
         try:
-            with open(full_log_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+            file_size = os.path.getsize(full_log_path)
+            truncated = False
+            with open(full_log_path, 'rb') as f:
+                if file_size > _LOG_TAIL_BYTES:
+                    f.seek(-_LOG_TAIL_BYTES, os.SEEK_END)
+                    raw = f.read()
+                    truncated = True
+                else:
+                    raw = f.read()
+            content = raw.decode('utf-8', errors='ignore')
+            if truncated:
+                # 丢弃可能不完整的首行（从中间截断处开始）
+                first_nl = content.find('\n')
+                if first_nl != -1:
+                    content = content[first_nl + 1:]
 
             self._current_log_path = full_log_path
             self.ui.log_list.setUpdatesEnabled(False)
@@ -792,8 +806,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._update_empty_hint(self.ui.log_list)
 
             line_count = len(content.splitlines())
-            self._append_log(f"[日志内容] 已加载 {line_count} 行")
-            self._show_info_bar(f"日志已加载 {line_count} 行", "success")
+            if truncated:
+                size_mb = file_size / (1024 * 1024)
+                self._append_log(f"[日志内容] 文件 {size_mb:.1f}MB 过大，仅显示尾部 {line_count} 行")
+                self._show_info_bar(f"大文件仅加载尾部 {line_count} 行", "warning")
+            else:
+                self._append_log(f"[日志内容] 已加载 {line_count} 行")
+                self._show_info_bar(f"日志已加载 {line_count} 行", "success")
             self._update_status_logs(line_count)
         except Exception as e:
             self._append_log(f"[错误] 无法读取日志文件: {str(e)}")
@@ -880,6 +899,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     def closeEvent(self, event):
         """主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程"""
+        # 0. 关闭运维管理面板（独立窗口，不随主窗口自动销毁）
+        panel = getattr(self, '_table_panel', None)
+        if panel is not None:
+            self._table_panel = None
+            try:
+                panel.close()
+            except (RuntimeError, OSError):
+                pass
+
         # 1. 终止 frpc 进程
         proc = getattr(self, '_frpc_process', None)
         if proc is not None:

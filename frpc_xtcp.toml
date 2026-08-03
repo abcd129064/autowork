@@ -15,7 +15,7 @@ name = "snk_4005"
 type = "xtcp"
 serverName = "snk_4005"
 secretKey = "abc123"
-bindPort = 32863
+bindPort = 32864
 
 [[visitors]]
 name = "snk_4001"
@@ -212,4 +212,11 @@ type = "xtcp"
 serverName = "snk_rm08"
 secretKey = "abc123"
 bindPort = 65293
+
+[[visitors]]
+name = "snk_2531"
+type = "xtcp"
+serverName = "snk_2531"
+secretKey = "abc123"
+bindPort = 22935
 

@@ -6,18 +6,20 @@
 标签页切换体验。
 
 用法：
-    win = RemoteSessionWindow(parent=main_window)
+    win = RemoteSessionWindow()   # 独立窗口，不传 parent（避免 owned window 始终置顶）
     win.add_session(panel)   # panel 为 SFTPPanel / SSHTerminalPanel / RDPPanel
     win.show()
 """
 
-from PySide6.QtWidgets import QDialog, QVBoxLayout
 from PySide6.QtCore import Qt
-from qfluentwidgets import TabWidget, FluentIcon
+from PySide6.QtWidgets import QVBoxLayout
+from qfluentwidgets import TabWidget
+from qfluentwidgets.window.fluent_window import FluentTitleBar
+from qframelesswindow import FramelessWindow
 
 
-class RemoteSessionWindow(QDialog):
-    """远程会话标签容器窗口
+class RemoteSessionWindow(FramelessWindow):
+    """远程会话标签容器窗口（无边框 + Fluent 自定义标题栏，独立窗口）
 
     - 每个标签页对应一个 visitor 的会话面板
     - 标签可拖拽排序、可关闭（关闭时自动调用 panel.shutdown() 释放资源）
@@ -28,14 +30,14 @@ class RemoteSessionWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("远程会话")
         self.resize(1300, 850)
+        self.setMinimumSize(800, 500)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        # 启用最小化/最大化/关闭按钮（QDialog 带 parent 时默认只有 X）
-        self.setWindowFlags(
-            Qt.WindowType.Window
-            | Qt.WindowType.WindowMinimizeButtonHint
-            | Qt.WindowType.WindowMaximizeButtonHint
-            | Qt.WindowType.WindowCloseButtonHint
-        )
+
+        # 替换默认标题栏为 Fluent 风格（含图标/标题/最小化/最大化/关闭，
+        # 后续自动同步 windowTitleChanged），取代原生 Qt 标题栏
+        self.setTitleBar(FluentTitleBar(self))
+        # setTitleBar 之前已设置过标题，信号早于连接发射，此处补一次初始同步
+        self.titleBar.setTitle(self.windowTitle())
 
         self._tab_widget = TabWidget(self)
         self._tab_widget.setTabsClosable(True)
@@ -43,13 +45,35 @@ class RemoteSessionWindow(QDialog):
         # 隐藏标签栏的+号按钮，只显示标签
         self._tab_widget.tabBar.setAddButtonVisible(False)
 
+        # 标题栏为浮动控件（高 48px，resizeEvent 中全宽拉伸），
+        # 内容区顶部需预留标题栏高度，避免被遮挡
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 32, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._tab_widget)
 
         # 跟踪所有面板（用于批量关闭）
         self._panels: list = []
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reset_titlebar_button_state()
+
+    def _reset_titlebar_button_state(self):
+        """重置标题栏按钮状态，修复关闭按钮卡在 PRESSED 导致窗口无法拖动。
+        qframelesswindow 的 TitleBarButton 仅在 mousePressEvent 置 PRESSED，
+        没有 mouseReleaseEvent 复位（只能靠 leaveEvent 恢复）。窗口关闭（hide）
+        复用时关闭按钮可能停在 PRESSED，TitleBar.canDrag() 因此返回 False，
+        标题栏无法拖动；鼠标移入按钮触发 enterEvent 后才恢复。每次显示主动复位。
+        """
+        try:
+            from qframelesswindow.titlebar.title_bar_buttons import (
+                TitleBarButton, TitleBarButtonState)
+            for btn in self.titleBar.findChildren(TitleBarButton):
+                if btn.isPressed():
+                    btn.setState(TitleBarButtonState.NORMAL)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ 公开 API
 

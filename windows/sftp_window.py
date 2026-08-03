@@ -85,15 +85,21 @@ _EXT_ICON_MAP = {
 
 
 def _file_icon(name: str, is_dir: bool):
-    """根据文件名/扩展名返回对应的 FluentIcon（带缓存）"""
+    """根据文件名/扩展名返回对应的 FluentIcon（带缓存）
+
+    注意：必须用 qicon()（FluentIconEngine）而非 icon()：
+    icon() 会把"构建时主题"的 SVG 固化为静态 QIcon 并被模块级缓存，
+    切换到深色模式后仍显示黑色图标看不清；qicon() 每次绘制时按
+    qconfig 当前主题动态取黑/白 SVG，缓存也随主题自动适配。
+    """
     if is_dir:
         fi = FluentIcon.FOLDER
     else:
         ext = os.path.splitext(name)[1].lower()
         fi = _EXT_ICON_MAP.get(ext, FluentIcon.DOCUMENT)
-    # 缓存 QIcon 实例避免重复创建
+    # 缓存 QIcon 实例避免重复创建（engine 随主题动态渲染，缓存安全）
     if fi not in _ICON_CACHE:
-        _ICON_CACHE[fi] = fi.icon()
+        _ICON_CACHE[fi] = fi.qicon()
     return _ICON_CACHE[fi]
 
 

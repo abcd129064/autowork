@@ -581,7 +581,7 @@ class Ui_MainWindow(object):
         self.p2p_ssh_user.setText("newbv")
         self.p2p_ssh_pass = PasswordLineEdit(self.p2p_panel)
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
-        self.p2p_ssh_pass.setText("Xqsjnbv155")
+        # 密码不在此硬编码，由 _init_p2p_panel 从 settings.json 的 ssh_pass 读取填充
         self.p2p_ssh_pass.setPlaceholderText("请输入密码")
 
         self.p2p_ssh_form = QFormLayout()

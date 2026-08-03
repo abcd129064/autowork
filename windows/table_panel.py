@@ -184,7 +184,7 @@ class TablePanelWindow(QDialog):
 
         # 筛选按钮（列显隐，CheckBox 子菜单）
         self._col_btn = TransparentDropDownPushButton("筛选", self)
-        self._col_btn.setIcon(FluentIcon.FILTER.icon())
+        self._col_btn.setIcon(FluentIcon.FILTER.qicon())
         self._build_col_menu()
         toolbar.addWidget(self._col_btn)
 

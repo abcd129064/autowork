@@ -47,12 +47,12 @@ class RemoteMixin:
         def _on_p2p_search_changed(self, text: str) -> None: ...
         def _resolve_remote_target(self, tag: str, feature_name: str) -> tuple[str, int, str, str, str] | None: ...
 
-    # frpc 服务器默认配置
+    # frpc 服务器默认配置（不含敏感凭据，auth_token 由 settings.json 读取/设置面板填写）
     _FRPC_SERVER_DEFAULTS = {
         "serverAddr": "49.235.34.253",
         "serverPort": 7900,
         "auth_method": "token",
-        "auth_token": "123",
+        "auth_token": "",
     }
 
     def _init_p2p_panel(self):
@@ -440,6 +440,8 @@ class RemoteMixin:
         server_port = frpc_server.get("serverPort", self._FRPC_SERVER_DEFAULTS["serverPort"])
         auth_method = frpc_server.get("auth_method", self._FRPC_SERVER_DEFAULTS["auth_method"])
         auth_token = frpc_server.get("auth_token", self._FRPC_SERVER_DEFAULTS["auth_token"])
+        if not auth_token:
+            self._append_log("[远程] 警告: frpc auth_token 未配置，请在 设置 → 认证 Token 中填写")
         with open(path, 'w', encoding='utf-8') as f:
             f.write(f'serverAddr = "{server_addr}"\n')
             f.write(f'serverPort = {server_port}\n')
@@ -568,10 +570,13 @@ class RemoteMixin:
                 return win
             except RuntimeError:
                 self._remote_session_window = None
-        win = RemoteSessionWindow(parent=self)  # type: ignore[arg-type]
+        # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上（始终置顶）
+        win = RemoteSessionWindow()
         win.destroyed.connect(lambda: setattr(self, '_remote_session_window', None))
         self._remote_session_window = win
         win.show()
+        win.raise_()
+        win.activateWindow()
         return win
 
     # ------------------------------------------------------------------ 远程窗口按钮

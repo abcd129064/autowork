@@ -28,6 +28,12 @@ def _load_api_credentials():
     return settings.get("api_credentials", {})
 
 
+def get_active_api_source() -> str:
+    """读取当前启用的设备数据源（'kd' / 'xqzg'），默认 kd"""
+    src = str(_load_api_credentials().get("active_source", "kd")).lower()
+    return src if src in ("kd", "xqzg") else "kd"
+
+
 # ==================== 原有接口（wechat2-billiard） ====================
 
 BASE_URL = "https://wechat2-billiard.newbv.cn/prod-api/api/billiardtable/listext"
@@ -39,7 +45,10 @@ DEFAULT_HEADERS = {
 
 
 class TableFetchWorker(QThread):
-    """异步拉取全量球桌数据（pageSize=1000 一次拉完，写入本地库）
+    """异步拉取全量球桌数据（循环分页直至拉完，写入本地库）
+
+    首页请求后读取接口返回的 total，若超过单页 pageSize 则自动翻页
+    继续拉取，避免数据超过 1000 条时后续记录被静默遗漏。
 
     Signals:
         result_ready(list): 全量数据列表
@@ -48,34 +57,61 @@ class TableFetchWorker(QThread):
     result_ready = Signal(list)
     error = Signal(str)
 
+    # 单页大小与最大页数保护（防止接口异常导致死循环）
+    _PAGE_SIZE = 1000
+    _MAX_PAGES = 50
+
+    # 除分页参数外的固定查询条件
+    _FIXED_PARAMS = {
+        "roomName": "", "roomInfo": "", "roomStatus": "",
+        "calculated": "", "sales": "", "code": "",
+        "name": "", "deviceVersion": "", "tableType": "",
+        "contractStatus": "", "feeStatus": "",
+        "startTime": "", "endTime": "",
+        "billingStartDate": "", "billingEndDate": "",
+        "contractEndStartDate": "", "contractEndEndDate": "",
+        "startLastPlay": "", "endLastPlay": "",
+        "status": "", "unlinedays": "", "nomatchdays": "",
+        "onlineStatus": "",
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
+    def _fetch_page(self, page_no: int) -> dict:
+        """拉取单页数据，返回接口 data 字段（含 lists/total）"""
+        params = {"pageNo": page_no, "pageSize": self._PAGE_SIZE}
+        params.update(self._FIXED_PARAMS)
+        resp = requests.get(BASE_URL, params=params,
+                            headers=DEFAULT_HEADERS, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != 200:
+            raise RuntimeError(payload.get('msg', '未知错误'))
+        return payload.get("data") or {}
+
     def run(self):
         try:
-            params = {
-                "pageNo": 1,
-                "pageSize": 1000,
-                "roomName": "", "roomInfo": "", "roomStatus": "",
-                "calculated": "", "sales": "", "code": "",
-                "name": "", "deviceVersion": "", "tableType": "",
-                "contractStatus": "", "feeStatus": "",
-                "startTime": "", "endTime": "",
-                "billingStartDate": "", "billingEndDate": "",
-                "contractEndStartDate": "", "contractEndEndDate": "",
-                "startLastPlay": "", "endLastPlay": "",
-                "status": "", "unlinedays": "", "nomatchdays": "",
-                "onlineStatus": "",
-            }
-            resp = requests.get(BASE_URL, params=params,
-                                headers=DEFAULT_HEADERS, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") != 200:
-                self.error.emit(f"接口返回错误: {data.get('msg', '未知错误')}")
-                return
-            inner = data.get("data") or {}
-            rows = inner.get("lists") or []
+            # 首页：拿到 total 与首批数据
+            inner = self._fetch_page(1)
+            rows = list(inner.get("lists") or [])
+            total = inner.get("total")
+            # total 可能为字符串，统一转 int；无法解析时按已拉取数量处理
+            try:
+                total = int(total)
+            except (TypeError, ValueError):
+                total = len(rows)
+
+            # 循环翻页直至拉全
+            page = 1
+            while len(rows) < total and page < self._MAX_PAGES:
+                page += 1
+                inner = self._fetch_page(page)
+                batch = inner.get("lists") or []
+                if not batch:  # 接口提前返回空页，避免死循环
+                    break
+                rows.extend(batch)
+
             self.result_ready.emit(rows)
         except requests.exceptions.Timeout:
             self.error.emit("请求超时（20秒），请检查网络后重试")
@@ -384,3 +420,53 @@ class MigrateImageWorker(QThread):
             self.error.emit("网络连接失败")
         except Exception as e:
             self.error.emit(f"迁移失败: {e}")
+
+
+# ==================== 登录测试（管理设置页「测试连接」用） ====================
+
+class LoginTestWorker(QThread):
+    """测试 API 登录是否成功
+
+    Signals:
+        success(str): 成功提示
+        error(str): 失败原因
+    """
+    success = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, api_name, username=None, password=None, parent=None):
+        """
+        Args:
+            api_name: "api1"（xqzg）或 "api2"（kd）
+        """
+        super().__init__(parent)
+        self.api_name = api_name
+        creds = _load_api_credentials()
+        cfg = creds.get(api_name, {})
+        self.username = username or cfg.get("username", "")
+        self.password = password or cfg.get("password", "")
+
+    def run(self):
+        if not self.username or not self.password:
+            self.error.emit("账号或密码为空，请先填写")
+            return
+        try:
+            if self.api_name == "api1":
+                session = requests.Session()
+                resp = session.post(API1_LOGIN_URL, json={
+                    "username": self.username, "password": self.password}, timeout=15)
+                ok = resp.status_code == 200
+            else:
+                resp = requests.post(API2_LOGIN_URL, json={
+                    "username": self.username, "password": self.password}, timeout=15)
+                ok = resp.status_code == 200 and bool(resp.json().get("access"))
+            if ok:
+                self.success.emit("账号密码验证通过")
+            else:
+                self.error.emit(f"登录失败（HTTP {resp.status_code}），请检查账号密码")
+        except requests.exceptions.Timeout:
+            self.error.emit("连接超时（15秒），请检查网络")
+        except requests.exceptions.ConnectionError:
+            self.error.emit("网络连接失败，请检查网络")
+        except Exception as e:
+            self.error.emit(f"测试失败: {e}")
