@@ -8,6 +8,7 @@
 
 - [core/ 基础层](#core-基础层)
 - [workers/ 后台线程层](#workers-后台线程层)
+- [database/ 数据层](#database-数据层)
 - [windows/ 独立窗口层](#windows-独立窗口层)
 - [main_window/ 主窗口层](#main_window-主窗口层)
 - [win_api/ Windows API 层](#win_api-windows-api-层)
@@ -225,6 +226,121 @@ SSHExecWorker(client: paramiko.SSHClient, command: str)
 
 ---
 
+## workers/table_worker.py 球桌/设备数据 Worker
+
+球桌与设备数据 API 异步请求 Worker（均继承 `QThread`），账号密码统一从 `settings.json` 的 `api_credentials` 节点读取。
+
+#### 模块级函数与常量
+
+| 函数/常量 | 签名 | 说明 |
+|-----------|------|------|
+| `_load_api_credentials()` | `() -> dict` | 读取 `settings.json` 的 `api_credentials` 配置 |
+| `get_active_api_source()` | `() -> str` | 当前启用的设备数据源（`'kd'`/`'xqzg'`，默认 kd） |
+| `build_image_path(file_path, device_code, category)` | `(str, str, str) -> str` | 构造迁移路径 `media/{日期}/{设备码}/{分类目录}/` |
+| `CATEGORY_DIRS` | `dict` | 中文分类 → 服务器目录名（正常=normal / 操作=except / 待处理=pending / 使用=operation / 精度=accuracy / 问题=already / 废弃=rubbish） |
+| `DIR_CATEGORIES` | `dict` | `CATEGORY_DIRS` 的反向映射 |
+
+### TableFetchWorker
+
+拉取球桌列表（wechat2-billiard.newbv.cn，无认证，pageSize=1000 一次拉完写入本地库）。
+
+```python
+TableFetchWorker()
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `result_ready` | `Signal(list)` | 全量球桌数据列表 |
+| `error` | `Signal(str)` | 错误信息 |
+
+### SnookerOmFetchWorker
+
+拉取接口1（xqzg.newbv.cn）设备状态数据，Session + CSRF 认证，401/403 自动重登录重试一次。响应数据在 `results` 键。
+
+```python
+SnookerOmFetchWorker(file_path="", page=1, pagesize=1000,
+                     username=None, password=None)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `result_ready` | `Signal(dict)` | 完整 JSON（含 total / results / summary_row） |
+| `error` | `Signal(str)` | 错误信息 |
+
+### DevicesFetchWorker
+
+拉取接口2（kd.newbv.cn:30005）设备状态数据，JWT Bearer Token 认证（登录端点 `/api/getAccessToken/`），401 自动重登录重试一次。响应数据在 `lists` 键，`file_path` 参数为日期分区（如 `2026/08/02`）。
+
+```python
+DevicesFetchWorker(file_path="", page=1, pagesize=1200,
+                   username=None, password=None)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `result_ready` | `Signal(dict)` | 完整 JSON（含 lists） |
+| `error` | `Signal(str)` | 错误信息 |
+
+### MigrateImageWorker
+
+异步执行图像分类迁移（`POST /api/devices/migrate_image/`，form 参数 `src_path`/`dest_path`/`file_name`），支持批量，Token 过期自动重试。
+
+```python
+MigrateImageWorker(file_path, device_code, file_names,
+                   src_category, dest_category,
+                   username=None, password=None)
+```
+
+- `file_path`：日期路径，如 `"2026/08/02"`
+- `src_category` / `dest_category`：中文分类名（见 `CATEGORY_DIRS`）
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `success` | `Signal(int)` | 成功迁移的图片数量 |
+| `error` | `Signal(str)` | 错误信息（含失败文件列表摘要） |
+| `progress` | `Signal(int, int)` | (当前进度, 总数) |
+
+### LoginTestWorker
+
+测试 API 登录是否可用（管理设置页「测试连接」按钮）。
+
+```python
+LoginTestWorker(api_name, username=None, password=None)
+# api_name: "api1"（xqzg）或 "api2"（kd）
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `success` | `Signal(str)` | 成功提示 |
+| `error` | `Signal(str)` | 失败原因 |
+
+---
+
+## database/ 数据层
+
+### database.table_db
+
+SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
+
+#### 球桌数据（wechat2-billiard）
+
+| 函数 | 说明 |
+|------|------|
+| `save_all(rows)` | 全量覆盖写入球桌表，返回条数 |
+| `query_page(page_no, page_size, keyword="")` | 分页查询，返回 `(total, rows)` |
+| `insert_one(record)` | 手动插入一条记录 |
+| `get_meta()` | 获取同步元信息（条数、时间） |
+
+#### 设备状态数据（xqzg / kd）
+
+| 函数 | 说明 |
+|------|------|
+| `save_xqzg(rows)` / `query_xqzg_page(page_no, page_size, keyword="")` | xqzg 数据存取（无日期分区，数据在 `results` 键） |
+| `save_kd(rows, file_path="")` / `query_kd_page(page_no, page_size, keyword="", file_path="")` | kd 数据按日期分区存取（自动序列化/反序列化文件列表字段） |
+| `get_kd_dates()` | 获取本地已有的 kd 日期分区列表 |
+
+---
+
 ## windows/ 独立窗口层
 
 ### SFTPWindow
@@ -295,6 +411,38 @@ RDPWindow(host, port, username, password,
 - 通道1：按启动进程 PID
 - 通道2：按所有 mstsc.exe 进程 PID（Win11 进程委托）
 - 通道3：全局类名兜底
+
+---
+
+### ManagementPanelWindow
+
+运维管理面板（`windows/management_panel.py`），qfluentwidgets `FluentWindow` + 左侧导航，三个功能页面。由主窗口「球桌管理」按钮打开（`UiMixin._on_open_table_panel`），支持 `python -m windows.management_panel` 独立调试。
+
+```python
+ManagementPanelWindow(parent=None)
+```
+
+**页面构成**：
+
+| 页面 | 类 | 说明 |
+|------|------|------|
+| 球桌管理 | `TablePage` | wechat2-billiard 球桌数据：表格/搜索/分页/列筛选/右键复制/手动添加记录 |
+| 设备状态 | `DevicePage` | kd / xqzg 数据源切换（`get_active_api_source()`），按日期分区查看；集成图片迁移 |
+| 管理设置 | `AdminSettingsPage` | 数据源选择（kd/xqzg）、双接口账号密码、测试连接，合并写入 `settings.json` |
+
+**图片迁移交互（DevicePage）**：
+
+- `总数`(pic_total) / `正常`(normal_count) / `操作`(except_count) 三列为链接色可点击单元格（`_FILE_VIEW_FIELDS`）
+- 点击后右侧滑出 `FileListPanel`（QPropertyAnimation，宽 360，需 `WA_StyledBackground` 才不透明）展示 [分类, 文件名]
+- 点击文件条目弹 RoundMenu 四选项（问题/精度/使用/废弃，`MIGRATE_DEST_OPTIONS`）→ `DevicePage.migrate_file()` → `MigrateImageWorker` 迁移单文件 → 成功后 `_silent_refresh()` 静默重拉刷新
+
+| 关键方法 | 说明 |
+|------|------|
+| `_on_cell_clicked(row, col)` | 单元格点击 → 打开文件面板 |
+| `migrate_file(fname, src_cat, dest_cat)` | 发起单文件迁移 |
+| `_silent_refresh()` | 迁移后静默重拉当前数据源 |
+
+**模块级辅助**：`_load_settings()` / `_save_settings(data)`（settings.json 合并读写）、`_copy_table_selection(table)`（表格选中内容复制）、`FILE_FIELD_CATEGORIES`（文件字段 → 中文分类）。
 
 ---
 
@@ -475,7 +623,20 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `ssh_pass` | str | — | SSH 默认密码 |
 | `tcp_servers` | [str] | [] | 保存的 TCP 服务器列表（ip:port） |
 | `frpc_server` | object | — | frp 服务器配置 |
+| `sftp_default_remote_path` | str | — | SFTP 默认远程路径 |
+| `remote_sessions` | [object] | [] | 保存的远程会话列表 |
+| `perf_acrylic` | bool | true | 亚克力效果性能开关 |
+| `perf_animation` | bool | true | 界面动画性能开关 |
+| `api_credentials` | object | — | 运维面板 API 配置（见下表） |
 | `shortcut_*` | str | 见上表 | 快捷键配置（共 9 项） |
+
+**api_credentials 子结构**（由管理设置页维护）：
+
+| 字段 | 说明 |
+|------|------|
+| `active_source` | 启用的设备数据源：`kd`（默认）/ `xqzg` |
+| `api1.username` / `api1.password` | 接口1 xqzg（Session 认证）账号密码 |
+| `api2.username` / `api2.password` | 接口2 kd（JWT 认证）账号密码 |
 
 ---
 
@@ -483,6 +644,8 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 
 ```
 core ← win_api ← workers ← windows ← main_window ← main.py
+                    ↑          ↑
+                    database ──┘
 ```
 
-严格单向依赖，禁止循环导入。
+严格单向依赖，禁止循环导入。`database/` 仅被 `windows/management_panel.py` 等上层模块引用。

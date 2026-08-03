@@ -28,6 +28,12 @@ def _load_api_credentials():
     return settings.get("api_credentials", {})
 
 
+def get_active_api_source() -> str:
+    """读取当前启用的设备数据源（'kd' / 'xqzg'），默认 kd"""
+    src = str(_load_api_credentials().get("active_source", "kd")).lower()
+    return src if src in ("kd", "xqzg") else "kd"
+
+
 # ==================== 原有接口（wechat2-billiard） ====================
 
 BASE_URL = "https://wechat2-billiard.newbv.cn/prod-api/api/billiardtable/listext"
@@ -384,3 +390,53 @@ class MigrateImageWorker(QThread):
             self.error.emit("网络连接失败")
         except Exception as e:
             self.error.emit(f"迁移失败: {e}")
+
+
+# ==================== 登录测试（管理设置页「测试连接」用） ====================
+
+class LoginTestWorker(QThread):
+    """测试 API 登录是否成功
+
+    Signals:
+        success(str): 成功提示
+        error(str): 失败原因
+    """
+    success = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, api_name, username=None, password=None, parent=None):
+        """
+        Args:
+            api_name: "api1"（xqzg）或 "api2"（kd）
+        """
+        super().__init__(parent)
+        self.api_name = api_name
+        creds = _load_api_credentials()
+        cfg = creds.get(api_name, {})
+        self.username = username or cfg.get("username", "")
+        self.password = password or cfg.get("password", "")
+
+    def run(self):
+        if not self.username or not self.password:
+            self.error.emit("账号或密码为空，请先填写")
+            return
+        try:
+            if self.api_name == "api1":
+                session = requests.Session()
+                resp = session.post(API1_LOGIN_URL, json={
+                    "username": self.username, "password": self.password}, timeout=15)
+                ok = resp.status_code == 200
+            else:
+                resp = requests.post(API2_LOGIN_URL, json={
+                    "username": self.username, "password": self.password}, timeout=15)
+                ok = resp.status_code == 200 and bool(resp.json().get("access"))
+            if ok:
+                self.success.emit("账号密码验证通过")
+            else:
+                self.error.emit(f"登录失败（HTTP {resp.status_code}），请检查账号密码")
+        except requests.exceptions.Timeout:
+            self.error.emit("连接超时（15秒），请检查网络")
+        except requests.exceptions.ConnectionError:
+            self.error.emit("网络连接失败，请检查网络")
+        except Exception as e:
+            self.error.emit(f"测试失败: {e}")

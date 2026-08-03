@@ -1,6 +1,6 @@
 # AutoWork
 
-基于 PySide6 + qfluentwidgets 开发的桌面自动化工具，用于台球追踪视频播放控制、日志管理、数据记录及 P2P 远程文件传输。
+基于 PySide6 + qfluentwidgets 开发的桌面自动化工具，用于台球追踪视频播放控制、日志管理、数据记录、运维管理及 P2P 远程文件传输。
 
 ## 功能特性
 
@@ -10,6 +10,12 @@
 - **日志管理**：三列联动（设备 → 日志文件 → 日志内容），按日期筛选，关键词高亮
 - **进程管理**：启动/终止/挂起/恢复 SnookerTracking 程序
 - **detect.json 解码**：自动调用 AES 解码工具生成 detect.json
+
+### 运维管理面板（球桌管理按钮打开）
+- **球桌管理**：对接 wechat2-billiard 接口，表格/搜索/分页/列筛选/右键复制/手动添加记录
+- **设备状态**：对接 kd / xqzg 双接口，数据源可切换，按日期分区查看设备状态
+- **图片迁移**：点击总数/正常/操作单元格右侧滑出文件列表，点击文件选择目标分类（问题/精度/使用/废弃）即可在服务器上移动图片
+- **管理设置**：配置双接口 API 账号密码、选择启用数据源、测试连接
 
 ### 远程连接（P2P）
 - **XTCP 模式**：基于 frp 的 P2P 内网穿透，支持多 visitor 管理
@@ -31,6 +37,8 @@
 | 组件 | 技术 |
 |------|------|
 | GUI 框架 | PySide6 (Qt6) + PySide6-Fluent-Widgets |
+| HTTP/API | requests（wechat2-billiard / xqzg / kd 三接口） |
+| 本地数据库 | SQLite3（球桌/设备状态缓存） |
 | SSH/SFTP | paramiko |
 | P2P 穿透 | frp (frpc) XTCP |
 | 远程桌面 | mstsc.exe + Win32 API 窗口嵌入 |
@@ -63,9 +71,16 @@ autowork/
 │   └── windows_api.py         #   显示设置/窗口嵌入/进程挂起恢复
 │
 ├── workers/                   # 后台线程 Worker 层
-│   └── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
+│   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
+│   └── table_worker.py        #   球桌/设备数据 API Worker（拉取/迁移/登录测试）
+│
+├── database/                  # 本地数据层
+│   ├── table_db.py            #   SQLite 存取（球桌/xqzg/kd 按日期分区）
+│   └── tables.db              #   SQLite 数据库文件
 │
 ├── windows/                   # 独立窗口层
+│   ├── management_panel.py    #   运维管理面板（球桌管理/设备状态/管理设置）
+│   ├── table_panel.py         #   球桌面板（旧版，仅 AddRecordDialog 仍被引用）
 │   ├── sftp_window.py         #   SFTP 双面板文件管理窗口
 │   ├── ssh_terminal.py        #   SSH 终端窗口（ANSI 渲染）
 │   ├── ansi_terminal.py       #   ANSI 虚拟终端控件
@@ -86,7 +101,6 @@ autowork/
 │   └── API.md                 #   接口文档
 │
 ├── videos/                    # 视频/日志文件目录
-├── database/                  # 数据库目录
 ├── logs/                      # 运行日志目录
 ├── build/                     # 构建临时输出
 └── dist/                      # 最终分发目录
@@ -96,6 +110,8 @@ autowork/
 
 ```
 core ← win_api ← workers ← windows ← main_window ← main.py
+                    ↑          ↑
+                    database ──┘
 ```
 
 ## 快速开始
@@ -147,6 +163,22 @@ python build_exe.py
 ## 配置说明
 
 配置文件 `settings.json` 位于 exe 同目录，首次运行自动生成。详见 [接口文档 - 配置文件](docs/API.md#配置文件-settingsjson)。
+
+运维管理面板相关的 API 配置存于 `api_credentials` 节点：
+
+```json
+"api_credentials": {
+  "active_source": "kd",
+  "api1": { "username": "...", "password": "..." },
+  "api2": { "username": "...", "password": "..." }
+}
+```
+
+- `active_source`：设备状态页启用的数据源（`kd` / `xqzg`）
+- `api1`：xqzg.newbv.cn 接口（Session 认证）
+- `api2`：kd.newbv.cn:30005 接口（JWT 认证，支持图片迁移）
+
+也可直接在「运维管理面板 → 管理设置」页中修改并测试连接。
 
 ## 接口文档
 
