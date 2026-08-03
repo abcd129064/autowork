@@ -172,7 +172,7 @@ class SFTPPanel(QWidget):
     资源清理统一由 shutdown() 方法负责，容器关闭标签时调用。
     """
 
-    def __init__(self, host, port, username, password, server_name='', log_callback=None, default_remote_path=None, parent=None):
+    def __init__(self, host, port, username, password, server_name='', log_callback=None, default_remote_path=None, default_local_path=None, parent=None):
         super().__init__(parent)
         self._host = host
         self._port = port
@@ -185,6 +185,14 @@ class SFTPPanel(QWidget):
         self._remote_entries = []
         _desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
         self._local_path = _desktop if os.path.isdir(_desktop) else os.path.expanduser('~')
+        # 指定本地初始目录（如 snk 会话按球桌号自动建文件夹）：不存在则尝试创建，失败回退桌面
+        if default_local_path:
+            try:
+                os.makedirs(default_local_path, exist_ok=True)
+                if os.path.isdir(default_local_path):
+                    self._local_path = default_local_path
+            except OSError:
+                pass
         self._local_entries = []
         self._log = log_callback or (lambda msg: None)
         self._connect_worker = None

@@ -373,11 +373,16 @@ class DeviceFilesDialog(QDialog):
 
 
 class UploadListDialog(QDialog):
-    """上传清单弹窗：树形展示 {videos_dir}/upload 下待上传文件（设备→文件）"""
+    """上传清单弹窗：树形展示 {videos_dir}/upload 下待上传文件（设备→文件）
+
+    内置打包上传（ZipUploadWorker）；只能通过底部「关闭」按钮关闭，
+    右上角 X / ESC 均被拦截，避免上传进行中被意外关闭。
+    """
 
     def __init__(self, upload_root: str, parent=None):
         super().__init__(parent)
         self._upload_root = upload_root
+        self._upload_worker = None
         self.setWindowTitle("上传清单")
         self.resize(560, 460)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -395,13 +400,28 @@ class UploadListDialog(QDialog):
             0, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self._tree, 1)
 
+        # 上传字节进度条（打包上传期间显示，平时隐藏）
+        self._progress_bar = ProgressBar(self)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedHeight(4)
+        self._progress_bar.hide()
+        layout.addWidget(self._progress_bar)
+
         bottom = QHBoxLayout()
         self._lbl_total = CaptionLabel("", self)
         bottom.addWidget(self._lbl_total)
+        # 打包上传阶段提示（打包中/连接中/上传中），代替多个 InfoBar 叠加
+        self._lbl_progress = CaptionLabel("", self)
+        bottom.addWidget(self._lbl_progress)
         bottom.addStretch(1)
         btn_open = PushButton(FluentIcon.FOLDER, "打开目录", self)
         btn_open.clicked.connect(self._open_dir)
         bottom.addWidget(btn_open)
+        self._btn_package = PushButton(FluentIcon.SEND, "打包上传", self)
+        self._btn_package.setToolTip("将收集的文件打包 zip 上传服务器，成功后清空本地 upload 目录")
+        self._btn_package.clicked.connect(self._on_package_upload)
+        bottom.addWidget(self._btn_package)
         btn_close = PushButton("关闭", self)
         btn_close.clicked.connect(self.accept)
         bottom.addWidget(btn_close)
@@ -409,6 +429,25 @@ class UploadListDialog(QDialog):
 
         # 填充放最后：_populate 需要 _lbl_total 已存在
         self._populate()
+
+    def closeEvent(self, event):
+        """右上角 X / ALT+F4 一律拦截，只能通过底部「关闭」按钮关闭
+        （accept → done → hide 不走 closeEvent，不受影响）"""
+        event.ignore()
+
+    def done(self, r):
+        """上传进行中禁止关闭（含「关闭」按钮），防止 zip 传输被截断"""
+        if self._upload_worker is not None and self._upload_worker.isRunning():
+            InfoBar.warning("提示", "打包上传进行中，请等待完成后再关闭",
+                            parent=self, duration=2000)
+            return
+        super().done(r)
+
+    def keyPressEvent(self, e):
+        """屏蔽 ESC 关闭（与 X 一致，只能通过「关闭」按钮退出）"""
+        if e.key() == Qt.Key.Key_Escape:
+            return
+        super().keyPressEvent(e)
 
     def _populate(self):
         total_files = 0
@@ -443,6 +482,78 @@ class UploadListDialog(QDialog):
     def _open_dir(self):
         if os.path.isdir(self._upload_root):
             os.startfile(self._upload_root)
+
+    # ---------- 打包上传 ----------
+
+    def _on_package_upload(self):
+        """打包 upload 目录为 zip 并 SFTP 上传，成功后清空本地目录并刷新清单
+
+        凭据用上传专用字段 upload_user/upload_pass（默认 root/Kaidao!2，
+        不复用 SSH 凭据）；目标由 upload_host/upload_port/upload_remote_dir 配置。
+        """
+        if self._upload_worker is not None and self._upload_worker.isRunning():
+            InfoBar.warning("提示", "已有上传进行中，请稍候", parent=self, duration=2000)
+            return
+        if not os.path.isdir(self._upload_root) or not os.listdir(self._upload_root):
+            InfoBar.info("提示", "upload 目录为空，无文件可上传", parent=self, duration=3000)
+            return
+        settings = _load_settings()
+        host = str(settings.get("upload_host") or "49.235.34.253").strip()
+        try:
+            port = int(settings.get("upload_port") or 22)
+        except (TypeError, ValueError):
+            port = 22
+        remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
+        username = str(settings.get("upload_user") or "root").strip()
+        password = settings.get("upload_pass") or "Kaidao!2"
+
+        count = self.file_count(self._upload_root)
+        box = MessageBox(
+            "打包上传",
+            f"将把 upload 目录中的 {count} 个文件打包为 zip，上传到\n"
+            f"{host}:{remote_dir}\n\n上传成功后将清空本地 upload 目录，确定继续？",
+            self)
+        box.yesButton.setText("上传")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+
+        self._btn_package.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._progress_bar.show()
+        self._upload_worker = ZipUploadWorker(
+            self._upload_root, host, port, username, password, remote_dir)
+        # 阶段提示显示在底部进度标签，避免多个 InfoBar 叠加
+        self._upload_worker.progress.connect(self._lbl_progress.setText)
+        # 字节进度驱动进度条（SFTP put 回调）
+        self._upload_worker.percent.connect(self._on_upload_percent)
+        self._upload_worker.done.connect(self._on_upload_done)
+        self._upload_worker.error.connect(self._on_upload_fail)
+        self._upload_worker.start()
+
+    def _on_upload_percent(self, p):
+        """上传字节进度：进度条 + 百分比文字（含显示保护）"""
+        if self._progress_bar.isHidden():
+            self._progress_bar.show()
+        self._progress_bar.setValue(p)
+        self._lbl_progress.setText(f"上传中 {p}%")
+
+    def _on_upload_done(self, info):
+        self._btn_package.setEnabled(True)
+        self._lbl_progress.setText("")
+        self._progress_bar.hide()
+        self._progress_bar.setValue(0)
+        self._tree.clear()
+        self._populate()  # upload 目录已被 worker 清空，刷新为空清单
+        InfoBar.success("上传成功", f"{info} · 本地 upload 目录已清空",
+                        parent=self, duration=5000)
+
+    def _on_upload_fail(self, msg):
+        self._btn_package.setEnabled(True)
+        self._lbl_progress.setText("")
+        self._progress_bar.hide()
+        self._progress_bar.setValue(0)
+        InfoBar.error("上传失败", msg.split(chr(10))[0], parent=self, duration=5000)
 
     @staticmethod
     def file_count(upload_root: str) -> int:
@@ -1434,6 +1545,13 @@ class DevicePage(QWidget):
     def _on_migrate_ok(self, fname, dest_cat):
         InfoBar.success("迁移成功", f"{fname} 已移动到「{dest_cat}」", parent=self, duration=2500)
         self._silent_refresh()
+        # 迁移到精度/问题后自动收集对应视频/日志到 upload 目录
+        # （无需再点精度/问题单元格；数据尚未刷回，先把 fname 并入字段列表）
+        field = {"精度": "accuracy_files", "问题": "already_files"}.get(dest_cat)
+        if field:
+            row = dict(getattr(self._file_panel, "_row", None) or {})
+            row[field] = list(row.get(field) or []) + [fname]
+            self._auto_collect(row, field)
 
     def _on_migrate_fail(self, msg):
         InfoBar.error("迁移失败", msg.split("\n")[0], parent=self, duration=4000)
@@ -1454,8 +1572,11 @@ class DevicePage(QWidget):
         """点击精度/问题后自动收集设备文件到 upload 工作区
 
         视频/日志按文件列表的基础名收集；detect.bin 与 CPP 日志（daily_*.txt）
-        只收集一次（目标已存在即跳过）。设备目录优先按 table_id 匹配，
-        失败回退 device_code。
+        只收集一次（目标已存在即跳过）。
+
+        设备目录三级匹配：① table_id / device_code 精确匹配；② 模糊搜索
+        （店号前缀相同 + 后缀归一化数字相等，如 281-S8 ↔ 281-08，仅唯一
+        命中才采用）；③ 均失败时警告并引导主界面右键兜底。
         """
         videos_dir = (_load_settings().get("videos_dir") or "").strip()
         if not videos_dir or not os.path.isdir(videos_dir):
@@ -1466,10 +1587,14 @@ class DevicePage(QWidget):
                       str(row.get("device_code") or "").strip()]
         device_id = next((n for n in dict.fromkeys(candidates)
                           if n and os.path.isdir(os.path.join(videos_dir, n))), "")
+        fuzzy_note = ""
+        if not device_id:
+            device_id, fuzzy_note = self._fuzzy_match_device_dir(videos_dir, candidates)
         if not device_id:
             InfoBar.warning("无法收集",
-                            "本地设备目录不存在: " + " / ".join(c for c in candidates if c),
-                            parent=self, duration=3000)
+                            "本地设备目录不存在: " + " / ".join(c for c in candidates if c)
+                            + "\n可在主界面设备列表找到对应文件夹，右键日志文件→添加到上传目录",
+                            parent=self, duration=5000)
             return
         bases = sorted({b for b in (clip_base_name(f) for f in (row.get(field) or [])) if b})
         if not bases:
@@ -1483,8 +1608,45 @@ class DevicePage(QWidget):
         self._collect_workers.append(worker)
         worker.start()
         InfoBar.info("收集中",
-                     f"{device_id} · {len(bases)} 个视频/日志 → upload 目录",
-                     parent=self, duration=1500)
+                     f"{device_id}{'（' + fuzzy_note + '）' if fuzzy_note else ''} · "
+                     f"{len(bases)} 个视频/日志 → upload 目录",
+                     parent=self, duration=1500 if not fuzzy_note else 3500)
+
+    @staticmethod
+    def _norm_suffix(name: str) -> str:
+        """后缀归一化：只留数字并去前导零（S8/08/TV2 → 8/8/2）"""
+        digits = "".join(ch for ch in str(name or "") if ch.isdigit())
+        return digits.lstrip("0")
+
+    def _fuzzy_match_device_dir(self, videos_dir: str, candidates: list) -> tuple:
+        """模糊搜索本地设备目录（命名与球桌号不一致时的兜底）
+
+        规则：店号前缀（最后一个 '-' 之前）完全相同，后缀归一化后的
+        数字相等；仅唯一命中才采用，多候选不猜。返回 (目录名, 匹配说明)。
+        """
+        try:
+            entries = os.listdir(videos_dir)
+        except OSError:
+            return "", ""
+        for cand in candidates:
+            if "-" not in cand:
+                continue
+            prefix, suffix = cand.rsplit("-", 1)
+            target = self._norm_suffix(suffix)
+            if not target:
+                continue
+            hits = []
+            for name in entries:
+                if "-" not in name:
+                    continue
+                if not os.path.isdir(os.path.join(videos_dir, name)):
+                    continue
+                p, s = name.rsplit("-", 1)
+                if p == prefix and self._norm_suffix(s) == target:
+                    hits.append(name)
+            if len(hits) == 1:
+                return hits[0], f"{cand} → 匹配本地目录 {hits[0]}"
+        return "", ""
 
     def _on_collect_done(self, device_id, copied, missing, worker):
         if worker in self._collect_workers:
@@ -1528,8 +1690,9 @@ class DevicePage(QWidget):
         except (TypeError, ValueError):
             port = 22
         remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
-        username = settings.get("ssh_user", "")
-        password = settings.get("ssh_pass", "")
+        # 上传专用凭据（不复用 SSH 凭据），未配置时用默认值
+        username = str(settings.get("upload_user") or "root").strip()
+        password = settings.get("upload_pass") or "Kaidao!2"
 
         count = UploadListDialog.file_count(root)
         box = MessageBox(
@@ -1547,6 +1710,9 @@ class DevicePage(QWidget):
             root, host, port, username, password, remote_dir)
         # 阶段提示显示在底部状态栏，避免多个 InfoBar 叠加
         self._upload_worker.progress.connect(self._lbl_time.setText)
+        # 字节进度：上传阶段在状态栏显示百分比
+        self._upload_worker.percent.connect(
+            lambda p: self._lbl_time.setText(f"上传中 {p}%"))
         self._upload_worker.done.connect(self._on_upload_done)
         self._upload_worker.error.connect(self._on_upload_fail)
         self._upload_worker.start()
@@ -1672,7 +1838,7 @@ class AdminSettingsPage(QWidget):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
-        layout.addWidget(TitleLabel("管理设置", view))
+       # layout.addWidget(TitleLabel("管理设置", view))
         layout.addWidget(self._build_source_card(view))
         layout.addWidget(self._build_api_card(
             # （Session 认证）
@@ -1680,6 +1846,7 @@ class AdminSettingsPage(QWidget):
         layout.addWidget(self._build_api_card(
             # （JWT 认证）
             view, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
+        layout.addWidget(self._build_upload_card(view))
         layout.addWidget(self._build_add_card(view))
 
         btn_row = QHBoxLayout()
@@ -1757,6 +1924,36 @@ class AdminSettingsPage(QWidget):
         vbox.addLayout(add_row)
         return card
 
+    def _build_upload_card(self, parent):
+        """收集与上传：与主界面设置对话框同款配置（复用 settings.json 同键）"""
+        card = CardWidget(parent)
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(8)
+        vbox.addWidget(BodyLabel("收集与上传", card))
+        vbox.addWidget(CaptionLabel(
+            "精度/问题文件收集打包上传；文件收集到 视频/日志目录/upload", card))
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self._edit_upload_host = LineEdit(card)
+        self._edit_upload_host.setPlaceholderText("上传服务器 IP")
+        form.addRow("上传服务器:", self._edit_upload_host)
+        self._edit_upload_port = LineEdit(card)
+        self._edit_upload_port.setPlaceholderText("端口号（默认 22）")
+        form.addRow("上传端口:", self._edit_upload_port)
+        self._edit_upload_dir = LineEdit(card)
+        self._edit_upload_dir.setPlaceholderText("如 /lhcos-data/videos")
+        form.addRow("远程目录:", self._edit_upload_dir)
+        self._edit_upload_user = LineEdit(card)
+        self._edit_upload_user.setPlaceholderText("上传用户名（默认 root）")
+        form.addRow("上传用户名:", self._edit_upload_user)
+        self._edit_upload_pass = PasswordLineEdit(card)
+        self._edit_upload_pass.setPlaceholderText("上传密码")
+        form.addRow("上传密码:", self._edit_upload_pass)
+        vbox.addLayout(form)
+        return card
+
     def _build_source_card(self, parent):
         card = CardWidget(parent)
         vbox = QVBoxLayout(card)
@@ -1807,7 +2004,8 @@ class AdminSettingsPage(QWidget):
 
     def _load_current(self):
         """从 settings.json 加载当前配置填充到界面"""
-        creds = _load_settings().get("api_credentials", {})
+        settings = _load_settings()
+        creds = settings.get("api_credentials", {})
         for api_key in ("api1", "api2"):
             cfg = creds.get(api_key, {})
             self._user_edits[api_key].setText(cfg.get("username", ""))
@@ -1815,6 +2013,13 @@ class AdminSettingsPage(QWidget):
         active = str(creds.get("active_source", "kd")).lower()
         idx = next((i for i, (_, v) in enumerate(self._SOURCE_OPTIONS) if v == active), 0)
         self._source_combo.setCurrentIndex(idx)
+        # 收集与上传（与主界面设置同键）
+        self._edit_upload_host.setText(str(settings.get("upload_host", "49.235.34.253")))
+        self._edit_upload_port.setText(str(settings.get("upload_port", 22)))
+        self._edit_upload_dir.setText(
+            str(settings.get("upload_remote_dir", "/lhcos-data/videos")))
+        self._edit_upload_user.setText(str(settings.get("upload_user", "root")))
+        self._edit_upload_pass.setText(str(settings.get("upload_pass", "Kaidao!2")))
 
     def _on_save(self):
         api_credentials = {
@@ -1829,8 +2034,19 @@ class AdminSettingsPage(QWidget):
             "active_source": self._SOURCE_OPTIONS[self._source_combo.currentIndex()][1],
         }
         try:
-            _save_settings({"api_credentials": api_credentials})
-            InfoBar.success("已保存", "API 配置已写入 settings.json，即时生效",
+            upload_port = int(self._edit_upload_port.text().strip() or 22)
+        except ValueError:
+            upload_port = 22
+        try:
+            _save_settings({
+                "api_credentials": api_credentials,
+                "upload_host": self._edit_upload_host.text().strip(),
+                "upload_port": upload_port,
+                "upload_remote_dir": self._edit_upload_dir.text().strip(),
+                "upload_user": self._edit_upload_user.text().strip() or "root",
+                "upload_pass": self._edit_upload_pass.text(),
+            })
+            InfoBar.success("已保存", "配置已写入 settings.json，即时生效",
                             parent=self, duration=2500)
         except Exception as e:
             InfoBar.error("保存失败", str(e), parent=self, duration=4000)

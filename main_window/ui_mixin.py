@@ -4,6 +4,7 @@
 import os
 import sys
 import json
+import shutil
 import ctypes
 import subprocess
 
@@ -25,6 +26,7 @@ from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAni
 
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
+from workers.collect_worker import CollectFilesWorker
 
 
 def _patch_acrylic_exec(menu):
@@ -294,6 +296,10 @@ class UIMixin:
             else:
                 self._append_log("[提示] 无法定位日志文件")
 
+        action_add_upload_log = Action(FluentIcon.SEND, "添加到上传目录", self)
+        action_add_upload_log.triggered.connect(
+            lambda: self._add_file_to_upload(self._current_log_path))
+
         action_copy.triggered.connect(_do_copy)
         action_copy_frame.triggered.connect(_do_copy_frame)
         action_locate.triggered.connect(_do_locate)
@@ -301,6 +307,7 @@ class UIMixin:
         menu.addAction(action_copy_frame)
         menu.addSeparator()
         menu.addAction(action_locate)
+        menu.addAction(action_add_upload_log)
         self._ctx_log_menu = menu
 
     def _build_video_list_menu(self):
@@ -360,6 +367,30 @@ class UIMixin:
             self._show_status_message("视频路径已复制到剪贴板", 2000)
             self._append_log(f"[复制] 视频路径: {video_path}")
 
+        def _do_add_to_upload():
+            """第二列右键：将当前日志文件（及对应视频）添加到上传目录"""
+            item = self.ui.loacl_video_list.currentItem()
+            if not item:
+                return
+            log_filename = item.text()
+            device_item = self.ui.id_list.currentItem()
+            if not device_item:
+                self._show_info_bar("请先选择设备", "warning")
+                return
+            device_code = device_item.text()
+            # 重建完整路径：日期子目录优先，其次设备根目录
+            date_str = self._get_selected_date_str()
+            full_path = os.path.join(
+                self.videos_dir, device_code, date_str, log_filename)
+            if not os.path.exists(full_path):
+                alt_path = os.path.join(self.videos_dir, device_code, log_filename)
+                if os.path.exists(alt_path):
+                    full_path = alt_path
+            self._add_file_to_upload(full_path)
+
+        action_add_upload = Action(FluentIcon.SEND, "添加到上传目录", self)
+        action_add_upload.triggered.connect(_do_add_to_upload)
+
         action_copy_name.triggered.connect(_do_copy_name)
         action_open_video_loc.triggered.connect(_do_open_video_loc)
         action_copy_video_loc.triggered.connect(_do_copy_video_loc)
@@ -367,6 +398,8 @@ class UIMixin:
         menu.addSeparator()
         menu.addAction(action_open_video_loc)
         menu.addAction(action_copy_video_loc)
+        menu.addSeparator()
+        menu.addAction(action_add_upload)
         self._ctx_video_menu = menu
 
     # ---------- 右键触发：直接弹出缓存菜单（零构建开销） ----------
@@ -387,6 +420,95 @@ class UIMixin:
             return
         _exec_menu(self._ctx_video_menu, self.ui.loacl_video_list.mapToGlobal(pos))
 
+    # ---------- 添加到上传目录（收集到 {videos_dir}/upload/{设备}/） ----------
+
+    def _add_file_to_upload(self, file_path):
+        """将指定日志/文本文件添加到上传收集目录
+
+        .log 文件走 CollectFilesWorker：连带收集对应视频、detect.bin、
+        CPP 日志（daily_*.txt），缺失项完成后警告提示；
+        .txt 等其他文件直接复制文件本身（已存在跳过）。
+        """
+        if not file_path or not os.path.isfile(file_path):
+            self._append_log("[上传] 文件不存在或未被选中，无法添加到上传目录")
+            self._show_info_bar("文件不存在，无法添加到上传目录", "warning")
+            return
+        videos_dir = getattr(self, "videos_dir", "") or ""
+        if not videos_dir or not os.path.isdir(videos_dir):
+            self._show_info_bar("videos_dir 未配置或目录不存在", "warning")
+            return
+        device_item = self.ui.id_list.currentItem()
+        device_code = device_item.text().strip() if device_item else ""
+        if not device_code or not os.path.isdir(os.path.join(videos_dir, device_code)):
+            self._show_info_bar(f"设备目录不存在，无法收集: {device_code or '未选择设备'}",
+                                "warning")
+            return
+
+        fname = os.path.basename(file_path)
+        if fname.lower().endswith(".log"):
+            base = os.path.splitext(fname)[0]
+            worker = CollectFilesWorker(videos_dir, device_code, [base])
+            worker.done.connect(
+                lambda dev, n, miss, w=worker: self._on_upload_collect_done(dev, n, miss, w))
+            worker.error.connect(
+                lambda msg: self._show_info_bar(msg.split(chr(10))[0], "error", duration=4000))
+            if not hasattr(self, "_upload_collect_workers"):
+                self._upload_collect_workers = []
+            self._upload_collect_workers.append(worker)
+            worker.start()
+            self._append_log(f"[上传] 正在收集 {device_code}: {base} 的视频/日志...")
+            return
+
+        # .txt 等其他文件：直接复制文件本身到 upload/{设备}/
+        try:
+            upload_dir = os.path.join(videos_dir, "upload", device_code)
+            os.makedirs(upload_dir, exist_ok=True)
+            dst = os.path.join(upload_dir, fname)
+            if os.path.exists(dst):
+                self._show_info_bar(f"{fname} 已在上传目录中（跳过）", "info")
+                self._append_log(f"[上传] 已存在跳过: {dst}")
+            else:
+                shutil.copy2(file_path, dst)
+                self._show_info_bar(f"{fname} 已添加到上传目录", "success")
+                self._append_log(f"[上传] 已收集: {dst}")
+        except Exception as e:
+            self._append_log(f"[上传] 收集失败: {e}")
+            self._show_info_bar(f"添加到上传目录失败: {e}", "error", duration=4000)
+
+    def _on_upload_collect_done(self, device_id, copied, missing, worker):
+        """右键收集完成：复制数 + 缺失项警告（视频/日志未找到时明确提示）"""
+        workers = getattr(self, "_upload_collect_workers", [])
+        if worker in workers:
+            workers.remove(worker)
+        if missing:
+            shown = ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else "")
+            self._append_log(
+                f"[上传] {device_id} 收集完成: 复制 {copied} 个，缺失 {len(missing)} 个: {shown}")
+            self._show_info_bar(
+                f"{device_id}: 复制 {copied} 个，缺失 {len(missing)} 个: {shown}",
+                "warning", duration=4000)
+        else:
+            self._append_log(f"[上传] {device_id} 收集完成: 复制 {copied} 个文件到 upload 目录")
+            self._show_info_bar(
+                f"{device_id}: {copied} 个文件已添加到上传目录", "success")
+
+    def _on_show_upload_list(self):
+        """功能菜单「上传清单」：复用运维面板 UploadListDialog 查看 upload 工作区文件"""
+        videos_dir = getattr(self, "videos_dir", "") or ""
+        if not videos_dir:
+            self._show_info_bar("videos_dir 未配置，请先在设置中配置视频/日志目录",
+                                "warning", duration=3000)
+            return
+        root = os.path.join(videos_dir, "upload")
+        if not os.path.isdir(root) or not os.listdir(root):
+            self._show_info_bar("暂无待上传文件，请先右键日志文件→添加到上传目录",
+                                "info", duration=3000)
+            return
+        # 延迟导入：management_panel 依赖重（qfluentwidgets 整包），避免启动开销
+        # 弹窗内置「打包上传」按钮，清单确认与上传在同一窗口完成
+        from windows.management_panel import UploadListDialog
+        UploadListDialog(root, self).exec()
+
     # ==================== 菜单栏 ====================
 
     def _init_menubar(self):
@@ -403,6 +525,10 @@ class UIMixin:
         act_settings = Action(FluentIcon.SETTING, "设置", self)
         act_settings.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_settings))
         func_menu.addAction(act_settings)
+        act_upload_list = Action(FluentIcon.LIBRARY, "上传清单", self)
+        act_upload_list.setToolTip("查看已收集待上传的文件（视频/日志目录/upload）")
+        act_upload_list.triggered.connect(lambda: QTimer.singleShot(0, self._on_show_upload_list))
+        func_menu.addAction(act_upload_list)
         #act_add_table = Action(FluentIcon.ADD, "手动添加", self)
         #act_add_table.setToolTip("手动添加一条球桌记录到本地数据库")
         #act_add_table.triggered.connect(lambda: QTimer.singleShot(0, self._on_add_table_record))
@@ -782,10 +908,21 @@ class UIMixin:
                 self._edit_upload_dir.setPlaceholderText("如 /lhcos-data/videos")
                 form.addRow("远程目录:", self._edit_upload_dir)
 
+                self._edit_upload_user = LineEdit(self)
+                self._edit_upload_user.setText(cfg.get("upload_user", "root"))
+                self._edit_upload_user.setPlaceholderText("上传用户名（默认 root）")
+                form.addRow("上传用户名:", self._edit_upload_user)
+
+                self._edit_upload_pass = LineEdit(self)
+                self._edit_upload_pass.setText(cfg.get("upload_pass", "Kaidao!2"))
+                self._edit_upload_pass.setEchoMode(LineEdit.EchoMode.Password)
+                self._edit_upload_pass.setPlaceholderText("上传密码")
+                form.addRow("上传密码:", self._edit_upload_pass)
+
                 self.main_layout.addLayout(form)
-                self.main_layout.addWidget(CaptionLabel(
-                    "上传凭据复用上方 SSH 用户名/密码；文件收集到 视频/日志目录/upload",
-                    self))
+                # self.main_layout.addWidget(CaptionLabel(
+                #     "上传使用上方专用账号密码（不复用 SSH 凭据）；文件收集到 视频/日志目录/upload",
+                #     self))
 
             # ---------- FRPC 服务器 ----------
             def _build_frpc_section(self, cfg):
@@ -871,6 +1008,8 @@ class UIMixin:
                 except ValueError:
                     data["upload_port"] = 22
                 data["upload_remote_dir"] = self._edit_upload_dir.text().strip()
+                data["upload_user"] = self._edit_upload_user.text().strip() or "root"
+                data["upload_pass"] = self._edit_upload_pass.text()
                 # FRPC
                 data["frpc_server"] = {
                     "serverAddr": self._edit_frpc_addr.text().strip(),

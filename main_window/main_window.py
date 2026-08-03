@@ -979,4 +979,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except (RuntimeError, OSError):
                 pass
 
+        # 7. 等待上传收集 worker 结束（文件复制任务，短等待即可）
+        for cw in list(getattr(self, '_upload_collect_workers', [])):
+            try:
+                if cw.isRunning():
+                    cw.wait(1500)
+            except (RuntimeError, OSError):
+                pass
+        self._upload_collect_workers = []
+
         super().closeEvent(event)

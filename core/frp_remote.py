@@ -92,8 +92,13 @@ class FrpRemoteBridge(QObject):
             self._notify("远程准备失败", str(e), error=True)
             return
         delay = _FRESH_TUNNEL_DELAY_MS if fresh else _REUSE_TUNNEL_DELAY_MS
-        self._notify("正在建立远程连接",
-                     f"{table_id or snk} → {snk}（本地端口 {port}）")
+        msg = f"{table_id or snk} → {snk}（本地端口 {port}）"
+        # SFTP 会话按球桌号在 videos_dir 下自动建本地目录，下载直接落位
+        if kind == "sftp" and table_id:
+            videos_dir = str(_load_settings().get("videos_dir") or "").strip()
+            if videos_dir and os.path.isdir(videos_dir):
+                msg += f"，本地目录 videos{os.sep}{table_id}"
+        self._notify("正在建立远程连接", msg)
         QTimer.singleShot(delay, lambda: self._do_open(kind, snk, table_id, port))
 
     def shutdown(self):
@@ -200,11 +205,17 @@ class FrpRemoteBridge(QObject):
                 )
             elif kind == "sftp":
                 from windows.sftp_window import SFTPPanel
+                # snk 会话：本地初始目录 = videos_dir/{球桌号}（不存在自动创建）
+                local_dir = None
+                videos_dir = str(settings.get("videos_dir") or "").strip()
+                if table_id and videos_dir and os.path.isdir(videos_dir):
+                    local_dir = os.path.join(videos_dir, str(table_id).strip())
                 panel = SFTPPanel(
                     host, port, username, password,
                     server_name=title_snk,
                     log_callback=lambda msg: None,
                     default_remote_path=settings.get("sftp_default_remote_path") or None,
+                    default_local_path=local_dir,
                 )
             else:  # rdp
                 from windows.rdp_window import RDPPanel
