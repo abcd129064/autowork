@@ -148,7 +148,15 @@ CREATE TABLE IF NOT EXISTS kd_status (
     rubbish_files   TEXT DEFAULT '[]',
     version_files   TEXT DEFAULT '[]'
 );
+-- 日期分区 + 默认 id 排序的覆盖索引：file_path 筛选的分页查询（列表页主路径）
+-- 无需回表扫描全表；CREATE INDEX IF NOT EXISTS 幂等，旧库首次初始化自动补建
+CREATE INDEX IF NOT EXISTS idx_kd_status_path_id ON kd_status(file_path, id);
 """
+
+# 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
+# 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
+# 反序列化大量 JSON 带来的 CPU/内存开销
+_KD_LIGHT_FIELDS = ("file_path",) + STATUS_FIELDS + ("device_code", "target_directory", "status")
 
 
 # 模块级初始化标志：建表脚本与迁移检查只在首次连接时执行一次，
@@ -446,17 +454,20 @@ def prune_kd_history(keep_days: int = 60) -> int:
 
 
 def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: str = "",
-                  order_by: str = "", desc: bool = False) -> tuple:
-    """接口2数据分页查询（含扩展字段）
+                  order_by: str = "", desc: bool = False, include_files: bool = False) -> tuple:
+    """接口2数据分页查询
 
     Args:
         file_path: 日期路径筛选，如 "2026/08/02"；为空则查全部日期
         order_by: 排序字段名（白名单校验）；为空按 id 排序
         desc: 是否降序
+        include_files: 是否携带 8 类文件清单 JSON（列表页用默认轻量模式，
+            详情按需走 get_kd_row_full 按 id 懒加载）
     """
     conn = _get_conn()
     try:
-        all_fields = ("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS
+        all_fields = (("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS if include_files
+                      else _KD_LIGHT_FIELDS)
         conds = []
         params = []
         # 日期筛选
@@ -488,14 +499,40 @@ def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: st
         rows = []
         for r in cursor.fetchall():
             row_dict = dict(zip(cols, r))
-            # 反序列化文件列表字段
-            for f in KD_FILE_FIELDS:
-                try:
-                    row_dict[f] = json.loads(row_dict.get(f) or "[]")
-                except (json.JSONDecodeError, TypeError):
-                    row_dict[f] = []
+            if include_files:
+                # 反序列化文件列表字段（仅详情查询需要）
+                for f in KD_FILE_FIELDS:
+                    try:
+                        row_dict[f] = json.loads(row_dict.get(f) or "[]")
+                    except (json.JSONDecodeError, TypeError):
+                        row_dict[f] = []
             rows.append(row_dict)
         return total, rows
+    finally:
+        conn.close()
+
+
+def get_kd_row_full(row_id: int) -> dict:
+    """按 id 查询 kd_status 完整行（含 8 类文件清单反序列化）
+
+    配合 query_kd_page 的轻量模式：列表页不读文件 JSON，点开某行详情时
+    才按 id 单点查询；记录不存在时返回空 dict。
+    """
+    conn = _get_conn()
+    try:
+        cols = ("id", "file_path") + STATUS_FIELDS + KD_EXTRA_FIELDS
+        cur = conn.execute(
+            f"SELECT {', '.join(cols)} FROM kd_status WHERE id = ?", (row_id,))
+        r = cur.fetchone()
+        if r is None:
+            return {}
+        row_dict = dict(zip(cols, r))
+        for f in KD_FILE_FIELDS:
+            try:
+                row_dict[f] = json.loads(row_dict.get(f) or "[]")
+            except (json.JSONDecodeError, TypeError):
+                row_dict[f] = []
+        return row_dict
     finally:
         conn.close()
 

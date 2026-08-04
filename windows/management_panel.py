@@ -32,6 +32,7 @@ from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
 from core.frp_remote import FrpRemoteBridge
+from core.perf import is_acrylic_enabled
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
@@ -250,11 +251,18 @@ def _copy_table_selection(table):
     QApplication.clipboard().setText("\n".join(lines))
 
 
+# 统一固定行高：原 resizeRowsToContents 对每行做内容同步测量，千行大表
+# 加载/滚动/窗口缩放都明显卡顿；改为固定行高，长文本省略号 + tooltip
+_FIXED_ROW_HEIGHT = 38
+
+
 def _fit_table_rows(table):
-    """行高自适应 + 最小行高"""
-    table.resizeRowsToContents()
+    """统一行高（固定值，不做内容测量）"""
+    vh = table.verticalHeader()
+    vh.setDefaultSectionSize(_FIXED_ROW_HEIGHT)
     for r in range(table.rowCount()):
-        table.setRowHeight(r, max(table.rowHeight(r) + 10, 38))
+        if table.rowHeight(r) != _FIXED_ROW_HEIGHT:
+            table.setRowHeight(r, _FIXED_ROW_HEIGHT)
 
 
 class AddRecordDialog(QDialog):
@@ -583,6 +591,11 @@ class TablePage(QWidget):
         self._total = 0
         self._worker = None
         self._hidden_cols = {2}
+        # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
+        self._search_timer = QTimer(self)
+        self._search_timer.setInterval(300)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._do_search)
         self._init_ui()
         self._load_local()
         db_total, _ = table_db.get_meta()
@@ -600,7 +613,7 @@ class TablePage(QWidget):
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText("搜索")
         self._search_edit.setFixedWidth(280)
-        self._search_edit.textChanged.connect(self._on_search)
+        self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
         toolbar.addStretch(1)
 
@@ -624,8 +637,11 @@ class TablePage(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self._table.setItemDelegate(_ReadOnlySelectDelegate(self._table))
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(_FIXED_ROW_HEIGHT)
         self._table.setAlternatingRowColors(True)
-        self._table.setWordWrap(True)
+        # 关闭自动换行：长文本由默认省略号截断 + tooltip 展示全文，
+        # 换行会显著增加布局成本
+        self._table.setWordWrap(False)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_copy_menu)
         QShortcut(QKeySequence.StandardKey.Copy, self._table).activated.connect(
@@ -634,7 +650,7 @@ class TablePage(QWidget):
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
-        header.sectionResized.connect(lambda: _fit_table_rows(self._table))
+        # 列宽拖动不再触发全表行高重算（固定行高，无需测量）
         for i, (_, _, w) in enumerate(TABLE_COLUMNS):
             self._table.setColumnWidth(i, w)
         for i in self._hidden_cols:
@@ -649,7 +665,11 @@ class TablePage(QWidget):
         pager.addStretch(1)
         pager.addWidget(QLabel("每页:", self))
         self._size_combo = ComboBox(self)
-        self._size_combo.addItems(["50", "100", "300", "800", "1000"])
+        # 每页选项 20/50/100/300（已移除 800/1000：大页同步填充/测量开销过大）
+        self._size_combo.blockSignals(True)
+        self._size_combo.addItems(["20", "50", "100", "300"])
+        self._size_combo.setCurrentText(str(self._page_size))
+        self._size_combo.blockSignals(False)
         self._size_combo.setFixedWidth(70)
         self._size_combo.currentTextChanged.connect(self._on_page_size_changed)
         pager.addWidget(self._size_combo)
@@ -714,18 +734,25 @@ class TablePage(QWidget):
         self._lbl_info.setText(f"同步失败: {msg}")
 
     def _populate(self, rows):
-        self._table.setRowCount(len(rows))
-        for r, item in enumerate(rows):
-            for c, (key, _, _) in enumerate(TABLE_COLUMNS):
-                val = item.get(key) or ""
-                val = str(val).replace("\n", " ").strip()
-                cell = QTableWidgetItem(val)
-                cell.setToolTip(str(item.get(key) or ""))
-                if key == "onlineStatusName":
-                    color = _STATUS_COLORS.get(val)
-                    if color:
-                        cell.setForeground(color)
-                self._table.setItem(r, c, cell)
+        # 填充期间关闭界面更新与信号，完成后一次性恢复
+        self._table.setUpdatesEnabled(False)
+        self._table.blockSignals(True)
+        try:
+            self._table.setRowCount(len(rows))
+            for r, item in enumerate(rows):
+                for c, (key, _, _) in enumerate(TABLE_COLUMNS):
+                    val = item.get(key) or ""
+                    val = str(val).replace("\n", " ").strip()
+                    cell = QTableWidgetItem(val)
+                    cell.setToolTip(str(item.get(key) or ""))
+                    if key == "onlineStatusName":
+                        color = _STATUS_COLORS.get(val)
+                        if color:
+                            cell.setForeground(color)
+                    self._table.setItem(r, c, cell)
+        finally:
+            self._table.blockSignals(False)
+            self._table.setUpdatesEnabled(True)
         _fit_table_rows(self._table)
 
     def _update_pager(self, keyword=""):
@@ -739,7 +766,11 @@ class TablePage(QWidget):
 
     # ---------- 交互 ----------
 
-    def _on_search(self, _=""):
+    def _on_search_input(self, _=""):
+        """搜索输入防抖入口：重启 300ms 定时器，连续输入合并为一次查询"""
+        self._search_timer.start()
+
+    def _do_search(self):
         self._page_no = 1
         self._load_local()
 
@@ -950,7 +981,7 @@ class FileListPanel(QWidget):
         if not code:
             return
         date = self._device_page._current_date()
-        _, rows = table_db.query_kd_page(1, 99999, code, date)
+        _, rows = table_db.query_kd_page(1, 99999, code, date, include_files=True)
         fresh = next((r for r in rows if r.get("device_code") == code), None)
         if fresh:
             self._row = fresh
@@ -1074,6 +1105,12 @@ class DevicePage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 懒加载：首次进入本页才构建 UI 与查询数据（管理面板打开时不再
+        # 一次性构造全部三页）
+        self._lazy_built = False
+
+    def _lazy_init(self):
+        """首次显示时执行：原初始化逻辑（UI + 日期 + 定时 + 首页加载）"""
         self._page_no = 1
         self._page_size = 50
         self._total = 0
@@ -1083,6 +1120,11 @@ class DevicePage(QWidget):
         self._hourly_worker = None  # 每小时定时拉取专用，与手动搜索 _worker 隔离
         self._collect_workers = []   # 收集 Worker 列表（不同设备可并行）
         self._upload_worker = None   # 打包上传 Worker（全局唯一）
+        # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
+        self._search_timer = QTimer(self)
+        self._search_timer.setInterval(300)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._do_search)
         self._init_ui()
         # 默认日期为昨天（与主窗口一致）
         yesterday = QDate.currentDate().addDays(-1)
@@ -1118,7 +1160,7 @@ class DevicePage(QWidget):
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText("搜索")
         self._search_edit.setFixedWidth(160)
-        self._search_edit.textChanged.connect(self._on_search)
+        self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
         toolbar.addStretch(1)
 
@@ -1149,7 +1191,10 @@ class DevicePage(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self._table.setItemDelegate(_ReadOnlySelectDelegate(self._table))
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(_FIXED_ROW_HEIGHT)
         self._table.setAlternatingRowColors(True)
+        # 固定行高 + 省略号：关闭换行，长文本由默认 ElideRight 截断，tooltip 展示全文
+        self._table.setWordWrap(False)
         # 点击表头排序：直连 sectionClicked 手动处理（更新箭头 + SQL 重查），
         # 绝不走 QTableView 内置排序链路（客户端排序只重排当前页，且 Qt 内部
         # C++ 路径会绕过 Python 重写直接排序模型）
@@ -1179,8 +1224,11 @@ class DevicePage(QWidget):
         pager.addStretch(1)
         pager.addWidget(QLabel("每页:", self))
         self._size_combo = ComboBox(self)
-        self._size_combo.addItems(["50", "100", "300", "800", "1000"])
+        # 每页选项 20/50/100/300（已移除 800/1000：大页同步填充/测量开销过大）
+        self._size_combo.blockSignals(True)
+        self._size_combo.addItems(["20", "50", "100", "300"])
         self._size_combo.setCurrentText(str(self._page_size))
+        self._size_combo.blockSignals(False)
         self._size_combo.setFixedWidth(70)
         self._size_combo.currentTextChanged.connect(self._on_page_size_changed)
         pager.addWidget(self._size_combo)
@@ -1273,8 +1321,15 @@ class DevicePage(QWidget):
                 timer.start()
 
     def showEvent(self, event):
-        """页面显示时刷新数据源状态（数据源可能在管理设置页被切换）"""
+        """页面显示时刷新数据源状态（数据源可能在管理设置页被切换）
+
+        首次显示先完成懒构建（UI + 首页加载），避免管理面板打开时同步构造
+        """
         super().showEvent(event)
+        if not self._lazy_built:
+            self._lazy_built = True
+            self._lazy_init()
+            return
         self._apply_source_date_state()
         self._load_local()
 
@@ -1287,6 +1342,7 @@ class DevicePage(QWidget):
             date = ""  # xqzg 不按日期筛选
         else:
             date = self._current_date()
+            # include_files=False：列表页只查轻量字段，文件 JSON 点开行时按 id 懒加载
             total, rows = table_db.query_kd_page(
                 self._page_no, self._page_size, keyword, date,
                 self._sort_key, self._sort_desc)
@@ -1333,31 +1389,38 @@ class DevicePage(QWidget):
     def _populate(self, rows):
         # 缓存当前页数据，供 _get_row_at 直接按行号取用，避免每次点击都重查数据库
         self._current_rows = rows
-        self._table.setRowCount(len(rows))
-        for r, item in enumerate(rows):
-            for c, (key, _, _) in enumerate(DEVICE_COLUMNS):
-                val = item.get(key)
-                if key == "status":
-                    # 设备状态码 → 中文 + 颜色标识
-                    text, color = _DEVICE_STATUS_MAP.get(str(val).strip(), ("未知", None))
-                    cell = QTableWidgetItem(text)
-                    cell.setToolTip(f"设备状态: {text}")
-                    if color is not None:
-                        cell.setForeground(color)
+        # 填充期间关闭界面更新与信号，完成后一次性恢复
+        self._table.setUpdatesEnabled(False)
+        self._table.blockSignals(True)
+        try:
+            self._table.setRowCount(len(rows))
+            for r, item in enumerate(rows):
+                for c, (key, _, _) in enumerate(DEVICE_COLUMNS):
+                    val = item.get(key)
+                    if key == "status":
+                        # 设备状态码 → 中文 + 颜色标识
+                        text, color = _DEVICE_STATUS_MAP.get(str(val).strip(), ("未知", None))
+                        cell = QTableWidgetItem(text)
+                        cell.setToolTip(f"设备状态: {text}")
+                        if color is not None:
+                            cell.setForeground(color)
+                        self._table.setItem(r, c, cell)
+                        continue
+                    if isinstance(val, list):
+                        display = str(len(val))
+                        tip = "\n".join(val[:30]) + ("..." if len(val) > 30 else "")
+                    else:
+                        display = str(val if val is not None else "")
+                        tip = display
+                    cell = QTableWidgetItem(display)
+                    cell.setToolTip(tip if tip else "(空)")
+                    if key in self._FILE_VIEW_FIELDS:
+                        cell.setForeground(_LINK_COLOR)
+                        cell.setToolTip("点击查看文件列表")
                     self._table.setItem(r, c, cell)
-                    continue
-                if isinstance(val, list):
-                    display = str(len(val))
-                    tip = "\n".join(val[:30]) + ("..." if len(val) > 30 else "")
-                else:
-                    display = str(val if val is not None else "")
-                    tip = display
-                cell = QTableWidgetItem(display)
-                cell.setToolTip(tip if tip else "(空)")
-                if key in self._FILE_VIEW_FIELDS:
-                    cell.setForeground(_LINK_COLOR)
-                    cell.setToolTip("点击查看文件列表")
-                self._table.setItem(r, c, cell)
+        finally:
+            self._table.blockSignals(False)
+            self._table.setUpdatesEnabled(True)
         _fit_table_rows(self._table)
 
     def _on_header_clicked(self, column):
@@ -1391,7 +1454,11 @@ class DevicePage(QWidget):
 
     # ---------- 交互 ----------
 
-    def _on_search(self, _=""):
+    def _on_search_input(self, _=""):
+        """搜索输入防抖入口：重启 300ms 定时器，连续输入合并为一次查询"""
+        self._search_timer.start()
+
+    def _do_search(self):
         self._page_no = 1
         self._load_local()
 
@@ -1421,6 +1488,20 @@ class DevicePage(QWidget):
         if 0 <= row_idx < len(rows):
             return rows[row_idx]
         return {}
+
+    def _get_full_row_at(self, row_idx) -> dict:
+        """获取指定行完整数据（含 8 类文件清单）：kd 数据按 id 懒加载
+
+        列表页缓存为轻量行（不含文件 JSON），仅在点开详情时单点查询；
+        xqzg 数据源无文件字段直接返回缓存行。
+        """
+        row = self._get_row_at(row_idx)
+        if not row or self._active_source() != "kd":
+            return row
+        row_id = row.get("id")
+        if row_id is None:
+            return row
+        return table_db.get_kd_row_full(row_id) or row
 
     def _show_context_menu(self, pos):
         idx = self._table.indexAt(pos)
@@ -1485,12 +1566,12 @@ class DevicePage(QWidget):
         bridge.open_session(kind, snk, table_id)
 
     def _show_files_dialog(self, row_idx):
-        row = self._get_row_at(row_idx)
+        row = self._get_full_row_at(row_idx)
         if row:
             DeviceFilesDialog(row, self).exec()
 
     def _copy_file_field(self, row_idx, field):
-        row = self._get_row_at(row_idx)
+        row = self._get_full_row_at(row_idx)
         files = row.get(field) or []
         QApplication.clipboard().setText("\n".join(files))
         InfoBar.success("已复制", f"{len(files)} 个文件名已复制到剪贴板", parent=self, duration=2000)
@@ -1512,7 +1593,7 @@ class DevicePage(QWidget):
         cfg = self._FILE_VIEW_FIELDS.get(key)
         if not cfg:
             return
-        data = self._get_row_at(row)
+        data = self._get_full_row_at(row)
         if not data:
             return
         title, fields = cfg
@@ -1812,12 +1893,22 @@ class AdminSettingsPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 懒加载：首次进入本页才构建 UI 与读取配置（管理面板打开更快）
+        self._lazy_built = False
+
+    def _lazy_init(self):
         self._test_worker = None
         self._user_edits = {}
         self._pass_edits = {}
         self._test_btns = {}
         self._init_ui()
         self._load_current()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._lazy_built:
+            self._lazy_built = True
+            self._lazy_init()
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -2101,7 +2192,9 @@ class ManagementPanelWindow(FluentWindow):
         self.addSubInterface(self.device_page, FluentIcon.IOT, "设备状态")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "管理设置")
 
-        self.navigationInterface.setAcrylicEnabled(True)
+        # 导航亚克力与「性能选项」联动：关闭 perf_acrylic 后不再强制开启，
+        # 避免关闭菜单亚克力后导航栏仍有额外核显消耗
+        self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
         self.navigationInterface.setCurrentItem(self.table_page.objectName())
 
         # 远程桥接：设备状态页右键菜单按 snk 建立 frp xtcp 隧道并打开会话

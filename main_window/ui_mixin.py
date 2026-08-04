@@ -9,7 +9,7 @@ import ctypes
 import subprocess
 
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout,
-    QVBoxLayout, QFormLayout, QFileDialog, QFrame)
+    QVBoxLayout, QFormLayout, QFileDialog, QFrame, QStackedWidget)
 from PySide6.QtCore import QTimer, Qt, QRect
 from PySide6.QtGui import (QColor, QKeySequence, QFont, QActionGroup,
     QFontDatabase, QPainter)
@@ -18,7 +18,7 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
     BodyLabel, CaptionLabel, TitleLabel, isDarkTheme, RoundMenu, SwitchButton,
-    PushButton, ToolButton, ScrollArea)
+    PushButton, ToolButton, ScrollArea, Pivot)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
@@ -865,32 +865,59 @@ class UIMixin:
         settings = self._load_settings()
 
         class SettingsDialog(MessageBoxBase):
+            """设置对话框（分页懒加载）：Pivot 导航 + 每页首次切入才构建控件，
+            避免打开时同步创建全部五个分区的控件"""
+
+            # 分区：(key, 标题)，顺序即页顺序
+            _SECTIONS = [
+                ("paths", "路径配置"),
+                ("remote", "远程连接"),
+                ("upload", "收集与上传"),
+                ("frpc", "FRPC 服务器"),
+                ("appearance", "外观"),
+            ]
+
             def __init__(self, parent, cfg):
                 super().__init__(parent)
                 self.titleLabel = BodyLabel("设置", self)
                 self.viewLayout.addWidget(self.titleLabel)
 
-                # 滚动区域（Fluent 风格滚动条）
-                scroll = ScrollArea(self)
-                scroll.setWidgetResizable(True)
-                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-                scroll.setMaximumHeight(520)
-                scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-                container = QWidget()
-                self.main_layout = QVBoxLayout(container)
-                self.main_layout.setContentsMargins(4, 4, 14, 4)
-                self.main_layout.setSpacing(12)
-                scroll.setWidget(container)
-                self.viewLayout.addWidget(scroll)
-
                 self._cfg = cfg
                 self._path_edits = {}
-                self._build_paths_section(cfg)
-                self._build_remote_section(cfg)
-                self._build_upload_section(cfg)
-                self._build_frpc_section(cfg)
-                self._build_appearance_section(cfg)
-                self.main_layout.addStretch()
+                self._built = set()    # 已构建的分区 key
+                self._pages = {}       # key -> 占位页 widget
+
+                # Pivot 分页导航 + 页面堆栈（页面控件首次切入时才创建）
+                self.pivot = Pivot(self)
+                self.stack = QStackedWidget(self)
+                self.stack.setMinimumHeight(240)  # 各分区高度接近，固定下限避免切换跳动
+                for key, title in self._SECTIONS:
+                    self.pivot.addItem(
+                        routeKey=key, text=title,
+                        onClick=lambda checked=False, k=key: self._switch_section(k))
+                    self._pages[key] = QWidget(self.stack)
+                    self.stack.addWidget(self._pages[key])
+                self.viewLayout.addWidget(self.pivot)
+                self.viewLayout.addWidget(self.stack)
+
+                # 默认展示第一页（路径配置）
+                self._switch_section("paths")
+
+            def _switch_section(self, key):
+                """切换到指定分区：首次切入时构建该页控件"""
+                self.pivot.setCurrentItem(key)
+                idx = [k for k, _ in self._SECTIONS].index(key)
+                self.stack.setCurrentIndex(idx)
+                if key in self._built:
+                    return
+                self._built.add(key)
+                # 构建器向 self.main_layout 追加控件，指向当前页布局
+                layout = QVBoxLayout(self._pages[key])
+                layout.setContentsMargins(4, 10, 4, 4)
+                layout.setSpacing(10)
+                self.main_layout = layout
+                getattr(self, f"_build_{key}_section")(self._cfg)
+                layout.addStretch(1)
 
             # ---------- 路径配置 ----------
             def _build_paths_section(self, cfg):
@@ -1053,38 +1080,77 @@ class UIMixin:
                     edit.setText(path)
 
             def collect(self):
-                """收集所有编辑结果"""
+                """收集所有编辑结果：未打开过的分区保持原配置值不变"""
+                cfg = self._cfg
                 data = {}
-                # 路径
-                for key, edit in self._path_edits.items():
-                    data[key] = edit.text().strip()
+                # 路径（未构建时用原配置）
+                if "paths" in self._built:
+                    for key, edit in self._path_edits.items():
+                        data[key] = edit.text().strip()
+                else:
+                    for key in ("exe_dir", "videos_dir", "cipher_tool",
+                                "front_exe", "backend_exe"):
+                        data[key] = str(cfg.get(key, "") or "")
                 # 远程
-                data["ssh_user"] = self._edit_ssh_user.text().strip()
-                data["ssh_pass"] = self._edit_ssh_pass.text().strip()
-                data["sftp_default_remote_path"] = self._edit_sftp_path.text().strip()
-                servers_text = self._edit_tcp_servers.text().strip()
-                data["tcp_servers"] = [s.strip() for s in servers_text.split(",") if s.strip()]
+                if "remote" in self._built:
+                    data["ssh_user"] = self._edit_ssh_user.text().strip()
+                    data["ssh_pass"] = self._edit_ssh_pass.text().strip()
+                    data["sftp_default_remote_path"] = self._edit_sftp_path.text().strip()
+                    servers_text = self._edit_tcp_servers.text().strip()
+                    data["tcp_servers"] = [s.strip() for s in servers_text.split(",")
+                                           if s.strip()]
+                else:
+                    data["ssh_user"] = str(cfg.get("ssh_user", "") or "")
+                    data["ssh_pass"] = str(cfg.get("ssh_pass", "") or "")
+                    data["sftp_default_remote_path"] = str(
+                        cfg.get("sftp_default_remote_path", "") or "")
+                    data["tcp_servers"] = list(cfg.get("tcp_servers", []) or [])
                 # 收集与上传
-                data["upload_host"] = self._edit_upload_host.text().strip()
-                try:
-                    data["upload_port"] = int(self._edit_upload_port.text().strip() or 22)
-                except ValueError:
-                    data["upload_port"] = 22
-                data["upload_remote_dir"] = self._edit_upload_dir.text().strip()
-                data["upload_user"] = self._edit_upload_user.text().strip() or "root"
-                data["upload_pass"] = self._edit_upload_pass.text()
+                if "upload" in self._built:
+                    data["upload_host"] = self._edit_upload_host.text().strip()
+                    try:
+                        data["upload_port"] = int(self._edit_upload_port.text().strip() or 22)
+                    except ValueError:
+                        data["upload_port"] = 22
+                    data["upload_remote_dir"] = self._edit_upload_dir.text().strip()
+                    data["upload_user"] = self._edit_upload_user.text().strip() or "root"
+                    data["upload_pass"] = self._edit_upload_pass.text()
+                else:
+                    data["upload_host"] = str(cfg.get("upload_host", "49.235.34.253") or "")
+                    try:
+                        data["upload_port"] = int(cfg.get("upload_port", 22))
+                    except (TypeError, ValueError):
+                        data["upload_port"] = 22
+                    data["upload_remote_dir"] = str(
+                        cfg.get("upload_remote_dir", "/lhcos-data/videos") or "")
+                    data["upload_user"] = str(cfg.get("upload_user", "root") or "root")
+                    data["upload_pass"] = cfg.get("upload_pass") or "Kaidao!2"
                 # FRPC
-                data["frpc_server"] = {
-                    "serverAddr": self._edit_frpc_addr.text().strip(),
-                    "serverPort": int(self._edit_frpc_port.text().strip() or 7000),
-                    "auth_method": "token",
-                    "auth_token": self._edit_frpc_token.text().strip(),
-                }
+                if "frpc" in self._built:
+                    data["frpc_server"] = {
+                        "serverAddr": self._edit_frpc_addr.text().strip(),
+                        "serverPort": int(self._edit_frpc_port.text().strip() or 7000),
+                        "auth_method": "token",
+                        "auth_token": self._edit_frpc_token.text().strip(),
+                    }
+                else:
+                    frpc = dict(cfg.get("frpc_server", {}) or {})
+                    data["frpc_server"] = {
+                        "serverAddr": str(frpc.get("serverAddr", "") or ""),
+                        "serverPort": frpc.get("serverPort", 7000),
+                        "auth_method": frpc.get("auth_method", "token"),
+                        "auth_token": str(frpc.get("auth_token", "") or ""),
+                    }
                 # 外观
-                data["font_size"] = self._spin_font_size.value()
-                dpi_text = self._combo_dpi.currentText().replace("%", "")
-                data["dpi_scale"] = int(dpi_text)
-                data["font_family"] = self._edit_font_family.text().strip()
+                if "appearance" in self._built:
+                    data["font_size"] = self._spin_font_size.value()
+                    dpi_text = self._combo_dpi.currentText().replace("%", "")
+                    data["dpi_scale"] = int(dpi_text)
+                    data["font_family"] = self._edit_font_family.text().strip()
+                else:
+                    data["font_size"] = cfg.get("font_size", 11)
+                    data["dpi_scale"] = cfg.get("dpi_scale", 100)
+                    data["font_family"] = cfg.get("font_family", "Microsoft YaHei UI")
                 return data
 
         dlg = SettingsDialog(self, settings)
