@@ -1004,7 +1004,8 @@ class UIMixin:
                 form.addRow("上传用户名:", self._edit_upload_user)
 
                 self._edit_upload_pass = LineEdit(self)
-                self._edit_upload_pass.setText(cfg.get("upload_pass", "Kaidao!2"))
+                # 不在代码中内置默认密码，未配置时留空由用户填写
+                self._edit_upload_pass.setText(cfg.get("upload_pass", ""))
                 self._edit_upload_pass.setEchoMode(LineEdit.EchoMode.Password)
                 self._edit_upload_pass.setPlaceholderText("上传密码")
                 form.addRow("上传密码:", self._edit_upload_pass)
@@ -1124,7 +1125,7 @@ class UIMixin:
                     data["upload_remote_dir"] = str(
                         cfg.get("upload_remote_dir", "/lhcos-data/videos") or "")
                     data["upload_user"] = str(cfg.get("upload_user", "root") or "root")
-                    data["upload_pass"] = cfg.get("upload_pass") or "Kaidao!2"
+                    data["upload_pass"] = str(cfg.get("upload_pass", "") or "")
                 # FRPC
                 if "frpc" in self._built:
                     data["frpc_server"] = {

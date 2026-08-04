@@ -88,6 +88,79 @@ _NUMERIC_SORT_FIELDS = frozenset({
 # 两张运维数据表允许排序的列白名单（防 SQL 注入，列名只能来自此集合）
 _SORTABLE_COLUMNS = frozenset(STATUS_FIELDS) | {"id", "table_id", "club_name", "status"}
 
+# ==================== FTS5 全文搜索 ====================
+# trigram 分词器支持任意位置子串匹配（等价 LIKE '%kw%'），但要求关键词
+# ≥ 3 个字符；更短的关键词回退多列 LIKE。external content 表 + 触发器
+# 增量同步，覆盖全部写入路径（全量替换/日期分区/清理/单行更新）。
+_FTS_MIN_LEN = 3
+
+# 主表 → (FTS 表名, 参与搜索的列) 映射
+_FTS_MAP = {
+    "billiard_tables": ("tables_fts", FIELDS),
+    "xqzg_status": ("xqzg_fts", STATUS_FIELDS),
+    "kd_status": ("kd_fts", STATUS_FIELDS + ("device_code",)),
+}
+
+# 运行时可用标志：SQLite 缺 FTS5/trigram 支持时置 False，查询回退 LIKE
+_fts_available = False
+
+
+def _setup_fts(conn: sqlite3.Connection):
+    """创建 FTS5 索引表与同步触发器；存量库首次初始化执行一次 rebuild
+
+    触发器自动维护增量（AFTER INSERT/DELETE/UPDATE），旧库通过
+    sync_meta.fts_built 标记只 rebuild 一次，避免每次启动重建。
+    任何异常（SQLite 编译选项缺 FTS5 等）置 _fts_available=False 静默回退 LIKE。
+    """
+    global _fts_available
+    if sqlite3.sqlite_version_info < (3, 34):  # trigram 分词器最低版本
+        return
+    try:
+        for table, (fts, fields) in _FTS_MAP.items():
+            cols = ", ".join(fields)
+            new_vals = ", ".join(f"new.{f}" for f in fields)
+            old_vals = ", ".join(f"old.{f}" for f in fields)
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5({cols}, "
+                f"content='{table}', content_rowid='id', tokenize='trigram')")
+            # INSERT OR REPLACE 冲突时先触发 DELETE 再触发 INSERT，两触发器配合保证一致
+            conn.executescript(f"""
+            CREATE TRIGGER IF NOT EXISTS {fts}_ai AFTER INSERT ON {table} BEGIN
+                INSERT INTO {fts}(rowid, {cols}) VALUES (new.id, {new_vals});
+            END;
+            CREATE TRIGGER IF NOT EXISTS {fts}_ad AFTER DELETE ON {table} BEGIN
+                INSERT INTO {fts}({fts}, rowid, {cols}) VALUES ('delete', old.id, {old_vals});
+            END;
+            CREATE TRIGGER IF NOT EXISTS {fts}_au AFTER UPDATE ON {table} BEGIN
+                INSERT INTO {fts}({fts}, rowid, {cols}) VALUES ('delete', old.id, {old_vals});
+                INSERT INTO {fts}(rowid, {cols}) VALUES (new.id, {new_vals});
+            END;
+            """)
+        built = conn.execute(
+            "SELECT value FROM sync_meta WHERE key='fts_built'").fetchone()
+        if not built:
+            for _, (fts, _) in _FTS_MAP.items():
+                conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('fts_built', '1')")
+            conn.commit()
+        _fts_available = True
+    except sqlite3.Error:
+        _fts_available = False
+
+
+def _fts_cond(fts_table: str, kw: str):
+    """构造 FTS MATCH 子查询条件；不可用或短关键词返回 None（调用方回退 LIKE）
+
+    关键词用双引号包裹为 FTS 字面量（防特殊字符被当语法解析），
+    内部双引号转义为两个双引号。
+    """
+    if not _fts_available or len(kw) < _FTS_MIN_LEN:
+        return None
+    escaped = '"' + kw.replace('"', '""') + '"'
+    return (f"id IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)",
+            [escaped])
+
 
 def _build_order_clause(order_by: str, desc: bool) -> str:
     """构造 ORDER BY 子句（含白名单校验与数值列 CAST）
@@ -199,6 +272,8 @@ def _ensure_initialized(conn: sqlite3.Connection):
     if kd_cols and "status" not in kd_cols:
         conn.execute("ALTER TABLE kd_status ADD COLUMN status TEXT DEFAULT ''")
         conn.commit()
+    # FTS5 全文索引（放在迁移补列之后，确保 kd 全部列就绪）
+    _setup_fts(conn)
     _initialized = True
 
 
@@ -267,10 +342,16 @@ def query_page(page_no: int, page_size: int, keyword: str = "") -> tuple:
         params = []
         kw = keyword.strip()
         if kw:
-            like = f"%{kw}%"
-            conds = " OR ".join([f"{f} LIKE ?" for f in FIELDS])
-            where = f" WHERE {conds}"
-            params = [like] * len(FIELDS)
+            # 优先 FTS5 trigram 索引（子串匹配），短关键词/不可用时回退多列 LIKE
+            fts = _fts_cond("tables_fts", kw)
+            if fts:
+                where = f" WHERE {fts[0]}"
+                params = fts[1]
+            else:
+                like = f"%{kw}%"
+                conds = " OR ".join([f"{f} LIKE ?" for f in FIELDS])
+                where = f" WHERE {conds}"
+                params = [like] * len(FIELDS)
 
         total = conn.execute(
             f"SELECT COUNT(*) FROM billiard_tables{where}", params).fetchone()[0]
@@ -474,14 +555,19 @@ def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: st
         if file_path:
             conds.append("file_path = ?")
             params.append(file_path)
-        # 关键词搜索
+        # 关键词搜索（优先 FTS5，短关键词/不可用回退多列 LIKE）
         kw = keyword.strip()
         if kw:
-            like = f"%{kw}%"
-            search_fields = STATUS_FIELDS + ("device_code",)
-            kw_cond = " OR ".join([f"{f} LIKE ?" for f in search_fields])
-            conds.append(f"({kw_cond})")
-            params.extend([like] * len(search_fields))
+            fts = _fts_cond("kd_fts", kw)
+            if fts:
+                conds.append(fts[0])
+                params.extend(fts[1])
+            else:
+                like = f"%{kw}%"
+                search_fields = STATUS_FIELDS + ("device_code",)
+                kw_cond = " OR ".join([f"{f} LIKE ?" for f in search_fields])
+                conds.append(f"({kw_cond})")
+                params.extend([like] * len(search_fields))
 
         where = (" WHERE " + " AND ".join(conds)) if conds else ""
 
@@ -582,10 +668,17 @@ def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: s
         params = []
         kw = keyword.strip()
         if kw:
-            like = f"%{kw}%"
-            conds = " OR ".join([f"{f} LIKE ?" for f in STATUS_FIELDS])
-            where = f" WHERE {conds}"
-            params = [like] * len(STATUS_FIELDS)
+            # 优先 FTS5 trigram 索引，短关键词/不可用回退多列 LIKE
+            fts_table = _FTS_MAP.get(table_name, (None,))[0]
+            fts = _fts_cond(fts_table, kw) if fts_table else None
+            if fts:
+                where = f" WHERE {fts[0]}"
+                params = fts[1]
+            else:
+                like = f"%{kw}%"
+                conds = " OR ".join([f"{f} LIKE ?" for f in STATUS_FIELDS])
+                where = f" WHERE {conds}"
+                params = [like] * len(STATUS_FIELDS)
 
         total = conn.execute(
             f"SELECT COUNT(*) FROM {table_name}{where}", params).fetchone()[0]

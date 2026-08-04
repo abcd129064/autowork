@@ -496,8 +496,9 @@ class UploadListDialog(QDialog):
     def _on_package_upload(self):
         """打包 upload 目录为 zip 并 SFTP 上传，成功后清空本地目录并刷新清单
 
-        凭据用上传专用字段 upload_user/upload_pass（默认 root/Kaidao!2，
-        不复用 SSH 凭据）；目标由 upload_host/upload_port/upload_remote_dir 配置。
+        凭据用上传专用字段 upload_user/upload_pass（不复用 SSH 凭据）；
+        目标由 upload_host/upload_port/upload_remote_dir 配置。
+        密码不在代码中内置默认值，未配置时提示用户在设置中填写。
         """
         if self._upload_worker is not None and self._upload_worker.isRunning():
             InfoBar.warning("提示", "已有上传进行中，请稍候", parent=self, duration=2000)
@@ -513,7 +514,11 @@ class UploadListDialog(QDialog):
             port = 22
         remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
         username = str(settings.get("upload_user") or "root").strip()
-        password = settings.get("upload_pass") or "Kaidao!2"
+        password = str(settings.get("upload_pass") or "")
+        if not password:
+            InfoBar.warning("提示", "未配置上传密码，请先在设置中填写后重试",
+                            parent=self, duration=3000)
+            return
 
         count = self.file_count(self._upload_root)
         box = MessageBox(
@@ -1771,9 +1776,13 @@ class DevicePage(QWidget):
         except (TypeError, ValueError):
             port = 22
         remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
-        # 上传专用凭据（不复用 SSH 凭据），未配置时用默认值
+        # 上传专用凭据（不复用 SSH 凭据），密码不内置默认值，未配置时拦截提示
         username = str(settings.get("upload_user") or "root").strip()
-        password = settings.get("upload_pass") or "Kaidao!2"
+        password = str(settings.get("upload_pass") or "")
+        if not password:
+            InfoBar.warning("提示", "未配置上传密码，请先在设置中填写后重试",
+                            parent=self, duration=3000)
+            return
 
         count = UploadListDialog.file_count(root)
         box = MessageBox(
@@ -2110,7 +2119,7 @@ class AdminSettingsPage(QWidget):
         self._edit_upload_dir.setText(
             str(settings.get("upload_remote_dir", "/lhcos-data/videos")))
         self._edit_upload_user.setText(str(settings.get("upload_user", "root")))
-        self._edit_upload_pass.setText(str(settings.get("upload_pass", "Kaidao!2")))
+        self._edit_upload_pass.setText(str(settings.get("upload_pass", "")))
 
     def _on_save(self):
         api_credentials = {
