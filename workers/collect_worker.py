@@ -39,6 +39,29 @@ def date_from_base(base: str) -> str:
     return ""
 
 
+class FileCopyWorker(QThread):
+    """异步文件拷贝 Worker（shutil.copy2 的线程替代）
+
+    Signals:
+        finished(): 拷贝成功完成
+        error(str): 拷贝失败时的错误信息
+    """
+    copy_finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, src, dst, parent=None):
+        super().__init__(parent)
+        self.src = src
+        self.dst = dst
+
+    def run(self):
+        try:
+            shutil.copy2(self.src, self.dst)
+            self.copy_finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class CollectFilesWorker(QThread):
     """异步收集设备视频/日志/CPP日志/detect.bin 到 upload 工作区
 

@@ -37,19 +37,25 @@ _COLORS = [
 _DEFAULT_FG = '#00ff00'
 _DEFAULT_BG = '#1e1e1e'
 
+# attrs 元组: (fg, bg, bold, underline) — 不可变，避免 dict 拷贝开销
+_DEFAULT_ATTRS = ('default', 'default', False, False)
 
-def _wrap_span(text: str, attrs: dict | None) -> str:
-    """将已转义的文本包裹在带样式的 span 中"""
-    if attrs:
+# 增量渲染开关：设为 False 可回退到全量渲染
+_ENABLE_INCREMENTAL_RENDER = True
+
+
+def _wrap_span(text: str, attrs: tuple | None) -> str:
+    """将已转义的文本包裹在带样式的 span 中（attrs 为 tuple）"""
+    if attrs and attrs != _DEFAULT_ATTRS:
         styles = []
-        fg = attrs.get('fg', _DEFAULT_FG)
-        styles.append(f'color:{fg}')
-        bg = attrs.get('bg')
-        if bg:
+        fg = attrs[0]
+        styles.append(f'color:{fg if fg != "default" else _DEFAULT_FG}')
+        bg = attrs[1]
+        if bg != 'default':
             styles.append(f'background-color:{bg}')
-        if attrs.get('bold'):
+        if attrs[2]:  # bold
             styles.append('font-weight:bold')
-        if attrs.get('underline'):
+        if attrs[3]:  # underline
             styles.append('text-decoration:underline')
         return f'<span style="{";".join(styles)}">{text}</span>'
     return f'<span style="color:{_DEFAULT_FG}">{text}</span>'
@@ -75,10 +81,10 @@ class ANSITerminalWidget(QTextEdit):
         # 允许键盘焦点
         self.setFocusPolicy(Qt.StrongFocus)
         # 终端状态
-        self._lines: list[list[tuple[str, dict]]] = [[]]  # 每行: [(text, attrs), ...]
+        self._lines: list[list[tuple[str, tuple]]] = [[]]  # 每行: [(text, attrs_tuple), ...]
         self._cursor_row = 0
         self._cursor_col = 0
-        self._attrs: dict = {}
+        self._attrs: tuple = _DEFAULT_ATTRS
         self._saved_cursor = (0, 0)
         # 备用屏幕
         self._alt_lines = None
@@ -89,12 +95,16 @@ class ANSITerminalWidget(QTextEdit):
         self._max_lines = 5000
         # 输入使能（连接成功前禁止键盘输入）
         self._input_enabled = False
-        # 渲染合并定时器：将高频 write_output 合并为一次 _render（~30fps）
+        # 渲染合并定时器：将高频 write_output 合并为一次 _render（~20fps）
         self._render_timer = QTimer(self)
-        self._render_timer.setInterval(33)  # 33ms ≈ 30fps
+        self._render_timer.setInterval(50)  # 50ms ≈ 20fps
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render)
         self._render_pending = False
+        # 增量渲染状态
+        self._dirty_rows: set[int] = set()  # 脏行集合
+        self._cached_html: str = ''  # 上一次渲染的 HTML 缓存
+        self._prev_line_count: int = 0  # 上一次渲染的行数
 
     # ─── 公开接口 ─────────────────────────────────────────────────────────
 
@@ -108,7 +118,7 @@ class ANSITerminalWidget(QTextEdit):
         self._schedule_render()
 
     def _schedule_render(self):
-        """调度渲染：33ms 内的多次 write_output 合并为一次 setHtml"""
+        """调度渲染：50ms 内的多次 write_output 合并为一次 setHtml"""
         if not self._render_timer.isActive():
             self._render_timer.start()
 
@@ -117,7 +127,9 @@ class ANSITerminalWidget(QTextEdit):
         self._lines = [[]]
         self._cursor_row = 0
         self._cursor_col = 0
-        self._attrs = {}
+        self._attrs = _DEFAULT_ATTRS
+        self._dirty_rows.clear()
+        self._cached_html = ''
         self._render()
 
     # ─── 键盘输入处理 ─────────────────────────────────────────────────────
@@ -331,15 +343,19 @@ class ANSITerminalWidget(QTextEdit):
                     self._esc_buf = ''
                     i += 1
                 elif ch == '\n':
+                    self._dirty_rows.add(self._cursor_row)  # 旧行光标消失
                     self._cursor_row += 1
                     self._cursor_col = 0
                     self._ensure_rows()
+                    self._dirty_rows.add(self._cursor_row)  # 新行光标出现
                     i += 1
                 elif ch == '\r':
+                    self._dirty_rows.add(self._cursor_row)
                     self._cursor_col = 0
                     i += 1
                 elif ch == '\b':
                     if self._cursor_col > 0:
+                        self._dirty_rows.add(self._cursor_row)
                         self._cursor_col -= 1
                     i += 1
                 elif ch == '\t':
@@ -370,25 +386,34 @@ class ANSITerminalWidget(QTextEdit):
         if final == 'm':
             self._handle_sgr(params or [0])
         elif final == 'H' or final == 'f':
+            self._dirty_rows.add(self._cursor_row)
             row = (params[0] if params else 1) - 1
             col = (params[1] if len(params) > 1 else 1) - 1
             self._cursor_row = max(0, row)
             self._cursor_col = max(0, col)
             self._ensure_rows()
+            self._dirty_rows.add(self._cursor_row)
         elif final == 'A':
             n = params[0] if params and params[0] else 1
+            self._dirty_rows.add(self._cursor_row)
             self._cursor_row = max(0, self._cursor_row - n)
+            self._dirty_rows.add(self._cursor_row)
         elif final == 'B':
+            self._dirty_rows.add(self._cursor_row)
             n = params[0] if params and params[0] else 1
             self._cursor_row += n
             self._ensure_rows()
+            self._dirty_rows.add(self._cursor_row)
         elif final == 'C':
+            self._dirty_rows.add(self._cursor_row)
             n = params[0] if params and params[0] else 1
             self._cursor_col += n
         elif final == 'D':
+            self._dirty_rows.add(self._cursor_row)
             n = params[0] if params and params[0] else 1
             self._cursor_col = max(0, self._cursor_col - n)
         elif final == 'G':
+            self._dirty_rows.add(self._cursor_row)
             col = (params[0] if params else 1) - 1
             self._cursor_col = max(0, col)
         elif final == 'J':
@@ -400,7 +425,9 @@ class ANSITerminalWidget(QTextEdit):
         elif final == 's':
             self._saved_cursor = (self._cursor_row, self._cursor_col)
         elif final == 'u':
+            self._dirty_rows.add(self._cursor_row)
             self._cursor_row, self._cursor_col = self._saved_cursor
+            self._dirty_rows.add(self._cursor_row)
         elif final == 'h':
             self._handle_mode(params, True)
         elif final == 'l':
@@ -408,54 +435,56 @@ class ANSITerminalWidget(QTextEdit):
         # 其余序列忽略
 
     def _handle_sgr(self, params: list):
-        """处理 SGR (Select Graphic Rendition)"""
+        """处理 SGR (Select Graphic Rendition) — attrs 为不可变 tuple"""
+        fg, bg, bold, underline = self._attrs
         i = 0
         while i < len(params):
             p = params[i]
             if p == 0:
-                self._attrs = {}
+                fg, bg, bold, underline = _DEFAULT_ATTRS
             elif p == 1:
-                self._attrs['bold'] = True
+                bold = True
             elif p == 22:
-                self._attrs.pop('bold', None)
+                bold = False
             elif p == 4:
-                self._attrs['underline'] = True
+                underline = True
             elif p == 24:
-                self._attrs.pop('underline', None)
+                underline = False
             elif 30 <= p <= 37:
-                self._attrs['fg'] = _COLORS[p - 30]
+                fg = _COLORS[p - 30]
             elif p == 38:
                 # 扩展前景色: 38;5;n 或 38;2;r;g;b
                 if i + 1 < len(params) and params[i + 1] == 5:
                     if i + 2 < len(params):
-                        self._attrs['fg'] = self._color_256(params[i + 2])
+                        fg = self._color_256(params[i + 2])
                         i += 2
                 elif i + 1 < len(params) and params[i + 1] == 2:
                     if i + 4 < len(params):
                         r, g, b = params[i + 2], params[i + 3], params[i + 4]
-                        self._attrs['fg'] = f'#{r:02x}{g:02x}{b:02x}'
+                        fg = f'#{r:02x}{g:02x}{b:02x}'
                         i += 4
             elif p == 39:
-                self._attrs.pop('fg', None)
+                fg = 'default'
             elif 40 <= p <= 47:
-                self._attrs['bg'] = _COLORS[p - 40]
+                bg = _COLORS[p - 40]
             elif p == 48:
                 if i + 1 < len(params) and params[i + 1] == 5:
                     if i + 2 < len(params):
-                        self._attrs['bg'] = self._color_256(params[i + 2])
+                        bg = self._color_256(params[i + 2])
                         i += 2
                 elif i + 1 < len(params) and params[i + 1] == 2:
                     if i + 4 < len(params):
                         r, g, b = params[i + 2], params[i + 3], params[i + 4]
-                        self._attrs['bg'] = f'#{r:02x}{g:02x}{b:02x}'
+                        bg = f'#{r:02x}{g:02x}{b:02x}'
                         i += 4
             elif p == 49:
-                self._attrs.pop('bg', None)
+                bg = 'default'
             elif 90 <= p <= 97:
-                self._attrs['fg'] = _COLORS[p - 90 + 8]
+                fg = _COLORS[p - 90 + 8]
             elif 100 <= p <= 107:
-                self._attrs['bg'] = _COLORS[p - 100 + 8]
+                bg = _COLORS[p - 100 + 8]
             i += 1
+        self._attrs = (fg, bg, bold, underline)
 
     @staticmethod
     def _color_256(n: int) -> str:
@@ -480,20 +509,28 @@ class ANSITerminalWidget(QTextEdit):
             self._lines = [[] for _ in range(max(self._cursor_row + 1, 24))]
             self._cursor_row = 0
             self._cursor_col = 0
+            self._dirty_rows.clear()
         elif mode == 0:
             # 光标到屏幕末尾
             if self._cursor_row < len(self._lines):
                 self._lines[self._cursor_row] = \
                     self._lines[self._cursor_row][:self._cursor_col]
+                self._dirty_rows.add(self._cursor_row)
+            old_count = len(self._lines)
             self._lines = self._lines[:self._cursor_row + 1]
+            if len(self._lines) < old_count:
+                self._dirty_rows.clear()  # 行数变了，缓存失效
         elif mode == 1:
             # 屏幕开头到光标
             for r in range(self._cursor_row):
-                self._lines[r] = []
+                if self._lines[r]:
+                    self._lines[r] = []
+                    self._dirty_rows.add(r)
             if self._cursor_row < len(self._lines):
                 self._lines[self._cursor_row] = \
                     self._lines[self._cursor_row][self._cursor_col:]
                 self._cursor_col = 0
+                self._dirty_rows.add(self._cursor_row)
 
     def _handle_el(self, mode: int):
         """EL - 行擦除"""
@@ -508,6 +545,7 @@ class ANSITerminalWidget(QTextEdit):
         elif mode == 2:
             self._lines[row] = []
             self._cursor_col = 0
+        self._dirty_rows.add(row)
 
     def _handle_mode(self, params: list, set_mode: bool):
         """处理 h/l 模式设置（备用屏幕等）"""
@@ -520,6 +558,8 @@ class ANSITerminalWidget(QTextEdit):
                     self._lines = [[]]
                     self._cursor_row = 0
                     self._cursor_col = 0
+                    self._dirty_rows.clear()
+                    self._cached_html = ''
                 else:
                     # 退出备用屏幕
                     if self._alt_lines is not None:
@@ -528,6 +568,8 @@ class ANSITerminalWidget(QTextEdit):
                     if self._alt_cursor is not None:
                         self._cursor_row, self._cursor_col = self._alt_cursor
                         self._alt_cursor = None
+                    self._dirty_rows.clear()
+                    self._cached_html = ''
 
     # ─── 字符写入 ─────────────────────────────────────────────────────────
 
@@ -539,25 +581,42 @@ class ANSITerminalWidget(QTextEdit):
             excess = len(self._lines) - self._max_lines
             self._lines = self._lines[excess:]
             self._cursor_row -= excess
+            self._dirty_rows.clear()  # 行裁剪后缓存失效
 
     def _put_char(self, ch: str):
         self._ensure_rows()
         line = self._lines[self._cursor_row]
         col = self._cursor_col
-        attrs = dict(self._attrs)
+        attrs = self._attrs  # tuple 不可变，直接引用，无需拷贝
+        self._dirty_rows.add(self._cursor_row)
         # 扩展行
         while len(line) <= col:
-            line.append((' ', {}))
+            line.append((' ', _DEFAULT_ATTRS))
         line[col] = (ch, attrs)
         self._cursor_col = col + 1
 
     # ─── HTML 渲染 ────────────────────────────────────────────────────────
 
     def _render(self):
+        # 增量渲染：无脏行且行数未变时跳过
+        if _ENABLE_INCREMENTAL_RENDER:
+            if not self._dirty_rows and self._prev_line_count == len(self._lines):
+                return
+            # 有脏行或行数变化 → 重建 HTML（setHtml 是全量的，但跳过无变化场景）
+            # 若只有少量脏行且行数不变，仍可优化为局部更新
+            # 当前方案：dirty 检查 + 缓存对比
+            html = self._build_html()
+            if html == self._cached_html:
+                return  # 内容未变，跳过 setHtml
+            self._cached_html = html
+            self._prev_line_count = len(self._lines)
+            self._dirty_rows.clear()
+        else:
+            html = self._build_html()
+
         scrollbar = self.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
 
-        html = self._build_html()
         self.setHtml(html)
 
         if at_bottom:
@@ -582,7 +641,7 @@ class ANSITerminalWidget(QTextEdit):
             return '&nbsp;'
 
         parts = []
-        cur_attrs: dict | None = None
+        cur_attrs: tuple | None = None
         buf: list[str] = []
         buf_start_col = 0  # buf 中第一个字符对应的列号
         col_counter = 0    # 当前已处理的列号

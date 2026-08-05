@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
     QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser, QTreeWidgetItem)
 from PySide6.QtCore import (Qt, QItemSelectionModel, QDate, QPoint, QPropertyAnimation,
-    QEasingCurve, QTimer, QEvent)
+    QEasingCurve, QTimer, QEvent, QThread, Signal)
 from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette, QCursor
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
@@ -140,25 +140,38 @@ _DEVICE_STATUS_MAP = {
 }
 
 
-# ==================== settings.json 读写 ====================
+# ==================== settings.json 读写（带内存缓存） ====================
+
+_settings_cache = None
+_settings_mtime = 0
+
 
 def _load_settings() -> dict:
-    """读取 settings.json，失败时返回空字典"""
+    """读取 settings.json（带内存缓存，文件未变时直接返回缓存）"""
+    global _settings_cache, _settings_mtime
     path = os.path.join(get_app_dir(), "settings.json")
     try:
+        mtime = os.path.getmtime(path)
+        if _settings_cache is not None and mtime == _settings_mtime:
+            return _settings_cache
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            _settings_cache = json.load(f)
+        _settings_mtime = mtime
+        return _settings_cache
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
 def _save_settings(data: dict):
-    """合并写入 settings.json（保留未涉及的其他字段）"""
+    """合并写入 settings.json（同步更新缓存）"""
+    global _settings_cache, _settings_mtime
     path = os.path.join(get_app_dir(), "settings.json")
     settings = _load_settings()
     settings.update(data)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
+    _settings_cache = settings
+    _settings_mtime = os.path.getmtime(path)
 
 
 def _fmt_size(n: float) -> str:
@@ -169,6 +182,31 @@ def _fmt_size(n: float) -> str:
             return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
+
+# ==================== 后台数据库查询/保存 Worker ====================
+
+class _DBQueryWorker(QThread):
+    """后台数据库查询/保存 Worker（通用封装）
+
+    将 table_db 的同步操作移到工作线程，避免阻塞 GUI。
+    通过 finished 信号返回结果，error 信号返回异常信息。
+    """
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, func, *args, **kwargs):
+        super().__init__()
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+
+    def run(self):
+        try:
+            result = self.func(*self.args, **self.kwargs)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # ==================== 通用组件 ====================
@@ -595,6 +633,8 @@ class TablePage(QWidget):
         self._page_size = 50
         self._total = 0
         self._worker = None
+        self._query_worker = None
+        self._save_worker = None
         self._hidden_cols = {2}
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
@@ -603,9 +643,10 @@ class TablePage(QWidget):
         self._search_timer.timeout.connect(self._do_search)
         self._init_ui()
         self._load_local()
-        db_total, _ = table_db.get_meta()
-        if db_total == 0:
-            self._sync_from_api()
+        # 异步获取元数据，判断是否需要首次同步
+        self._meta_worker = _DBQueryWorker(table_db.get_meta)
+        self._meta_worker.finished.connect(self._on_meta_finished)
+        self._meta_worker.start()
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -706,15 +747,39 @@ class TablePage(QWidget):
             menu.addWidget(cb, selectable=False)
         self._col_btn.setMenu(menu)
 
+    def _on_meta_finished(self, result):
+        """元数据查询完成：若数据库为空则自动触发首次同步"""
+        db_total, _ = result
+        if db_total == 0:
+            self._sync_from_api()
+
     # ---------- 数据加载 ----------
 
     def _load_local(self):
+        """异步分页查询本地数据库，快速切换时取消前一个 Worker"""
+        if self._query_worker and self._query_worker.isRunning():
+            self._query_worker.requestInterruption()
+            self._query_worker.disconnect()
         keyword = self._search_edit.text().strip()
-        total, rows = table_db.query_page(self._page_no, self._page_size, keyword)
+        self._query_worker = _DBQueryWorker(
+            table_db.query_page, self._page_no, self._page_size, keyword)
+        self._query_worker.finished.connect(
+            lambda result, kw=keyword: self._on_query_finished(result, kw))
+        self._query_worker.start()
+
+    def _on_query_finished(self, result, keyword=""):
+        """查询完成回调：更新表格与分页"""
+        total, rows = result
         self._total = total
         self._populate(rows)
         self._update_pager(keyword)
-        _, sync_time = table_db.get_meta()
+        # 异步获取同步时间
+        self._time_worker = _DBQueryWorker(table_db.get_meta)
+        self._time_worker.finished.connect(self._on_time_meta)
+        self._time_worker.start()
+
+    def _on_time_meta(self, result):
+        _, sync_time = result
         self._lbl_time.setText(f"数据时间: {sync_time}" if sync_time else "未同步")
 
     def _sync_from_api(self):
@@ -728,7 +793,13 @@ class TablePage(QWidget):
         self._worker.start()
 
     def _on_sync_done(self, rows):
-        count = table_db.save_all(rows)
+        """API 同步完成：异步保存数据到本地数据库"""
+        self._save_worker = _DBQueryWorker(table_db.save_all, rows)
+        self._save_worker.finished.connect(self._on_save_finished)
+        self._save_worker.start()
+
+    def _on_save_finished(self, count):
+        """保存完成：重置页码并重新加载"""
         self._page_no = 1
         self._load_local()
         self._refresh_btn.setEnabled(True)
@@ -864,6 +935,7 @@ class FileListPanel(QWidget):
         self._fields = []       # 展示的文件字段列表
         self._entries = []      # [(文件名, 源分类), ...]
         self._anim = None
+        self._query_worker = None  # 异步刷新 Worker
         self._init_ui()
         self.hide()
 
@@ -979,15 +1051,24 @@ class FileListPanel(QWidget):
         self._lbl_title.setText(f"{self._title} · {code} · {len(self._entries)} 个")
 
     def refresh_if_visible(self):
-        """数据刷新后，若面板可见则重新加载当前设备的文件列表"""
+        """数据刷新后，若面板可见则异步重新加载当前设备的文件列表"""
         if not self.isVisible():
             return
         code = self._row.get("device_code", "")
         if not code:
             return
         date = self._device_page._current_date()
-        _, rows = table_db.query_kd_page(1, 99999, code, date, include_files=True)
-        fresh = next((r for r in rows if r.get("device_code") == code), None)
+        # 取消前一个刷新 Worker，避免堆积
+        if self._query_worker and self._query_worker.isRunning():
+            self._query_worker.requestInterruption()
+            self._query_worker.disconnect()
+        self._query_worker = _DBQueryWorker(
+            table_db.query_kd_by_device, code, date)
+        self._query_worker.finished.connect(self._on_refresh_query)
+        self._query_worker.start()
+
+    def _on_refresh_query(self, fresh):
+        """异步查询完成：更新文件面板"""
         if fresh:
             self._row = fresh
             self._reload_entries()
@@ -1125,6 +1206,8 @@ class DevicePage(QWidget):
         self._hourly_worker = None  # 每小时定时拉取专用，与手动搜索 _worker 隔离
         self._collect_workers = []   # 收集 Worker 列表（不同设备可并行）
         self._upload_worker = None   # 打包上传 Worker（全局唯一）
+        self._query_worker = None    # 异步查询 Worker
+        self._save_worker = None     # 异步保存 Worker
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
@@ -1339,18 +1422,31 @@ class DevicePage(QWidget):
         self._load_local()
 
     def _load_local(self):
+        """异步分页查询本地数据库，快速切换时取消前一个 Worker"""
+        if self._query_worker and self._query_worker.isRunning():
+            self._query_worker.requestInterruption()
+            self._query_worker.disconnect()
         keyword = self._search_edit.text().strip()
         if self._active_source() == "xqzg":
-            total, rows = table_db.query_xqzg_page(
+            self._query_worker = _DBQueryWorker(
+                table_db.query_xqzg_page,
                 self._page_no, self._page_size, keyword,
                 self._sort_key, self._sort_desc)
             date = ""  # xqzg 不按日期筛选
         else:
             date = self._current_date()
             # include_files=False：列表页只查轻量字段，文件 JSON 点开行时按 id 懒加载
-            total, rows = table_db.query_kd_page(
+            self._query_worker = _DBQueryWorker(
+                table_db.query_kd_page,
                 self._page_no, self._page_size, keyword, date,
                 self._sort_key, self._sort_desc)
+        self._query_worker.finished.connect(
+            lambda result, d=date, kw=keyword: self._on_query_finished(result, d, kw))
+        self._query_worker.start()
+
+    def _on_query_finished(self, result, date="", keyword=""):
+        """查询完成回调：更新表格与分页"""
+        total, rows = result
         self._total = total
         self._populate(rows)
         self._update_pager(date, keyword)
@@ -1373,14 +1469,21 @@ class DevicePage(QWidget):
         self._worker.start()
 
     def _on_search_done(self, data):
+        """API 搜索完成：异步保存数据到本地数据库"""
         rows = data.get("lists") or data.get("results") or []
         if self._active_source() == "xqzg":
-            count = table_db.save_xqzg(rows)
+            self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
             date_desc = "全部日期"
         else:
             date = self._current_date()
-            count = table_db.save_kd(rows, date)
+            self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
             date_desc = date
+        self._save_worker.finished.connect(
+            lambda count, dd=date_desc: self._on_save_finished(count, dd))
+        self._save_worker.start()
+
+    def _on_save_finished(self, count, date_desc=""):
+        """保存完成：重置页码、刷新表格并提示"""
         self._sync_btn.setEnabled(True)
         self._page_no = 1
         self._load_local()
@@ -1834,12 +1937,18 @@ class DevicePage(QWidget):
         self._refresh_worker.start()
 
     def _on_refresh_done(self, data):
+        """迁移后静默刷新完成：异步保存数据"""
         rows = data.get("lists") or data.get("results") or []
         date = self._current_date()
         if self._active_source() == "xqzg":
-            table_db.save_xqzg(rows)
+            self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
         else:
-            table_db.save_kd(rows, date)
+            self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
+        self._save_worker.finished.connect(self._on_refresh_save_finished)
+        self._save_worker.start()
+
+    def _on_refresh_save_finished(self, _count):
+        """刷新保存完成：重新加载并刷新文件面板"""
         self._load_local()
         self._file_panel.refresh_if_visible()
 
@@ -1865,10 +1974,16 @@ class DevicePage(QWidget):
         self._hourly_worker.start()
 
     def _on_hourly_done(self, data):
+        """每小时定时拉取完成：异步保存数据"""
         rows = data.get("lists") or data.get("results") or []
         today = QDate.currentDate().toString("yyyy/MM/dd")
-        count = table_db.save_kd(rows, today)
-        # 仅当用户正在查看当天时刷新表格，避免打断其在历史日期上的浏览
+        self._save_worker = _DBQueryWorker(table_db.save_kd, rows, today)
+        self._save_worker.finished.connect(
+            lambda count: self._on_hourly_save_finished(count, today))
+        self._save_worker.start()
+
+    def _on_hourly_save_finished(self, count, today=""):
+        """每小时保存完成：仅当用户正在查看当天时刷新表格"""
         if self._current_date() == today:
             self._load_local()
         self._lbl_time.setText(f"自动更新: {datetime.now().strftime('%H:%M:%S')}（{count} 台）")
@@ -1938,7 +2053,6 @@ class AdminSettingsPage(QWidget):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
-       # layout.addWidget(TitleLabel("管理设置", view))
         layout.addWidget(self._build_source_card(view))
         layout.addWidget(self._build_api_card(
             # （Session 认证）
@@ -2237,7 +2351,7 @@ class ManagementPanelWindow(FluentWindow):
             bridge.shutdown()
         for page in (self.table_page, self.device_page, self.settings_page):
             for attr in ("_worker", "_migrate_worker", "_refresh_worker", "_test_worker",
-                         "_upload_worker"):
+                         "_upload_worker", "_query_worker", "_save_worker", "_meta_worker"):
                 worker = getattr(page, attr, None)
                 if worker and worker.isRunning():
                     try:

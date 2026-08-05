@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 
 # 数据库文件路径：database/tables.db（随项目目录）
@@ -277,11 +278,28 @@ def _ensure_initialized(conn: sqlite3.Connection):
     _initialized = True
 
 
+_conn: sqlite3.Connection | None = None
+_lock = threading.Lock()
+
+
 def _get_conn() -> sqlite3.Connection:
+    """获取模块级单连接（惰性创建，WAL 模式）"""
+    global _conn
     os.makedirs(_DB_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_initialized(conn)
-    return conn
+    if _conn is None:
+        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA busy_timeout=3000")
+        _ensure_initialized(_conn)
+    return _conn
+
+
+def close():
+    """关闭数据库连接（应用退出时调用）"""
+    global _conn
+    if _conn is not None:
+        _conn.close()
+        _conn = None
 
 
 # ==================== 原有球桌表操作 ====================
@@ -293,41 +311,38 @@ def save_all(rows: list) -> int:
     snk（如手动写入）时保留旧值，避免同步把手动值冲掉。
     """
     conn = _get_conn()
-    try:
-        # 先记录存量 snk（TRIM(name) → snk_code），DELETE 后仍可回查
-        old_snk = {}
-        for name, snk in conn.execute(
-                "SELECT name, snk_code FROM billiard_tables"):
-            key = str(name or "").strip()
-            val = str(snk or "").strip()
-            if key and val:
-                old_snk[key] = val
-        conn.execute("DELETE FROM billiard_tables")
-        data = []
-        for item in rows:
-            remark = str(item.get("remark") or "")
-            name = str(item.get("name") or "")
-            snk = parse_snk_code(remark) or old_snk.get(name.strip(), "")
-            data.append((
-                item.get("id") or 0,
-                name,
-                str(item.get("roomName") or ""),
-                str(item.get("onlineStatusName") or ""),
-                remark,
-                str(item.get("cameraPassExt") or ""),
-                snk,
-            ))
-        conn.executemany(
-            "INSERT OR REPLACE INTO billiard_tables "
-            "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)", data)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
-        conn.commit()
-        return len(data)
-    finally:
-        conn.close()
+    # 先记录存量 snk（TRIM(name) → snk_code），DELETE 后仍可回查
+    old_snk = {}
+    for name, snk in conn.execute(
+            "SELECT name, snk_code FROM billiard_tables"):
+        key = str(name or "").strip()
+        val = str(snk or "").strip()
+        if key and val:
+            old_snk[key] = val
+    conn.execute("DELETE FROM billiard_tables")
+    data = []
+    for item in rows:
+        remark = str(item.get("remark") or "")
+        name = str(item.get("name") or "")
+        snk = parse_snk_code(remark) or old_snk.get(name.strip(), "")
+        data.append((
+            item.get("id") or 0,
+            name,
+            str(item.get("roomName") or ""),
+            str(item.get("onlineStatusName") or ""),
+            remark,
+            str(item.get("cameraPassExt") or ""),
+            snk,
+        ))
+    conn.executemany(
+        "INSERT OR REPLACE INTO billiard_tables "
+        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)", data)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
+    conn.commit()
+    return len(data)
 
 
 def query_page(page_no: int, page_size: int, keyword: str = "") -> tuple:
@@ -337,35 +352,32 @@ def query_page(page_no: int, page_size: int, keyword: str = "") -> tuple:
         (total, rows)  rows 为 list[dict]
     """
     conn = _get_conn()
-    try:
-        where = ""
-        params = []
-        kw = keyword.strip()
-        if kw:
-            # 优先 FTS5 trigram 索引（子串匹配），短关键词/不可用时回退多列 LIKE
-            fts = _fts_cond("tables_fts", kw)
-            if fts:
-                where = f" WHERE {fts[0]}"
-                params = fts[1]
-            else:
-                like = f"%{kw}%"
-                conds = " OR ".join([f"{f} LIKE ?" for f in FIELDS])
-                where = f" WHERE {conds}"
-                params = [like] * len(FIELDS)
+    where = ""
+    params = []
+    kw = keyword.strip()
+    if kw:
+        # 优先 FTS5 trigram 索引（子串匹配），短关键词/不可用时回退多列 LIKE
+        fts = _fts_cond("tables_fts", kw)
+        if fts:
+            where = f" WHERE {fts[0]}"
+            params = fts[1]
+        else:
+            like = f"%{kw}%"
+            conds = " OR ".join([f"{f} LIKE ?" for f in FIELDS])
+            where = f" WHERE {conds}"
+            params = [like] * len(FIELDS)
 
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM billiard_tables{where}", params).fetchone()[0]
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM billiard_tables{where}", params).fetchone()[0]
 
-        offset = (page_no - 1) * page_size
-        cursor = conn.execute(
-            f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code "
-            f"FROM billiard_tables{where} ORDER BY id DESC LIMIT ? OFFSET ?",
-            params + [page_size, offset])
-        cols = [d[0] for d in cursor.description]
-        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
-        return total, rows
-    finally:
-        conn.close()
+    offset = (page_no - 1) * page_size
+    cursor = conn.execute(
+        f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code "
+        f"FROM billiard_tables{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [page_size, offset])
+    cols = [d[0] for d in cursor.description]
+    rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+    return total, rows
 
 
 def insert_one(record: dict) -> int:
@@ -375,25 +387,22 @@ def insert_one(record: dict) -> int:
     从 remark 自动解析。
     """
     conn = _get_conn()
-    try:
-        remark = str(record.get("remark") or "")
-        snk = str(record.get("snk_code") or "").strip() or parse_snk_code(remark)
-        cur = conn.execute(
-            "INSERT INTO billiard_tables "
-            "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                str(record.get("name") or ""),
-                str(record.get("roomName") or ""),
-                str(record.get("onlineStatusName") or ""),
-                remark,
-                str(record.get("cameraPassExt") or ""),
-                snk,
-            ))
-        conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
+    remark = str(record.get("remark") or "")
+    snk = str(record.get("snk_code") or "").strip() or parse_snk_code(remark)
+    cur = conn.execute(
+        "INSERT INTO billiard_tables "
+        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            str(record.get("name") or ""),
+            str(record.get("roomName") or ""),
+            str(record.get("onlineStatusName") or ""),
+            remark,
+            str(record.get("cameraPassExt") or ""),
+            snk,
+        ))
+    conn.commit()
+    return cur.lastrowid
 
 
 def update_snk_by_name(name: str, snk_code: str) -> int:
@@ -406,14 +415,11 @@ def update_snk_by_name(name: str, snk_code: str) -> int:
     if not name:
         return 0
     conn = _get_conn()
-    try:
-        cur = conn.execute(
-            "UPDATE billiard_tables SET snk_code = ? WHERE TRIM(name) = ?",
-            (str(snk_code or "").strip(), name))
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
+    cur = conn.execute(
+        "UPDATE billiard_tables SET snk_code = ? WHERE TRIM(name) = ?",
+        (str(snk_code or "").strip(), name))
+    conn.commit()
+    return cur.rowcount
 
 
 def get_snk_by_name(name: str) -> str:
@@ -425,26 +431,20 @@ def get_snk_by_name(name: str) -> str:
     if not name:
         return ""
     conn = _get_conn()
-    try:
-        row = conn.execute(
-            "SELECT snk_code FROM billiard_tables WHERE TRIM(name) = ? LIMIT 1",
-            (name,)).fetchone()
-        return str(row[0] or "") if row else ""
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT snk_code FROM billiard_tables WHERE TRIM(name) = ? LIMIT 1",
+        (name,)).fetchone()
+    return str(row[0] or "") if row else ""
 
 
 def get_meta() -> tuple:
     """返回 (总条数, 最后同步时间字符串)，无数据时返回 (0, '')"""
     conn = _get_conn()
-    try:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM billiard_tables").fetchone()[0]
-        row = conn.execute(
-            "SELECT value FROM sync_meta WHERE key='last_sync'").fetchone()
-        return total, (row[0] if row else "")
-    finally:
-        conn.close()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM billiard_tables").fetchone()[0]
+    row = conn.execute(
+        "SELECT value FROM sync_meta WHERE key='last_sync'").fetchone()
+    return total, (row[0] if row else "")
 
 
 # ==================== 接口1 xqzg_status 表操作 ====================
@@ -476,36 +476,33 @@ def save_kd(rows: list, file_path: str = "") -> int:
         file_path: 日期路径，如 "2026/08/02"；仅替换该日期的数据
     """
     conn = _get_conn()
-    try:
-        # 只删除该日期的数据，保留其他日期
-        conn.execute("DELETE FROM kd_status WHERE file_path = ?", (file_path,))
-        all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
-        placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
-        col_names = "id, file_path, " + ", ".join(all_fields)
-        # 获取当前最大 id，续接编号
-        max_id = conn.execute("SELECT MAX(id) FROM kd_status").fetchone()[0] or 0
-        data = []
-        for idx, item in enumerate(rows, max_id + 1):
-            row_vals = [idx, file_path]
-            for f in STATUS_FIELDS:
-                row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
-            for f in KD_EXTRA_FIELDS:
-                val = item.get(f)
-                if f in KD_FILE_FIELDS:
-                    row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
-                else:
-                    row_vals.append(str(val if val is not None else ""))
-            data.append(tuple(row_vals))
-        conn.executemany(
-            f"INSERT OR REPLACE INTO kd_status ({col_names}) VALUES ({placeholders})", data)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
-        conn.commit()
-        inserted = len(data)
-    finally:
-        conn.close()
+    # 只删除该日期的数据，保留其他日期
+    conn.execute("DELETE FROM kd_status WHERE file_path = ?", (file_path,))
+    all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
+    placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
+    col_names = "id, file_path, " + ", ".join(all_fields)
+    # 获取当前最大 id，续接编号
+    max_id = conn.execute("SELECT MAX(id) FROM kd_status").fetchone()[0] or 0
+    data = []
+    for idx, item in enumerate(rows, max_id + 1):
+        row_vals = [idx, file_path]
+        for f in STATUS_FIELDS:
+            row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
+        for f in KD_EXTRA_FIELDS:
+            val = item.get(f)
+            if f in KD_FILE_FIELDS:
+                row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
+            else:
+                row_vals.append(str(val if val is not None else ""))
+        data.append(tuple(row_vals))
+    conn.executemany(
+        f"INSERT OR REPLACE INTO kd_status ({col_names}) VALUES ({placeholders})", data)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
+    conn.commit()
+    inserted = len(data)
     # 保存后顺手清理 60 天前的历史分区，避免数据库随天数无限膨胀
     prune_kd_history(_KD_KEEP_DAYS)
     return inserted
@@ -522,16 +519,13 @@ def prune_kd_history(keep_days: int = 60) -> int:
         keep_days: 保留最近多少天的数据（含今天），默认 60 天
     """
     conn = _get_conn()
-    try:
-        cutoff = (datetime.now() - timedelta(days=keep_days - 1)).strftime("%Y/%m/%d")
-        cur = conn.execute(
-            "DELETE FROM kd_status WHERE file_path != '' AND file_path < ?", (cutoff,))
-        deleted = cur.rowcount
-        if deleted:
-            conn.commit()
-        return deleted
-    finally:
-        conn.close()
+    cutoff = (datetime.now() - timedelta(days=keep_days - 1)).strftime("%Y/%m/%d")
+    cur = conn.execute(
+        "DELETE FROM kd_status WHERE file_path != '' AND file_path < ?", (cutoff,))
+    deleted = cur.rowcount
+    if deleted:
+        conn.commit()
+    return deleted
 
 
 def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: str = "",
@@ -546,56 +540,82 @@ def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: st
             详情按需走 get_kd_row_full 按 id 懒加载）
     """
     conn = _get_conn()
-    try:
-        all_fields = (("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS if include_files
-                      else _KD_LIGHT_FIELDS)
-        conds = []
-        params = []
-        # 日期筛选
-        if file_path:
-            conds.append("file_path = ?")
-            params.append(file_path)
-        # 关键词搜索（优先 FTS5，短关键词/不可用回退多列 LIKE）
-        kw = keyword.strip()
-        if kw:
-            fts = _fts_cond("kd_fts", kw)
-            if fts:
-                conds.append(fts[0])
-                params.extend(fts[1])
-            else:
-                like = f"%{kw}%"
-                search_fields = STATUS_FIELDS + ("device_code",)
-                kw_cond = " OR ".join([f"{f} LIKE ?" for f in search_fields])
-                conds.append(f"({kw_cond})")
-                params.extend([like] * len(search_fields))
+    all_fields = (("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS if include_files
+                  else _KD_LIGHT_FIELDS)
+    conds = []
+    params = []
+    # 日期筛选
+    if file_path:
+        conds.append("file_path = ?")
+        params.append(file_path)
+    # 关键词搜索（优先 FTS5，短关键词/不可用回退多列 LIKE）
+    kw = keyword.strip()
+    if kw:
+        fts = _fts_cond("kd_fts", kw)
+        if fts:
+            conds.append(fts[0])
+            params.extend(fts[1])
+        else:
+            like = f"%{kw}%"
+            search_fields = STATUS_FIELDS + ("device_code",)
+            kw_cond = " OR ".join([f"{f} LIKE ?" for f in search_fields])
+            conds.append(f"({kw_cond})")
+            params.extend([like] * len(search_fields))
 
-        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
 
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM kd_status{where}", params).fetchone()[0]
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM kd_status{where}", params).fetchone()[0]
 
-        offset = (page_no - 1) * page_size
-        select_cols = "id, " + ", ".join(all_fields)
-        order_sql = _build_order_clause(order_by, desc)
-        cursor = conn.execute(
-            f"SELECT {select_cols} "
-            f"FROM kd_status{where}{order_sql} LIMIT ? OFFSET ?",
-            params + [page_size, offset])
-        cols = [d[0] for d in cursor.description]
-        rows = []
-        for r in cursor.fetchall():
-            row_dict = dict(zip(cols, r))
-            if include_files:
-                # 反序列化文件列表字段（仅详情查询需要）
-                for f in KD_FILE_FIELDS:
-                    try:
-                        row_dict[f] = json.loads(row_dict.get(f) or "[]")
-                    except (json.JSONDecodeError, TypeError):
-                        row_dict[f] = []
-            rows.append(row_dict)
-        return total, rows
-    finally:
-        conn.close()
+    offset = (page_no - 1) * page_size
+    select_cols = "id, " + ", ".join(all_fields)
+    order_sql = _build_order_clause(order_by, desc)
+    cursor = conn.execute(
+        f"SELECT {select_cols} "
+        f"FROM kd_status{where}{order_sql} LIMIT ? OFFSET ?",
+        params + [page_size, offset])
+    cols = [d[0] for d in cursor.description]
+    rows = []
+    for r in cursor.fetchall():
+        row_dict = dict(zip(cols, r))
+        if include_files:
+            # 反序列化文件列表字段（仅详情查询需要）
+            for f in KD_FILE_FIELDS:
+                try:
+                    row_dict[f] = json.loads(row_dict.get(f) or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    row_dict[f] = []
+        rows.append(row_dict)
+    return total, rows
+
+
+def query_kd_by_device(device_code: str, file_path: str = "") -> dict:
+    """按 device_code 精确查询单台设备完整信息（含文件清单）
+
+    供 FileListPanel 刷新使用，避免全量分页查询后 Python 侧过滤。
+    返回空 dict 表示未找到匹配记录。
+    """
+    conn = _get_conn()
+    conds = ["device_code = ?"]
+    params = [device_code]
+    if file_path:
+        conds.append("file_path = ?")
+        params.append(file_path)
+    where = " WHERE " + " AND ".join(conds)
+    all_fields = ("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS
+    select_cols = "id, " + ", ".join(all_fields)
+    cur = conn.execute(
+        f"SELECT {select_cols} FROM kd_status{where} LIMIT 1", params)
+    r = cur.fetchone()
+    if r is None:
+        return {}
+    row_dict = dict(zip(["id"] + list(all_fields), r))
+    for f in KD_FILE_FIELDS:
+        try:
+            row_dict[f] = json.loads(row_dict.get(f) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            row_dict[f] = []
+    return row_dict
 
 
 def get_kd_row_full(row_id: int) -> dict:
@@ -605,33 +625,27 @@ def get_kd_row_full(row_id: int) -> dict:
     才按 id 单点查询；记录不存在时返回空 dict。
     """
     conn = _get_conn()
-    try:
-        cols = ("id", "file_path") + STATUS_FIELDS + KD_EXTRA_FIELDS
-        cur = conn.execute(
-            f"SELECT {', '.join(cols)} FROM kd_status WHERE id = ?", (row_id,))
-        r = cur.fetchone()
-        if r is None:
-            return {}
-        row_dict = dict(zip(cols, r))
-        for f in KD_FILE_FIELDS:
-            try:
-                row_dict[f] = json.loads(row_dict.get(f) or "[]")
-            except (json.JSONDecodeError, TypeError):
-                row_dict[f] = []
-        return row_dict
-    finally:
-        conn.close()
+    cols = ("id", "file_path") + STATUS_FIELDS + KD_EXTRA_FIELDS
+    cur = conn.execute(
+        f"SELECT {', '.join(cols)} FROM kd_status WHERE id = ?", (row_id,))
+    r = cur.fetchone()
+    if r is None:
+        return {}
+    row_dict = dict(zip(cols, r))
+    for f in KD_FILE_FIELDS:
+        try:
+            row_dict[f] = json.loads(row_dict.get(f) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            row_dict[f] = []
+    return row_dict
 
 
 def get_kd_dates() -> list:
     """获取 kd_status 中已存储的所有日期列表（降序）"""
     conn = _get_conn()
-    try:
-        cursor = conn.execute(
-            "SELECT DISTINCT file_path FROM kd_status WHERE file_path != '' ORDER BY file_path DESC")
-        return [r[0] for r in cursor.fetchall()]
-    finally:
-        conn.close()
+    cursor = conn.execute(
+        "SELECT DISTINCT file_path FROM kd_status WHERE file_path != '' ORDER BY file_path DESC")
+    return [r[0] for r in cursor.fetchall()]
 
 
 # ==================== 通用内部函数 ====================
@@ -639,59 +653,53 @@ def get_kd_dates() -> list:
 def _save_status_table(table_name: str, rows: list, meta_key: str) -> int:
     """全量替换指定运维数据表"""
     conn = _get_conn()
-    try:
-        conn.execute(f"DELETE FROM {table_name}")
-        placeholders = ", ".join(["?"] * (len(STATUS_FIELDS) + 1))
-        col_names = "id, " + ", ".join(STATUS_FIELDS)
-        data = []
-        for idx, item in enumerate(rows, 1):
-            data.append(tuple(
-                [idx] + [str(item.get(f) if item.get(f) is not None else "") for f in STATUS_FIELDS]
-            ))
-        conn.executemany(
-            f"INSERT OR REPLACE INTO {table_name} ({col_names}) VALUES ({placeholders})", data)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
-        conn.commit()
-        return len(data)
-    finally:
-        conn.close()
+    conn.execute(f"DELETE FROM {table_name}")
+    placeholders = ", ".join(["?"] * (len(STATUS_FIELDS) + 1))
+    col_names = "id, " + ", ".join(STATUS_FIELDS)
+    data = []
+    for idx, item in enumerate(rows, 1):
+        data.append(tuple(
+            [idx] + [str(item.get(f) if item.get(f) is not None else "") for f in STATUS_FIELDS]
+        ))
+    conn.executemany(
+        f"INSERT OR REPLACE INTO {table_name} ({col_names}) VALUES ({placeholders})", data)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
+    conn.commit()
+    return len(data)
 
 
 def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: str = "",
                        order_by: str = "", desc: bool = False) -> tuple:
     """运维数据表通用分页查询（order_by/desc 见 _build_order_clause）"""
     conn = _get_conn()
-    try:
-        where = ""
-        params = []
-        kw = keyword.strip()
-        if kw:
-            # 优先 FTS5 trigram 索引，短关键词/不可用回退多列 LIKE
-            fts_table = _FTS_MAP.get(table_name, (None,))[0]
-            fts = _fts_cond(fts_table, kw) if fts_table else None
-            if fts:
-                where = f" WHERE {fts[0]}"
-                params = fts[1]
-            else:
-                like = f"%{kw}%"
-                conds = " OR ".join([f"{f} LIKE ?" for f in STATUS_FIELDS])
-                where = f" WHERE {conds}"
-                params = [like] * len(STATUS_FIELDS)
+    where = ""
+    params = []
+    kw = keyword.strip()
+    if kw:
+        # 优先 FTS5 trigram 索引，短关键词/不可用回退多列 LIKE
+        fts_table = _FTS_MAP.get(table_name, (None,))[0]
+        fts = _fts_cond(fts_table, kw) if fts_table else None
+        if fts:
+            where = f" WHERE {fts[0]}"
+            params = fts[1]
+        else:
+            like = f"%{kw}%"
+            conds = " OR ".join([f"{f} LIKE ?" for f in STATUS_FIELDS])
+            where = f" WHERE {conds}"
+            params = [like] * len(STATUS_FIELDS)
 
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM {table_name}{where}", params).fetchone()[0]
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM {table_name}{where}", params).fetchone()[0]
 
-        offset = (page_no - 1) * page_size
-        select_cols = "id, " + ", ".join(STATUS_FIELDS)
-        order_sql = _build_order_clause(order_by, desc)
-        cursor = conn.execute(
-            f"SELECT {select_cols} "
-            f"FROM {table_name}{where}{order_sql} LIMIT ? OFFSET ?",
-            params + [page_size, offset])
-        cols = [d[0] for d in cursor.description]
-        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
-        return total, rows
-    finally:
-        conn.close()
+    offset = (page_no - 1) * page_size
+    select_cols = "id, " + ", ".join(STATUS_FIELDS)
+    order_sql = _build_order_clause(order_by, desc)
+    cursor = conn.execute(
+        f"SELECT {select_cols} "
+        f"FROM {table_name}{where}{order_sql} LIMIT ? OFFSET ?",
+        params + [page_size, offset])
+    cols = [d[0] for d in cursor.description]
+    rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+    return total, rows

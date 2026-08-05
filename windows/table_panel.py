@@ -14,7 +14,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
     QTextEdit)
-from PySide6.QtCore import Qt, QItemSelectionModel
+from PySide6.QtCore import Qt, QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
@@ -172,6 +172,7 @@ class TablePanelWindow(QDialog):
     # ==================== UI 构建 ====================
 
     def _init_ui(self):
+        self._search_timer = None
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 8)
         root.setSpacing(8)
@@ -349,7 +350,13 @@ class TablePanelWindow(QDialog):
     # ==================== 交互事件 ====================
 
     def _on_search(self, text=""):
-        """实时搜索：输入即过滤（本地全字段模糊匹配）"""
+        """实时搜索：防抖 300ms 后执行"""
+        if self._search_timer:
+            self._search_timer.stop()
+        self._search_timer = QTimer.singleShot(300, self._do_search)
+
+    def _do_search(self):
+        """实际执行搜索"""
         self._page_no = 1
         self._load_local()
 

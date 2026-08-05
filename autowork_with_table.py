@@ -3,7 +3,7 @@
 ################################################################################
 ## AutoWork - SCADA 工业监控 Dashboard UI
 ## 三区域布局: 左侧设备树 + 中间日志控制台 + 右侧远程控制面板
-## WARNING! 重新编译 .ui 文件会覆盖此文件
+## 原 PySide6 Designer 自动生成，现已手工维护（亚克力补丁、双布局切换等）
 ################################################################################
 
 from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QEvent, QLocale,
@@ -54,7 +54,7 @@ class _VisibleAcrylicComboView(AcrylicComboMenuActionListWidget):
         super().__init__(parent)
         # 默认模糊半径 35，背景内容均匀色；15 保留更多背景细节
         self.acrylicBrush.setBlurRadius(15)
-        # 库默认噪点不透明度 0.03；0.15 磨砂玻璃
+        # 库默认噪点不透明度 0.03；实际值 0.03 保持默认，几乎不可见
         self.acrylicBrush.noiseOpacity = 0.03
 
     def paintEvent(self, e):
@@ -279,6 +279,35 @@ class Ui_MainWindow(object):
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
         self.verticalLayout_2.setContentsMargins(0, 0, 0, 0)
 
+        # 顶部工具栏
+        self._build_toolbar()
+
+        # 三区域 Splitter: 左侧设备树 | 中间日志控制台 | 右侧远程面板
+        self._build_lists_and_containers()
+
+        # 右侧: 远程控制面板
+        self._build_p2p_panel()
+
+        self.verticalLayout_2.addLayout(self.horizontalLayout_main)
+
+        # 将中心控件挂到容器布局（兼容 QMainWindow 和 FluentWindowBase 容器模式）
+        if hasattr(MainWindow, 'setCentralWidget'):
+            MainWindow.setCentralWidget(self.centralwidget)
+        else:
+            # FluentWindowBase 模式：必须挂到 vBoxLayout（带 48px 标题栏预留的垂直布局），
+            # 而非 MainWindow.layout()（hBoxLayout）——后者会导致内容绕过标题栏预留区，
+            # 与菜单栏水平并排，造成顶部三行（标题栏/菜单栏/工具栏）挤压重叠
+            MainWindow.vBoxLayout.addWidget(self.centralwidget)
+
+        self.retranslateUi(MainWindow)
+
+        # 注意：不能调用 QMetaObject.connectSlotsByName(MainWindow)
+        # 它会按 on_<objectName>_<signal>_<signal> 规则自动连接 on_end_clicked / on_flush_clicked 等槽，
+        # 与 connect_signals() 中的手动连接重复，导致按钮点击触发两次。
+    # setupUi
+
+    def _build_toolbar(self):
+        """构建顶部工具栏 — FlowLayout 流式布局（窗口缩窄时控件自动换行）"""
         # ============================================================
         # 顶部工具栏 — FlowLayout 流式布局（窗口缩窄时控件自动换行，严禁重叠）
         # 包裹在 QScrollArea 中：折行过多时可上下滚动，不挤压下方日志区域
@@ -387,9 +416,8 @@ class Ui_MainWindow(object):
         self.toolbar_scroll.setWidget(self.toolbar_widget)
         self.verticalLayout_2.addWidget(self.toolbar_scroll)
 
-        # ============================================================
-        # 三区域 Splitter: 左侧设备树 | 中间日志控制台 | 右侧远程面板
-        # ============================================================
+    def _build_lists_and_containers(self):
+        """构建三区域 Splitter: 左侧设备树 | 中间日志控制台 | 右侧远程面板"""
         self.horizontalLayout_main = QHBoxLayout()
         self.horizontalLayout_main.setObjectName(u"horizontalLayout_main")
         self.horizontalLayout_main.setContentsMargins(0, 0, 0, 0)
@@ -415,27 +443,27 @@ class Ui_MainWindow(object):
         _id_container_layout.addWidget(self.id_list, 1)
         _id_container_layout.addWidget(self.id_search)
 
-        self.loacl_video_list = ListWidget()
-        self.loacl_video_list.setObjectName(u"loacl_video_list")
+        self.local_video_list = ListWidget()
+        self.local_video_list.setObjectName(u"local_video_list")
 
         # 空状态提示（列表为空时中央显示灰色文字）
         _ListEmptyHint(self.id_list, "暂无设备\n请检查 videos 目录")
-        _ListEmptyHint(self.loacl_video_list, "请选择设备")
+        _ListEmptyHint(self.local_video_list, "请选择设备")
 
-        # 日志文件搜索框（位于 loacl_video_list 正下方，默认隐藏，Ctrl+F 显示）
+        # 日志文件搜索框（位于 local_video_list 正下方，默认隐藏，Ctrl+F 显示）
         self.video_search = _create_search_line_edit()
         self.video_search.setObjectName(u"video_search")
         self.video_search.setPlaceholderText("搜索日志文件...")
         self.video_search.setClearButtonEnabled(True)
         self.video_search.setVisible(False)
 
-        # 容器：loacl_video_list + 搜索框，布局切换时随列表一起迁移
+        # 容器：local_video_list + 搜索框，布局切换时随列表一起迁移
         self.video_list_container = QWidget()
         self.video_list_container.setObjectName(u"video_list_container")
         _video_container_layout = QVBoxLayout(self.video_list_container)
         _video_container_layout.setContentsMargins(0, 0, 0, 0)
         _video_container_layout.setSpacing(0)
-        _video_container_layout.addWidget(self.loacl_video_list, 1)
+        _video_container_layout.addWidget(self.local_video_list, 1)
         _video_container_layout.addWidget(self.video_search)
 
         self.log_list = ListWidget()
@@ -465,12 +493,13 @@ class Ui_MainWindow(object):
         log_status_layout.addStretch()
 
         # 构建默认布局（新版）
-
         self._is_classic_layout = False
         self._build_modern_content()
 
         self.horizontalLayout_main.addWidget(self.splitter)
 
+    def _build_p2p_panel(self):
+        """构建右侧远程控制面板 (Fluent 卡片模块化, 默认隐藏)"""
         # ===== 右侧: 远程控制面板 (Fluent 卡片模块化, 默认隐藏) =====
         self.p2p_panel = CardWidget(self.centralwidget)
         self.p2p_panel.setObjectName(u"p2p_panel")
@@ -533,7 +562,7 @@ class Ui_MainWindow(object):
         p2p_main_layout.addLayout(self.p2p_xtcp_form)
 
         # XTCP 专属控件列表（visitor 列表与添加/删除按钮为两种模式共用，不在此列：
-        # TCP 模式下该列表复用为“保存的服务器”，见 main.py _update_p2p_visibility）
+        # TCP 模式下该列表复用为"保存的服务器"，见 main.py _update_p2p_visibility）
         self.p2p_xtcp_widgets = [
             self.p2p_form_server, self.p2p_form_port, self.p2p_form_key
         ]
@@ -626,29 +655,11 @@ class Ui_MainWindow(object):
 
         # 注意：尾部不再 addStretch()——剩余垂直空间全部由 p2p_visitor_list 吸收
         # （见上方 setStretchFactor），表单/按钮固定贴底，列表随窗口高度自由伸缩
-        # 面板宽度 340px：保证表单字段（serverName/密码等）有足够呼吸空间
+        # 面板宽度 290px：保证表单字段（serverName/密码等）有足够呼吸空间
         self.p2p_panel.setFixedWidth(290)
         self.p2p_panel.setVisible(False)
 
         self.horizontalLayout_main.addWidget(self.p2p_panel)
-
-        self.verticalLayout_2.addLayout(self.horizontalLayout_main)
-
-        # 将中心控件挂到容器布局（兼容 QMainWindow 和 FluentWindowBase 容器模式）
-        if hasattr(MainWindow, 'setCentralWidget'):
-            MainWindow.setCentralWidget(self.centralwidget)
-        else:
-            # FluentWindowBase 模式：必须挂到 vBoxLayout（带 48px 标题栏预留的垂直布局），
-            # 而非 MainWindow.layout()（hBoxLayout）——后者会导致内容绕过标题栏预留区，
-            # 与菜单栏水平并排，造成顶部三行（标题栏/菜单栏/工具栏）挤压重叠
-            MainWindow.vBoxLayout.addWidget(self.centralwidget)
-
-        self.retranslateUi(MainWindow)
-
-        # 注意：不能调用 QMetaObject.connectSlotsByName(MainWindow)
-        # 它会按 on_<objectName>_<signal> 规则自动连接 on_end_clicked / on_flush_clicked 等槽，
-        # 与 connect_signals() 中的手动连接重复，导致按钮点击触发两次。
-    # setupUi
 
     def retranslateUi(self, MainWindow):
         if hasattr(MainWindow, 'setCentralWidget'):  # 仅对真正的窗口设置标题

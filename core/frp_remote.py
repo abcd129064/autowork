@@ -151,8 +151,13 @@ class FrpRemoteBridge(QObject):
                 proc.finished.disconnect(self._on_frpc_finished)
             except (RuntimeError, TypeError):
                 pass
+            proc.finished.connect(self._on_stop_cleanup_done)
             proc.kill()
-            proc.waitForFinished(3000)
+
+    def _on_stop_cleanup_done(self, *_args):
+        """frpc 进程停止后的清理回调（替代 waitForFinished 阻塞等待）"""
+        proc = self.sender()
+        if proc is not None:
             proc.deleteLater()
 
     def _on_frpc_finished(self, _exit_code, _exit_status):

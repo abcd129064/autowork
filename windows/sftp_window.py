@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
     QWidget, QTreeWidgetItem,
     QHeaderView, QSplitter,
     QTableWidgetItem, QAbstractItemView, QApplication, QPushButton)
-from PySide6.QtCore import QTimer, Qt, QEvent
+from PySide6.QtCore import QTimer, Qt, QEvent, QThread, Signal
 from PySide6.QtGui import QShortcut, QKeySequence, QFont
 from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
     SearchLineEdit, setFont, TreeWidget, TableWidget, ProgressBar,
@@ -101,6 +101,26 @@ def _file_icon(name: str, is_dir: bool):
     if fi not in _ICON_CACHE:
         _ICON_CACHE[fi] = fi.qicon()
     return _ICON_CACHE[fi]
+
+
+class _HealthCheckWorker(QThread):
+    """后台 SFTP 连接健康检测"""
+    result = Signal(int)  # latency_ms, -1 表示异常
+
+    def __init__(self, transport):
+        super().__init__()
+        self.transport = transport
+
+    def run(self):
+        try:
+            import time as _time
+            start = _time.time()
+            session = self.transport.open_session()
+            session.close()
+            latency_ms = int((_time.time() - start) * 1000)
+            self.result.emit(latency_ms)
+        except Exception:
+            self.result.emit(-1)
 
 
 def _safe_release_worker(w):
@@ -204,6 +224,7 @@ class SFTPPanel(QWidget):
         self._next_transfer_id = 0
         self._drag_source_row = -1
         self._closing = False
+        self._health_worker = None
         self._init_ui()
         QTimer.singleShot(100, self._connect_and_list)
 
@@ -218,8 +239,24 @@ class SFTPPanel(QWidget):
     def _init_ui(self):
         root = QVBoxLayout(self)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # 左侧 - 本地文件
+    
+        self._build_local_panel()
+        self._build_remote_panel()
+    
+        self._splitter.addWidget(self._left_panel)
+        self._splitter.addWidget(self._right_panel)
+        self._splitter.setStretchFactor(0, 1)  # 【左右比例】本地面板拉伸因子
+        self._splitter.setStretchFactor(1, 1)  # 【左右比例】远程面板拉伸因子（1:1 等分）
+    
+        self._build_transfer_queue()
+        self._build_button_bar(root)
+        self._bind_shortcuts()
+    
+        # 预构建右键菜单（Action/图标/信号仅创建一次，后续右键零开销弹出）
+        self._build_context_menus()
+    
+    def _build_local_panel(self):
+        """构建本地面板（树控件、路径栏、搜索框）"""
         self._left_panel = QWidget()
         left_lay = QVBoxLayout(self._left_panel)
         left_lay.setContentsMargins(0, 0, 0, 0)
@@ -237,7 +274,7 @@ class SFTPPanel(QWidget):
         self._btn_local_refresh.clicked.connect(self._local_refresh)
         left_bar.addWidget(self._btn_local_refresh)
         left_lay.addLayout(left_bar)
-
+    
         self._local_tree = TreeWidget()
         self._local_tree.setHeaderLabels(['文件名', '大小', '类型', '修改时间'])
         self._local_tree.setColumnCount(4)
@@ -254,7 +291,7 @@ class SFTPPanel(QWidget):
         self._local_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._local_tree.customContextMenuRequested.connect(self._on_local_context_menu)
         left_lay.addWidget(self._local_tree)
-
+    
         # 本地底部搜索框（SearchLineEdit 自带搜索图标+清空按钮）
         self._local_search_frame = QWidget()
         local_sf = QHBoxLayout(self._local_search_frame)
@@ -265,8 +302,9 @@ class SFTPPanel(QWidget):
         local_sf.addWidget(self._local_search_edit, 1)
         left_lay.addWidget(self._local_search_frame)
         self._local_search_frame.hide()
-
-        # 右侧 - 远程 SFTP
+    
+    def _build_remote_panel(self):
+        """构建远程面板（树控件、路径栏、搜索框）"""
         self._right_panel = QWidget()
         right_lay = QVBoxLayout(self._right_panel)
         right_lay.setContentsMargins(0, 0, 0, 0)
@@ -284,7 +322,7 @@ class SFTPPanel(QWidget):
         self._btn_refresh.clicked.connect(self._refresh)
         right_bar.addWidget(self._btn_refresh)
         right_lay.addLayout(right_bar)
-
+    
         self._tree = TreeWidget()
         self._tree.setHeaderLabels(['文件名', '大小', '类型', '权限', '修改时间'])
         self._tree.setColumnCount(5)
@@ -305,7 +343,7 @@ class SFTPPanel(QWidget):
         self._tree.setAcceptDrops(True)
         self._tree.installEventFilter(self)
         right_lay.addWidget(self._tree)
-
+    
         # 远程底部搜索框（SearchLineEdit 自带搜索图标+清空按钮）
         self._remote_search_frame = QWidget()
         remote_sf = QHBoxLayout(self._remote_search_frame)
@@ -316,13 +354,9 @@ class SFTPPanel(QWidget):
         remote_sf.addWidget(self._remote_search_edit, 1)
         right_lay.addWidget(self._remote_search_frame)
         self._remote_search_frame.hide()
-
-        self._splitter.addWidget(self._left_panel)
-        self._splitter.addWidget(self._right_panel)
-        self._splitter.setStretchFactor(0, 1)  # 【左右比例】本地面板拉伸因子
-        self._splitter.setStretchFactor(1, 1)  # 【左右比例】远程面板拉伸因子（1:1 等分）
-
-        # ---- 传输队列面板
+    
+    def _build_transfer_queue(self):
+        """构建传输队列表格 + 垂直 Splitter"""
         self._transfer_table = _TransferTable()
         self._transfer_table._panel = self
         self._transfer_table.setColumnCount(4)
@@ -349,7 +383,7 @@ class SFTPPanel(QWidget):
         self._transfer_table.setAcceptDrops(False)
         self._transfer_table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self._transfer_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-
+    
         # 垂直 Splitter：文件区域（上） + 传输队列（下），支持上下拖拽调节
         self._v_splitter = QSplitter(Qt.Orientation.Vertical)
         self._v_splitter.addWidget(self._splitter)
@@ -357,8 +391,13 @@ class SFTPPanel(QWidget):
         self._v_splitter.setStretchFactor(0, 4)  # 文件区域占大部分
         self._v_splitter.setStretchFactor(1, 1)  # 传输队列占小部分
         self._v_splitter.setSizes([400, 130])    # 初始比例
+        # 注意：root.addWidget 由 _init_ui 在 _build_button_bar 之后统一处理
+    
+    def _build_button_bar(self, root):
+        """构建操作按钮栏 + 健康检测定时器，挂到 root 布局"""
+        # 先把 v_splitter 挂到 root
         root.addWidget(self._v_splitter, 1)
-
+    
         # ---- 操作按钮栏
         btn_row = QHBoxLayout()
         self._btn_upload = PushButton('上传 ▶')
@@ -385,25 +424,24 @@ class SFTPPanel(QWidget):
         self._lbl_status = BodyLabel('就绪')
         btn_row.addWidget(self._lbl_status)
         root.addLayout(btn_row)
-
+    
         # 连接健康检测定时器（每 5s 检测一次）
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(5000)
         self._health_timer.timeout.connect(self._check_connection_health)
         self._health_timer.start()
-
+    
+    def _bind_shortcuts(self):
+        """绑定快捷键 + 修复默认按钮 + 预构建右键菜单"""
         # ---- Ctrl+F 快捷键
         sc = QShortcut(QKeySequence('Ctrl+F'), self)
         sc.activated.connect(self._on_search_shortcut)
         esc = QShortcut(QKeySequence('Escape'), self)
         esc.activated.connect(self._hide_search_boxes)
-
-        # 修复误触发“上级”默认按钮，把本地目录推到上一级
+    
+        # 修复误触发"上级"默认按钮，把本地目录推到上一级
         for _btn in self.findChildren(QPushButton):
             _btn.setAutoDefault(False)
-        
-        # 预构建右键菜单（Action/图标/信号仅创建一次，后续右键零开销弹出）
-        self._build_context_menus()
 
     # ------------------------------------------------------------------ 连接
     def _connect_and_list(self):
@@ -444,21 +482,28 @@ class SFTPPanel(QWidget):
         if self._transport is None or not self._transport.is_active():
             self._set_health_indicator('red', '未连接')
             return
-        # 尝试发送轻量请求检测延迟
-        try:
-            import time as _time
-            start = _time.time()
-            # stat 根目录作为轻量 ping
-            self._transport.open_session().close()
-            latency_ms = int((_time.time() - start) * 1000)
-            if latency_ms < 200:
-                self._set_health_indicator('green', f'已连接 ({latency_ms}ms)')
-            elif latency_ms < 1000:
-                self._set_health_indicator('orange', f'延迟较高 ({latency_ms}ms)')
-            else:
-                self._set_health_indicator('red', f'延迟过高 ({latency_ms}ms)')
-        except Exception:
+
+        # 取消前一个检测（如果还在运行）
+        if self._health_worker is not None:
+            if self._health_worker.isRunning():
+                return  # 上一个还没完成，跳过本次
+
+        worker = _HealthCheckWorker(self._transport)
+        worker.result.connect(self._on_health_check_result)
+        self._health_worker = worker
+        worker.start()
+
+    def _on_health_check_result(self, latency_ms):
+        """健康检测结果回调"""
+        if latency_ms < 0:
             self._set_health_indicator('red', '连接异常')
+        elif latency_ms < 200:
+            self._set_health_indicator('green', f'已连接 ({latency_ms}ms)')
+        elif latency_ms < 1000:
+            self._set_health_indicator('orange', f'延迟较高 ({latency_ms}ms)')
+        else:
+            self._set_health_indicator('red', f'延迟过高 ({latency_ms}ms)')
+        self._health_worker = None
 
     def _set_health_indicator(self, color, tooltip):
         """设置健康指示器颜色和提示"""
@@ -466,7 +511,7 @@ class SFTPPanel(QWidget):
         self._lbl_health.setStyleSheet(f'color: {color_map.get(color, "gray")}; font-size: 14px;')
         self._lbl_health.setToolTip(f'连接状态: {tooltip}')
 
-    # ------------------------------------------------------------------ Wozrker 管理
+    # ------------------------------------------------------------------ Worker 管理
     def _cleanup_list_worker(self):
         if self._list_worker is not None:
             w = self._list_worker
@@ -546,6 +591,7 @@ class SFTPPanel(QWidget):
         files = [e for e in entries if not e['is_dir']]
         self._lbl_status.setText(f'{len(dirs)} 个目录, {len(files)} 个文件')
         self._log(f'[SFTP] 目录加载完成: {path} ({len(dirs)} 目录, {len(files)} 文件)')
+        self._list_fallback_done = False
         self._process_pending_remote_path()
 
     def _on_list_error(self, error):
@@ -555,6 +601,16 @@ class SFTPPanel(QWidget):
         self._listing = False
         self._lbl_status.setText(f'列表失败: {error}')
         self._log(f'[SFTP] 列表失败: {error}')
+        # 保底机制：路径不存在时自动回到根目录（仅重试一次，避免无限循环）
+        err_text = str(error)
+        if not getattr(self, '_list_fallback_done', False) and (
+                '文件或路径不存在' in err_text or 'No such file' in err_text or '[Errno 2]' in err_text):
+            self._list_fallback_done = True
+            self._pending_remote_path = None
+            self._log('[SFTP] 路径不存在，自动回到根目录 /')
+            self._edit_remote_path.setText('/')
+            self._list_remote('/')
+            return
         self._process_pending_remote_path()
 
     def _process_pending_remote_path(self):
@@ -1196,6 +1252,19 @@ class SFTPPanel(QWidget):
         self._log('[SFTP] 已清空传输队列')
 
     # ------------------------------------------------------------------ 删除 / 新建目录
+    def _run_quick_op(self, op, remote_path, log_msg, local_path=''):
+        """执行快速操作的通用模板（创建 worker → 注册 → 启动）"""
+        self._log(log_msg)
+        worker = SFTPOperationWorker(self._conn_params, op, local_path, remote_path)
+        worker.success.connect(self._on_quick_op_success)
+        worker.error.connect(self._on_quick_op_error)
+        tid = self._next_transfer_id
+        self._next_transfer_id += 1
+        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
+        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
+        worker.start()
+
     def _delete_selected(self):
         item = self._tree.currentItem()
         if not item:
@@ -1206,32 +1275,14 @@ class SFTPPanel(QWidget):
             return
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         op = 'rmdir' if entry['is_dir'] else 'delete'
-        self._log(f'[SFTP] 删除: {remote_path}')
-        worker = SFTPOperationWorker(self._conn_params, op, '', remote_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        self._run_quick_op(op, remote_path, f'[SFTP] 删除: {remote_path}')
 
     def _create_directory(self):
         name = self._ask_name('新建目录', '目录名:')
         if not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
-        self._log(f'[SFTP] 创建目录: {remote_path}')
-        worker = SFTPOperationWorker(self._conn_params, 'mkdir', '', remote_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        self._run_quick_op('mkdir', remote_path, f'[SFTP] 创建目录: {remote_path}')
 
     def _open_in_xftp(self):
         if not shutil.which('xftp'):
@@ -1377,16 +1428,9 @@ class SFTPPanel(QWidget):
             return
         old_path = self._remote_path.rstrip('/') + '/' + entry['name']
         new_path = self._remote_path.rstrip('/') + '/' + new_name
-        self._log(f'[SFTP] 重命名: {old_path} -> {new_path}')
-        worker = SFTPOperationWorker(self._conn_params, 'rename', old_path, new_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        self._run_quick_op('rename', new_path,
+                           f'[SFTP] 重命名: {old_path} -> {new_path}',
+                           local_path=old_path)
 
     def _ctx_delete_local(self, data):
         if data['is_dir']:
@@ -1423,16 +1467,7 @@ class SFTPPanel(QWidget):
             return
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         op = 'rmdir' if entry['is_dir'] else 'delete'
-        self._log(f'[SFTP] 删除: {remote_path}')
-        worker = SFTPOperationWorker(self._conn_params, op, '', remote_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        self._run_quick_op(op, remote_path, f'[SFTP] 删除: {remote_path}')
 
     def _ctx_new_file_local(self):
         name = self._ask_name('新建文件', '文件名:')
@@ -1467,32 +1502,14 @@ class SFTPPanel(QWidget):
         if not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
-        self._log(f'[SFTP] 创建远程文件: {remote_path}')
-        worker = SFTPOperationWorker(self._conn_params, 'create_file', '', remote_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        self._run_quick_op('create_file', remote_path, f'[SFTP] 创建远程文件: {remote_path}')
 
     def _ctx_new_dir_remote(self):
         name = self._ask_name('新建文件夹', '文件夹名:')
         if not name:
             return
         remote_path = self._remote_path.rstrip('/') + '/' + name
-        self._log(f'[SFTP] 创建远程目录: {remote_path}')
-        worker = SFTPOperationWorker(self._conn_params, 'mkdir', '', remote_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        self._run_quick_op('mkdir', remote_path, f'[SFTP] 创建远程目录: {remote_path}')
 
     # ------------------------------------------------------------------ 关闭
     def shutdown(self):
@@ -1506,6 +1523,9 @@ class SFTPPanel(QWidget):
         # 停止健康检测定时器
         if hasattr(self, '_health_timer'):
             self._health_timer.stop()
+        # 等待健康检测 worker 完成
+        if self._health_worker and self._health_worker.isRunning():
+            self._health_worker.wait(1000)
         transport = self._transport
         self._transport = None
         self._cleanup_connect_worker()

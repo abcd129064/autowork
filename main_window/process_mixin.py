@@ -4,13 +4,13 @@
 import os
 import sys
 import json
-import shutil
 import ctypes
 
 from PySide6.QtCore import QProcess, QTimer, Slot
 from qfluentwidgets import setCustomStyleSheet, isDarkTheme
 
 from core.app_paths import get_app_dir
+from workers.collect_worker import FileCopyWorker
 
 if sys.platform == 'win32':
     from win_api.windows_api import (
@@ -73,8 +73,11 @@ class ProcessMixin:
         self._pending_exe_path = exe_path
         self._update_play_btn(True)
         need_decode = self._prepare_detect_json()
-        if need_decode:
+        if need_decode == 'decode':
             self._append_log(f"\n[播放] 等待 detect.json 解码完成后启动...")
+            self._update_status_running(exe_name)
+        elif need_decode == 'copy':
+            self._append_log(f"\n[播放] 等待 detect.json 复制完成后启动...")
             self._update_status_running(exe_name)
         else:
             self._launch_program(exe_path, exe_name, exe_dir)
@@ -219,6 +222,10 @@ class ProcessMixin:
     # ==================== 分辨率捕获/恢复 ====================
 
     def _capture_current_resolution(self):
+        """捕获当前显示器分辨率快照，用于三端关闭后自动恢复。
+
+        返回 (snapshot, (w, h, freq, bits)) 元组；失败返回 None。
+        snapshot 是 DEVMODE 的原始内存拷贝，恢复时直接回写以保证字段精确一致。"""
         if sys.platform != 'win32':
             return None
         try:
@@ -235,6 +242,10 @@ class ProcessMixin:
             return None
 
     def _restore_resolution(self, mode):
+        """将显示器分辨率恢复到 _capture_current_resolution 捕获的状态。
+
+        优先使用原始 snapshot 精确恢复；若失败则枚举支持模式寻找最佳匹配；
+        最终回退到仅设置宽高 + 系统默认刷新率。"""
         if sys.platform != 'win32' or not mode:
             return
         try:
@@ -272,6 +283,9 @@ class ProcessMixin:
             self._append_log(f"[分辨率] 恢复失败: {e}")
 
     def _find_best_mode(self, width, height, bits, freq):
+        """在显示器支持的模式中，查找与目标宽高率/色深最接近的显示模式。
+
+        按刷新率差值最小、刷新率最高优先排序；返回 DEVMODE 或 None。"""
         try:
             best = None
             best_score = None
@@ -313,6 +327,15 @@ class ProcessMixin:
     # ==================== detect.json / cfg.json ====================
 
     def _prepare_detect_json(self):
+        """准备 detect.json：根据文件存在情况决定是否从 detect.bin 异步解码。
+
+        解码触发条件：
+        - detect.json 不存在且 detect.bin 存在 → 立即解码
+        - detect.bin 修改时间晚于 detect.json → 重新解码
+        跳过条件：
+        - detect.json 已存在且不比 detect.bin 旧 → 直接复制到程序目录
+        - 未选中设备 → 跳过
+        返回 True 表示正在异步解码（需等待完成后再启动程序），False 表示可立即启动。"""
         if not self.ui.id_list.currentItem():
             self._append_log("[detect] 未选中设备，跳过 detect.json 处理")
             return False
@@ -350,14 +373,15 @@ class ProcessMixin:
             self._decode_process.readyReadStandardError.connect(self._on_decode_error)
             self._decode_process.finished.connect(self._on_decode_finished)
             self._decode_process.start(cmd[0], cmd[1:])
-            return True
+            return 'decode'
         target_path = os.path.join(self.exe_dir, "detect.json")
-        try:
-            shutil.copy2(detect_json_path, target_path)
-            self._append_log(f"[detect] 已更新 detect.json -> {target_path}")
-        except Exception as e:
-            self._append_log(f"[detect] 复制失败: {e}")
-        return False
+        # exe_path 已由调用方 _start_program 写入 self._pending_exe_path
+        worker = FileCopyWorker(detect_json_path, target_path)
+        worker.copy_finished.connect(self._on_detect_copy_finished)
+        worker.error.connect(lambda err: self._on_detect_copy_error(err))
+        self._file_copy_worker = worker
+        worker.start()
+        return 'copy'
 
     def _on_decode_output(self):
         if self._decode_process:
@@ -371,12 +395,22 @@ class ProcessMixin:
             if error.strip():
                 self._append_log(f"[detect] {error.strip()}")
 
+    def _on_detect_copy_finished(self):
+        """detect.json 异步复制完成回调：启动程序"""
+        self._file_copy_worker = None
+        target_path = os.path.join(self.exe_dir, "detect.json")
+        self._append_log(f"[detect] 已更新 detect.json -> {target_path}")
+        self._do_launch_after_detect()
+
+    def _on_detect_copy_error(self, err):
+        """detect.json 异步复制失败回调"""
+        self._file_copy_worker = None
+        self._append_log(f"[detect] 复制失败: {err}")
+        self._do_launch_after_detect()
+
     def _on_decode_finished(self, exit_code, exit_status):
         self._decode_process = None
         detect_json_path = self._pending_detect_json
-        exe_path = self._pending_exe_path
-        exe_name = os.path.basename(exe_path)
-        exe_dir = os.path.dirname(exe_path)
         if exit_code != 0:
             self._append_log(f"[detect] 解码失败，退出码: {exit_code}")
             self._pending_exe_path = None
@@ -390,16 +424,28 @@ class ProcessMixin:
             self._update_status_idle()
             return
         target_path = os.path.join(self.exe_dir, "detect.json")
-        try:
-            shutil.copy2(detect_json_path, target_path)
-            self._append_log(f"[detect] 已更新 detect.json -> {target_path}")
-        except Exception as e:
-            self._append_log(f"[detect] 复制失败: {e}")
+        worker = FileCopyWorker(detect_json_path, target_path)
+        worker.copy_finished.connect(self._on_detect_copy_finished)
+        worker.error.connect(lambda err: self._on_detect_copy_error(err))
+        self._file_copy_worker = worker
+        worker.start()
+
+    def _do_launch_after_detect(self):
+        """detect.json 就绪后启动程序（解码/复制路径共用）"""
+        exe_path = self._pending_exe_path
         self._pending_exe_path = None
         self._pending_detect_json = None
+        if not exe_path:
+            return
+        exe_name = os.path.basename(exe_path)
+        exe_dir = os.path.dirname(exe_path)
         self._launch_program(exe_path, exe_name, exe_dir)
 
     def _launch_program(self, exe_path, exe_name, exe_dir):
+        """启动识别端程序。
+
+        启动前将当前视频路径和起始帧写入 cfg.json，
+        然后通过 QProcess.start 启动 exe 并更新 UI 状态。"""
         if self.current_video and self.current_frame is not None:
             video_start_frame = self._compute_video_start_frame(self.current_frame)
             self._update_cfg_json(self.current_video, video_start_frame)
@@ -410,6 +456,10 @@ class ProcessMixin:
         self._update_status_running(exe_name)
 
     def _update_cfg_json(self, video_path, frame):
+        """更新程序目录下的 cfg.json，写入当前视频路径和起始帧。
+
+        将 cap.file.path 设为 video_path、cap.file.video_start_frame 设为 frame，
+        同时清理顶层残留的 path / video_start_frame 旧字段。"""
         cfg_path = os.path.join(self.exe_dir, "cfg.json")
         if not os.path.exists(cfg_path):
             self._append_log(f"[警告] cfg.json 不存在: {cfg_path}")
@@ -443,6 +493,10 @@ class ProcessMixin:
         self._toggle_process_suspend()
 
     def _toggle_process_suspend(self):
+        """切换识别端进程的挂起/恢复状态。
+
+        通过 Windows API SuspendThread/ResumeThread 对进程所有线程
+        执行挂起或恢复操作，并同步更新暂停按钮文字和状态栏。"""
         if self.running_process is None:
             return
         state = self.running_process.state()

@@ -4,12 +4,11 @@
 import os
 import sys
 import json
-import shutil
 import ctypes
 import subprocess
 
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QHBoxLayout,
-    QVBoxLayout, QFormLayout, QFileDialog, QFrame, QStackedWidget)
+    QVBoxLayout, QFormLayout, QFrame)
 from PySide6.QtCore import QTimer, Qt, QRect
 from PySide6.QtGui import (QColor, QKeySequence, QFont, QActionGroup,
     QFontDatabase, QPainter)
@@ -18,7 +17,7 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
     BodyLabel, CaptionLabel, TitleLabel, isDarkTheme, RoundMenu, SwitchButton,
-    PushButton, ToolButton, ScrollArea, Pivot)
+    PushButton, ScrollArea)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
@@ -26,7 +25,8 @@ from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAni
 
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
-from workers.collect_worker import CollectFilesWorker
+from workers.collect_worker import CollectFilesWorker, FileCopyWorker
+from main_window.settings_dialog import SettingsDialog
 
 # ==================== 版本信息（帮助→关于） ====================
 # 仓库暂无 git tag，版本号按语义化手工维护：新增功能→小版本+1
@@ -141,8 +141,8 @@ class _VisibleAcrylicView(AcrylicMenuActionListWidget):
         # 库默认模糊半径 35 过强，背景内容糊成均匀色；15 保留更多背景细节，
         # 让磨砂层能透出背后内容的明暗变化
         self.acrylicBrush.setBlurRadius(15)
-        # 库默认噪点不透明度 0.03 几乎不可见；0.15 呈现亚克力标志性颗粒感，
-        # 即使弹出位置背后是纯色背景（如设备列表空白区）也能看出材质纹理
+        # 库默认噪点不透明度 0.03 几乎不可见；实际值 0.03 保持默认，
+        # 若调高到 0.15 可呈现亚克力标志性颗粒感，但当前选择保留默认
         self.acrylicBrush.noiseOpacity = 0.03
 
     def paintEvent(self, e):
@@ -305,7 +305,7 @@ class UIMixin:
         """为列表控件设置自定义右键菜单策略，并预构建缓存菜单（避免每次右键重建）"""
         self.ui.id_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.ui.log_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.ui.loacl_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ui.local_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
         # 预构建三个右键菜单（Action/图标/信号仅创建一次，后续右键直接弹出）
         self._build_id_list_menu()
         self._build_log_list_menu()
@@ -381,7 +381,7 @@ class UIMixin:
         action_copy_video_loc = Action(FluentIcon.LINK, "复制视频位置", self)
 
         def _do_copy_name():
-            item = self.ui.loacl_video_list.currentItem()
+            item = self.ui.local_video_list.currentItem()
             if not item:
                 return
             pure_name = os.path.splitext(item.text())[0]
@@ -391,7 +391,7 @@ class UIMixin:
 
         def _resolve_video_path():
             """根据当前选中的日志文件名推断视频完整路径"""
-            item = self.ui.loacl_video_list.currentItem()
+            item = self.ui.local_video_list.currentItem()
             if not item:
                 return None
             log_filename = item.text()
@@ -432,7 +432,7 @@ class UIMixin:
 
         def _do_add_to_upload():
             """第二列右键：将当前日志文件（及对应视频）添加到上传目录"""
-            item = self.ui.loacl_video_list.currentItem()
+            item = self.ui.local_video_list.currentItem()
             if not item:
                 return
             log_filename = item.text()
@@ -477,11 +477,11 @@ class UIMixin:
             return
         _exec_menu(self._ctx_log_menu, self.ui.log_list.mapToGlobal(pos))
 
-    def _loacl_video_list_context_menu(self, pos):
+    def _local_video_list_context_menu(self, pos):
         """日志文件列表右键菜单（预构建缓存，直接弹出）"""
-        if self.ui.loacl_video_list.currentItem() is None:
+        if self.ui.local_video_list.currentItem() is None:
             return
-        _exec_menu(self._ctx_video_menu, self.ui.loacl_video_list.mapToGlobal(pos))
+        _exec_menu(self._ctx_video_menu, self.ui.local_video_list.mapToGlobal(pos))
 
     # ---------- 添加到上传目录（收集到 {videos_dir}/upload/{设备}/） ----------
 
@@ -522,21 +522,31 @@ class UIMixin:
             self._append_log(f"[上传] 正在收集 {device_code}: {base} 的视频/日志...")
             return
 
-        # .txt 等其他文件：直接复制文件本身到 upload/{设备}/
-        try:
-            upload_dir = os.path.join(videos_dir, "upload", device_code)
-            os.makedirs(upload_dir, exist_ok=True)
-            dst = os.path.join(upload_dir, fname)
-            if os.path.exists(dst):
-                self._show_info_bar(f"{fname} 已在上传目录中（跳过）", "info")
-                self._append_log(f"[上传] 已存在跳过: {dst}")
-            else:
-                shutil.copy2(file_path, dst)
-                self._show_info_bar(f"{fname} 已添加到上传目录", "success")
-                self._append_log(f"[上传] 已收集: {dst}")
-        except Exception as e:
-            self._append_log(f"[上传] 收集失败: {e}")
-            self._show_info_bar(f"添加到上传目录失败: {e}", "error", duration=4000)
+        # .txt 等其他文件：异步复制文件本身到 upload/{设备}/
+        upload_dir = os.path.join(videos_dir, "upload", device_code)
+        os.makedirs(upload_dir, exist_ok=True)
+        dst = os.path.join(upload_dir, fname)
+        if os.path.exists(dst):
+            self._show_info_bar(f"{fname} 已在上传目录中（跳过）", "info")
+            self._append_log(f"[上传] 已存在跳过: {dst}")
+        else:
+            worker = FileCopyWorker(file_path, dst)
+            def _on_copy_ok(w=worker, d=dst, n=fname):
+                if hasattr(self, '_file_copy_workers') and w in self._file_copy_workers:
+                    self._file_copy_workers.remove(w)
+                self._show_info_bar(f"{n} 已添加到上传目录", "success")
+                self._append_log(f"[上传] 已收集: {d}")
+            def _on_copy_err(err, w=worker, n=fname):
+                if hasattr(self, '_file_copy_workers') and w in self._file_copy_workers:
+                    self._file_copy_workers.remove(w)
+                self._append_log(f"[上传] 收集失败: {err}")
+                self._show_info_bar(f"添加到上传目录失败: {err}", "error", duration=4000)
+            worker.copy_finished.connect(_on_copy_ok)
+            worker.error.connect(_on_copy_err)
+            if not hasattr(self, '_file_copy_workers'):
+                self._file_copy_workers = []
+            self._file_copy_workers.append(worker)
+            worker.start()
 
     def _on_upload_collect_done(self, device_id, copied, missing, worker):
         """右键收集完成：复制数 + 缺失项警告（视频/日志未找到时明确提示）"""
@@ -592,10 +602,6 @@ class UIMixin:
         act_upload_list.setToolTip("查看已收集待上传的文件（视频/日志目录/upload）")
         act_upload_list.triggered.connect(lambda: QTimer.singleShot(0, self._on_show_upload_list))
         func_menu.addAction(act_upload_list)
-        #act_add_table = Action(FluentIcon.ADD, "手动添加", self)
-        #act_add_table.setToolTip("手动添加一条球桌记录到本地数据库")
-        #act_add_table.triggered.connect(lambda: QTimer.singleShot(0, self._on_add_table_record))
-        #func_menu.addAction(act_add_table)
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
@@ -849,7 +855,6 @@ class UIMixin:
 
     def _on_open_table_panel(self):
         """打开球桌管理面板（非模态独立窗口）"""
-       # from windows.table_panel import TablePanelWindow
         from windows.management_panel import ManagementPanelWindow
         if not hasattr(self, '_table_panel') or self._table_panel is None:
             # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上（始终置顶）
@@ -863,296 +868,6 @@ class UIMixin:
     def _on_open_settings(self):
         """统一设置面板：分组展示所有可配置项，支持路径浏览、即时编辑"""
         settings = self._load_settings()
-
-        class SettingsDialog(MessageBoxBase):
-            """设置对话框（分页懒加载）：Pivot 导航 + 每页首次切入才构建控件，
-            避免打开时同步创建全部五个分区的控件"""
-
-            # 分区：(key, 标题)，顺序即页顺序
-            _SECTIONS = [
-                ("paths", "路径配置"),
-                ("remote", "远程连接"),
-                ("upload", "收集与上传"),
-                ("frpc", "FRPC 服务器"),
-                ("appearance", "外观"),
-            ]
-
-            def __init__(self, parent, cfg):
-                super().__init__(parent)
-                self.titleLabel = BodyLabel("设置", self)
-                self.viewLayout.addWidget(self.titleLabel)
-
-                self._cfg = cfg
-                self._path_edits = {}
-                self._built = set()    # 已构建的分区 key
-                self._pages = {}       # key -> 占位页 widget
-
-                # Pivot 分页导航 + 页面堆栈（页面控件首次切入时才创建）
-                self.pivot = Pivot(self)
-                self.stack = QStackedWidget(self)
-                self.stack.setMinimumHeight(240)  # 各分区高度接近，固定下限避免切换跳动
-                for key, title in self._SECTIONS:
-                    self.pivot.addItem(
-                        routeKey=key, text=title,
-                        onClick=lambda checked=False, k=key: self._switch_section(k))
-                    self._pages[key] = QWidget(self.stack)
-                    self.stack.addWidget(self._pages[key])
-                self.viewLayout.addWidget(self.pivot)
-                self.viewLayout.addWidget(self.stack)
-
-                # 默认展示第一页（路径配置）
-                self._switch_section("paths")
-
-            def _switch_section(self, key):
-                """切换到指定分区：首次切入时构建该页控件"""
-                self.pivot.setCurrentItem(key)
-                idx = [k for k, _ in self._SECTIONS].index(key)
-                self.stack.setCurrentIndex(idx)
-                if key in self._built:
-                    return
-                self._built.add(key)
-                # 构建器向 self.main_layout 追加控件，指向当前页布局
-                layout = QVBoxLayout(self._pages[key])
-                layout.setContentsMargins(4, 10, 4, 4)
-                layout.setSpacing(10)
-                self.main_layout = layout
-                getattr(self, f"_build_{key}_section")(self._cfg)
-                layout.addStretch(1)
-
-            # ---------- 路径配置 ----------
-            def _build_paths_section(self, cfg):
-                self._add_section_header("📂 路径配置")
-                path_items = [
-                    ("exe_dir", "程序目录", cfg.get("exe_dir", ""), "dir"),
-                    ("videos_dir", "视频/日志目录", cfg.get("videos_dir", ""), "dir"),
-                    ("cipher_tool", "加密工具", cfg.get("cipher_tool", ""), "file"),
-                    ("front_exe", "前端程序", cfg.get("front_exe", ""), "file"),
-                    ("backend_exe", "后端程序", cfg.get("backend_exe", ""), "file"),
-                ]
-                for key, label, value, mode in path_items:
-                    row = QHBoxLayout()
-                    lbl = BodyLabel(label, self)
-                    lbl.setFixedWidth(90)
-                    row.addWidget(lbl)
-                    edit = LineEdit(self)
-                    edit.setText(value)
-                    edit.setPlaceholderText(f"请选择{label}...")
-                    row.addWidget(edit, 1)
-                    btn = ToolButton(FluentIcon.FOLDER, self)
-                    btn.setFixedSize(32, 32)
-                    btn.setToolTip("浏览...")
-                    btn.clicked.connect(lambda checked, e=edit, m=mode: self._browse(e, m))
-                    row.addWidget(btn)
-                    self._path_edits[key] = edit
-                    self.main_layout.addLayout(row)
-
-            # ---------- 远程连接 ----------
-            def _build_remote_section(self, cfg):
-                self._add_section_header("🌐 远程连接")
-                form = QFormLayout()
-                form.setSpacing(8)
-
-                self._edit_ssh_user = LineEdit(self)
-                self._edit_ssh_user.setText(cfg.get("ssh_user", ""))
-                self._edit_ssh_user.setPlaceholderText("SSH 用户名")
-                form.addRow("SSH 用户名:", self._edit_ssh_user)
-
-                self._edit_ssh_pass = LineEdit(self)
-                self._edit_ssh_pass.setText(cfg.get("ssh_pass", ""))
-                self._edit_ssh_pass.setEchoMode(LineEdit.EchoMode.Password)
-                self._edit_ssh_pass.setPlaceholderText("SSH 密码")
-                form.addRow("SSH 密码:", self._edit_ssh_pass)
-
-                self._edit_sftp_path = LineEdit(self)
-                self._edit_sftp_path.setText(cfg.get("sftp_default_remote_path", ""))
-                self._edit_sftp_path.setPlaceholderText("如 /home/user/project")
-                form.addRow("SFTP默认路径:", self._edit_sftp_path)
-
-                self._edit_tcp_servers = LineEdit(self)
-                servers = cfg.get("tcp_servers", [])
-                self._edit_tcp_servers.setText(", ".join(servers))
-                self._edit_tcp_servers.setPlaceholderText("多个用逗号分隔，如 ip:port, ip:port")
-                form.addRow("TCP服务器:", self._edit_tcp_servers)
-
-                self.main_layout.addLayout(form)
-
-            # ---------- 收集与上传（运维面板精度/问题文件收集打包上传） ----------
-            def _build_upload_section(self, cfg):
-                self._add_section_header("📦 收集与上传")
-                form = QFormLayout()
-                form.setSpacing(8)
-
-                self._edit_upload_host = LineEdit(self)
-                self._edit_upload_host.setText(cfg.get("upload_host", "49.235.34.253"))
-                self._edit_upload_host.setPlaceholderText("上传服务器 IP")
-                form.addRow("上传服务器:", self._edit_upload_host)
-
-                self._edit_upload_port = LineEdit(self)
-                self._edit_upload_port.setText(str(cfg.get("upload_port", 22)))
-                self._edit_upload_port.setPlaceholderText("端口号（默认 22）")
-                form.addRow("上传端口:", self._edit_upload_port)
-
-                self._edit_upload_dir = LineEdit(self)
-                self._edit_upload_dir.setText(
-                    cfg.get("upload_remote_dir", "/lhcos-data/videos"))
-                self._edit_upload_dir.setPlaceholderText("如 /lhcos-data/videos")
-                form.addRow("远程目录:", self._edit_upload_dir)
-
-                self._edit_upload_user = LineEdit(self)
-                self._edit_upload_user.setText(cfg.get("upload_user", "root"))
-                self._edit_upload_user.setPlaceholderText("上传用户名（默认 root）")
-                form.addRow("上传用户名:", self._edit_upload_user)
-
-                self._edit_upload_pass = LineEdit(self)
-                # 不在代码中内置默认密码，未配置时留空由用户填写
-                self._edit_upload_pass.setText(cfg.get("upload_pass", ""))
-                self._edit_upload_pass.setEchoMode(LineEdit.EchoMode.Password)
-                self._edit_upload_pass.setPlaceholderText("上传密码")
-                form.addRow("上传密码:", self._edit_upload_pass)
-
-                self.main_layout.addLayout(form)
-                # self.main_layout.addWidget(CaptionLabel(
-                #     "上传使用上方专用账号密码（不复用 SSH 凭据）；文件收集到 视频/日志目录/upload",
-                #     self))
-
-            # ---------- FRPC 服务器 ----------
-            def _build_frpc_section(self, cfg):
-                self._add_section_header("🔗 FRPC 穿透服务器")
-                frpc = cfg.get("frpc_server", {})
-                form = QFormLayout()
-                form.setSpacing(8)
-
-                self._edit_frpc_addr = LineEdit(self)
-                self._edit_frpc_addr.setText(frpc.get("serverAddr", ""))
-                self._edit_frpc_addr.setPlaceholderText("服务器 IP")
-                form.addRow("服务器地址:", self._edit_frpc_addr)
-
-                self._edit_frpc_port = LineEdit(self)
-                self._edit_frpc_port.setText(str(frpc.get("serverPort", 7000)))
-                self._edit_frpc_port.setPlaceholderText("端口号")
-                form.addRow("服务器端口:", self._edit_frpc_port)
-
-                self._edit_frpc_token = LineEdit(self)
-                self._edit_frpc_token.setText(frpc.get("auth_token", ""))
-                self._edit_frpc_token.setPlaceholderText("认证 Token")
-                form.addRow("认证 Token:", self._edit_frpc_token)
-
-                self.main_layout.addLayout(form)
-
-            # ---------- 外观 ----------
-            def _build_appearance_section(self, cfg):
-                self._add_section_header("🎨 外观")
-                form = QFormLayout()
-                form.setSpacing(8)
-
-                self._spin_font_size = SpinBox(self)
-                self._spin_font_size.setRange(10, 20)
-                self._spin_font_size.setValue(cfg.get("font_size", 11))
-                self._spin_font_size.setSuffix(" pt")
-                form.addRow("字号大小:", self._spin_font_size)
-
-                self._combo_dpi = ComboBox(self)
-                dpi_options = [100, 125, 150, 175, 200]
-                self._combo_dpi.addItems([f"{d}%" for d in dpi_options])
-                cur_dpi = cfg.get("dpi_scale", 100)
-                if cur_dpi in dpi_options:
-                    self._combo_dpi.setCurrentIndex(dpi_options.index(cur_dpi))
-                form.addRow("界面缩放:", self._combo_dpi)
-
-                self._edit_font_family = LineEdit(self)
-                self._edit_font_family.setText(cfg.get("font_family", "Microsoft YaHei UI"))
-                self._edit_font_family.setPlaceholderText("字体名称")
-                form.addRow("字体:", self._edit_font_family)
-
-                self.main_layout.addLayout(form)
-
-            # ---------- 工具 ----------
-            def _add_section_header(self, text):
-                lbl = CaptionLabel(text, self)
-                lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 4px;")
-                self.main_layout.addWidget(lbl)
-
-            def _browse(self, edit, mode):
-                if mode == "dir":
-                    path = QFileDialog.getExistingDirectory(self, "选择目录", edit.text())
-                else:
-                    path, _ = QFileDialog.getOpenFileName(self, "选择文件", edit.text())
-                if path:
-                    edit.setText(path)
-
-            def collect(self):
-                """收集所有编辑结果：未打开过的分区保持原配置值不变"""
-                cfg = self._cfg
-                data = {}
-                # 路径（未构建时用原配置）
-                if "paths" in self._built:
-                    for key, edit in self._path_edits.items():
-                        data[key] = edit.text().strip()
-                else:
-                    for key in ("exe_dir", "videos_dir", "cipher_tool",
-                                "front_exe", "backend_exe"):
-                        data[key] = str(cfg.get(key, "") or "")
-                # 远程
-                if "remote" in self._built:
-                    data["ssh_user"] = self._edit_ssh_user.text().strip()
-                    data["ssh_pass"] = self._edit_ssh_pass.text().strip()
-                    data["sftp_default_remote_path"] = self._edit_sftp_path.text().strip()
-                    servers_text = self._edit_tcp_servers.text().strip()
-                    data["tcp_servers"] = [s.strip() for s in servers_text.split(",")
-                                           if s.strip()]
-                else:
-                    data["ssh_user"] = str(cfg.get("ssh_user", "") or "")
-                    data["ssh_pass"] = str(cfg.get("ssh_pass", "") or "")
-                    data["sftp_default_remote_path"] = str(
-                        cfg.get("sftp_default_remote_path", "") or "")
-                    data["tcp_servers"] = list(cfg.get("tcp_servers", []) or [])
-                # 收集与上传
-                if "upload" in self._built:
-                    data["upload_host"] = self._edit_upload_host.text().strip()
-                    try:
-                        data["upload_port"] = int(self._edit_upload_port.text().strip() or 22)
-                    except ValueError:
-                        data["upload_port"] = 22
-                    data["upload_remote_dir"] = self._edit_upload_dir.text().strip()
-                    data["upload_user"] = self._edit_upload_user.text().strip() or "root"
-                    data["upload_pass"] = self._edit_upload_pass.text()
-                else:
-                    data["upload_host"] = str(cfg.get("upload_host", "49.235.34.253") or "")
-                    try:
-                        data["upload_port"] = int(cfg.get("upload_port", 22))
-                    except (TypeError, ValueError):
-                        data["upload_port"] = 22
-                    data["upload_remote_dir"] = str(
-                        cfg.get("upload_remote_dir", "/lhcos-data/videos") or "")
-                    data["upload_user"] = str(cfg.get("upload_user", "root") or "root")
-                    data["upload_pass"] = str(cfg.get("upload_pass", "") or "")
-                # FRPC
-                if "frpc" in self._built:
-                    data["frpc_server"] = {
-                        "serverAddr": self._edit_frpc_addr.text().strip(),
-                        "serverPort": int(self._edit_frpc_port.text().strip() or 7000),
-                        "auth_method": "token",
-                        "auth_token": self._edit_frpc_token.text().strip(),
-                    }
-                else:
-                    frpc = dict(cfg.get("frpc_server", {}) or {})
-                    data["frpc_server"] = {
-                        "serverAddr": str(frpc.get("serverAddr", "") or ""),
-                        "serverPort": frpc.get("serverPort", 7000),
-                        "auth_method": frpc.get("auth_method", "token"),
-                        "auth_token": str(frpc.get("auth_token", "") or ""),
-                    }
-                # 外观
-                if "appearance" in self._built:
-                    data["font_size"] = self._spin_font_size.value()
-                    dpi_text = self._combo_dpi.currentText().replace("%", "")
-                    data["dpi_scale"] = int(dpi_text)
-                    data["font_family"] = self._edit_font_family.text().strip()
-                else:
-                    data["font_size"] = cfg.get("font_size", 11)
-                    data["dpi_scale"] = cfg.get("dpi_scale", 100)
-                    data["font_family"] = cfg.get("font_family", "Microsoft YaHei UI")
-                return data
 
         dlg = SettingsDialog(self, settings)
         dlg.yesButton.setText("保存")

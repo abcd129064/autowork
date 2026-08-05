@@ -7,7 +7,7 @@ import glob
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem)
-from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess
+from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
 from qfluentwidgets import (InfoBar, InfoBarPosition, FluentTitleBar,
     MessageBoxBase, BodyLabel, ComboBox)
@@ -21,6 +21,49 @@ from .process_mixin import ProcessMixin
 from .remote_mixin import RemoteMixin
 from .ui_mixin import UIMixin
 from qfluentwidgets import Dialog
+
+# 预编译高亮正则，避免每次日志加载重复编译
+_RE_HIGHLIGHT = [re.compile(p) for p in (r'返回', r'add')]
+
+
+class _LogLoadWorker(QThread):
+    """后台读取日志文件并匹配高亮"""
+    loaded = Signal(list, int, bool, float)  # lines_data, line_count, truncated, size_mb
+    error = Signal(str)
+
+    def __init__(self, path, tail_bytes=2 * 1024 * 1024):
+        super().__init__()
+        self.path = path
+        self.tail_bytes = tail_bytes
+
+    def run(self):
+        try:
+            file_size = os.path.getsize(self.path)
+            truncated = False
+            with open(self.path, 'rb') as f:
+                if file_size > self.tail_bytes:
+                    f.seek(-self.tail_bytes, os.SEEK_END)
+                    raw = f.read()
+                    truncated = True
+                else:
+                    raw = f.read()
+            content = raw.decode('utf-8', errors='ignore')
+            if truncated:
+                first_nl = content.find('\n')
+                if first_nl != -1:
+                    content = content[first_nl + 1:]
+
+            lines = content.splitlines()
+            # 预计算高亮信息
+            lines_data = []
+            for line in lines:
+                highlight = any(r.search(line) for r in _RE_HIGHLIGHT)
+                lines_data.append((line, highlight))
+
+            size_mb = file_size / (1024 * 1024)
+            self.loaded.emit(lines_data, len(lines_data), truncated, size_mb)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindowBase):
@@ -104,6 +147,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 存储当前日志文件路径（用于右键菜单定位）
         self._current_log_path = None
 
+        # 异步日志加载 worker
+        self._log_worker = None
+
         # 异步解码相关
         self._decode_process = None
         self._pending_exe_path = None
@@ -153,7 +199,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.table_panel_btn.clicked.connect(lambda: QTimer.singleShot(0, self._on_open_table_panel))
         # 列表项选择事件
         self.ui.id_list.currentItemChanged.connect(self._on_id_current_changed)
-        self.ui.loacl_video_list.currentItemChanged.connect(self._on_video_current_changed)
+        self.ui.local_video_list.currentItemChanged.connect(self._on_video_current_changed)
         self.ui.log_list.itemClicked.connect(self.on_log_selected)
         self.ui.log_list.itemDoubleClicked.connect(self.on_log_double_clicked)
 
@@ -166,7 +212,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 右键菜单信号
         self.ui.id_list.customContextMenuRequested.connect(self._id_list_context_menu)
         self.ui.log_list.customContextMenuRequested.connect(self._log_list_context_menu)
-        self.ui.loacl_video_list.customContextMenuRequested.connect(self._loacl_video_list_context_menu)
+        self.ui.local_video_list.customContextMenuRequested.connect(self._local_video_list_context_menu)
 
         # 远程面板信号
         self.ui.p2p_btn.toggled.connect(self._on_p2p_toggled)
@@ -373,7 +419,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._append_log(f"[设备] 找到 {len(device_codes)} 个设备代码")
 
     def _load_videos_for_device(self, device_code):
-        """根据设备代码和选中日期加载日志文件到 loacl_video_list（第二列）
+        """根据设备代码和选中日期加载日志文件到 local_video_list（第二列）
 
         查找路径：
         1. videos/{device_code}/{date_str}/ 下的 *.txt, *.log（原有逻辑）
@@ -391,7 +437,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         date_dir = os.path.join(device_dir, date_str)
 
         # 清空第二列
-        self.ui.loacl_video_list.clear()
+        self.ui.local_video_list.clear()
 
         log_files = []
 
@@ -419,20 +465,20 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._show_info_bar(f"扫描 {device_code} 设备目录失败: {e}", "warning", duration=4000)
 
         if not log_files:
-            self._update_empty_hint(self.ui.loacl_video_list)
+            self._update_empty_hint(self.ui.local_video_list)
             self._append_log(f"[提示] {device_code} 下没有 {date_str} 的日志 (查找路径: {date_dir} 及设备根目录)")
             self._show_info_bar(f"{device_code} 下未找到 {date_str} 的日志", "warning")
             return
 
-        self.ui.loacl_video_list.setUpdatesEnabled(False)
+        self.ui.local_video_list.setUpdatesEnabled(False)
         for log_path in sorted(log_files):
             # 只显示文件名，如 20260705_131009.log
-            self.ui.loacl_video_list.addItem(os.path.basename(log_path))
-        self.ui.loacl_video_list.setUpdatesEnabled(True)
+            self.ui.local_video_list.addItem(os.path.basename(log_path))
+        self.ui.local_video_list.setUpdatesEnabled(True)
 
         # 列表重载后重新应用搜索过滤
         self._on_video_search_changed(self.ui.video_search.text())
-        self._update_empty_hint(self.ui.loacl_video_list)
+        self._update_empty_hint(self.ui.local_video_list)
 
         self._append_log(f"[日志目录] {device_code}/{date_str} 下有 {len(log_files)} 个日志文件")
 
@@ -462,8 +508,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """Ctrl+F：根据焦点所在列表切换对应搜索框的显示/隐藏"""
         focused = self.focusWidget()
         # 焦点在日志文件列表（或其搜索框）→ 操作 video_search
-        if (self.ui.loacl_video_list.isAncestorOf(focused)
-                or focused is self.ui.loacl_video_list
+        if (self.ui.local_video_list.isAncestorOf(focused)
+                or focused is self.ui.local_video_list
                 or focused is self.ui.video_search):
             if self.ui.video_search.isVisible():
                 self._hide_video_search()
@@ -494,9 +540,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.video_search.clear()
         self.ui.video_search.blockSignals(False)
         self.ui.video_search.hide()
-        for i in range(self.ui.loacl_video_list.count()):
-            self.ui.loacl_video_list.item(i).setHidden(False)
-        self._update_empty_hint(self.ui.loacl_video_list)
+        for i in range(self.ui.local_video_list.count()):
+            self.ui.local_video_list.item(i).setHidden(False)
+        self._update_empty_hint(self.ui.local_video_list)
 
     def _hide_all_search(self):
         """隐藏所有搜索框（Esc 触发）"""
@@ -514,10 +560,10 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
     def _on_video_search_changed(self, text):
         """实时过滤日志文件列表：不区分大小写子串匹配"""
         kw = text.strip().lower()
-        for i in range(self.ui.loacl_video_list.count()):
-            item = self.ui.loacl_video_list.item(i)
+        for i in range(self.ui.local_video_list.count()):
+            item = self.ui.local_video_list.item(i)
             item.setHidden(bool(kw) and kw not in item.text().lower())
-        self._update_empty_hint(self.ui.loacl_video_list)
+        self._update_empty_hint(self.ui.local_video_list)
 
     def _on_p2p_search_changed(self, text):
         """实时过滤远程面板 visitor/服务器列表：不区分大小写子串匹配"""
@@ -773,53 +819,54 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             if os.path.exists(alt_path):
                 full_log_path = alt_path
 
-        # 读取日志文件内容并显示在第三列
-        # 大文件只读尾部 _LOG_TAIL_BYTES，避免一次性加载整个文件导致 UI 卡顿/内存暴涨
-        _LOG_TAIL_BYTES = 2 * 1024 * 1024  # 2MB
-        try:
-            file_size = os.path.getsize(full_log_path)
-            truncated = False
-            with open(full_log_path, 'rb') as f:
-                if file_size > _LOG_TAIL_BYTES:
-                    f.seek(-_LOG_TAIL_BYTES, os.SEEK_END)
-                    raw = f.read()
-                    truncated = True
-                else:
-                    raw = f.read()
-            content = raw.decode('utf-8', errors='ignore')
-            if truncated:
-                # 丢弃可能不完整的首行（从中间截断处开始）
-                first_nl = content.find('\n')
-                if first_nl != -1:
-                    content = content[first_nl + 1:]
+        # 保存路径供回调使用
+        self._current_log_path = full_log_path
 
-            self._current_log_path = full_log_path
-            self.ui.log_list.setUpdatesEnabled(False)
-            self.ui.log_list.clear()
-            highlight_patterns = [r'返回', r'add']
-            for line in content.splitlines():
-                log_item = QListWidgetItem(line)
-                if any(re.search(p, line) for p in highlight_patterns):
-                    log_item.setForeground(QBrush(self.highlight_color))
-                self.ui.log_list.addItem(log_item)
-            self.ui.log_list.setUpdatesEnabled(True)
-            self._update_empty_hint(self.ui.log_list)
+        # 取消前一个正在运行的 worker（用户快速切换场景）
+        if self._log_worker is not None and self._log_worker.isRunning():
+            self._log_worker.requestInterruption()
+            self._log_worker.wait(500)
 
-            line_count = len(content.splitlines())
-            if truncated:
-                size_mb = file_size / (1024 * 1024)
-                self._append_log(f"[日志内容] 文件 {size_mb:.1f}MB 过大，仅显示尾部 {line_count} 行")
-                self._show_info_bar(f"大文件仅加载尾部 {line_count} 行", "warning")
-            else:
-                self._append_log(f"[日志内容] 已加载 {line_count} 行")
-                self._show_info_bar(f"日志已加载 {line_count} 行", "success")
-            self._update_status_logs(line_count)
-        except Exception as e:
-            self._append_log(f"[错误] 无法读取日志文件: {str(e)}")
-            self._show_info_bar(f"无法读取日志文件: {e}", "error")
-            self.ui.log_list.clear()
-            self._update_empty_hint(self.ui.log_list)
-            self._current_log_path = None
+        # 清空列表并显示加载提示
+        self.ui.log_list.clear()
+        self.ui.log_list.addItem("加载中...")
+
+        # 启动后台加载
+        worker = _LogLoadWorker(full_log_path)
+        worker.loaded.connect(self._on_log_loaded)
+        worker.error.connect(self._on_log_load_error)
+        self._log_worker = worker  # 防止 GC
+        worker.start()
+
+    def _on_log_loaded(self, lines_data, line_count, truncated, size_mb):
+        """日志加载完成，填充 UI"""
+        self.ui.log_list.setUpdatesEnabled(False)
+        self.ui.log_list.clear()
+        for line, highlight in lines_data:
+            item = QListWidgetItem(line)
+            if highlight:
+                item.setForeground(QBrush(self.highlight_color))
+            self.ui.log_list.addItem(item)
+        self.ui.log_list.setUpdatesEnabled(True)
+        self._update_empty_hint(self.ui.log_list)
+
+        if truncated:
+            self._append_log(f"[日志内容] 文件 {size_mb:.1f}MB 过大，仅显示尾部 {line_count} 行")
+            self._show_info_bar(f"大文件仅加载尾部 {line_count} 行", "warning")
+        else:
+            self._append_log(f"[日志内容] 已加载 {line_count} 行")
+            self._show_info_bar(f"日志已加载 {line_count} 行", "success")
+        self._update_status_logs(line_count)
+        self._log_worker = None
+
+    def _on_log_load_error(self, error_msg):
+        """日志加载失败"""
+        self._append_log(f"[错误] 无法读取日志文件: {error_msg}")
+        self._show_info_bar(f"无法读取日志文件: {error_msg}", "error")
+        self.ui.log_list.clear()
+        self._update_empty_hint(self.ui.log_list)
+        self._current_log_path = None
+        self._log_worker = None
 
     @Slot()
     def on_log_selected(self, item):
@@ -842,11 +889,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             return
 
         # 从第二列获取当前选中的日志文件名，推断视频文件名
-        if not self.ui.loacl_video_list.currentItem():
+        if not self.ui.local_video_list.currentItem():
             self._append_log("[警告] 未选择日志文件")
             return
 
-        log_filename = self.ui.loacl_video_list.currentItem().text()
+        log_filename = self.ui.local_video_list.currentItem().text()
         video_name = os.path.splitext(log_filename)[0] + '.mp4'
         # 视频查找路径：优先 videos/videos/，其次 videos/{device_code}/
         video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
@@ -934,7 +981,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except (RuntimeError, OSError):
                 pass
 
-        # 3. 终止正在运行的 SnookerTracking 程序
+        # 4. 终止正在运行的 SnookerTracking 程序
         rp = getattr(self, 'running_process', None)
         if rp is not None:
             self.running_process = None
@@ -944,7 +991,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except (RuntimeError, OSError):
                 pass
 
-        # 4. 终止三端进程
+        # 5. 终止三端进程
         for attr in ('_tracking_process', '_backend_process', '_front_process'):
             p = getattr(self, attr, None)
             if p is not None:
@@ -956,7 +1003,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 except (RuntimeError, OSError):
                     pass
 
-        # 5. 清理 TCP worker
+        # 6. 清理 TCP worker
         tw = getattr(self, '_tcp_worker', None)
         if tw is not None:
             self._tcp_worker = None
@@ -968,7 +1015,18 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except RuntimeError:
                 pass
 
-        # 6. 终止异步解码进程
+        # 7. 清理日志加载 worker
+        lw = getattr(self, '_log_worker', None)
+        if lw is not None:
+            self._log_worker = None
+            try:
+                if lw.isRunning():
+                    lw.requestInterruption()
+                    lw.wait(1000)
+            except RuntimeError:
+                pass
+
+        # 8. 终止异步解码进程
         dp = getattr(self, '_decode_process', None)
         if dp is not None:
             self._decode_process = None
@@ -979,7 +1037,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except (RuntimeError, OSError):
                 pass
 
-        # 7. 等待上传收集 worker 结束（文件复制任务，短等待即可）
+        # 9. 等待上传收集 worker 结束（文件复制任务，短等待即可）
         for cw in list(getattr(self, '_upload_collect_workers', [])):
             try:
                 if cw.isRunning():

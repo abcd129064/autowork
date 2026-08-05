@@ -220,3 +220,10 @@ serverName = "snk_2531"
 secretKey = "abc123"
 bindPort = 22935
 
+[[visitors]]
+name = "snk_4004"
+type = "xtcp"
+serverName = "snk_4004"
+secretKey = "abc123"
+bindPort = 36123
+

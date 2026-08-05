@@ -165,7 +165,7 @@
        <enum>Qt::Orientation::Horizontal</enum>
       </property>
       <widget class="QListWidget" name="id_list"/>
-      <widget class="QListWidget" name="loacl_video_list"/>
+      <widget class="QListWidget" name="local_video_list"/>
       <widget class="QListWidget" name="log_list"/>
       <widget class="QPlainTextEdit" name="show_log">
        <property name="readOnly">

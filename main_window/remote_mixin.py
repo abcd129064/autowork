@@ -176,10 +176,6 @@ class RemoteMixin:
         # 重新应用搜索过滤
         self._on_p2p_search_changed(self.ui.p2p_search.text())
 
-    def _save_p2p_settings(self):
-        """visitor 配置仅存于内存，连接时写入 TOML，不持久化到 settings.json"""
-        pass
-
     # ------------------------------------------------------------------ TCP 保存的服务器
     def _load_tcp_servers(self):
         """从 settings.json 读取保存的服务器列表（ip:port 字符串）"""
@@ -342,9 +338,14 @@ class RemoteMixin:
         self._append_log("[远程] 正在停止 frpc...")
         proc = self._frpc_process
         self._frpc_process = None
+        proc.finished.connect(self._on_proc_cleanup_done)
         proc.kill()
-        proc.waitForFinished(3000)
-        proc.deleteLater()
+
+    def _on_proc_cleanup_done(self, *_args):
+        """frpc 进程终止后的清理回调（替代 waitForFinished 阻塞等待）"""
+        proc = self.sender()
+        if proc is not None:
+            proc.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
         self.ui.p2p_ssh_terminal_btn.setEnabled(False)
         self.ui.p2p_rdp_btn.setEnabled(False)

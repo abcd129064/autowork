@@ -402,136 +402,142 @@ class SFTPDirTransferWorker(QThread):
                 pass  # 可能已被并发创建
 
 
-class SFTPConnectWorker(QThread):
+class _BaseConnectWorker(QThread):
+    """连接 Worker 基类，封装重试逻辑"""
+    connected = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, host, port, username, password):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self._abort = False
+
+    def abort(self):
+        """请求中止重试循环"""
+        self._abort = True
+
+    # ---- 子类必须覆盖 ----
+    @property
+    def _log_name(self):
+        raise NotImplementedError
+
+    def _do_connect(self):
+        """执行实际连接，返回连接对象"""
+        raise NotImplementedError
+
+    def _safe_close(self):
+        """安全关闭连接"""
+        raise NotImplementedError
+
+    def _log_before_connect(self, attempt):
+        """连接前的日志（默认无操作，SSH 子类覆盖）"""
+        pass
+
+    # ---- 通用重试循环 ----
+    def run(self):
+        for attempt in range(1, RETRY_MAX + 1):
+            if self._abort:
+                conn_logger.info(self._log_name, '连接已中止（用户取消）',
+                                 host=self.host, port=self.port, user=self.username)
+                return
+            self._log_before_connect(attempt)
+            try:
+                obj = self._do_connect()
+                conn_logger.info(self._log_name, f'连接成功 (第{attempt}次尝试)',
+                                 host=self.host, port=self.port, user=self.username)
+                self.connected.emit(obj)
+                return
+            except Exception as e:
+                self._safe_close()
+                err_msg = str(e)
+                friendly = classify_conn_error(e)
+                if any(kw in err_msg for kw in RETRYABLE_KEYWORDS) and attempt < RETRY_MAX:
+                    conn_logger.error(self._log_name,
+                                      f'连接失败，将重试 ({attempt}/{RETRY_MAX}): {err_msg}',
+                                      host=self.host, port=self.port, user=self.username,
+                                      error_type=type(e).__name__)
+                    time.sleep(RETRY_DELAY)
+                    continue
+                if self._abort:
+                    return
+                conn_logger.exception(self._log_name,
+                                      f'连接最终失败 (已尝试{attempt}次): {friendly}', exc=e,
+                                      host=self.host, port=self.port, user=self.username)
+                if attempt > 1:
+                    self.error.emit(f'连接失败（已重试{RETRY_MAX}次）: {friendly}')
+                else:
+                    self.error.emit(friendly)
+                return
+
+
+class SFTPConnectWorker(_BaseConnectWorker):
     """异步建立 paramiko.Transport 连接的工作线程（含自动重试）"""
-    connected = Signal(object)   # 成功时发射 transport 对象
-    error = Signal(str)          # 失败时发射错误信息
 
     def __init__(self, host, port, username, password):
-        super().__init__()
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self._abort = False
+        super().__init__(host, port, username, password)
+        self._transport = None
 
-    def abort(self):
-        """请求中止重试循环"""
-        self._abort = True
+    @property
+    def _log_name(self):
+        return 'SFTP'
 
-    def run(self):
-        for attempt in range(1, RETRY_MAX + 1):
-            if self._abort:
-                conn_logger.info('SFTP', '连接已中止（用户取消）',
-                                 host=self.host, port=self.port, user=self.username)
-                return
-            transport = None
-            try:
-                transport = paramiko.Transport((self.host, self.port))
-                transport.banner_timeout = 15
-                transport.auth_timeout = 15
-                transport.connect(username=self.username, password=self.password)
-                # keepalive：防止空闲连接被 NAT/防火墙静默丢弃
-                transport.set_keepalive(30)
-                conn_logger.info('SFTP', f'连接成功 (第{attempt}次尝试)',
-                                 host=self.host, port=self.port, user=self.username)
-                self.connected.emit(transport)
-                return  # 成功，立即退出
-            except Exception as e:
-                # 安全关闭 transport（close+join 等待后台线程退出，避免 C 层崩溃）
-                safe_close_transport(transport)
-                err_msg = str(e)
-                friendly = classify_conn_error(e)
-                # 仅网络就绪类错误才重试，认证失败等直接报错
-                if any(kw in err_msg for kw in RETRYABLE_KEYWORDS) and attempt < RETRY_MAX:
-                    conn_logger.error('SFTP', f'连接失败，将重试 ({attempt}/{RETRY_MAX}): {err_msg}',
-                                      host=self.host, port=self.port, user=self.username,
-                                      error_type=type(e).__name__)
-                    time.sleep(RETRY_DELAY)
-                    continue
-                # 不可重试的错误 或 已达最大重试次数
-                if self._abort:
-                    return
-                conn_logger.exception('SFTP', f'连接最终失败 (已尝试{attempt}次): {friendly}', exc=e,
-                                      host=self.host, port=self.port, user=self.username)
-                if attempt > 1:
-                    self.error.emit(f'连接失败（已重试{RETRY_MAX}次）: {friendly}')
-                else:
-                    self.error.emit(friendly)
-                return
+    def _do_connect(self):
+        self._transport = paramiko.Transport((self.host, self.port))
+        self._transport.banner_timeout = 15
+        self._transport.auth_timeout = 15
+        self._transport.connect(username=self.username, password=self.password)
+        self._transport.set_keepalive(30)
+        return self._transport
+
+    def _safe_close(self):
+        safe_close_transport(self._transport)
+        self._transport = None
 
 
-class SSHConnectWorker(QThread):
+class SSHConnectWorker(_BaseConnectWorker):
     """异步建立 SSH 连接的工作线程（保持 client 存活，含自动重试）"""
-    connected = Signal(object)   # 成功时发射 SSHClient 对象
-    error = Signal(str)          # 失败时发射错误信息
 
     def __init__(self, host, port, username, password):
-        super().__init__()
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self._abort = False
+        super().__init__(host, port, username, password)
+        self._client = None
 
-    def abort(self):
-        """请求中止重试循环"""
-        self._abort = True
+    @property
+    def _log_name(self):
+        return 'SSH'
 
-    def run(self):
-        for attempt in range(1, RETRY_MAX + 1):
-            if self._abort:
-                conn_logger.info('SSH', '连接已中止（用户取消）',
-                                 host=self.host, port=self.port, user=self.username)
-                return
-            client = None
+    def _log_before_connect(self, attempt):
+        conn_logger.info('SSH', f'尝试连接 ({attempt}/{RETRY_MAX})',
+                         host=self.host, port=self.port, user=self.username)
+
+    def _do_connect(self):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            self.host, port=self.port,
+            username=self.username, password=self.password,
+            timeout=10, banner_timeout=15, auth_timeout=15
+        )
+        transport = client.get_transport()
+        if transport:
+            transport.set_keepalive(30)
+        self._client = client
+        return client
+
+    def _safe_close(self):
+        if self._client:
             try:
-                conn_logger.info('SSH', f'尝试连接 ({attempt}/{RETRY_MAX})',
-                                 host=self.host, port=self.port, user=self.username)
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(
-                    self.host, port=self.port,
-                    username=self.username, password=self.password,
-                    timeout=10, banner_timeout=15, auth_timeout=15
-                )
-                # keepalive：防止空闲连接被 NAT/防火墙静默丢弃
-                transport = client.get_transport()
-                if transport:
-                    transport.set_keepalive(30)
-                conn_logger.info('SSH', f'连接成功 (第{attempt}次尝试)',
-                                 host=self.host, port=self.port, user=self.username)
-                self.connected.emit(client)
-                return  # 成功，立即退出
-            except Exception as e:
-                # 安全关闭 transport 后台线程（close+join），避免线程残留导致 C 层崩溃
-                if client:
-                    try:
-                        transport = client.get_transport()
-                        safe_close_transport(transport)
-                    except Exception:
-                        pass
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
-                err_msg = str(e)
-                friendly = classify_conn_error(e)
-                if any(kw in err_msg for kw in RETRYABLE_KEYWORDS) and attempt < RETRY_MAX:
-                    conn_logger.error('SSH', f'连接失败，将重试 ({attempt}/{RETRY_MAX}): {err_msg}',
-                                      host=self.host, port=self.port, user=self.username,
-                                      error_type=type(e).__name__)
-                    time.sleep(RETRY_DELAY)
-                    continue
-                if self._abort:
-                    return
-                conn_logger.exception('SSH', f'连接最终失败 (已尝试{attempt}次): {friendly}', exc=e,
-                                      host=self.host, port=self.port, user=self.username)
-                if attempt > 1:
-                    self.error.emit(f'连接失败（已重试{RETRY_MAX}次）: {friendly}')
-                else:
-                    self.error.emit(friendly)
-                return
+                transport = self._client.get_transport()
+                safe_close_transport(transport)
+            except Exception:
+                pass
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
 
 
 class SSHExecWorker(QThread):
