@@ -7,6 +7,7 @@
 - get_meta(): 返回 (总条数, 最后刷新时间字符串)
 - save_xqzg / query_xqzg_page: 接口1 (xqzg.newbv.cn) 数据存取
 - save_kd / query_kd_page: 接口2 (kd.newbv.cn) 数据存取
+- upsert_kd: 接口2 keyword 搜索拉取结果的增量更新（不覆盖全量）
 """
 
 import json
@@ -506,6 +507,58 @@ def save_kd(rows: list, file_path: str = "") -> int:
     # 保存后顺手清理 60 天前的历史分区，避免数据库随天数无限膨胀
     prune_kd_history(_KD_KEEP_DAYS)
     return inserted
+
+
+def upsert_kd(rows: list, file_path: str = "") -> int:
+    """按 (file_path, device_code) 增量更新/插入（keyword 搜索拉取专用），返回处理条数
+
+    save_kd 是按日期全量替换，若直接保存带 keyword 拉取的部分数据，
+    会删除同日期下未匹配的其他设备，造成数据丢失。
+    本函数只处理返回范围内的记录：已存在则更新，不存在则插入，
+    不动其他记录，保证本地全量数据完整。
+    无 device_code 的记录无法定位唯一性，跳过不写入。
+    """
+    conn = _get_conn()
+    all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
+    set_clause = ", ".join(f"{f} = ?" for f in all_fields)
+    max_id = conn.execute("SELECT MAX(id) FROM kd_status").fetchone()[0] or 0
+    next_id = max_id + 1
+    updated = 0
+    inserts = []
+    for item in rows:
+        device_code = str(item.get("device_code") or "").strip()
+        if not device_code:
+            continue
+        vals = []
+        for f in STATUS_FIELDS:
+            vals.append(str(item.get(f) if item.get(f) is not None else ""))
+        for f in KD_EXTRA_FIELDS:
+            val = item.get(f)
+            if f in KD_FILE_FIELDS:
+                vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
+            else:
+                vals.append(str(val if val is not None else ""))
+        cur = conn.execute(
+            f"UPDATE kd_status SET {set_clause} "
+            f"WHERE file_path = ? AND device_code = ?",
+            vals + [file_path, device_code])
+        if cur.rowcount:
+            updated += cur.rowcount
+            continue
+        inserts.append(tuple([next_id, file_path] + vals))
+        next_id += 1
+    if inserts:
+        placeholders = ", ".join(["?"] * (len(all_fields) + 2))
+        col_names = "id, file_path, " + ", ".join(all_fields)
+        conn.executemany(
+            f"INSERT OR REPLACE INTO kd_status ({col_names}) VALUES ({placeholders})",
+            inserts)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
+    conn.commit()
+    return updated + len(inserts)
 
 
 def prune_kd_history(keep_days: int = 60) -> int:

@@ -27,12 +27,12 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     FluentWindow, NavigationItemPosition, InfoBar, ProgressBar, TitleLabel,
     BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
     CardWidget, setCustomStyleSheet, qconfig, isDarkTheme, MessageBox, TreeWidget,
-    MessageBoxBase)
+    MessageBoxBase, MenuAnimationType)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
 from core.frp_remote import FrpRemoteBridge
-from core.perf import is_acrylic_enabled
+from core.perf import is_acrylic_enabled, is_animation_enabled
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
@@ -40,6 +40,29 @@ from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
 from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     clip_base_name)
 from database import table_db
+
+# ==================== 动画开关辅助 ====================
+
+def _popup_ani_type():
+    """按主界面「性能选项-动画效果」开关决定菜单弹出动画类型。
+
+    运行时即时读取 core.perf 全局状态：开关切换后，已打开面板中的
+    菜单下一次弹出即同步生效，新打开的面板同样读取当前值。"""
+    return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
+            else MenuAnimationType.NONE)
+
+
+def _patch_menu_animation(menu):
+    """实例级 exec 补丁：用于由控件代为弹出的菜单（如 ToolButton.setMenu）。
+
+    库内 ToolButton._showMenu 固定以 DROP_DOWN 调用 menu.exec，无法在
+    调用点传参；此处绑定实例级 exec，弹出时按动画开关动态决定类型。"""
+    def _exec(pos, ani=True, aniType=None):
+        if not is_animation_enabled():
+            aniType = MenuAnimationType.NONE
+        RoundMenu.exec(menu, pos, ani=ani, aniType=aniType)
+    menu.exec = _exec
+
 
 # ==================== 常量定义 ====================
 
@@ -745,6 +768,8 @@ class TablePage(QWidget):
             cb.checkStateChanged.connect(
                 lambda state, idx=i: self._toggle_col(idx, state == Qt.CheckState.Checked))
             menu.addWidget(cb, selectable=False)
+        # 菜单由 ToolButton 代为弹出（库内固定 DROP_DOWN），打实例补丁以跟随动画开关
+        _patch_menu_animation(menu)
         self._col_btn.setMenu(menu)
 
     def _on_meta_finished(self, result):
@@ -900,7 +925,52 @@ class TablePage(QWidget):
                 act_snk.triggered.connect(
                     lambda _=False, n=table_name, c=current: self._edit_snk(n, c))
                 menu.addAction(act_snk)
-        menu.exec_(self._table.viewport().mapToGlobal(pos))
+        # 远程连接入口（SSH / SFTP），与设备状态页交互一致
+        if idx.isValid():
+            self._add_remote_actions(menu, idx.row())
+        menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
+
+    def _add_remote_actions(self, menu, row_idx):
+        """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件管理）
+
+        snk 优先取行数据 snk_code 列（存储时已从 remark 解析/手动写入），
+        兜底再从 remark 正则解析；两者皆无则该球桌不可远程。
+        """
+        snk_item = self._table.item(row_idx, 5)
+        remark_item = self._table.item(row_idx, 3)
+        table_item = self._table.item(row_idx, 0)
+        table_id = table_item.text().strip() if table_item else ""
+        snk = (snk_item.text().strip() if snk_item else "") or \
+            table_db.parse_snk_code(remark_item.text() if remark_item else "")
+        menu.addSeparator()
+        remote_items = [
+            ("ssh", FluentIcon.COMMAND_PROMPT, "SSH 终端"),
+            ("sftp", FluentIcon.FOLDER, "SFTP 文件管理"),
+        ]
+        if not snk:
+            # 置灰但可见：提示功能存在，仅该球桌缺 snk 配置不可用
+            tip = Action(FluentIcon.INFO, "该球桌无 snk 标识，无法远程", self._table)
+            tip.setEnabled(False)
+            menu.addAction(tip)
+        for kind, icon, label in remote_items:
+            act = Action(icon, label if snk else f"{label}（无 snk）", self._table)
+            act.setEnabled(bool(snk))
+            if snk:
+                act.triggered.connect(
+                    lambda _=False, k=kind: self._open_remote_session(k, snk, table_id))
+            menu.addAction(act)
+
+    def _open_remote_session(self, kind, snk, table_id):
+        """委托运维面板窗口的 FrpRemoteBridge 建立 xtcp 隧道并打开会话
+
+        与设备状态页共享同一桥接实例（ManagementPanelWindow 顶层持有，
+        面板关闭时 closeEvent 统一 shutdown），避免重复启动 frpc 进程。
+        """
+        bridge = getattr(self.window(), "_remote_bridge", None)
+        if bridge is None:
+            InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
+            return
+        bridge.open_session(kind, snk, table_id)
 
     def _edit_snk(self, table_name, current):
         """弹窗手动写入/修改指定球桌的 snk 标识，保存后刷新当前页"""
@@ -1123,7 +1193,7 @@ class FileListPanel(QWidget):
         act_copy_all.triggered.connect(self._copy_all_names)
         menu.addAction(act_copy_all)
 
-        menu.exec_(self._list.viewport().mapToGlobal(pos))
+        menu.exec_(self._list.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
 
     def _clip_name(self, fname: str) -> str:
         """复制时截取文件名 'kd' 之前的字符
@@ -1151,6 +1221,10 @@ class FileListPanel(QWidget):
         self.move(pw, 0)
         self.show()
         self.raise_()
+        # 动画开关关闭：直接定位到最终位置，跳过过渡动画
+        if not is_animation_enabled():
+            self.move(pw - self._PANEL_WIDTH, 0)
+            return
         anim = QPropertyAnimation(self, b"pos", self)
         anim.setDuration(200)
         anim.setStartValue(QPoint(pw, 0))
@@ -1162,6 +1236,11 @@ class FileListPanel(QWidget):
     def slide_out(self):
         parent = self.parent()
         pw = parent.width()
+        # 动画开关关闭：直接移出可视区并隐藏，跳过过渡动画
+        if not is_animation_enabled():
+            self.move(pw, 0)
+            self.hide()
+            return
         anim = QPropertyAnimation(self, b"pos", self)
         anim.setDuration(180)
         anim.setStartValue(self.pos())
@@ -1208,6 +1287,8 @@ class DevicePage(QWidget):
         self._upload_worker = None   # 打包上传 Worker（全局唯一）
         self._query_worker = None    # 异步查询 Worker
         self._save_worker = None     # 异步保存 Worker
+        self._fetch_keyword = ""     # 当前 API 拉取携带的 keyword（空=全量）
+        self._last_fetch_silent = False  # 静默拉取（搜索触发）完成不弹 InfoBar
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
@@ -1362,7 +1443,9 @@ class DevicePage(QWidget):
                     cached_view.setDate(picker.date)
                 x = int(picker.width() / 2 - cached_view.sizeHint().width() / 2)
                 y = picker.height()
-                cached_view.exec(picker.mapToGlobal(QPoint(x, y)))
+                # ani 跟随动画开关：关闭时日历直接弹出，无过渡动画
+                cached_view.exec(picker.mapToGlobal(QPoint(x, y)),
+                                 ani=is_animation_enabled())
 
             picker._showCalendarView = _fast_show_calendar_view
             picker._cached_calendar_view = cached_view
@@ -1459,35 +1542,71 @@ class DevicePage(QWidget):
             return
         self._sync_btn.setEnabled(False)
         src = self._active_source()
+        # 搜索状态（kd 数据源）：携带 keyword 只拉取匹配设备，减少数据传输
+        keyword = self._search_edit.text().strip() if src == "kd" else ""
+        self._fetch_keyword = keyword
+        self._last_fetch_silent = False
         self._lbl_info.setText(f"正在从 {src} 搜索 {date} 的设备数据")
         if src == "xqzg":
             self._worker = SnookerOmFetchWorker(file_path=date)
         else:
-            self._worker = DevicesFetchWorker(file_path=date)
+            self._worker = DevicesFetchWorker(file_path=date, keyword=keyword)
+        self._worker.result_ready.connect(self._on_search_done)
+        self._worker.error.connect(self._on_search_error)
+        self._worker.start()
+
+    def _fetch_api_keyword(self, keyword):
+        """搜索状态 API 拉取：只请求匹配 keyword 的设备（仅 kd 数据源）
+
+        返回结果为部分数据，落库走 upsert_kd 增量更新，不覆盖本地全量。
+        防堆积：Worker 运行中不发新请求；若期间关键词变化，
+        由 _on_save_finished 在完成后用最新关键词补拉一次。
+        """
+        if self._worker and self._worker.isRunning():
+            return
+        date = self._current_date()
+        if not date:
+            return
+        self._fetch_keyword = keyword
+        self._last_fetch_silent = True
+        self._worker = DevicesFetchWorker(file_path=date, keyword=keyword)
         self._worker.result_ready.connect(self._on_search_done)
         self._worker.error.connect(self._on_search_error)
         self._worker.start()
 
     def _on_search_done(self, data):
-        """API 搜索完成：异步保存数据到本地数据库"""
+        """API 搜索完成：异步保存数据到本地数据库
+
+        带 keyword 拉取的结果是部分数据，走 upsert_kd 增量更新；
+        save_kd 是按日期全量替换，直接保存会删除同日期下其他设备。
+        """
         rows = data.get("lists") or data.get("results") or []
+        keyword = getattr(self, "_fetch_keyword", "")
         if self._active_source() == "xqzg":
             self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
             date_desc = "全部日期"
         else:
             date = self._current_date()
-            self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
+            save_func = table_db.upsert_kd if keyword else table_db.save_kd
+            self._save_worker = _DBQueryWorker(save_func, rows, date)
             date_desc = date
         self._save_worker.finished.connect(
             lambda count, dd=date_desc: self._on_save_finished(count, dd))
         self._save_worker.start()
 
     def _on_save_finished(self, count, date_desc=""):
-        """保存完成：重置页码、刷新表格并提示"""
+        """保存完成：重置页码、刷新表格并提示（静默拉取不弹窗）"""
         self._sync_btn.setEnabled(True)
         self._page_no = 1
         self._load_local()
-        InfoBar.success("搜索完成", f"{date_desc} 共 {count} 台设备", parent=self, duration=2500)
+        if not getattr(self, "_last_fetch_silent", False):
+            InfoBar.success("搜索完成", f"{date_desc} 共 {count} 台设备",
+                            parent=self, duration=2500)
+        # 请求在途期间关键词已变化：用最新关键词补拉一次（防抖合并后只补最新值）
+        current_kw = self._search_edit.text().strip()
+        if (current_kw and current_kw != getattr(self, "_fetch_keyword", "")
+                and self._active_source() == "kd"):
+            self._fetch_api_keyword(current_kw)
 
     def _on_search_error(self, msg):
         self._sync_btn.setEnabled(True)
@@ -1569,6 +1688,11 @@ class DevicePage(QWidget):
     def _do_search(self):
         self._page_no = 1
         self._load_local()
+        # 搜索状态（kd 数据源）：同步向服务端发起带 keyword 的请求，
+        # 只拉取匹配设备并增量更新本地库（防抖已合并逐字输入）
+        keyword = self._search_edit.text().strip()
+        if keyword and self._active_source() == "kd":
+            self._fetch_api_keyword(keyword)
 
     def _on_prev_page(self):
         if self._page_no > 1:
@@ -1639,7 +1763,7 @@ class DevicePage(QWidget):
         # 远程连接：按球桌号关联球桌管理 remark 中的 snk 标识（frp xtcp
         # visitor serverName），无 snk 的设备菜单项保留可见但置灰并说明原因
         self._add_remote_actions(menu, idx.row())
-        menu.exec_(self._table.viewport().mapToGlobal(pos))
+        menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
 
     def _add_remote_actions(self, menu, row_idx):
         """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件 / 远程桌面）"""
@@ -1707,10 +1831,8 @@ class DevicePage(QWidget):
         title, fields = cfg
         can_migrate = bool(fields) and all(f in _MIGRATABLE_FIELDS for f in fields)
         self._file_panel.show_files(data, title, fields, can_migrate=can_migrate)
-        # 点击精度/问题后自动收集该设备的视频/日志/CPP日志/detect.bin 到 upload 工作区
-        if key in ("accuracy_count", "already_count"):
-            field = "accuracy_files" if key == "accuracy_count" else "already_files"
-            self._auto_collect(data, field)
+        # 注意：点击精度/问题单元格只展示文件列表，不触发收集；
+        # 收集统一由迁移按钮（精度/问题提交）成功后在 _on_migrate_ok 中触发
 
     def migrate_file(self, fname, src_cat, dest_cat):
         """迁移单个文件到目标分类（调用 migrate_image API）"""
@@ -1758,7 +1880,7 @@ class DevicePage(QWidget):
         return os.path.join(videos_dir, "upload")
 
     def _auto_collect(self, row: dict, field: str):
-        """点击精度/问题后自动收集设备文件到 upload 工作区
+        """迁移到精度/问题后自动收集设备文件到 upload 工作区
 
         视频/日志按文件列表的基础名收集；detect.bin 与 CPP 日志（daily_*.txt）
         只收集一次（目标已存在即跳过）。

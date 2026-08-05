@@ -18,6 +18,7 @@ from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
     MessageBox, MessageBoxBase)
 
 from core.conn_logger import conn_logger
+from core.perf import is_animation_enabled
 from core.utils import safe_close_transport
 from workers.network_workers import (
     SFTPConnectWorker, SFTPListWorker, SFTPOperationWorker, SFTPDirTransferWorker,
@@ -25,6 +26,15 @@ from workers.network_workers import (
 
 # 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
 _pending_workers: set = set()
+
+
+def _popup_ani_type():
+    """按主界面「性能选项-动画效果」开关决定右键菜单弹出动画类型。
+
+    运行时即时读取 core.perf 全局状态：主窗口切换开关后，已打开的
+    远程面板中菜单下一次弹出即同步生效，新打开的会话同样读取当前值。"""
+    return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
+            else MenuAnimationType.NONE)
 
 # ------------------------------------------------------------------ 文件类型图标映射
 _ICON_CACHE: dict = {}
@@ -1149,7 +1159,7 @@ class SFTPPanel(QWidget):
         self._act_t_delete_all.setEnabled(has_tasks)
         self._ctx_transfer_menu.exec(
             self._transfer_table.viewport().mapToGlobal(pos),
-            aniType=MenuAnimationType.DROP_DOWN)
+            aniType=_popup_ani_type())
 
     def _find_tid_by_row(self, row):
         for tid, info in self._transfer_workers.items():
@@ -1344,11 +1354,11 @@ class SFTPPanel(QWidget):
             self._ctx_local_data = data
             self._ctx_local_menu_full.exec(
                 self._local_tree.viewport().mapToGlobal(pos),
-                aniType=MenuAnimationType.DROP_DOWN)
+                aniType=_popup_ani_type())
         else:
             self._ctx_local_menu_empty.exec(
                 self._local_tree.viewport().mapToGlobal(pos),
-                aniType=MenuAnimationType.DROP_DOWN)
+                aniType=_popup_ani_type())
 
     def _on_remote_context_menu(self, pos):
         """远程面板右键菜单（预构建缓存，零构建开销）"""
@@ -1360,11 +1370,11 @@ class SFTPPanel(QWidget):
             self._ctx_remote_entry = entry
             self._ctx_remote_menu_full.exec(
                 self._tree.viewport().mapToGlobal(pos),
-                aniType=MenuAnimationType.DROP_DOWN)
+                aniType=_popup_ani_type())
         else:
             self._ctx_remote_menu_empty.exec(
                 self._tree.viewport().mapToGlobal(pos),
-                aniType=MenuAnimationType.DROP_DOWN)
+                aniType=_popup_ani_type())
 
     # ---- 右键菜单操作实现 ----
     def _get_temp_dir(self):

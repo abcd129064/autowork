@@ -226,12 +226,14 @@ class DevicesFetchWorker(QThread):
     result_ready = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, file_path="", page=1, pagesize=1200,
+    def __init__(self, file_path="", page=1, pagesize=1200, keyword="",
                  username=None, password=None, parent=None):
         super().__init__(parent)
         self.file_path = file_path
         self.page = page
         self.pagesize = pagesize
+        # 搜索关键词：非空时拼入请求 URL，服务端只返回匹配设备
+        self.keyword = str(keyword or "").strip()
         # 优先使用传入参数，否则从配置文件读取
         creds = _load_api_credentials()
         api2_cfg = creds.get("api2", {})
@@ -271,6 +273,10 @@ class DevicesFetchWorker(QThread):
                 "page": self.page,
                 "pagesize": self.pagesize,
             }
+            # 搜索状态：携带 keyword 参数，服务端只返回匹配设备
+            # （requests 的 params 字典自动做 URL 编码，中文等字符安全转义）
+            if self.keyword:
+                params["keyword"] = self.keyword
             headers = {"Authorization": f"Bearer {token}"}
             resp = requests.get(API2_DATA_URL, params=params,
                                 headers=headers, timeout=30)

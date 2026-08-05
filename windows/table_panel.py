@@ -18,11 +18,20 @@ from PySide6.QtCore import Qt, QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
-    Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit)
+    Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
+    MenuAnimationType)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
+from core.perf import is_animation_enabled
+from core.frp_remote import FrpRemoteBridge
 from workers.table_worker import TableFetchWorker
 from database import table_db
+
+
+def _popup_ani_type():
+    """按主界面「性能选项-动画效果」开关决定菜单弹出动画类型（与运维面板一致）"""
+    return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
+            else MenuAnimationType.NONE)
 
 # 表格列定义：(字段key, 表头文字, 默认宽度)
 COLUMNS = [
@@ -160,6 +169,8 @@ class TablePanelWindow(QDialog):
         self._total: int = 0           # 当前查询总条数
         self._worker: TableFetchWorker = None
         self._hidden_cols: set = {2}   # 默认隐藏「在线状态」列
+        self._rows: list = []          # 当前页行数据（右键远程连接需读取 snk_code）
+        self._remote_bridge: FrpRemoteBridge = None  # 惰性创建（首次点远程菜单时）
 
         self._init_ui()
         self._load_local()
@@ -322,6 +333,7 @@ class TablePanelWindow(QDialog):
     # ==================== 表格填充 ====================
 
     def _populate(self, rows):
+        self._rows = list(rows)
         self._table.setRowCount(len(rows))
         for r, item in enumerate(rows):
             for c, (key, _, _) in enumerate(COLUMNS):
@@ -398,18 +410,59 @@ class TablePanelWindow(QDialog):
             self._table.setRowHeight(r, max(self._table.rowHeight(r) + 14, 40))
 
     def _show_copy_menu(self, pos):
-        """右键菜单：Fluent 风格复制（无选中时先选中右键点击的单元格）"""
+        """右键菜单：Fluent 风格复制 + 远程连接入口（无选中时先选中右键点击的单元格）"""
+        idx = self._table.indexAt(pos)
+        if not idx.isValid():
+            return
         if not self._table.selectedItems():
-            idx = self._table.indexAt(pos)
-            if not idx.isValid():
-                return
             self._table.selectionModel().select(
                 idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
         menu = RoundMenu(parent=self._table)
         act = Action(FluentIcon.COPY, "复制", self._table)
         act.triggered.connect(self._copy_selected)
         menu.addAction(act)
-        menu.exec_(self._table.viewport().mapToGlobal(pos))
+        # 远程连接：按行数据的 snk 标识（frp xtcp visitor serverName），
+        # 无 snk 的球桌菜单项保留可见但置灰并说明原因（与运维面板交互一致）
+        self._add_remote_actions(menu, idx.row())
+        menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
+
+    def _add_remote_actions(self, menu, row_idx):
+        """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件管理）
+
+        snk 优先取行数据 snk_code 列（存储时已从 remark 解析/手动写入），
+        兜底再从 remark 正则解析；两者皆无则该球桌不可远程。
+        """
+        row = self._rows[row_idx] if 0 <= row_idx < len(self._rows) else {}
+        table_id = str(row.get("name") or "").strip()
+        snk = (str(row.get("snk_code") or "").strip()
+               or table_db.parse_snk_code(row.get("remark")))
+        menu.addSeparator()
+        remote_items = [
+            ("ssh", FluentIcon.COMMAND_PROMPT, "SSH 终端"),
+            ("sftp", FluentIcon.FOLDER, "SFTP 文件管理"),
+        ]
+        if not snk:
+            # 置灰但可见：提示功能存在，仅该球桌缺 snk 配置不可用
+            tip = Action(FluentIcon.INFO, "该球桌无 snk 标识，无法远程", self._table)
+            tip.setEnabled(False)
+            menu.addAction(tip)
+        for kind, icon, label in remote_items:
+            act = Action(icon, label if snk else f"{label}（无 snk）", self._table)
+            act.setEnabled(bool(snk))
+            if snk:
+                act.triggered.connect(
+                    lambda _=False, k=kind: self._open_remote_session(k, snk, table_id))
+            menu.addAction(act)
+
+    def _open_remote_session(self, kind, snk, table_id):
+        """委托面板自持的 FrpRemoteBridge 建立 xtcp 隧道并打开会话
+
+        桥接惰性创建：未点过远程菜单时不启动 frpc；生命周期挂在本面板上，
+        面板关闭时 closeEvent 统一 shutdown（复用运维面板同款桥接逻辑）。
+        """
+        if self._remote_bridge is None:
+            self._remote_bridge = FrpRemoteBridge(self)
+        self._remote_bridge.open_session(kind, snk, table_id)
 
     def _copy_selected(self):
         """复制选中文本：编辑态优先复制光标选中部分，否则复制选中单元格"""
@@ -441,6 +494,11 @@ class TablePanelWindow(QDialog):
     # ==================== 资源清理 ====================
 
     def closeEvent(self, event):
+        # 远程桥接清理（frpc 进程/会话窗口）需在 worker 之前处理
+        bridge = self._remote_bridge
+        if bridge is not None:
+            self._remote_bridge = None
+            bridge.shutdown()
         if self._worker and self._worker.isRunning():
             self._worker.result_ready.disconnect()
             self._worker.error.disconnect()
