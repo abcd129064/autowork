@@ -61,6 +61,11 @@ a = Analysis(
         ('styles', 'styles'),
         # 应用图标（窗口/任务栏图标，运行时经 get_resource_dir() 读取）
         ('app_icon.ico', '.'),
+        # 球桌数据库种子：table_db.py 用 __file__ 定位 database/tables.db，
+        # 打包后 __file__ 位于 _internal/database/，必须随包分发，
+        # 否则打包版首次运行自建空库，球桌库搜索永远无候选。
+        # 打包前由 build_exe.py 执行 WAL checkpoint，保证主库文件含全部数据
+        ('database/tables.db', 'database'),
         # 注意：settings.json / frpc.exe / frpc_xtcp.toml 由 build_exe.py
         # 构建后复制到 dist 根目录（exe 旁边），不放入 datas；
         # autowork_with_table.py / p2p.py 已被 import 追踪编译进 PYZ，无需重复打包

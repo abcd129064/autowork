@@ -12,6 +12,21 @@ import shutil
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
+# ---- 打包前：球桌库 WAL checkpoint ----
+# database/tables.db 以 WAL 模式运行，未合并的增量数据在 tables.db-wal 中；
+# spec 只分发主库文件，打包前必须 checkpoint 将 WAL 全部合入主库，
+# 否则打包版种子库可能缺少最新同步数据（球桌库搜索候选不全）
+db_path = os.path.join(ROOT, 'database', 'tables.db')
+if os.path.isfile(db_path):
+    import sqlite3
+    _c = sqlite3.connect(db_path)
+    try:
+        _c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        _c.commit()
+        print('[build_exe] 已 checkpoint database/tables.db（WAL 合入主库）')
+    finally:
+        _c.close()
+
 result = subprocess.run(
     [sys.executable, "-m", "PyInstaller",
      "--noconfirm", "AutoWork.spec"],

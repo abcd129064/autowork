@@ -147,8 +147,13 @@ def _setup_fts(conn: sqlite3.Connection):
                 "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('fts_built', '1')")
             conn.commit()
         _fts_available = True
-    except sqlite3.Error:
+    except sqlite3.Error as e:
         _fts_available = False
+        # 降级为 LIKE 搜索不影响功能，但将原因打到 stderr 便于排查
+        # （打包版 console=False 时不可见，开发调试用）
+        import sys as _sys
+        print(f"[table_db] FTS5 初始化失败，降级 LIKE 搜索: "
+              f"{type(e).__name__}: {e}", file=_sys.stderr)
 
 
 def _fts_cond(fts_table: str, kw: str):

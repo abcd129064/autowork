@@ -386,7 +386,11 @@ class RemoteMixin:
                                           keyword.strip(), include_test=False,
                                           include_manual=False)
         except Exception as e:
-            self._append_log(f"[球桌库] 查询失败: {e}")
+            # 记录异常类型与数据库实际路径：打包版曾因种子库未随包分发
+            # 连到自建空库导致搜索无候选，日志带 DB 路径可秒定位此类问题
+            self._append_log(
+                f"[球桌库] 查询失败: {type(e).__name__}: {e} "
+                f"(db={table_db.DB_PATH})")
             return []
         picked = []
         for r in rows:
