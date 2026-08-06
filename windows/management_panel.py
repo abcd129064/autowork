@@ -910,6 +910,8 @@ class TablePage(QWidget):
         self._save_worker = None
         self._export_worker = None
         self._hidden_cols = {2}
+        self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
+        self._show_manual = False  # 是否显示手动版本设备（name 含 @s，默认不显示）
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
@@ -1024,6 +1026,21 @@ class TablePage(QWidget):
             cb.checkStateChanged.connect(
                 lambda state, idx=i: self._toggle_col(idx, state == Qt.CheckState.Checked))
             menu.addWidget(cb, selectable=False)
+        # 「公司测试」数据开关：默认不勾选（不显示），勾选后才展示
+        menu.addSeparator()
+        self._test_cb = CheckBox("公司测试", self)
+        self._test_cb.setChecked(self._show_test)
+        self._test_cb.setFixedSize(max(self._test_cb.sizeHint().width() + 30, 120), 36)
+        self._test_cb.setToolTip("显示内部测试球房数据")
+        self._test_cb.checkStateChanged.connect(self._toggle_test_data)
+        menu.addWidget(self._test_cb, selectable=False)
+        # 「手动版本」设备开关：默认不勾选（不显示 name 含 @s 的设备），勾选后才展示
+        self._manual_cb = CheckBox("手动版本", self)
+        self._manual_cb.setChecked(self._show_manual)
+        self._manual_cb.setFixedSize(max(self._manual_cb.sizeHint().width() + 30, 120), 36)
+        self._manual_cb.setToolTip("显示手动版本设备（球桌号含 @s）")
+        self._manual_cb.checkStateChanged.connect(self._toggle_manual_data)
+        menu.addWidget(self._manual_cb, selectable=False)
         # 菜单由 ToolButton 代为弹出（库内固定 DROP_DOWN），打实例补丁以跟随动画开关
         _patch_menu_animation(menu)
         self._col_btn.setMenu(menu)
@@ -1043,7 +1060,8 @@ class TablePage(QWidget):
             self._query_worker.disconnect()
         keyword = self._search_edit.text().strip()
         self._query_worker = _DBQueryWorker(
-            table_db.query_page, self._page_no, self._page_size, keyword)
+            table_db.query_page, self._page_no, self._page_size, keyword,
+            include_test=self._show_test, include_manual=self._show_manual)
         self._query_worker.finished.connect(
             lambda result, kw=keyword: self._on_query_finished(result, kw))
         self._query_worker.start()
@@ -1172,6 +1190,18 @@ class TablePage(QWidget):
             self._hidden_cols.add(col_idx)
         self._table.setColumnHidden(col_idx, not visible)
 
+    def _toggle_test_data(self, state):
+        """「公司测试」数据显隐切换：回到第一页重新查询"""
+        self._show_test = (state == Qt.CheckState.Checked)
+        self._page_no = 1
+        self._load_local()
+
+    def _toggle_manual_data(self, state):
+        """「手动版本」设备显隐切换：回到第一页重新查询"""
+        self._show_manual = (state == Qt.CheckState.Checked)
+        self._page_no = 1
+        self._load_local()
+
     def _show_copy_menu(self, pos):
         idx = self._table.indexAt(pos)
         if not self._table.selectedItems():
@@ -1265,8 +1295,10 @@ class TablePage(QWidget):
             InfoBar.warning("提示", "已有导出进行中，请稍候", parent=self, duration=2000)
             return
         # 复用异步查询机制：一次拉取当前条件下的全部记录后写文件
+        # （遵循当前「公司测试」与「手动版本」筛选状态）
         self._export_worker = _DBQueryWorker(
-            table_db.query_page, 1, _EXPORT_MAX_ROWS, keyword)
+            table_db.query_page, 1, _EXPORT_MAX_ROWS, keyword,
+            include_test=self._show_test, include_manual=self._show_manual)
         self._export_worker.finished.connect(
             lambda result, p=path: self._on_export_query(result, p))
         self._export_worker.error.connect(
