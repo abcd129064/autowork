@@ -21,7 +21,7 @@ import subprocess
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QWidget
 from PySide6.QtCore import QTimer, Qt, QProcess
 from PySide6.QtGui import QGuiApplication
-from qfluentwidgets import CaptionLabel
+from qfluentwidgets import CaptionLabel, BodyLabel, PushButton
 
 from core.conn_logger import conn_logger
 
@@ -72,6 +72,7 @@ class RDPPanel(QWidget):
         # 才能把容器尺寸作为远程分辨率传给 mstsc（否则远程会话按
         # 默认分辨率——如 1080p——连接，嵌入后画面被裁剪并出现滚动条）
         self._rdp_started = False
+        self._reconnecting = False    # 重连进行中标志（防重复点击/看门狗误报）
         self._init_ui()
         QTimer.singleShot(100, self._try_start_rdp)
         # 兑底：若容器尺寸一直未就绪（如面板未布局），延迟后用
@@ -98,6 +99,21 @@ class RDPPanel(QWidget):
         self._status_label.setFixedHeight(24)
         self._status_label.setStyleSheet('padding: 2px 8px;')
         layout.addWidget(self._status_label)
+        # 会话结束覆盖层（提示文字 + 重新连接按钮），默认隐藏
+        self._reconnect_overlay = QWidget(self)
+        self._reconnect_overlay.hide()
+        ol = QVBoxLayout(self._reconnect_overlay)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(10)
+        ol.addStretch(1)
+        self._overlay_hint = BodyLabel('远程会话已结束', self._reconnect_overlay)
+        self._overlay_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ol.addWidget(self._overlay_hint, 0, Qt.AlignmentFlag.AlignCenter)
+        self._reconnect_btn = PushButton('重新连接', self._reconnect_overlay)
+        self._reconnect_btn.setFixedSize(140, 36)
+        self._reconnect_btn.clicked.connect(self._reconnect)
+        ol.addWidget(self._reconnect_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        ol.addStretch(1)
 
     # ------------------------------------------------------------------ 连接流程
     def showEvent(self, event):
@@ -332,6 +348,10 @@ class RDPPanel(QWidget):
                 return
 
             self._embedded_hwnd = hwnd
+            # 嵌入成功：若处于重连流程，移除“会话结束”覆盖层
+            if self._reconnecting:
+                self._reconnecting = False
+                self._reconnect_overlay.hide()
             self._resize_embedded()
             self._status_label.setText(f'已连接: {self._host}:{self._port}')
             self._log(f"[RDP] 远程桌面已嵌入: {self._host}:{self._port} "
@@ -346,17 +366,70 @@ class RDPPanel(QWidget):
             self._embedded_hwnd = None
 
     def _end_session(self, message):
-        """会话结束：停止看门狗，更新状态"""
+        """会话结束：停止看门狗，更新状态，显示重连覆盖层
+
+        看门狗已停止，不会在重连期间误报；重连时 _start_rdp 会重启看门狗。
+        """
         self._session_ended = True
         if self._watch_timer is not None:
             self._watch_timer.stop()
         self._embedded_hwnd = None
         self._status_label.setText(message)
         self._log(f'[RDP] {message}')
+        # 关闭窗口路径（shutdown）不显示重连按钮
+        if not self._closing:
+            self._overlay_hint.setText(message)
+            # 覆盖容器区域（若尚未布局过，同步一次几何）
+            if self._reconnect_overlay.geometry() != self._container.geometry():
+                self._reconnect_overlay.setGeometry(self._container.geometry())
+            self._reconnect_overlay.show()
+            self._reconnect_overlay.raise_()
+
+    # ------------------------------------------------------------------ 重连
+    def _reconnect(self):
+        """点击重连：清理旧状态，复用 _start_rdp 完整路径重新建连"""
+        if self._closing or self._reconnecting:
+            return
+        self._reconnecting = True
+        self._reconnect_overlay.hide()
+        self._session_ended = False
+        self._dead_count = 0
+        self._embedded_hwnd = None
+        # 清理看门狗窗口查找缓存（旧 hwnd / 旧 PID）
+        self._cached_hwnd = None
+        self._cached_pid = None
+        # 清理旧 mstsc 进程引用（正常应已退出，此处兜底终止）
+        if self._mstsc_proc is not None:
+            try:
+                if self._mstsc_proc.poll() is None:
+                    self._mstsc_proc.terminate()
+                    self._mstsc_proc.wait(timeout=2)
+            except Exception:
+                pass
+            self._mstsc_proc = None
+        self._cred_removed = False
+        self._status_label.setText('正在重新连接...')
+        self._log('[RDP] 用户请求重新连接')
+        # 优先复用容器当前尺寸（含原延迟启动逻辑的兜底分辨率）
+        w, h = self._container.width(), self._container.height()
+        if w < 200 or h < 200:
+            w, h = getattr(self, '_pending_size', (0, 0))
+        if w < 200 or h < 200:
+            w, h = 1280, 800
+            try:
+                screen = QGuiApplication.primaryScreen()
+                if screen is not None:
+                    area = screen.availableGeometry()
+                    w, h = int(area.width() * 0.8), int(area.height() * 0.8)
+            except Exception:
+                pass
+        self._start_rdp(w, h)
 
     # ------------------------------------------------------------------ 尺寸同步
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._reconnect_overlay is not None:
+            self._reconnect_overlay.setGeometry(self._container.geometry())
         self._resize_embedded()
         # 若因容器尺寸未就绪而尚未启动 mstsc，此处补触发
         self._try_start_rdp()
@@ -388,6 +461,7 @@ class RDPPanel(QWidget):
             return
         self._closing = True
         try:
+            self._reconnect_overlay.hide()
             if self._watch_timer is not None and self._watch_timer.isActive():
                 self._watch_timer.stop()
             hwnd = self._embedded_hwnd

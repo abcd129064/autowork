@@ -5,22 +5,31 @@
 1. 球桌管理 —— 对接 wechat2-billiard 接口，表格/搜索/分页/列筛选/右键复制
 2. 设备状态 —— 对接 kd / xqzg 接口，按日期切换查看设备状态；点击总数/正常/操作单元格
    右侧滑出文件列表，点击文件条目选择目标分类执行图片迁移
-3. 管理设置 —— 配置 API 账号密码、选择启用数据源（kd / xqzg）、测试连接
+3. 健康趋势 —— kd_status 60 天历史聚合：错误率突增预警、单设备趋势折线、TOP N 排行
+4. 管理设置 —— 配置 API 账号密码、选择启用数据源（kd / xqzg）、测试连接
 
 数据层复用 database/table_db.py，Worker 层复用 workers/table_worker.py。
 """
 
+import csv
+import difflib
+import json
+import logging
 import math
 import os
-import json
+import re
+import shutil
+import subprocess
 from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
-    QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser, QTreeWidgetItem)
+    QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser, QTreeWidgetItem,
+    QFileDialog, QToolTip, QFrame, QListWidget, QListWidgetItem, QAbstractScrollArea)
 from PySide6.QtCore import (Qt, QItemSelectionModel, QDate, QPoint, QPropertyAnimation,
-    QEasingCurve, QTimer, QEvent, QThread, Signal)
-from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette, QCursor
+    QEasingCurve, QTimer, QEvent, QThread, Signal, QRectF, QSize)
+from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QPalette, QCursor,
+    QPainter, QPen, QFont, QFontMetrics)
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
@@ -31,15 +40,55 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
-from core.frp_remote import FrpRemoteBridge
+from core.frp_remote import get_session_manager
 from core.perf import is_acrylic_enabled, is_animation_enabled
+from core.secrets import decrypt_settings, encrypt_settings
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
                                   CATEGORY_DIRS)
 from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
-                                    clip_base_name)
+                                    clip_base_name, date_from_base,
+                                    resolve_device_dir,
+                                    fuzzy_match_device_dir, norm_device_suffix)
 from database import table_db
+
+logger = logging.getLogger(__name__)
+
+
+def _dir_similarity(name: str, candidates: list) -> int:
+    """计算候选目录名与目标设备码的相似度分数（0-100）
+
+    结构化规则优先（复用 norm_device_suffix 后缀归一化）：
+    精确同名 100；店号前缀相同 + 后缀归一化相等 95；前缀归一化
+    相等 + 后缀相同 90；前缀相同 55；字符级相似度（difflib）最高
+    60 分兜底。返回对全部候选码的最高分。
+    """
+    n = str(name or "").strip()
+    best = 0
+    for cand in candidates:
+        c = str(cand or "").strip()
+        if not c or not n:
+            continue
+        if n == c:
+            return 100
+        score = 0
+        np, _, ns = n.rpartition("-")
+        cp, _, cs = c.rpartition("-")
+        if np and cp:
+            nps, cps = norm_device_suffix(np), norm_device_suffix(cp)
+            if np == cp:
+                score += 55
+                if ns and norm_device_suffix(ns) and norm_device_suffix(ns) == norm_device_suffix(cs):
+                    score += 40
+            elif nps and nps == cps:
+                score += 30
+                if ns and ns == cs:
+                    score += 60
+        ratio = difflib.SequenceMatcher(None, n.lower(), c.lower()).ratio()
+        score = max(score, int(round(ratio * 60)))
+        best = max(best, score)
+    return best
 
 # ==================== 动画开关辅助 ====================
 
@@ -170,7 +219,7 @@ _settings_mtime = 0
 
 
 def _load_settings() -> dict:
-    """读取 settings.json（带内存缓存，文件未变时直接返回缓存）"""
+    """读取 settings.json（带内存缓存，文件未变时直接返回缓存；敏感字段透明解密）"""
     global _settings_cache, _settings_mtime
     path = os.path.join(get_app_dir(), "settings.json")
     try:
@@ -178,7 +227,7 @@ def _load_settings() -> dict:
         if _settings_cache is not None and mtime == _settings_mtime:
             return _settings_cache
         with open(path, "r", encoding="utf-8") as f:
-            _settings_cache = json.load(f)
+            _settings_cache = decrypt_settings(json.load(f))
         _settings_mtime = mtime
         return _settings_cache
     except (FileNotFoundError, json.JSONDecodeError):
@@ -186,13 +235,13 @@ def _load_settings() -> dict:
 
 
 def _save_settings(data: dict):
-    """合并写入 settings.json（同步更新缓存）"""
+    """合并写入 settings.json（同步更新缓存；敏感字段加密后落盘）"""
     global _settings_cache, _settings_mtime
     path = os.path.join(get_app_dir(), "settings.json")
     settings = _load_settings()
     settings.update(data)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
+        json.dump(encrypt_settings(settings), f, ensure_ascii=False, indent=2)
     _settings_cache = settings
     _settings_mtime = os.path.getmtime(path)
 
@@ -205,6 +254,46 @@ def _fmt_size(n: float) -> str:
             return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
+
+# ==================== 远程前置检查 / CSV 导出辅助（A2 / B6） ====================
+
+# CSV 导出单次查询上限（当前搜索/筛选条件下的全部结果）
+_EXPORT_MAX_ROWS = 1_000_000
+
+# 高频问题设备：近 N 天提交 ≥ 阈值次标红（C1）
+_HF_DAYS = 30
+_HF_THRESHOLD = 3
+_HF_COLOR = QColor("#e81123")
+
+
+def _confirm_offline_connect(parent, last_report: str) -> bool:
+    """A2 离线确认：设备下线时弹醒目确认框，返回是否仍要继续连接"""
+    box = MessageBox(
+        "设备离线", f"设备离线（最后上报时间 {last_report}），仍要尝试连接吗？", parent)
+    box.yesButton.setText("仍要连接")
+    box.cancelButton.setText("取消")
+    return box.exec()
+
+
+def _open_in_explorer(path: str):
+    """在资源管理器中定位文件（explorer /select,）；目录则直接打开"""
+    try:
+        if os.path.isfile(path):
+            subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
+        elif os.path.isdir(path):
+            os.startfile(path)
+    except Exception:
+        pass
+
+
+def _show_export_bar(parent, path: str, count: int):
+    """导出成功提示条，附「打开文件夹」动作（explorer /select, 定位文件）"""
+    bar = InfoBar.success("导出成功", f"共 {count} 条 → {os.path.basename(path)}",
+                          parent=parent, duration=6000)
+    btn = PushButton(FluentIcon.FOLDER, "打开文件夹")
+    btn.clicked.connect(lambda _=False, p=path: _open_in_explorer(p))
+    bar.addWidget(btn)
 
 
 # ==================== 后台数据库查询/保存 Worker ====================
@@ -398,6 +487,77 @@ class EditSnkDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.edit)
 
 
+class DeviceDirHealDialog(MessageBoxBase):
+    """收集失败自愈向导（C5）：候选目录按相似度排序点选 + 手动浏览兜底
+
+    确认选择后 chosen_dir 为相对 videos_dir 的设备目录名；
+    取消则保持空串，调用方走原失败提示流程。
+    """
+
+    def __init__(self, parent, videos_dir: str, candidates: list, scored: list):
+        """scored: [(相似度分, 目录名), ...] 已按分数降序"""
+        super().__init__(parent)
+        self.videos_dir = videos_dir
+        self.chosen_dir = ""
+        self.titleLabel = BodyLabel("设备目录自愈向导", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        codes = " / ".join(candidates) or "未知设备"
+        self.subLabel = CaptionLabel(
+            f"未在视频目录中找到设备「{codes}」对应的文件夹。\n"
+            f"请选择实际对应的本地目录，选择后将被记忆，下次自动命中。", self)
+        self.subLabel.setWordWrap(True)
+        self.viewLayout.addWidget(self.subLabel)
+
+        self.listWidget = QListWidget(self)
+        self.listWidget.setMinimumWidth(360)
+        self.listWidget.setMinimumHeight(220)
+        self.listWidget.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        for score, name in scored:
+            it = QListWidgetItem(f"{name}　·　相似度 {score}%", self.listWidget)
+            it.setData(Qt.ItemDataRole.UserRole, name)
+            it.setToolTip(os.path.join(videos_dir, name))
+        self.viewLayout.addWidget(self.listWidget)
+
+        self.browseBtn = PushButton(FluentIcon.FOLDER, "手动浏览...", self)
+        self.browseBtn.clicked.connect(self._on_browse)
+        self.viewLayout.addWidget(self.browseBtn)
+
+        self.yesButton.setText("确认选择")
+        self.cancelButton.setText("取消")
+        self.widget.setMinimumWidth(420)
+
+    def validate(self) -> bool:
+        """点击确认：必须选中一个候选目录才放行"""
+        row = self.listWidget.currentRow()
+        if row is None:
+            InfoBar.warning("提示", "请先在列表中选择一个目录，或使用「手动浏览...」",
+                            parent=self, duration=2500)
+            return False
+        self.chosen_dir = row.data(Qt.ItemDataRole.UserRole) or ""
+        return bool(self.chosen_dir)
+
+    def _on_browse(self):
+        """手动浏览兜底：所选目录必须位于 videos_dir 内"""
+        picked = QFileDialog.getExistingDirectory(
+            self, "选择设备目录", self.videos_dir)
+        if not picked:
+            return
+        picked = os.path.normpath(picked)
+        root = os.path.normpath(self.videos_dir)
+        try:
+            inside = (picked != root and
+                      os.path.commonpath([picked, root]) == root)
+        except ValueError:
+            inside = False
+        if not inside:
+            InfoBar.warning("提示", "所选目录必须位于视频目录（videos_dir）内",
+                            parent=self, duration=2500)
+            return
+        self.chosen_dir = os.path.relpath(picked, root)
+        self.accept()
+
+
 class DeviceFilesDialog(QDialog):
     """设备文件列表详情弹窗（按分类展示全部文件，支持一键复制）"""
 
@@ -462,11 +622,14 @@ class UploadListDialog(QDialog):
         layout.addWidget(BodyLabel(f"收集目录: {upload_root}", self))
 
         self._tree = TreeWidget(self)
-        self._tree.setColumnCount(2)
-        self._tree.setHeaderLabels(["文件", "大小"])
+        self._tree.setColumnCount(3)
+        self._tree.setHeaderLabels(["文件", "大小", "操作"])
         self._tree.setAlternatingRowColors(True)
         self._tree.header().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
+        self._tree.header().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Fixed)
+        self._tree.setColumnWidth(2, 56)
         layout.addWidget(self._tree, 1)
 
         # 上传字节进度条（打包上传期间显示，平时隐藏）
@@ -518,6 +681,28 @@ class UploadListDialog(QDialog):
             return
         super().keyPressEvent(e)
 
+    @staticmethod
+    def _dir_size(path: str) -> int:
+        """递归统计目录总大小（忽略不可访问项）"""
+        total = 0
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+        return total
+
+    def _make_delete_btn(self, full_path: str, name: str) -> ToolButton:
+        """为行最右侧创建删除按钮（FluentIcon.DELETE）"""
+        btn = ToolButton(FluentIcon.DELETE, self)
+        btn.setToolTip(f"删除 {name}")
+        btn.setIconSize(QSize(16, 16))
+        btn.setFixedSize(30, 24)
+        btn.clicked.connect(lambda checked=False, p=full_path, n=name:
+                            self._on_delete_item(p, n))
+        return btn
+
     def _populate(self):
         total_files = 0
         total_size = 0
@@ -529,24 +714,85 @@ class UploadListDialog(QDialog):
             dev_dir = os.path.join(self._upload_root, dev)
             if not os.path.isdir(dev_dir):
                 continue
-            dev_item = QTreeWidgetItem([dev, ""])
+            dev_item = QTreeWidgetItem([dev, "", ""])
             dev_size = 0
             for fname in sorted(os.listdir(dev_dir)):
                 full = os.path.join(dev_dir, fname)
-                if not os.path.isfile(full):
+                if os.path.isdir(full):
+                    # 子文件夹也列入清单，支持整目录删除
+                    size = self._dir_size(full)
+                    total_files += sum(len(fs) for _r, _ds, fs in os.walk(full))
+                    dev_size += size
+                    child = QTreeWidgetItem([fname + "  (文件夹)", _fmt_size(size), ""])
+                elif os.path.isfile(full):
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        size = 0
+                    total_files += 1
+                    dev_size += size
+                    child = QTreeWidgetItem([fname, _fmt_size(size), ""])
+                else:
                     continue
-                try:
-                    size = os.path.getsize(full)
-                except OSError:
-                    size = 0
-                dev_size += size
-                total_files += 1
-                dev_item.addChild(QTreeWidgetItem([fname, _fmt_size(size)]))
+                dev_item.addChild(child)
+                self._tree.setItemWidget(child, 2, self._make_delete_btn(full, fname))
             dev_item.setText(1, _fmt_size(dev_size))
             dev_item.setExpanded(True)
             self._tree.addTopLevelItem(dev_item)
+            self._tree.setItemWidget(dev_item, 2, self._make_delete_btn(dev_dir, dev))
             total_size += dev_size
         self._lbl_total.setText(f"共 {total_files} 个文件，总大小 {_fmt_size(total_size)}")
+
+    # ---------- 逐行删除（二次确认 + 路径安全校验） ----------
+
+    def _safe_upload_path(self, full_path: str):
+        """路径安全校验：必须位于 upload 根目录内部且不是根目录本身"""
+        root = os.path.normcase(os.path.normpath(os.path.abspath(self._upload_root)))
+        path = os.path.normcase(os.path.normpath(os.path.abspath(full_path)))
+        if path == root:
+            return None
+        try:
+            if os.path.commonpath([root, path]) != root:
+                return None
+        except ValueError:
+            return None
+        return path
+
+    def _on_delete_item(self, full_path: str, name: str):
+        """行删除按钮：二次确认后删除磁盘文件/文件夹并刷新清单"""
+        if self._upload_worker is not None and self._upload_worker.isRunning():
+            InfoBar.warning("提示", "打包上传进行中，请等待完成后再操作",
+                            parent=self, duration=2000)
+            return
+        safe_path = self._safe_upload_path(full_path)
+        if safe_path is None:
+            InfoBar.error("删除失败", "路径不在 upload 目录内，已拒绝删除",
+                          parent=self, duration=4000)
+            return
+        box = MessageBox("删除确认", f"确定删除 {name} 吗？", self)
+        box.yesButton.setText("删除")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        try:
+            if os.path.isdir(safe_path):
+                shutil.rmtree(safe_path)
+            else:
+                os.remove(safe_path)
+        except FileNotFoundError:
+            InfoBar.warning("删除失败", f"{name} 已不存在，正在刷新清单",
+                            parent=self, duration=3000)
+        except PermissionError:
+            InfoBar.error("删除失败", f"没有权限删除 {name}（文件可能被占用）",
+                          parent=self, duration=4000)
+            return
+        except OSError as e:
+            InfoBar.error("删除失败", f"{name}: {e.strerror or e}",
+                          parent=self, duration=4000)
+            return
+        InfoBar.success("已删除", name, parent=self, duration=2000)
+        self._tree.clear()
+        self._populate()
 
     def _open_dir(self):
         if os.path.isdir(self._upload_root):
@@ -619,6 +865,11 @@ class UploadListDialog(QDialog):
         self._progress_bar.setValue(0)
         self._tree.clear()
         self._populate()  # upload 目录已被 worker 清空，刷新为空清单
+        # C1 台账：回填上传结果（匹配近期已收集未上传记录，失败静默）
+        try:
+            table_db.update_submission_upload(str(info or ""), True)
+        except Exception:
+            pass
         InfoBar.success("上传成功", f"{info} · 本地 upload 目录已清空",
                         parent=self, duration=5000)
 
@@ -631,7 +882,7 @@ class UploadListDialog(QDialog):
 
     @staticmethod
     def file_count(upload_root: str) -> int:
-        """清单中的文件总数（供外部确认弹窗展示）"""
+        """清单中的文件总数（递归统计，与打包遍历 os.walk 一致，供外部确认弹窗展示）"""
         count = 0
         try:
             entries = os.listdir(upload_root)
@@ -640,8 +891,7 @@ class UploadListDialog(QDialog):
         for dev in entries:
             dev_dir = os.path.join(upload_root, dev)
             if os.path.isdir(dev_dir):
-                count += sum(1 for f in os.listdir(dev_dir)
-                             if os.path.isfile(os.path.join(dev_dir, f)))
+                count += sum(len(files) for _root, _dirs, files in os.walk(dev_dir))
         return count
 
 
@@ -658,6 +908,7 @@ class TablePage(QWidget):
         self._worker = None
         self._query_worker = None
         self._save_worker = None
+        self._export_worker = None
         self._hidden_cols = {2}
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
@@ -685,6 +936,11 @@ class TablePage(QWidget):
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
         toolbar.addStretch(1)
+
+        self._btn_export_csv = PushButton(FluentIcon.DOWNLOAD, "导出 CSV", self)
+        self._btn_export_csv.setToolTip("导出当前搜索结果（含搜索/筛选条件）为 CSV")
+        self._btn_export_csv.clicked.connect(self._export_csv)
+        toolbar.addWidget(self._btn_export_csv)
 
         self._col_btn = TransparentDropDownPushButton("筛选", self)
         self._col_btn.setIcon(FluentIcon.FILTER.qicon())
@@ -835,21 +1091,35 @@ class TablePage(QWidget):
         self._lbl_info.setText(f"同步失败: {msg}")
 
     def _populate(self, rows):
+        # 高频问题标记：一次聚合查询（无 N+1），失败静默不标记
+        try:
+            hf_map = table_db.get_submission_stats(days=_HF_DAYS)["by_table"]
+        except Exception:
+            hf_map = {}
         # 填充期间关闭界面更新与信号，完成后一次性恢复
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
             self._table.setRowCount(len(rows))
             for r, item in enumerate(rows):
+                # 球桌号（name）即提交台账的 table_id，用它匹配高频统计
+                hf = hf_map.get(str(item.get("name") or "").strip(), 0)
                 for c, (key, _, _) in enumerate(TABLE_COLUMNS):
                     val = item.get(key) or ""
                     val = str(val).replace("\n", " ").strip()
                     cell = QTableWidgetItem(val)
-                    cell.setToolTip(str(item.get(key) or ""))
+                    tip = str(item.get(key) or "")
+                    cell.setToolTip(tip)
                     if key == "onlineStatusName":
                         color = _STATUS_COLORS.get(val)
                         if color:
                             cell.setForeground(color)
+                        if hf >= _HF_THRESHOLD:
+                            # 高频问题设备：状态列标红 + tooltip 显示提交次数
+                            cell.setText(f"{val} · 高频问题")
+                            cell.setForeground(_HF_COLOR)
+                            cell.setToolTip(
+                                f"{tip}\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）")
                     self._table.setItem(r, c, cell)
         finally:
             self._table.blockSignals(False)
@@ -961,16 +1231,63 @@ class TablePage(QWidget):
             menu.addAction(act)
 
     def _open_remote_session(self, kind, snk, table_id):
-        """委托运维面板窗口的 FrpRemoteBridge 建立 xtcp 隧道并打开会话
+        """委托统一远程会话中心建立 xtcp 隧道并打开会话
 
-        与设备状态页共享同一桥接实例（ManagementPanelWindow 顶层持有，
-        面板关闭时 closeEvent 统一 shutdown），避免重复启动 frpc 进程。
+        与全应用共享同一 frpc 进程/TOML（RemoteSessionManager 单例），
+        同一 snk 已建隧道时直接复用；面板关闭不再 shutdown，
+        frpc 由主窗口 closeEvent 统一关闭。
         """
+        # A2 远程前置检查：查 kd 最新分区该设备状态，离线时先确认；
+        # 单条轻量 SQL，查询失败静默跳过检查照常连接
+        try:
+            latest = table_db.get_latest_kd_status(table_id)
+            if latest and latest.get("status") == "0":
+                if not _confirm_offline_connect(
+                        self, latest.get("file_path") or "未知"):
+                    return
+        except Exception:
+            pass
         bridge = getattr(self.window(), "_remote_bridge", None)
         if bridge is None:
             InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
             return
-        bridge.open_session(kind, snk, table_id)
+        bridge.open_session(kind, snk, table_id, notifier=self, source="球桌管理")
+
+    def _export_csv(self):
+        """B6 导出当前搜索结果（含搜索条件）为 CSV（utf-8-sig，Excel 中文兼容）"""
+        keyword = self._search_edit.text().strip()
+        default = f"球桌数据_{datetime.now().strftime('%Y-%m-%d')}.csv"
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "导出 CSV", default, "CSV 文件 (*.csv)")
+        if not path:
+            return
+        if self._export_worker and self._export_worker.isRunning():
+            InfoBar.warning("提示", "已有导出进行中，请稍候", parent=self, duration=2000)
+            return
+        # 复用异步查询机制：一次拉取当前条件下的全部记录后写文件
+        self._export_worker = _DBQueryWorker(
+            table_db.query_page, 1, _EXPORT_MAX_ROWS, keyword)
+        self._export_worker.finished.connect(
+            lambda result, p=path: self._on_export_query(result, p))
+        self._export_worker.error.connect(
+            lambda msg: InfoBar.error("导出失败", str(msg).split(chr(10))[0],
+                                      parent=self, duration=4000))
+        self._export_worker.start()
+
+    def _on_export_query(self, result, path):
+        _total, rows = result
+        header = [c[1] for c in TABLE_COLUMNS]
+        keys = [c[0] for c in TABLE_COLUMNS]
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                for item in rows:
+                    writer.writerow([str(item.get(k) or "") for k in keys])
+        except OSError as e:
+            InfoBar.error("导出失败", str(e), parent=self, duration=4000)
+            return
+        _show_export_bar(self, path, len(rows))
 
     def _edit_snk(self, table_name, current):
         """弹窗手动写入/修改指定球桌的 snk 标识，保存后刷新当前页"""
@@ -1193,6 +1510,17 @@ class FileListPanel(QWidget):
         act_copy_all.triggered.connect(self._copy_all_names)
         menu.addAction(act_copy_all)
 
+        # C6 反向跳转：kd 照片与本地日志共享时间戳前缀，可关联到对应日志
+        # 时才显示（.log/.txt 直接支持；照片名需含可解析的时间戳前缀）
+        base = clip_base_name(fname)
+        if (fname.lower().endswith((".log", ".txt"))
+                or re.match(r"^\d{8}_\d{6}", base)):
+            menu.addSeparator()
+            act_analyze = Action(FluentIcon.DOCUMENT, "在主窗口分析", self)
+            act_analyze.setToolTip("在主窗口定位并加载该文件对应的日志")
+            act_analyze.triggered.connect(lambda _=False, f=fname: self._analyze_in_main_window(f))
+            menu.addAction(act_analyze)
+
         menu.exec_(self._list.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
 
     def _clip_name(self, fname: str) -> str:
@@ -1211,6 +1539,69 @@ class FileListPanel(QWidget):
         QApplication.clipboard().setText("\n".join(names))
         InfoBar.success("已复制", f"{len(names)} 个文件名已复制到剪贴板（已截取 kd 前缀）",
                         parent=self, duration=2000)
+
+    # ---------- C6 反向跳转：在主窗口分析 ----------
+
+    def _analyze_in_main_window(self, fname):
+        """C6 反向：由 kd 文件清单条目跳转到主窗口分析对应日志
+
+        kd 照片名（20260724_225031kd-xxx.jpg）与本地日志共享时间戳前缀，
+        据此在 {videos_dir}/{设备目录}/{日期}/ 下定位同名 .log/.txt，
+        找到后激活主窗口并复用其选中链路定位该日志；本地无文件时提示
+        先通过 SFTP 下载。
+        """
+        base = clip_base_name(fname)
+        date_str = date_from_base(base)
+        if not date_str:
+            InfoBar.warning("无法定位", "文件名缺少可解析的时间戳前缀，无法关联日志",
+                            parent=self, duration=3000)
+            return
+        videos_dir = (_load_settings().get("videos_dir") or "").strip()
+        if not videos_dir or not os.path.isdir(videos_dir):
+            InfoBar.warning("无法定位", "videos_dir 未配置或目录不存在",
+                            parent=self, duration=3000)
+            return
+        # 设备目录三级解析（映射表 → 精确同名 → 模糊匹配，同收集链路）
+        candidates = [str(self._row.get("table_id") or "").strip(),
+                      str(self._row.get("device_code") or "").strip()]
+        device_dir, _note, _src = resolve_device_dir(videos_dir, candidates)
+        if not device_dir:
+            InfoBar.warning("无法定位",
+                            "本地未找到设备目录: " + " / ".join(c for c in candidates if c),
+                            parent=self, duration=3500)
+            return
+        # 同名日志查找：日期子目录优先，其次设备根目录（与主窗口加载规则一致）
+        log_fname = ""
+        dev_dir = os.path.join(videos_dir, device_dir)
+        for ext in (".log", ".txt"):
+            for cand in (os.path.join(dev_dir, date_str, base + ext),
+                         os.path.join(dev_dir, base + ext)):
+                if os.path.isfile(cand):
+                    log_fname = base + ext
+                    break
+            if log_fname:
+                break
+        if not log_fname:
+            InfoBar.warning("本地无此文件",
+                            f"{device_dir}/{date_str} 下未找到 {base}.log/.txt，请先通过 SFTP 下载",
+                            parent=self, duration=4000)
+            return
+        main_win = self._find_main_window()
+        if main_win is None:
+            InfoBar.error("无法跳转", "主窗口未打开", parent=self, duration=3000)
+            return
+        main_win.focus_log_file(device_dir, date_str, log_fname)
+
+    def _find_main_window(self):
+        """从 QApplication 顶层窗口中查找主窗口实例（延迟导入避免循环依赖）"""
+        try:
+            from main_window.main_window import MainWindow
+        except Exception:
+            return None
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, MainWindow):
+                return w
+        return None
 
     # ---------- 滑入 / 滑出动画 ----------
 
@@ -1273,6 +1664,29 @@ class DevicePage(QWidget):
         # 懒加载：首次进入本页才构建 UI 与查询数据（管理面板打开时不再
         # 一次性构造全部三页）
         self._lazy_built = False
+        # 外部跳转预设（趋势页预警点击）：未构建时暂存，_lazy_init 应用
+        self._pending_search = ""
+        self._pending_date = ""
+
+    def focus_search(self, keyword: str, file_path: str = ""):
+        """外部设置搜索关键词并触发查询（如趋势页预警跳转）
+
+        页面未懒构建时存入 pending 字段，_lazy_init 完成后自动应用；
+        file_path 非空时同步把日期选择器切到该分区日期。
+        """
+        self._pending_search = str(keyword or "")
+        self._pending_date = str(file_path or "")
+        if not self._lazy_built:
+            return
+        if self._pending_date:
+            d = QDate.fromString(self._pending_date.replace("/", "-"), "yyyy-MM-dd")
+            self._pending_date = ""
+            if d.isValid() and d != self._date_picker.date:
+                self._date_picker.setDate(d)  # 触发 dateChanged → 重查该日期
+        if self._pending_search:
+            # setText 触发 textChanged → 防抖 → _do_search（本地重查 + 服务端拉取）
+            self._search_edit.setText(self._pending_search)
+            self._pending_search = ""
 
     def _lazy_init(self):
         """首次显示时执行：原初始化逻辑（UI + 日期 + 定时 + 首页加载）"""
@@ -1287,6 +1701,13 @@ class DevicePage(QWidget):
         self._upload_worker = None   # 打包上传 Worker（全局唯一）
         self._query_worker = None    # 异步查询 Worker
         self._save_worker = None     # 异步保存 Worker
+        self._export_worker = None   # CSV 导出异步查询 Worker（B6）
+        self._last_submission_id = None  # 最近一条提交台账 id，供收集完成后回填（C1）
+        # C2 历史日期自动补漏状态
+        self._backfill_queue = []
+        self._backfill_running = False
+        self._backfill_worker = None
+        self._backfill_save_worker = None
         self._fetch_keyword = ""     # 当前 API 拉取携带的 keyword（空=全量）
         self._last_fetch_silent = False  # 静默拉取（搜索触发）完成不弹 InfoBar
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
@@ -1295,10 +1716,14 @@ class DevicePage(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._do_search)
         self._init_ui()
-        # 默认日期为昨天（与主窗口一致）
-        yesterday = QDate.currentDate().addDays(-1)
+        # 默认日期为昨天（与主窗口一致）；预警跳转预设了分区日期时优先用它
+        init_date = QDate.currentDate().addDays(-1)
+        if self._pending_date:
+            d = QDate.fromString(self._pending_date.replace("/", "-"), "yyyy-MM-dd")
+            if d.isValid():
+                init_date = d
         self._date_picker.blockSignals(True)
-        self._date_picker.setDate(yesterday)
+        self._date_picker.setDate(init_date)
         self._date_picker.blockSignals(False)
         # 根据数据源调整日期选择器可用状态（xqzg 不按日期区分）
         self._apply_source_date_state()
@@ -1311,6 +1736,14 @@ class DevicePage(QWidget):
         if self._active_source() == "kd":
             self._hourly_timer.start()
         self._load_local()
+        # 趋势页预警跳转：预置搜索词在构建完成后应用（防抖自动触发查询）
+        if self._pending_search:
+            pending_kw = self._pending_search
+            self._pending_search = ""
+            self._pending_date = ""
+            self._search_edit.setText(pending_kw)
+        # C2 历史日期自动补漏：延后启动，避开首次加载与用户操作；静默仅日志
+        QTimer.singleShot(2000, self._backfill_missing_dates)
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -1324,7 +1757,21 @@ class DevicePage(QWidget):
         self._date_picker = CalendarPicker(self)
         self._date_picker.setFixedWidth(160)
         self._date_picker.dateChanged.connect(self._on_date_changed)
-        toolbar.addWidget(self._date_picker)
+        # 日期步进按钮：紧贴日期选择器组成一组，连续点击逐日前移/后移
+        self._btn_date_prev = ToolButton(FluentIcon.LEFT_ARROW, self)
+        self._btn_date_prev.setFixedWidth(26)
+        self._btn_date_prev.setToolTip("前一天")
+        self._btn_date_prev.clicked.connect(lambda _=False: self._step_date(-1))
+        self._btn_date_next = ToolButton(FluentIcon.RIGHT_ARROW, self)
+        self._btn_date_next.setFixedWidth(26)
+        self._btn_date_next.setToolTip("后一天")
+        self._btn_date_next.clicked.connect(lambda _=False: self._step_date(1))
+        date_group = QHBoxLayout()
+        date_group.setSpacing(2)
+        date_group.addWidget(self._date_picker)
+        date_group.addWidget(self._btn_date_prev)
+        date_group.addWidget(self._btn_date_next)
+        toolbar.addLayout(date_group)
 
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText("搜索")
@@ -1332,6 +1779,11 @@ class DevicePage(QWidget):
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
         toolbar.addStretch(1)
+
+        self._btn_export_csv = PushButton(FluentIcon.DOWNLOAD, "导出 CSV", self)
+        self._btn_export_csv.setToolTip("导出当前查询结果（含日期/搜索/排序条件）为 CSV")
+        self._btn_export_csv.clicked.connect(self._export_csv)
+        toolbar.addWidget(self._btn_export_csv)
 
         self._btn_upload_list = PushButton(FluentIcon.LIBRARY, "上传清单", self)
         self._btn_upload_list.setToolTip("查看已收集待上传的文件（videos_dir/upload）")
@@ -1465,6 +1917,10 @@ class DevicePage(QWidget):
             panel.slide_out()
         self._load_local()
 
+    def _step_date(self, delta_days: int):
+        """日期步进：负数前移、正数后移；setDate 触发 dateChanged → 现有加载链路"""
+        self._date_picker.setDate(self._date_picker.date.addDays(delta_days))
+
     # ---------- 数据加载 ----------
 
     def _active_source(self) -> str:
@@ -1479,6 +1935,11 @@ class DevicePage(QWidget):
         """
         is_xqzg = (self._active_source() == "xqzg")
         self._date_picker.setEnabled(not is_xqzg)
+        # 步进按钮与日期选择器同组，同步启用/禁用
+        for attr in ("_btn_date_prev", "_btn_date_next"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(not is_xqzg)
         if is_xqzg:
             self._date_picker.setToolTip("xqzg 数据源不按日期区分，日期选择不可用")
         else:
@@ -1616,19 +2077,60 @@ class DevicePage(QWidget):
     def _populate(self, rows):
         # 缓存当前页数据，供 _get_row_at 直接按行号取用，避免每次点击都重查数据库
         self._current_rows = rows
+        # 高频问题标记：一次聚合查询（无 N+1），失败静默不标记
+        try:
+            _hf_stats = table_db.get_submission_stats(days=_HF_DAYS)
+        except Exception:
+            _hf_stats = {"by_device": {}, "by_table": {}}
+        # C4 在线状态交叉校验：一次批量取全部球桌 name→onlineStatusName
+        # 映射（kd 行 table_id ↔ billiard_tables.name，与 get_snk_by_name
+        # 同款关联），页内逐行内存匹配，无逐行查库；失败静默不校验
+        try:
+            _online_map = table_db.get_tables_online_map()
+        except Exception:
+            _online_map = {}
         # 填充期间关闭界面更新与信号，完成后一次性恢复
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
             self._table.setRowCount(len(rows))
             for r, item in enumerate(rows):
+                # 优先按 device_code 匹配，无则回退 table_id（两者指向同一批记录）
+                _dev = str(item.get("device_code") or "").strip()
+                hf = (_hf_stats["by_device"].get(_dev, 0) if _dev else
+                      _hf_stats["by_table"].get(
+                          str(item.get("table_id") or "").strip(), 0))
                 for c, (key, _, _) in enumerate(DEVICE_COLUMNS):
                     val = item.get(key)
                     if key == "status":
                         # 设备状态码 → 中文 + 颜色标识
                         text, color = _DEVICE_STATUS_MAP.get(str(val).strip(), ("未知", None))
+                        tip = f"设备状态: {text}"
+                        if hf >= _HF_THRESHOLD:
+                            # 高频问题设备：状态列标红，tooltip 显示提交次数
+                            text = f"{text} · 高频问题"
+                            color = _HF_COLOR
+                            tip += f"\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）"
+                        # C4 交叉校验：kd.status 与球桌 onlineStatusName 矛盾时醒目标记
+                        _tid = str(item.get("table_id") or "").strip()
+                        _tb_online = _online_map.get(_tid) if _tid else None
+                        _kd_code = str(val).strip()
+                        if _tb_online and _kd_code in ("0", "1", "2"):
+                            _kd_online = _kd_code != "0"
+                            # 仅比较已知状态值（在线/运行中/空闲/下线），未知值不判矛盾
+                            if _tb_online in ("在线", "运行中", "空闲", "下线"):
+                                _conflict = _kd_online == (_tb_online == "下线")
+                            else:
+                                _conflict = False
+                            if _conflict:
+                                text = f"{text} ⚠状态矛盾"
+                                color = _HF_COLOR
+                                tip += (f"\n⚠ 状态矛盾: kd 接口 status={_kd_code}"
+                                        f"（{'在线' if _kd_online else '下线'}），"
+                                        f"但球桌管理 onlineStatusName=「{_tb_online}」，"
+                                        f"两个数据源不一致")
                         cell = QTableWidgetItem(text)
-                        cell.setToolTip(f"设备状态: {text}")
+                        cell.setToolTip(tip)
                         if color is not None:
                             cell.setForeground(color)
                         self._table.setItem(r, c, cell)
@@ -1763,13 +2265,70 @@ class DevicePage(QWidget):
         # 远程连接：按球桌号关联球桌管理 remark 中的 snk 标识（frp xtcp
         # visitor serverName），无 snk 的设备菜单项保留可见但置灰并说明原因
         self._add_remote_actions(menu, idx.row())
+        # C4：清除错误设备映射（auto 映射导致收集错误时人工删除，下次收集重新匹配）
+        self._add_mapping_actions(menu, idx.row())
         menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
+
+    def _add_mapping_actions(self, menu, row_idx):
+        """右键菜单追加「清除设备映射」项（仅该设备存在映射记录时显示）"""
+        row = self._get_row_at(row_idx)
+        codes = [str(row.get("table_id") or "").strip(),
+                 str(row.get("device_code") or "").strip()]
+        infos = []
+        for code in dict.fromkeys(c for c in codes if c):
+            try:
+                info = table_db.get_device_mapping(code)
+            except Exception:
+                info = {}
+            if info:
+                infos.append(info)
+        if not infos:
+            return
+        menu.addSeparator()
+        for info in infos:
+            code = str(info.get("device_code") or "")
+            local_dir = str(info.get("local_dir") or "")
+            src = "自动" if str(info.get("source") or "auto") == "auto" else "手动"
+            act = Action(FluentIcon.DELETE,
+                         f"清除设备映射 {code} → {local_dir}（{src}）",
+                         self._table)
+            act.triggered.connect(
+                lambda _=False, cd=code, ld=local_dir:
+                self._clear_device_mapping(cd, ld))
+            menu.addAction(act)
+
+    def _clear_device_mapping(self, device_code, local_dir):
+        """确认后删除设备映射（删除后下次收集重新走模糊匹配）"""
+        box = MessageBox(
+            "清除设备映射",
+            f"确定删除 {device_code} → {local_dir} 的映射？\n"
+            f"删除后下次收集将重新模糊匹配（若映射错误导致收集到\n"
+            f"错误目录，建议先在 videos_dir 中清理误收集的文件）。",
+            self)
+        box.yesButton.setText("删除映射")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        try:
+            n = table_db.delete_device_mapping(device_code)
+        except Exception as e:
+            InfoBar.error("删除失败", str(e), parent=self, duration=3000)
+            return
+        if n:
+            InfoBar.success("已清除", f"设备映射 {device_code} 已删除",
+                            parent=self, duration=2500)
+        else:
+            InfoBar.info("提示", "该设备映射不存在或已被删除",
+                         parent=self, duration=2500)
 
     def _add_remote_actions(self, menu, row_idx):
         """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件 / 远程桌面）"""
         row = self._get_row_at(row_idx)
         table_id = str(row.get("table_id") or "").strip()
         snk = table_db.get_snk_by_name(table_id)
+        # A2 前置检查所需：行内设备状态与最后上报日期（xqzg 无 status 则跳过检查）
+        status = str(row.get("status") or "").strip()
+        report = str(row.get("file_path") or "") or self._current_date()
         menu.addSeparator()
         remote_items = [
             ("ssh", FluentIcon.COMMAND_PROMPT, "SSH 终端"),
@@ -1786,16 +2345,21 @@ class DevicePage(QWidget):
             act.setEnabled(bool(snk))
             if snk:
                 act.triggered.connect(
-                    lambda _=False, k=kind: self._open_remote_session(k, snk, table_id))
+                    lambda _=False, k=kind:
+                    self._open_remote_session(k, snk, table_id, status, report))
             menu.addAction(act)
 
-    def _open_remote_session(self, kind, snk, table_id):
-        """委托运维面板窗口的 FrpRemoteBridge 建立 xtcp 隧道并打开会话"""
+    def _open_remote_session(self, kind, snk, table_id, status="", report=""):
+        """委托统一远程会话中心建立 xtcp 隧道并打开会话"""
+        # A2 远程前置检查：行内 status=0（下线）时先确认，不阻止但醒目提示
+        if str(status).strip() == "0":
+            if not _confirm_offline_connect(self, report or "未知"):
+                return
         bridge = getattr(self.window(), "_remote_bridge", None)
         if bridge is None:
             InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
             return
-        bridge.open_session(kind, snk, table_id)
+        bridge.open_session(kind, snk, table_id, notifier=self, source="设备状态")
 
     def _show_files_dialog(self, row_idx):
         row = self._get_full_row_at(row_idx)
@@ -1862,7 +2426,22 @@ class DevicePage(QWidget):
         if field:
             row = dict(getattr(self._file_panel, "_row", None) or {})
             row[field] = list(row.get(field) or []) + [fname]
+            # C1 台账：精度/问题迁移成功写一条（collect_ok 待收集结果回填）
+            self._log_submission(row, dest_cat, fname)
             self._auto_collect(row, field)
+
+    def _log_submission(self, row: dict, category: str, fname: str):
+        """C1 台账写入点：精度/问题迁移成功记录一条提交（失败静默不阻断主流程）"""
+        try:
+            self._last_submission_id = table_db.log_submission(
+                device_code=str(row.get("device_code") or ""),
+                table_id=str(row.get("table_id") or ""),
+                club_name=str(row.get("club_name") or ""),
+                category=category,
+                file_name=fname,
+                file_path_date=self._current_date())
+        except Exception:
+            self._last_submission_id = None
 
     def _on_migrate_fail(self, msg):
         InfoBar.error("迁移失败", msg.split("\n")[0], parent=self, duration=4000)
@@ -1885,9 +2464,12 @@ class DevicePage(QWidget):
         视频/日志按文件列表的基础名收集；detect.bin 与 CPP 日志（daily_*.txt）
         只收集一次（目标已存在即跳过）。
 
-        设备目录三级匹配：① table_id / device_code 精确匹配；② 模糊搜索
-        （店号前缀相同 + 后缀归一化数字相等，如 281-S8 ↔ 281-08，仅唯一
-        命中才采用）；③ 均失败时警告并引导主界面右键兜底。
+        设备目录三级匹配（C4）：① device_mapping 持久化映射命中；
+        ② table_id / device_code 精确同名目录；③ 模糊匹配（店号前缀
+        相同 + 后缀归一化数字相等，如 281-S8 ↔ 281-08，仅唯一命中才
+        采用，命中后自动落库 source='auto'）；均失败时弹出收集失败
+        自愈向导（C5）：候选目录按相似度排序供用户点选或手动浏览，
+        选中后落库 source='manual' 并立即继续收集；取消则走原失败提示。
         """
         videos_dir = (_load_settings().get("videos_dir") or "").strip()
         if not videos_dir or not os.path.isdir(videos_dir):
@@ -1896,23 +2478,25 @@ class DevicePage(QWidget):
             return
         candidates = [str(row.get("table_id") or "").strip(),
                       str(row.get("device_code") or "").strip()]
-        device_id = next((n for n in dict.fromkeys(candidates)
-                          if n and os.path.isdir(os.path.join(videos_dir, n))), "")
-        fuzzy_note = ""
+        device_id, fuzzy_note, _src = resolve_device_dir(videos_dir, candidates)
         if not device_id:
-            device_id, fuzzy_note = self._fuzzy_match_device_dir(videos_dir, candidates)
-        if not device_id:
-            InfoBar.warning("无法收集",
-                            "本地设备目录不存在: " + " / ".join(c for c in candidates if c)
-                            + "\n可在主界面设备列表找到对应文件夹，右键日志文件→添加到上传目录",
-                            parent=self, duration=5000)
-            return
+            device_id = self._heal_device_dir(videos_dir, candidates)
+            if not device_id:
+                InfoBar.warning("无法收集",
+                                "本地设备目录不存在: " + " / ".join(c for c in candidates if c)
+                                + "\n可在主界面设备列表找到对应文件夹，右键日志文件→添加到上传目录",
+                                parent=self, duration=5000)
+                return
+            fuzzy_note = f"已手动映射 → {device_id}"
         bases = sorted({b for b in (clip_base_name(f) for f in (row.get(field) or [])) if b})
         if not bases:
             return
         worker = CollectFilesWorker(videos_dir, device_id, bases)
+        # 捕获当前台账 id：收集完成后回填 collect_ok（C1）
+        sub_id = getattr(self, "_last_submission_id", None)
         worker.done.connect(
-            lambda dev, n, miss, w=worker: self._on_collect_done(dev, n, miss, w))
+            lambda dev, n, miss, w=worker, sid=sub_id:
+            self._on_collect_done(dev, n, miss, w, sid))
         worker.error.connect(
             lambda msg: InfoBar.error("收集失败", msg.split(chr(10))[0],
                                       parent=self, duration=4000))
@@ -1926,42 +2510,56 @@ class DevicePage(QWidget):
     @staticmethod
     def _norm_suffix(name: str) -> str:
         """后缀归一化：只留数字并去前导零（S8/08/TV2 → 8/8/2）"""
-        digits = "".join(ch for ch in str(name or "") if ch.isdigit())
-        return digits.lstrip("0")
+        return norm_device_suffix(name)
 
     def _fuzzy_match_device_dir(self, videos_dir: str, candidates: list) -> tuple:
-        """模糊搜索本地设备目录（命名与球桌号不一致时的兜底）
+        """模糊搜索本地设备目录（委托 collect_worker，保留供自愈向导复用）"""
+        return fuzzy_match_device_dir(videos_dir, candidates)
 
-        规则：店号前缀（最后一个 '-' 之前）完全相同，后缀归一化后的
-        数字相等；仅唯一命中才采用，多候选不猜。返回 (目录名, 匹配说明)。
+    def _heal_device_dir(self, videos_dir: str, candidates: list) -> str:
+        """自愈向导（C5）：匹配失败时弹候选目录列表供用户点选
+
+        扫描 videos_dir 下全部子目录，按与目标设备码的相似度降序取
+        TOP 12 弹 Fluent 候选对话框；用户选中后对所有候选码落库
+        source='manual'（下次 resolve_device_dir 直接命中映射不再弹窗），
+        返回所选目录名；取消返回空串走原失败提示。
         """
+        cands = [c for c in candidates if c]
+        scored = []
         try:
             entries = os.listdir(videos_dir)
         except OSError:
-            return "", ""
-        for cand in candidates:
-            if "-" not in cand:
+            entries = []
+        for name in entries:
+            if name in ("upload", "videos"):
                 continue
-            prefix, suffix = cand.rsplit("-", 1)
-            target = self._norm_suffix(suffix)
-            if not target:
+            if not os.path.isdir(os.path.join(videos_dir, name)):
                 continue
-            hits = []
-            for name in entries:
-                if "-" not in name:
-                    continue
-                if not os.path.isdir(os.path.join(videos_dir, name)):
-                    continue
-                p, s = name.rsplit("-", 1)
-                if p == prefix and self._norm_suffix(s) == target:
-                    hits.append(name)
-            if len(hits) == 1:
-                return hits[0], f"{cand} → 匹配本地目录 {hits[0]}"
-        return "", ""
+            score = _dir_similarity(name, cands)
+            if score > 0:
+                scored.append((score, name))
+        scored.sort(key=lambda t: (-t[0], t[1].lower()))
+        dlg = DeviceDirHealDialog(self, videos_dir, cands, scored[:12])
+        if not dlg.exec() or not dlg.chosen_dir:
+            return ""
+        chosen = dlg.chosen_dir
+        try:
+            for cand in dict.fromkeys(cands):
+                table_db.set_device_mapping(cand, chosen, source="manual")
+        except Exception:
+            logger.warning("自愈向导映射落库失败: %s -> %s", cands, chosen,
+                           exc_info=True)
+        return chosen
 
-    def _on_collect_done(self, device_id, copied, missing, worker):
+    def _on_collect_done(self, device_id, copied, missing, worker, sub_id=None):
         if worker in self._collect_workers:
             self._collect_workers.remove(worker)
+        # C1 台账：回填收集结果（全部就位才算成功，失败静默）
+        if sub_id:
+            try:
+                table_db.update_submission_collect(sub_id, not missing)
+            except Exception:
+                pass
         if missing:
             shown = ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else "")
             InfoBar.warning("收集完成",
@@ -2035,6 +2633,11 @@ class DevicePage(QWidget):
     def _on_upload_done(self, info):
         self._btn_package.setEnabled(True)
         self._lbl_time.setText("")
+        # C1 台账：回填上传结果（匹配近期已收集未上传记录，失败静默）
+        try:
+            table_db.update_submission_upload(str(info or ""), True)
+        except Exception:
+            pass
         InfoBar.success("上传成功", f"{info} · 本地 upload 目录已清空",
                         parent=self, duration=5000)
 
@@ -2113,6 +2716,144 @@ class DevicePage(QWidget):
     def _on_hourly_error(self, msg):
         # 定时拉取失败不打断用户，仅在状态栏静默提示
         self._lbl_time.setText(f"自动更新失败: {msg.split(chr(10))[0]}")
+
+    # ---------- CSV 导出（B6） ----------
+
+    def _export_csv(self):
+        """导出当前查询结果（含日期/搜索/排序条件）为 CSV（utf-8-sig）"""
+        src = self._active_source()
+        date = self._current_date()
+        default_name = (f"设备状态_{date.replace('/', '-')}" if src == "kd"
+                        else "设备状态")
+        default = f"{default_name}_{datetime.now().strftime('%Y-%m-%d')}.csv"
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "导出 CSV", default, "CSV 文件 (*.csv)")
+        if not path:
+            return
+        if self._export_worker and self._export_worker.isRunning():
+            InfoBar.warning("提示", "已有导出进行中，请稍候", parent=self, duration=2000)
+            return
+        keyword = self._search_edit.text().strip()
+        # 复用异步查询机制：按当前条件一次拉取全部记录后写文件
+        if src == "xqzg":
+            self._export_worker = _DBQueryWorker(
+                table_db.query_xqzg_page, 1, _EXPORT_MAX_ROWS, keyword,
+                self._sort_key, self._sort_desc)
+        else:
+            self._export_worker = _DBQueryWorker(
+                table_db.query_kd_page, 1, _EXPORT_MAX_ROWS, keyword, date,
+                self._sort_key, self._sort_desc)
+        self._export_worker.finished.connect(
+            lambda result, p=path, s=src: self._on_export_query(result, p, s))
+        self._export_worker.error.connect(
+            lambda msg: InfoBar.error("导出失败", str(msg).split(chr(10))[0],
+                                      parent=self, duration=4000))
+        self._export_worker.start()
+
+    def _on_export_query(self, result, path, src):
+        _total, rows = result
+        if src == "kd":
+            header = ["设备编码"] + [c[1] for c in DEVICE_COLUMNS]
+            keys = ["device_code"] + [c[0] for c in DEVICE_COLUMNS]
+        else:
+            header = [c[1] for c in DEVICE_COLUMNS]
+            keys = [c[0] for c in DEVICE_COLUMNS]
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                for item in rows:
+                    writer.writerow([
+                        str(item.get(k) if item.get(k) is not None else "")
+                        for k in keys])
+        except OSError as e:
+            InfoBar.error("导出失败", str(e), parent=self, duration=4000)
+            return
+        _show_export_bar(self, path, len(rows))
+
+    # ---------- 历史日期自动补漏（C2） ----------
+
+    _BACKFILL_MAX = 10        # 单次启动最多补漏天数，其余下次再补
+    _BACKFILL_INTERVAL = 1500  # 串行拉取间隔（毫秒），避免并发打爆 API
+
+    def _backfill_missing_dates(self):
+        """生成应有日期序列（最早 kd 日期→今天，无数据则近 60 天），对比已存
+        分区找出缺失日期静默串行补拉（每次最多 10 天，不弹 UI 仅日志）
+        """
+        if self._active_source() != "kd" or getattr(self, "_backfill_running", False):
+            return
+        try:
+            # 已覆盖 = 有数据的分区 + 拉过但接口为空的日期（sync_meta）
+            covered = set(table_db.get_kd_dates()) | set(table_db.get_kd_synced_dates())
+        except Exception:
+            return
+        today = QDate.currentDate()
+        start = None
+        if covered:
+            start = QDate.fromString(min(covered), "yyyy/MM/dd")
+        if start is None or not start.isValid():
+            start = today.addDays(-59)
+        missing = []
+        d = start
+        while d <= today:
+            s = d.toString("yyyy/MM/dd")
+            if s not in covered:
+                missing.append(s)
+            d = d.addDays(1)
+        if not missing:
+            return
+        self._backfill_running = True
+        self._backfill_queue = missing[:self._BACKFILL_MAX]
+        logger.info("历史补漏：缺失 %d 天，本次补 %d 天: %s",
+                    len(missing), len(self._backfill_queue),
+                    ", ".join(self._backfill_queue))
+        self._backfill_next()
+
+    def _backfill_next(self):
+        """串行消费补漏队列：逐个日期拉取，间隔短延时；用户操作优先"""
+        if not getattr(self, "_backfill_queue", []):
+            if getattr(self, "_backfill_running", False):
+                logger.info("历史补漏完成")
+            self._backfill_running = False
+            return
+        # 用户手动拉取/静默刷新/定时拉取进行中 → 延后，避免并发冲突
+        busy = any(getattr(self, a) is not None and getattr(self, a).isRunning()
+                   for a in ("_worker", "_refresh_worker", "_hourly_worker"))
+        if busy:
+            QTimer.singleShot(3000, self._backfill_next)
+            return
+        date = self._backfill_queue.pop(0)
+        worker = DevicesFetchWorker(file_path=date)
+        worker.result_ready.connect(
+            lambda data, dt=date: self._on_backfill_done(data, dt))
+        worker.error.connect(
+            lambda msg, dt=date: self._on_backfill_error(msg, dt))
+        self._backfill_worker = worker
+        worker.start()
+
+    def _on_backfill_done(self, data, date):
+        """补漏拉取完成：异步落库（复用 _DBQueryWorker，不阻塞 GUI）"""
+        rows = data.get("lists") or data.get("results") or []
+        self._backfill_save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
+        self._backfill_save_worker.finished.connect(
+            lambda count, dt=date: self._on_backfill_saved(count, dt))
+        self._backfill_save_worker.error.connect(
+            lambda msg, dt=date: self._on_backfill_save_error(msg, dt))
+        self._backfill_save_worker.start()
+
+    def _on_backfill_saved(self, count, date):
+        logger.info("历史补漏 %s 完成：%d 台设备", date, count)
+        if self._current_date() == date:
+            self._load_local()  # 用户正查看该日期 → 顺带刷新
+        QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
+
+    def _on_backfill_save_error(self, msg, date):
+        logger.warning("历史补漏保存失败 %s: %s", date, str(msg).split(chr(10))[0])
+        QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
+
+    def _on_backfill_error(self, msg, date):
+        logger.warning("历史补漏拉取失败 %s: %s", date, str(msg).split(chr(10))[0])
+        QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -2413,6 +3154,522 @@ class AdminSettingsPage(QWidget):
             InfoBar.error(f"{label} 连接失败", msg, parent=self, duration=4000)
 
 
+# ==================== 健康度趋势看板（C3） ====================
+
+# 折线序列配色：错误率=警示红、操作率=信息蓝、精度=琥珀金（虚线）
+_TREND_SERIES = (
+    ("error_rate", "错误率", QColor("#e81123"), False),
+    ("operation_rate", "操作率", QColor("#0078d4"), False),
+    ("accuracy_count", "精度", QColor("#c98a2d"), True),
+)
+
+
+class _TrendChart(QWidget):
+    """零依赖自绘折线图（QPainter）
+
+    绘制 error_rate/operation_rate/accuracy_count 三条折线（数据已由
+    query_kd_trend CAST 为数值），带网格线、Y 刻度、X 日期标签、图例与
+    悬停提示。缺失日期（补漏未完成）自然按稀疏点绘制。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows = []
+        self._hover = -1
+        self._pts_x = []
+        self.setMinimumHeight(210)
+        self.setMouseTracking(True)
+
+    def set_data(self, rows):
+        self._rows = list(rows or [])
+        self._hover = -1
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = isDarkTheme()
+        text_c = QColor("#e8ebef") if dark else QColor("#3b4046")
+        faint_c = QColor("#8a919b")
+        grid_c = QColor("#3a414b") if dark else QColor("#e2e6ea")
+        if not self._rows:
+            p.setPen(QPen(faint_c))
+            p.setFont(QFont("Microsoft YaHei", 10))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                       "暂无趋势数据 — 请在上方搜索并选择设备")
+            return
+        pad_l, pad_r, pad_t, pad_b = 48, 14, 32, 24
+        plot = QRectF(pad_l, pad_t, max(10, self.width() - pad_l - pad_r),
+                      max(10, self.height() - pad_t - pad_b))
+        n = len(self._rows)
+        vmax = max([float(r.get(k) or 0) for r in self._rows
+                    for k, _, _, _ in _TREND_SERIES] + [1.0]) * 1.15
+
+        def x_at(i):
+            return plot.left() + (plot.width() * i / (n - 1) if n > 1
+                                  else plot.width() / 2)
+
+        def y_at(v):
+            return plot.bottom() - plot.height() * max(0.0, float(v)) / vmax
+
+        self._pts_x = [x_at(i) for i in range(n)]
+        # 网格线 + Y 刻度（5 档）
+        p.setFont(QFont("Microsoft YaHei", 7))
+        for g in range(5):
+            v = vmax * g / 4
+            y = int(y_at(v))
+            p.setPen(QPen(grid_c, 1, Qt.PenStyle.DotLine if g
+                          else Qt.PenStyle.SolidLine))
+            p.drawLine(int(plot.left()), y, int(plot.right()), y)
+            p.setPen(QPen(faint_c))
+            label = f"{v:.1f}" if v < 10 else f"{v:.0f}"
+            p.drawText(QRectF(0, y - 7, pad_l - 6, 14),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       label)
+        # X 日期标签（最多 8 个，避免重叠）
+        step = max(1, math.ceil(n / 8))
+        for i in range(0, n, step):
+            date = str(self._rows[i].get("file_path") or "")
+            p.setPen(QPen(faint_c))
+            p.drawText(QRectF(self._pts_x[i] - 24, plot.bottom() + 4, 48, 16),
+                       Qt.AlignmentFlag.AlignCenter, date[-5:])
+        # 图例（顶部横排）
+        p.setFont(QFont("Microsoft YaHei", 8))
+        lx = plot.left()
+        for _, label, color, dashed in _TREND_SERIES:
+            pen = QPen(color, 2)
+            if dashed:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawLine(int(lx), 14, int(lx) + 18, 14)
+            p.setPen(QPen(text_c))
+            p.drawText(int(lx) + 24, 18, label)
+            lx += 24 + QFontMetrics(p.font()).horizontalAdvance(label) + 18
+        # 悬停竖向参考线
+        if 0 <= self._hover < n:
+            p.setPen(QPen(faint_c, 1, Qt.PenStyle.DashLine))
+            p.drawLine(int(self._pts_x[self._hover]), int(plot.top()),
+                       int(self._pts_x[self._hover]), int(plot.bottom()))
+        # 折线 + 数据点（None 值断点，各段独立绘制）
+        for key, _, color, dashed in _TREND_SERIES:
+            pen = QPen(color, 2,
+                       Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine)
+            p.setPen(pen)
+            prev = None
+            for i, r in enumerate(self._rows):
+                v = r.get(key)
+                pt = (self._pts_x[i], y_at(v)) if v is not None else None
+                if pt and prev:
+                    p.drawLine(int(prev[0]), int(prev[1]), int(pt[0]), int(pt[1]))
+                prev = pt
+            p.setBrush(color)
+            p.setPen(Qt.PenStyle.NoPen)
+            for i, r in enumerate(self._rows):
+                v = r.get(key)
+                if v is None:
+                    continue
+                rad = 4.5 if i == self._hover else 2.5
+                p.drawEllipse(QRectF(self._pts_x[i] - rad, y_at(v) - rad,
+                                     rad * 2, rad * 2))
+
+    def mouseMoveEvent(self, event):
+        if not self._rows or not self._pts_x:
+            return
+        x = event.position().x()
+        idx = min(range(len(self._pts_x)),
+                  key=lambda i: abs(self._pts_x[i] - x))
+        if idx != self._hover:
+            self._hover = idx
+            self.update()
+        r = self._rows[idx]
+        tip = (f"{r.get('file_path', '')}   错误率 {float(r.get('error_rate') or 0):.1f}%   "
+               f"操作率 {float(r.get('operation_rate') or 0):.1f}%   "
+               f"精度 {int(float(r.get('accuracy_count') or 0))}")
+        QToolTip.showText(event.globalPosition().toPoint(), tip, self)
+
+    def leaveEvent(self, event):
+        self._hover = -1
+        self.update()
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+
+class _AlertRow(CardWidget):
+    """单条错误率突增预警条目（整行可点击，跳转设备页搜索该设备）"""
+
+    def __init__(self, info: dict, on_jump, parent=None):
+        super().__init__(parent)
+        self._info = info
+        self._on_jump = on_jump
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"数据日期 {info.get('file_path', '')}，点击查看该设备")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setSpacing(10)
+        icon = QLabel("⚠", self)
+        icon.setStyleSheet("color: #e81123; font-size: 15px;")
+        lay.addWidget(icon)
+        avg = max(float(info.get("avg_rate") or 0), 0.001)
+        times = float(info.get("today_rate") or 0) / avg
+        txt = QLabel(
+            f"{info.get('device_code', '')} · {info.get('club_name', '')} · "
+            f"球桌 {info.get('table_id', '')} —— 今日错误率 "
+            f"{float(info.get('today_rate') or 0):.1f}%，近 "
+            f"{info.get('hist_days', 0)} 日均值 "
+            f"{float(info.get('avg_rate') or 0):.1f}%（{times:.1f}×）", self)
+        txt.setStyleSheet("color: #e81123;")
+        lay.addWidget(txt, 1)
+        jump = QLabel("查看设备 →", self)
+        jump.setStyleSheet("color: #e81123; font-weight: 600;")
+        lay.addWidget(jump)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_jump(self._info)
+        super().mouseReleaseEvent(event)
+
+
+class TrendPage(QWidget):
+    """健康度趋势看板页（C3）：突增预警 + 单设备趋势折线 + TOP N 排行
+
+    全部查询走 _DBQueryWorker 异步模式；页面懒构建（首次进入才初始化）。
+    仅 kd 数据源可用（kd_status 才有日期分区历史）。
+    """
+
+    # 排行表列：(key, 表头, 宽度)
+    _RANK_COLUMNS = [
+        ("rank", "排名", 46), ("club_name", "球房", 150), ("table_id", "球桌", 70),
+        ("status", "状态", 60), ("error_rate", "错误率", 80),
+        ("operation_rate", "操作率", 80), ("accuracy_count", "精度", 60),
+        ("already_count", "问题", 60),
+    ]
+    # 排序下拉文案 → query_kd_ranking 字段
+    _RANK_FIELD_MAP = {
+        "错误率": "error_rate", "操作率": "operation_rate",
+        "精度": "accuracy_count", "问题数": "already_count",
+        "操作数": "except_count", "废弃数": "rubbish_count",
+    }
+    # 页面切回时预警/排行重查的最小间隔（秒），避免频繁切换重复扫表
+    _REFRESH_COOLDOWN = 60
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lazy_built = False
+
+    def _lazy_init(self):
+        self._alerts_worker = None   # 预警查询
+        self._cand_worker = None     # 设备候选搜索
+        self._trend_worker = None    # 趋势序列查询
+        self._rank_worker = None     # 排行查询
+        self._candidates = []        # 当前匹配的候选设备行
+        self._last_refresh = None    # 上次预警/排行刷新时间
+        # 搜索防抖（与球桌/设备页同款 300ms 模式）
+        self._search_timer = QTimer(self)
+        self._search_timer.setInterval(300)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._do_search_candidates)
+        self._init_ui()
+        self._load_alerts()
+        self._load_ranking()
+
+    def _init_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 12)
+        root.setSpacing(10)
+        title = TitleLabel("健康度趋势", self)
+        root.addWidget(title)
+
+        # ---------- 预警区（置顶红色提示，点击跳转设备页） ----------
+        alert_card = CardWidget(self)
+        a_lay = QVBoxLayout(alert_card)
+        a_lay.setContentsMargins(14, 10, 14, 12)
+        a_lay.setSpacing(6)
+        head = QHBoxLayout()
+        lbl_head = QLabel("⚠ 异常突增预警（今日错误率 > 近 7 日均值×2）", alert_card)
+        lbl_head.setStyleSheet("font-weight: 600; color: #e81123;")
+        head.addWidget(lbl_head)
+        head.addStretch(1)
+        self._btn_alert_refresh = ToolButton(FluentIcon.SYNC, alert_card)
+        self._btn_alert_refresh.setToolTip("刷新预警与排行")
+        self._btn_alert_refresh.clicked.connect(self._refresh_all)
+        head.addWidget(self._btn_alert_refresh)
+        a_lay.addLayout(head)
+        self._lbl_alert_empty = QLabel("暂无突增预警", alert_card)
+        self._lbl_alert_empty.setStyleSheet("color: #8a919b;")
+        a_lay.addWidget(self._lbl_alert_empty)
+        alert_scroll = ScrollArea(alert_card)
+        alert_scroll.setWidgetResizable(True)
+        alert_scroll.setFixedHeight(110)
+        alert_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._alert_body = QWidget()
+        body_lay = QVBoxLayout(self._alert_body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(4)
+        body_lay.addStretch(1)
+        alert_scroll.setWidget(self._alert_body)
+        a_lay.addWidget(alert_scroll)
+        root.addWidget(alert_card)
+
+        # ---------- 设备趋势折线 ----------
+        trend_card = CardWidget(self)
+        t_lay = QVBoxLayout(trend_card)
+        t_lay.setContentsMargins(14, 10, 14, 12)
+        t_lay.setSpacing(8)
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+        self._search_edit = SearchLineEdit(trend_card)
+        self._search_edit.setPlaceholderText("搜索设备（编码 / 球房 / 球桌）")
+        self._search_edit.setFixedWidth(230)
+        self._search_edit.textChanged.connect(self._on_search_input)
+        bar.addWidget(self._search_edit)
+        self._device_combo = ComboBox(trend_card)
+        self._device_combo.setToolTip("选择设备查看趋势")
+        self._device_combo.currentIndexChanged.connect(self._on_device_chosen)
+        bar.addWidget(self._device_combo, 1)
+        t_lay.addLayout(bar)
+        self._lbl_trend_title = CaptionLabel("近 30 天趋势", trend_card)
+        t_lay.addWidget(self._lbl_trend_title)
+        self._chart = _TrendChart(trend_card)
+        t_lay.addWidget(self._chart)
+        root.addWidget(trend_card)
+
+        # ---------- TOP N 排行 ----------
+        rank_card = CardWidget(self)
+        r_lay = QVBoxLayout(rank_card)
+        r_lay.setContentsMargins(14, 10, 14, 12)
+        r_lay.setSpacing(8)
+        r_head = QHBoxLayout()
+        r_head.setSpacing(6)
+        r_head.addWidget(QLabel("TOP", rank_card))
+        self._top_combo = ComboBox(rank_card)
+        self._top_combo.addItems(["10", "20", "50"])
+        self._top_combo.setFixedWidth(70)
+        self._top_combo.currentTextChanged.connect(lambda _: self._load_ranking())
+        r_head.addWidget(self._top_combo)
+        r_head.addWidget(QLabel("排行 · 排序:", rank_card))
+        self._sort_combo = ComboBox(rank_card)
+        self._sort_combo.addItems(list(self._RANK_FIELD_MAP.keys()))
+        self._sort_combo.currentTextChanged.connect(lambda _: self._load_ranking())
+        r_head.addWidget(self._sort_combo)
+        r_head.addStretch(1)
+        self._lbl_rank_date = CaptionLabel("", rank_card)
+        r_head.addWidget(self._lbl_rank_date)
+        r_lay.addLayout(r_head)
+        self._rank_table = TableWidget(rank_card)
+        self._rank_table.setColumnCount(len(self._RANK_COLUMNS))
+        self._rank_table.setHorizontalHeaderLabels([c[1] for c in self._RANK_COLUMNS])
+        self._rank_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._rank_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._rank_table.verticalHeader().setVisible(False)
+        self._rank_table.verticalHeader().setDefaultSectionSize(_FIXED_ROW_HEIGHT)
+        self._rank_table.setAlternatingRowColors(True)
+        self._rank_table.setWordWrap(False)
+        self._rank_table.setMinimumHeight(180)
+        self._rank_table.cellDoubleClicked.connect(self._on_rank_double_clicked)
+        header = self._rank_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        for i, (_, _, w) in enumerate(self._RANK_COLUMNS):
+            self._rank_table.setColumnWidth(i, w)
+        r_lay.addWidget(self._rank_table)
+        r_tip = CaptionLabel("双击排行行可跳转设备页查看", rank_card)
+        r_tip.setStyleSheet("color: #8a919b;")
+        r_lay.addWidget(r_tip)
+        root.addWidget(rank_card)
+        root.addStretch(1)
+
+    def showEvent(self, event):
+        """首次显示懒构建；之后按冷却间隔刷新预警/排行（数据可能已同步更新）"""
+        super().showEvent(event)
+        if not self._lazy_built:
+            self._lazy_built = True
+            self._lazy_init()
+            return
+        if self._active_source() != "kd":
+            return
+        now = datetime.now()
+        if (self._last_refresh is None
+                or (now - self._last_refresh).total_seconds() > self._REFRESH_COOLDOWN):
+            self._load_alerts()
+            self._load_ranking()
+
+    # ---------- 通用 ----------
+
+    def _active_source(self) -> str:
+        return get_active_api_source()
+
+    def _run_query(self, attr, func, args, on_ok):
+        """异步查询通用入口：同名旧任务断开信号，worker 引用挂到 self 供
+        面板 closeEvent 统一清理"""
+        old = getattr(self, attr, None)
+        if old is not None and old.isRunning():
+            try:
+                old.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        worker = _DBQueryWorker(func, *args)
+        setattr(self, attr, worker)
+        worker.finished.connect(on_ok)
+        worker.error.connect(
+            lambda msg: logger.warning("趋势页查询失败: %s", msg))
+        worker.start()
+
+    def _refresh_all(self):
+        self._load_alerts()
+        self._load_ranking()
+
+    # ---------- 预警区 ----------
+
+    def _load_alerts(self):
+        if self._active_source() != "kd":
+            self._lbl_alert_empty.setText("趋势看板仅支持 kd 数据源（当前为 xqzg）")
+            self._lbl_alert_empty.show()
+            self._clear_alert_rows()
+            return
+        self._run_query("_alerts_worker", table_db.query_kd_alerts, (7,),
+                        self._on_alerts)
+
+    def _on_alerts(self, alerts):
+        self._last_refresh = datetime.now()
+        self._clear_alert_rows()
+        if not alerts:
+            self._lbl_alert_empty.setText("暂无突增预警 — 各设备错误率平稳")
+            self._lbl_alert_empty.show()
+            return
+        self._lbl_alert_empty.hide()
+        lay = self._alert_body.layout()
+        for info in alerts:
+            lay.insertWidget(lay.count() - 1,
+                             _AlertRow(info, self._jump_to_device, self._alert_body))
+
+    def _clear_alert_rows(self):
+        lay = self._alert_body.layout()
+        while lay.count() > 1:  # 末尾 stretch 保留
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _jump_to_device(self, info):
+        """预警条目点击 → 切到设备状态页并搜索该设备（日期定位到预警分区）"""
+        win = self.window()
+        device_page = getattr(win, "device_page", None)
+        if device_page is None:
+            return
+        win.switchTo(device_page)
+        device_page.focus_search(str(info.get("device_code") or ""),
+                                 str(info.get("file_path") or ""))
+
+    # ---------- 设备趋势 ----------
+
+    def _on_search_input(self, _=""):
+        """搜索防抖入口：300ms 无输入后才查候选设备"""
+        self._search_timer.start()
+
+    def _do_search_candidates(self):
+        kw = self._search_edit.text().strip()
+        if not kw:
+            self._candidates = []
+            self._device_combo.clear()
+            return
+        self._run_query("_cand_worker", self._query_candidates, (kw,),
+                        self._on_candidates)
+
+    @staticmethod
+    def _query_candidates(kw):
+        """最新分区内按关键词匹配的候选设备（复用分页查询的 FTS/LIKE 路径）"""
+        dates = table_db.get_kd_dates()
+        latest = dates[0] if dates else ""
+        if not latest:
+            return []
+        _, rows = table_db.query_kd_page(1, 30, kw, latest)
+        return [r for r in rows if str(r.get("device_code") or "")]
+
+    def _on_candidates(self, rows):
+        self._candidates = rows
+        combo = self._device_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for r in rows:
+            combo.addItem(
+                f"{r.get('device_code', '')} · {r.get('club_name', '')} · "
+                f"{r.get('table_id', '')}", r.get("device_code", ""))
+        combo.blockSignals(False)
+        if rows:
+            combo.setCurrentIndex(0)
+            self._load_trend(str(rows[0].get("device_code") or ""))
+        else:
+            self._chart.set_data([])
+            self._lbl_trend_title.setText("未匹配到设备")
+
+    def _on_device_chosen(self, _=None):
+        code = self._device_combo.currentData()
+        if code:
+            self._load_trend(str(code))
+
+    def _load_trend(self, device_code):
+        if not device_code:
+            return
+        self._lbl_trend_title.setText(f"{device_code} · 近 30 天趋势")
+        self._run_query("_trend_worker", table_db.query_kd_trend,
+                        (device_code, 30), self._chart.set_data)
+
+    # ---------- TOP N 排行 ----------
+
+    def _load_ranking(self):
+        if self._active_source() != "kd":
+            return
+        by = self._RANK_FIELD_MAP.get(self._sort_combo.currentText(), "error_rate")
+        try:
+            top = int(self._top_combo.currentText())
+        except ValueError:
+            top = 10
+        self._run_query("_rank_worker", table_db.query_kd_ranking,
+                        ("", top, by), self._on_ranking)
+
+    def _on_ranking(self, result):
+        rows = result.get("rows", [])
+        self._lbl_rank_date.setText(f"数据日期 {result.get('date') or '无'}")
+        t = self._rank_table
+        t.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            status_text = _DEVICE_STATUS_MAP.get(
+                str(r.get("status") or "").strip(), ("未知", None))[0]
+            vals = [
+                str(i + 1),
+                str(r.get("club_name") or ""),
+                str(r.get("table_id") or ""),
+                status_text,
+                f"{float(r.get('error_rate') or 0):.1f}%",
+                f"{float(r.get('operation_rate') or 0):.1f}%",
+                str(int(float(r.get("accuracy_count") or 0))),
+                str(int(float(r.get("already_count") or 0))),
+            ]
+            for col, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 4 and float(r.get("error_rate") or 0) > 0:
+                    item.setForeground(_HF_COLOR)  # 非零错误率标红
+                if col == 3:
+                    color = _DEVICE_STATUS_MAP.get(
+                        str(r.get("status") or "").strip(), (None, None))[1]
+                    if color is not None:
+                        item.setForeground(color)
+                t.setItem(i, col, item)
+            # 设备码存 itemData 供双击跳转
+            first = t.item(i, 0)
+            if first is not None:
+                first.setData(Qt.ItemDataRole.UserRole,
+                              str(r.get("device_code") or ""))
+
+    def _on_rank_double_clicked(self, row, _col):
+        item = self._rank_table.item(row, 0)
+        code = item.data(Qt.ItemDataRole.UserRole) if item else ""
+        if code:
+            self._jump_to_device({"device_code": code})
+
+
 # ==================== 主窗口 ====================
 
 class ManagementPanelWindow(FluentWindow):
@@ -2429,12 +3686,15 @@ class ManagementPanelWindow(FluentWindow):
         self.table_page.setObjectName("tablePage")
         self.device_page = DevicePage(self)
         self.device_page.setObjectName("devicePage")
+        self.trend_page = TrendPage(self)
+        self.trend_page.setObjectName("trendPage")
         self.settings_page = AdminSettingsPage(self)
         self.settings_page.setObjectName("adminSettingsPage")
 
         # 注册导航
         self.addSubInterface(self.table_page, FluentIcon.LIBRARY, "球桌管理")
         self.addSubInterface(self.device_page, FluentIcon.IOT, "设备状态")
+        self.addSubInterface(self.trend_page, FluentIcon.PIE_SINGLE, "健康趋势")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "管理设置")
 
         # 导航亚克力与「性能选项」联动：关闭 perf_acrylic 后不再强制开启，
@@ -2442,8 +3702,9 @@ class ManagementPanelWindow(FluentWindow):
         self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
         self.navigationInterface.setCurrentItem(self.table_page.objectName())
 
-        # 远程桥接：设备状态页右键菜单按 snk 建立 frp xtcp 隧道并打开会话
-        self._remote_bridge = FrpRemoteBridge(self)
+        # 远程会话中心：设备状态页右键菜单按 snk 建立 frp xtcp 隧道并打开会话
+        # （全局单例，与主窗口远程面板/球桌面板共享同一 frpc 进程）
+        self._remote_bridge = get_session_manager()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2467,13 +3728,21 @@ class ManagementPanelWindow(FluentWindow):
             pass
 
     def closeEvent(self, event):
-        """关闭窗口时清理所有 Worker 与远程桥接（frpc 进程/会话窗口）"""
-        bridge = getattr(self, "_remote_bridge", None)
-        if bridge is not None:
-            bridge.shutdown()
-        for page in (self.table_page, self.device_page, self.settings_page):
-            for attr in ("_worker", "_migrate_worker", "_refresh_worker", "_test_worker",
-                         "_upload_worker", "_query_worker", "_save_worker", "_meta_worker"):
+        """关闭窗口时清理所有 Worker
+
+        注意：远程会话中心为全局单例，frpc/隧道可能被其他入口使用中，
+        面板关闭不 shutdown，统一由主窗口 closeEvent 关闭。
+        """
+        # 停止补漏队列（防止关闭后继续拉取）
+        getattr(self.device_page, "_backfill_queue", []).clear()
+        for page in (self.table_page, self.device_page, self.trend_page,
+                     self.settings_page):
+            for attr in ("_worker", "_migrate_worker", "_refresh_worker",
+                         "_test_worker", "_upload_worker", "_query_worker",
+                         "_save_worker", "_meta_worker", "_export_worker",
+                         "_time_worker", "_backfill_worker", "_backfill_save_worker",
+                         "_alerts_worker", "_cand_worker", "_trend_worker",
+                         "_rank_worker"):
                 worker = getattr(page, attr, None)
                 if worker and worker.isRunning():
                     try:

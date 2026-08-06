@@ -9,6 +9,7 @@
 """
 
 import math
+import sqlite3
 from datetime import datetime
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -19,11 +20,11 @@ from PySide6.QtGui import QColor, QShortcut, QKeySequence, QPalette
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
-    MenuAnimationType)
+    MenuAnimationType, MessageBox)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.perf import is_animation_enabled
-from core.frp_remote import FrpRemoteBridge
+from core.frp_remote import get_session_manager
 from workers.table_worker import TableFetchWorker
 from database import table_db
 
@@ -170,7 +171,8 @@ class TablePanelWindow(QDialog):
         self._worker: TableFetchWorker = None
         self._hidden_cols: set = {2}   # 默认隐藏「在线状态」列
         self._rows: list = []          # 当前页行数据（右键远程连接需读取 snk_code）
-        self._remote_bridge: FrpRemoteBridge = None  # 惰性创建（首次点远程菜单时）
+        self._show_test: bool = False    # 是否显示「公司测试」数据（默认不显示）
+        self._show_manual: bool = False  # 是否显示手动版本设备（name 含 @s，默认不显示）
 
         self._init_ui()
         self._load_local()
@@ -290,6 +292,21 @@ class TablePanelWindow(QDialog):
             cb.setFixedSize(max(cb.sizeHint().width() + 30, 120), 36)
             cb.checkStateChanged.connect(lambda state, idx=i: self._toggle_col(idx, state == Qt.CheckState.Checked))
             menu.addWidget(cb, selectable=False)
+        # 「公司测试」数据开关：默认不勾选（不显示），勾选后才展示
+        menu.addSeparator()
+        self._test_cb = CheckBox("公司测试", self)
+        self._test_cb.setChecked(self._show_test)
+        self._test_cb.setFixedSize(max(self._test_cb.sizeHint().width() + 30, 120), 36)
+        self._test_cb.setToolTip("显示内部测试球房数据")
+        self._test_cb.checkStateChanged.connect(self._toggle_test_data)
+        menu.addWidget(self._test_cb, selectable=False)
+        # 「手动版本」设备开关：默认不勾选（不显示 name 含 @s 的设备），勾选后才展示
+        self._manual_cb = CheckBox("手动版本", self)
+        self._manual_cb.setChecked(self._show_manual)
+        self._manual_cb.setFixedSize(max(self._manual_cb.sizeHint().width() + 30, 120), 36)
+        self._manual_cb.setToolTip("显示手动版本设备（球桌号含 @s）")
+        self._manual_cb.checkStateChanged.connect(self._toggle_manual_data)
+        menu.addWidget(self._manual_cb, selectable=False)
         self._col_btn.setMenu(menu)
 
     # ==================== 本地查询 ====================
@@ -297,7 +314,9 @@ class TablePanelWindow(QDialog):
     def _load_local(self):
         """从本地 SQLite 查询当前页并展示"""
         keyword = self._search_edit.text().strip()
-        total, rows = table_db.query_page(self._page_no, self._page_size, keyword)
+        total, rows = table_db.query_page(
+            self._page_no, self._page_size, keyword,
+            include_test=self._show_test, include_manual=self._show_manual)
         self._total = total
         self._populate(rows)
         self._update_pager(keyword)
@@ -401,6 +420,18 @@ class TablePanelWindow(QDialog):
             self._hidden_cols.add(col_idx)
         self._table.setColumnHidden(col_idx, not visible)
 
+    def _toggle_test_data(self, state):
+        """「公司测试」数据显隐切换：回到第一页重新查询"""
+        self._show_test = (state == Qt.CheckState.Checked)
+        self._page_no = 1
+        self._load_local()
+
+    def _toggle_manual_data(self, state):
+        """「手动版本」设备显隐切换：回到第一页重新查询"""
+        self._show_manual = (state == Qt.CheckState.Checked)
+        self._page_no = 1
+        self._load_local()
+
     # ==================== 复制功能 ====================
 
     def _fit_row_heights(self):
@@ -454,15 +485,58 @@ class TablePanelWindow(QDialog):
                     lambda _=False, k=kind: self._open_remote_session(k, snk, table_id))
             menu.addAction(act)
 
-    def _open_remote_session(self, kind, snk, table_id):
-        """委托面板自持的 FrpRemoteBridge 建立 xtcp 隧道并打开会话
+    def _check_device_offline(self, table_name):
+        """发起远程连接前的设备状态前置检查
 
-        桥接惰性创建：未点过远程菜单时不启动 frpc；生命周期挂在本面板上，
-        面板关闭时 closeEvent 统一 shutdown（复用运维面板同款桥接逻辑）。
+        关联方式：kd_status.table_id ↔ 球桌管理 name（与设备状态页一致）；
+        精确匹配不到时降级按球桌号模糊匹配 device_code；仍匹配不到则
+        视为无法判断，跳过检查照常连接。单条 SQL 取最新日期分区的一条
+        记录，任何异常静默跳过不阻塞连接。
+
+        Returns:
+            True 允许继续连接；False 用户确认取消（仅设备离线时弹框询问）
         """
-        if self._remote_bridge is None:
-            self._remote_bridge = FrpRemoteBridge(self)
-        self._remote_bridge.open_session(kind, snk, table_id)
+        name = str(table_name or "").strip()
+        if not name:
+            return True
+        try:
+            conn = sqlite3.connect(table_db.DB_PATH, timeout=3)
+            try:
+                # 最新分区一条：file_path 为日期分区（如 2026/08/02），id 递增
+                row = conn.execute(
+                    "SELECT status, file_path FROM kd_status WHERE TRIM(table_id) = ? "
+                    "ORDER BY file_path DESC, id DESC LIMIT 1", (name,)).fetchone()
+                if row is None:  # 降级：按球桌号模糊匹配 device_code
+                    row = conn.execute(
+                        "SELECT status, file_path FROM kd_status WHERE device_code LIKE ? "
+                        "ORDER BY file_path DESC, id DESC LIMIT 1",
+                        (f"%{name}%",)).fetchone()
+            finally:
+                conn.close()
+            if row is None or str(row[0]).strip() != "0":
+                return True  # 未匹配到记录或非离线状态，直接放行
+            last_report = str(row[1] or "").strip() or "未知"
+            dlg = MessageBox(
+                "设备离线",
+                f"球桌「{name}」对应设备已下线（最后上报：{last_report}）。\n仍要尝试连接吗？",
+                self)
+            dlg.yesButton.setText("仍要连接")
+            dlg.cancelButton.setText("取消")
+            return dlg.exec()
+        except Exception:
+            return True  # 查询异常静默跳过，照常连接
+
+    def _open_remote_session(self, kind, snk, table_id):
+        """委托统一远程会话中心建立 xtcp 隧道并打开会话
+
+        会话中心为全局单例（共享单一 frpc 进程/TOML），同一 snk 已建隧道
+        时直接复用；面板关闭不再 shutdown，frpc 由主窗口 closeEvent 统一关闭。
+        发起连接前先做设备离线前置检查，用户取消则不建立隧道。
+        """
+        if not self._check_device_offline(table_id):
+            return
+        get_session_manager().open_session(kind, snk, table_id,
+                                           notifier=self, source="球桌面板")
 
     def _copy_selected(self):
         """复制选中文本：编辑态优先复制光标选中部分，否则复制选中单元格"""
@@ -494,11 +568,7 @@ class TablePanelWindow(QDialog):
     # ==================== 资源清理 ====================
 
     def closeEvent(self, event):
-        # 远程桥接清理（frpc 进程/会话窗口）需在 worker 之前处理
-        bridge = self._remote_bridge
-        if bridge is not None:
-            self._remote_bridge = None
-            bridge.shutdown()
+        # 远程会话中心为全局单例，面板关闭不 shutdown（避免误杀其他入口的隧道）
         if self._worker and self._worker.isRunning():
             self._worker.result_ready.disconnect()
             self._worker.error.disconnect()

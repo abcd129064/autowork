@@ -14,18 +14,19 @@ import requests
 from PySide6.QtCore import QThread, Signal
 
 from core.app_paths import get_app_dir
+from core.secrets import decrypt_settings
 
 # ==================== 配置读取 ====================
 
 def _load_api_credentials():
-    """从 settings.json 读取 API 账号密码配置"""
+    """从 settings.json 读取 API 账号密码配置（敏感字段透明解密）"""
     settings_path = os.path.join(get_app_dir(), "settings.json")
     try:
         with open(settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         settings = {}
-    return settings.get("api_credentials", {})
+    return decrypt_settings(settings).get("api_credentials", {})
 
 
 def get_active_api_source() -> str:
@@ -92,19 +93,19 @@ class TableFetchWorker(QThread):
 
     def run(self):
         try:
-            # 首页：拿到 total 与首批数据
+            # 首页：拿到 total 与首批数据（接口返回字段名为 count）
             inner = self._fetch_page(1)
             rows = list(inner.get("lists") or [])
-            total = inner.get("total")
+            total = inner.get("count") or inner.get("total")
             # total 可能为字符串，统一转 int；无法解析时按已拉取数量处理
             try:
                 total = int(total)
             except (TypeError, ValueError):
                 total = len(rows)
 
-            # 循环翻页直至拉全
+            # 循环翻页直至拉全（以「已请求页数 × 每页条数」是否覆盖 total 为准）
             page = 1
-            while len(rows) < total and page < self._MAX_PAGES:
+            while page * self._PAGE_SIZE < total and page < self._MAX_PAGES:
                 page += 1
                 inner = self._fetch_page(page)
                 batch = inner.get("lists") or []

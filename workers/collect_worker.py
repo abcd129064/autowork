@@ -39,6 +39,95 @@ def date_from_base(base: str) -> str:
     return ""
 
 
+# ==================== 设备目录解析（C4：映射表持久化 + 模糊匹配） ====================
+
+def norm_device_suffix(name: str) -> str:
+    """后缀归一化：只留数字并去前导零（S8/08/TV2 → 8/8/2）"""
+    digits = "".join(ch for ch in str(name or "") if ch.isdigit())
+    return digits.lstrip("0")
+
+
+def fuzzy_match_device_dir(videos_dir: str, candidates: list) -> tuple:
+    """模糊搜索本地设备目录（命名与球桌号不一致时的兜底）
+
+    规则：店号前缀（最后一个 '-' 之前）完全相同，后缀归一化后的
+    数字相等；仅唯一命中才采用，多候选不猜。返回 (目录名, 匹配说明)。
+    """
+    try:
+        entries = os.listdir(videos_dir)
+    except OSError:
+        return "", ""
+    for cand in candidates:
+        cand = str(cand or "").strip()
+        if "-" not in cand:
+            continue
+        prefix, suffix = cand.rsplit("-", 1)
+        target = norm_device_suffix(suffix)
+        if not target:
+            continue
+        hits = []
+        for name in entries:
+            if "-" not in name:
+                continue
+            if not os.path.isdir(os.path.join(videos_dir, name)):
+                continue
+            p, s = name.rsplit("-", 1)
+            if p == prefix and norm_device_suffix(s) == target:
+                hits.append(name)
+        if len(hits) == 1:
+            return hits[0], f"{cand} → 匹配本地目录 {hits[0]}"
+    return "", ""
+
+
+def resolve_device_dir(videos_dir: str, candidates: list) -> tuple:
+    """收集入口的设备目录三级解析（C4）
+
+    查找顺序：
+    ① device_mapping 表命中且目录仍存在 → 直接用（不再重新猜测）；
+    ② table_id/device_code 精确同名目录 → 直接用（同名无需映射）；
+    ③ 模糊匹配唯一命中 → 落库（source='auto'）后使用；
+    均失败返回空（调用方走现有失败流程；自愈向导 Task #37 后续在
+    此基础上人工选择落库，预留 source='manual'）。
+
+    本函数在 QThread/主线程均可调用（table_db 单连接已设
+    check_same_thread=False）；映射表读写异常静默降级为纯模糊匹配，
+    不影响收集主流程。
+
+    Returns:
+        (device_id, note, source): 目录名 / 匹配说明（命中映射表时标注
+        来源）/ 命中方式 ('mapping'|'exact'|'fuzzy'，失败为空串)
+    """
+    cands = list(dict.fromkeys(str(c or "").strip() for c in candidates if str(c or "").strip()))
+    if not videos_dir or not cands:
+        return "", "", ""
+    # ① 映射表：任一候选命中且目录仍存在即采用
+    try:
+        from database import table_db
+        for cand in cands:
+            info = table_db.get_device_mapping(cand)
+            local_dir = str(info.get("local_dir") or "").strip()
+            if local_dir and os.path.isdir(os.path.join(videos_dir, local_dir)):
+                src = str(info.get("source") or "auto")
+                return local_dir, f"{cand} → 已存映射 {local_dir}（{src}）", "mapping"
+    except Exception:
+        pass
+    # ② 精确同名目录
+    for cand in cands:
+        if os.path.isdir(os.path.join(videos_dir, cand)):
+            return cand, "", "exact"
+    # ③ 模糊匹配唯一命中 → 自动落库（失败静默，不阻断收集）
+    device_id, note = fuzzy_match_device_dir(videos_dir, cands)
+    if device_id:
+        try:
+            from database import table_db
+            for cand in cands:
+                table_db.set_device_mapping(cand, device_id, source="auto")
+        except Exception:
+            pass
+        return device_id, note, "fuzzy"
+    return "", "", ""
+
+
 class FileCopyWorker(QThread):
     """异步文件拷贝 Worker（shutil.copy2 的线程替代）
 
