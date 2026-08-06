@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
     QWidget, QTreeWidgetItem,
     QHeaderView, QSplitter,
     QTableWidgetItem, QAbstractItemView, QApplication, QPushButton)
-from PySide6.QtCore import QTimer, Qt, QEvent, QThread, Signal
+from PySide6.QtCore import QObject, QTimer, Qt, QEvent, QThread, Signal
 from PySide6.QtGui import QShortcut, QKeySequence, QFont
 from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
     SearchLineEdit, setFont, TreeWidget, TableWidget, ProgressBar,
@@ -26,6 +26,52 @@ from workers.network_workers import (
 
 # 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
 _pending_workers: set = set()
+
+
+class _GlobalSignals(QObject):
+    # (设备目录名, 下载文件绝对路径, 本批文件数)
+    file_downloaded = Signal(str, str, int)
+
+
+GLOBAL_SIGNALS = _GlobalSignals()
+
+
+def _videos_top_dir(local_path):
+    """返回下载落点在 videos 目录下的第一级子目录名；不在 videos 下返回空字符串"""
+    try:
+        from core.app_paths import get_app_dir
+        videos_dir = os.path.join(get_app_dir(), 'videos')
+        norm = os.path.normpath(local_path)
+        vbase = os.path.normpath(videos_dir)
+        if os.path.commonpath([norm, vbase]) != vbase:
+            return ''
+        rel = os.path.relpath(norm, vbase)
+        parts = [p for p in rel.split(os.sep) if p]
+        return parts[0] if len(parts) > 1 else ''
+    except Exception:
+        return ''
+
+
+def _cleanup_sftp_temp():
+    """清理 _sftp_temp 临时目录中 mtime 超过 7 天的文件，异常静默"""
+    try:
+        from core.app_paths import get_app_dir
+        temp_dir = os.path.join(get_app_dir(), '_sftp_temp')
+        if not os.path.isdir(temp_dir):
+            return
+        cutoff = time.time() - 7 * 24 * 3600
+        for name in os.listdir(temp_dir):
+            p = os.path.join(temp_dir, name)
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    if os.path.isdir(p):
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _popup_ani_type():
@@ -236,6 +282,7 @@ class SFTPPanel(QWidget):
         self._closing = False
         self._health_worker = None
         self._init_ui()
+        _cleanup_sftp_temp()  # 清理 _sftp_temp 中超过 7 天的旧临时文件
         QTimer.singleShot(100, self._connect_and_list)
 
     @property
@@ -286,6 +333,7 @@ class SFTPPanel(QWidget):
         left_lay.addLayout(left_bar)
     
         self._local_tree = TreeWidget()
+        self._local_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._local_tree.setHeaderLabels(['文件名', '大小', '类型', '修改时间'])
         self._local_tree.setColumnCount(4)
         lh = self._local_tree.header()
@@ -334,6 +382,7 @@ class SFTPPanel(QWidget):
         right_lay.addLayout(right_bar)
     
         self._tree = TreeWidget()
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.setHeaderLabels(['文件名', '大小', '类型', '权限', '修改时间'])
         self._tree.setColumnCount(5)
         rh = self._tree.header()
@@ -908,6 +957,15 @@ class SFTPPanel(QWidget):
     def _upload_file(self, data=None):
         if not isinstance(data, dict):
             data = None
+        # 无参点击按钮：对所有选中项批量上传（无选中则回退 currentItem 单选流程）
+        if data is None:
+            items = self._local_tree.selectedItems()
+            if len(items) > 1 or (items and items[0] is not self._local_tree.currentItem()):
+                for it in items:
+                    d = it.data(0, Qt.ItemDataRole.UserRole)
+                    if d:
+                        self._upload_file(d)
+                return
         if data is None:
             item = self._local_tree.currentItem()
             if not item:
@@ -924,7 +982,8 @@ class SFTPPanel(QWidget):
         file_size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         self._log(f'[SFTP] 上传: {local_path} -> {remote_path}')
         worker = SFTPOperationWorker(self._conn_params, 'upload', local_path, remote_path, file_size=file_size)
-        self._start_transfer_op(worker, data['name'], '上传', file_size)
+        self._start_transfer_op(worker, data['name'], '上传', file_size,
+                                op='upload', local_path=local_path, remote_path=remote_path)
 
     def _upload_dir(self, data):
         local_dir = data['path']
@@ -933,11 +992,21 @@ class SFTPPanel(QWidget):
         self._log(f'[SFTP] 上传目录: {local_dir} -> {remote_dir}')
         worker = SFTPDirTransferWorker(self._conn_params, 'upload_dir',
                                        local_dir=local_dir, remote_dir=remote_dir, dir_name=dir_name)
-        self._start_transfer_op(worker, f'[目录] {dir_name}', '上传', 0)
+        self._start_transfer_op(worker, f'[目录] {dir_name}', '上传', 0,
+                                op='upload_dir', local_path=local_dir, remote_path=remote_dir)
 
     def _download_file(self, entry=None):
         if not isinstance(entry, dict):
             entry = None
+        # 无参点击按钮：对所有选中项批量下载（无选中则回退 currentItem 单选流程）
+        if entry is None:
+            items = self._tree.selectedItems()
+            if len(items) > 1 or (items and items[0] is not self._tree.currentItem()):
+                for it in items:
+                    e = it.data(0, Qt.ItemDataRole.UserRole)
+                    if e:
+                        self._download_file(e)
+                return
         if entry is None:
             item = self._tree.currentItem()
             if not item:
@@ -954,7 +1023,8 @@ class SFTPPanel(QWidget):
         file_size = entry.get('size', 0)
         self._log(f'[SFTP] 下载: {remote_path} -> {local_path}')
         worker = SFTPOperationWorker(self._conn_params, 'download', local_path, remote_path, file_size=file_size)
-        self._start_transfer_op(worker, entry['name'], '下载', file_size)
+        self._start_transfer_op(worker, entry['name'], '下载', file_size,
+                                op='download', local_path=local_path, remote_path=remote_path)
 
     def _download_dir(self, entry):
         dir_name = entry['name']
@@ -963,9 +1033,11 @@ class SFTPPanel(QWidget):
         self._log(f'[SFTP] 下载目录: {remote_dir} -> {local_dir}')
         worker = SFTPDirTransferWorker(self._conn_params, 'download_dir',
                                        local_dir=local_dir, remote_dir=remote_dir, dir_name=dir_name)
-        self._start_transfer_op(worker, f'[目录] {dir_name}', '下载', 0)
+        self._start_transfer_op(worker, f'[目录] {dir_name}', '下载', 0,
+                                op='download_dir', local_path=local_dir, remote_path=remote_dir)
 
-    def _start_transfer_op(self, worker, filename, op_label, file_size):
+    def _start_transfer_op(self, worker, filename, op_label, file_size,
+                           op=None, local_path='', remote_path=''):
         tid = self._next_transfer_id
         self._next_transfer_id += 1
         row = self._transfer_table.rowCount()
@@ -979,7 +1051,9 @@ class SFTPPanel(QWidget):
         self._transfer_table.setItem(row, 3, QTableWidgetItem('传输中'))
         now = time.time()
         info = {'worker': worker, 'row': row, 'start_time': now,
-                'last_bytes': 0, 'last_time': now, 'speed': 0.0}
+                'last_bytes': 0, 'last_time': now, 'speed': 0.0,
+                # 重试所需参数快照：(conn_params, op, local_path, remote_path)
+                'params': (self._conn_params, op, local_path, remote_path)}
         self._transfer_workers[tid] = info
         worker.progress.connect(lambda t, tot, _tid=tid: self._on_transfer_progress(_tid, t, tot))
         worker.success.connect(lambda msg, _tid=tid: self._on_transfer_success(_tid, msg))
@@ -1016,7 +1090,15 @@ class SFTPPanel(QWidget):
             status_item = self._transfer_table.item(row, 3)
             if status_item:
                 status_item.setText('完成')
-        self._safe_delete_transfer_worker(tid)
+            # A1：下载成功后发射全局信号，联动主窗口
+            params = info.get('params')
+            if params and params[1] == 'download':
+                local_path = params[2]
+                if local_path:
+                    GLOBAL_SIGNALS.file_downloaded.emit(
+                        _videos_top_dir(local_path), local_path, 1)
+        # 注意：不在此处删除 info，保留 params 供"打开所在文件夹"使用；
+        # worker 线程已结束，行被删除/清空/关闭时统一释放
         self._lbl_status.setText(msg)
         self._log(f'[SFTP] {msg}')
         self._list_remote(self._remote_path)
@@ -1029,7 +1111,7 @@ class SFTPPanel(QWidget):
             status_item = self._transfer_table.item(row, 3)
             if status_item:
                 status_item.setText(f'失败: {error}')
-        self._safe_delete_transfer_worker(tid)
+        # 保留 info（含 params）供右键"重试"使用，行删除时统一释放 worker
         self._lbl_status.setText(f'操作失败: {error}')
         self._log(f'[SFTP] 操作失败: {error}')
 
@@ -1058,6 +1140,16 @@ class SFTPPanel(QWidget):
         self._act_t_delete_all = Action(FluentIcon.DELETE, '全部删除', self)
         self._act_t_delete_all.triggered.connect(self._transfer_delete_all)
         menu.addAction(self._act_t_delete_all)
+        menu.addSeparator()
+        self._act_t_retry = Action(FluentIcon.SYNC, '重试', self)
+        self._act_t_retry.triggered.connect(lambda: self._transfer_retry_row(self._ctx_transfer_row))
+        menu.addAction(self._act_t_retry)
+        self._act_t_open_folder = Action(FluentIcon.FOLDER, '打开所在文件夹', self)
+        self._act_t_open_folder.triggered.connect(lambda: self._transfer_open_folder(self._ctx_transfer_row))
+        menu.addAction(self._act_t_open_folder)
+        self._act_t_clear_done = Action(FluentIcon.BROOM, '清除已完成', self)
+        self._act_t_clear_done.triggered.connect(self._transfer_clear_completed)
+        menu.addAction(self._act_t_clear_done)
         self._ctx_transfer_menu = menu
 
         # ---- 本地面板菜单（item 相关 + 新建子菜单）
@@ -1157,6 +1249,9 @@ class SFTPPanel(QWidget):
         self._act_t_resume_all.setEnabled(has_tasks)
         self._act_t_delete.setEnabled(has_selection)
         self._act_t_delete_all.setEnabled(has_tasks)
+        self._act_t_retry.setEnabled(has_selection and selected_status.startswith('失败'))
+        self._act_t_open_folder.setEnabled(has_selection and selected_status == '完成')
+        self._act_t_clear_done.setEnabled(has_tasks)
         self._ctx_transfer_menu.exec(
             self._transfer_table.viewport().mapToGlobal(pos),
             aniType=_popup_ani_type())
@@ -1260,6 +1355,94 @@ class SFTPPanel(QWidget):
                 self._safe_delete_transfer_worker(tid)
         self._transfer_table.setRowCount(0)
         self._log('[SFTP] 已清空传输队列')
+
+    def _transfer_retry_row(self, row):
+        """失败任务一键重试：从 info['params'] 取参数重建 worker 发起传输"""
+        tid = self._find_tid_by_row(row)
+        if tid is None:
+            return
+        info = self._transfer_workers.get(tid)
+        params = info.get('params') if info else None
+        if not params or not params[1]:
+            self._log('[SFTP] 该任务缺少重试参数，无法重试')
+            return
+        conn_params, op, local_path, remote_path = params
+        if op == 'upload_dir':
+            worker = SFTPDirTransferWorker(
+                conn_params, op, local_dir=local_path, remote_dir=remote_path,
+                dir_name=os.path.basename(local_path.rstrip('/\\')))
+        elif op == 'download_dir':
+            worker = SFTPDirTransferWorker(
+                conn_params, op, local_dir=local_path, remote_dir=remote_path,
+                dir_name=os.path.basename(remote_path.rstrip('/')))
+        else:
+            file_size = os.path.getsize(local_path) if (op == 'upload' and local_path and os.path.isfile(local_path)) else 0
+            worker = SFTPOperationWorker(conn_params, op, local_path, remote_path, file_size=file_size)
+        # 断开旧 worker 信号（防止失败行收到旧信号回写），换新 worker
+        old_worker = info['worker']
+        try:
+            old_worker.progress.disconnect()
+            old_worker.success.disconnect()
+            old_worker.error.disconnect()
+        except Exception:
+            pass
+        info['worker'] = worker
+        info['last_bytes'] = 0
+        info['last_time'] = time.time()
+        info['speed'] = 0.0
+        pb = self._transfer_table.cellWidget(row, 1)
+        if pb:
+            pb.setValue(0)
+        speed_item = self._transfer_table.item(row, 2)
+        if speed_item:
+            speed_item.setText('0 B/s')
+        status_item = self._transfer_table.item(row, 3)
+        if status_item:
+            status_item.setText('传输中')
+        worker.progress.connect(lambda t, tot, _tid=tid: self._on_transfer_progress(_tid, t, tot))
+        worker.success.connect(lambda msg, _tid=tid: self._on_transfer_success(_tid, msg))
+        worker.error.connect(lambda err, _tid=tid: self._on_transfer_error(_tid, err))
+        worker.start()
+        name_item = self._transfer_table.item(row, 0)
+        name = name_item.text() if name_item else f'任务{tid}'
+        self._log(f'[SFTP] 重试传输: {name}')
+
+    def _transfer_open_folder(self, row):
+        """完成行：在资源管理器中定位本地文件（下载用目标路径，上传用源路径，均为 local_path）"""
+        tid = self._find_tid_by_row(row)
+        if tid is None:
+            return
+        info = self._transfer_workers.get(tid)
+        params = info.get('params') if info else None
+        if not params:
+            return
+        local_path = params[2]
+        if not local_path or not os.path.exists(local_path):
+            self._log('[SFTP] 本地文件不存在，无法定位')
+            return
+        try:
+            subprocess.Popen(['explorer', '/select,', os.path.normpath(local_path)])
+        except Exception as e:
+            self._log(f'[SFTP] 打开所在文件夹失败: {e}')
+
+    def _transfer_clear_completed(self):
+        """清除所有状态为"完成"的行（进行中/暂停/失败的任务不动）"""
+        table = self._transfer_table
+        done_rows = []
+        for row in range(table.rowCount()):
+            status_item = table.item(row, 3)
+            if status_item and status_item.text() == '完成':
+                done_rows.append(row)
+        for row in sorted(done_rows, reverse=True):
+            tid = self._find_tid_by_row(row)
+            if tid is not None:
+                self._safe_delete_transfer_worker(tid)
+            table.removeRow(row)
+            for t, inf in self._transfer_workers.items():
+                if inf['row'] > row:
+                    inf['row'] -= 1
+        if done_rows:
+            self._log(f'[SFTP] 已清除 {len(done_rows)} 个完成的传输记录')
 
     # ------------------------------------------------------------------ 删除 / 新建目录
     def _run_quick_op(self, op, remote_path, log_msg, local_path=''):
@@ -1393,6 +1576,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 打开失败: {e}')
 
     def _ctx_remote_open(self, entry):
+        _cleanup_sftp_temp()  # 打开前清理超过 7 天的旧临时文件
         temp_dir = self._get_temp_dir()
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         if entry['is_dir']:
@@ -1401,14 +1585,16 @@ class SFTPPanel(QWidget):
             worker = SFTPDirTransferWorker(self._conn_params, 'download_dir',
                                            local_dir=local_dir, remote_dir=remote_path, dir_name=entry['name'])
             worker.success.connect(lambda msg, p=local_dir: self._open_after_download(p))
-            self._start_transfer_op(worker, f'[打开] {entry["name"]}', '下载', 0)
+            self._start_transfer_op(worker, f'[打开] {entry["name"]}', '下载', 0,
+                                    op='download_dir', local_path=local_dir, remote_path=remote_path)
         else:
             local_path = os.path.join(temp_dir, entry['name'])
             file_size = entry.get('size', 0)
             self._log(f'[SFTP] 下载并打开: {remote_path} -> {local_path}')
             worker = SFTPOperationWorker(self._conn_params, 'download', local_path, remote_path, file_size=file_size)
             worker.success.connect(lambda msg, p=local_path: self._open_after_download(p))
-            self._start_transfer_op(worker, f'[打开] {entry["name"]}', '下载', file_size)
+            self._start_transfer_op(worker, f'[打开] {entry["name"]}', '下载', file_size,
+                                    op='download', local_path=local_path, remote_path=remote_path)
 
     def _open_after_download(self, path):
         try:

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """SSH/SFTP 连接统一文件日志 + Qt 消息处理器"""
 
+import os
 import threading
 import traceback
 from datetime import datetime
@@ -18,13 +19,13 @@ class ConnLogger:
     - 日志文件：程序目录/logs/autowork_conn.log
     """
     _MAX_BYTES = 2 * 1024 * 1024  # 单文件超过 2MB 时轮转
+    _MAX_ARCHIVES = 3               # 最多保留 3 个归档（.1/.2/.3，.1 最新）
 
     def __init__(self):
         self._lock = threading.Lock()
         self._file = None
         self._path = ''
         try:
-            import os
             log_dir = os.path.join(get_app_dir(), 'logs')
             os.makedirs(log_dir, exist_ok=True)
             self._path = os.path.join(log_dir, 'autowork_conn.log')
@@ -32,16 +33,42 @@ class ConnLogger:
         except Exception:
             self._file = None  # 日志不可用时静默降级，绝不影响主功能
 
+    def _rotate(self):
+        """归档轮转：当前文件改名为 .1，已有归档依次后移（.1→.2→.3），
+        超出 _MAX_ARCHIVES 的最老归档删除。任何一步失败都不抛异常。"""
+        try:
+            self._file.close()
+        except Exception:
+            pass
+        self._file = None
+        try:
+            oldest = f'{self._path}.{self._MAX_ARCHIVES}'
+            if os.path.exists(oldest):
+                os.remove(oldest)
+            for i in range(self._MAX_ARCHIVES - 1, 0, -1):
+                src = f'{self._path}.{i}'
+                if os.path.exists(src):
+                    os.replace(src, f'{self._path}.{i + 1}')
+            if os.path.exists(self._path):
+                os.replace(self._path, f'{self._path}.1')
+        except Exception:
+            pass
+        try:
+            self._file = open(self._path, 'a', encoding='utf-8')
+        except Exception:
+            self._file = None
+
     def _write(self, level, op, msg, host=None, port=None, user=None,
                error_type=None, detail=None):
         if self._file is None:
             return
         with self._lock:
             try:
-                # 简单轮转：文件过大时截断重建
+                # 归档轮转：文件过大时改名归档（历史保留，不再截断销毁）
                 if self._file.tell() > self._MAX_BYTES:
-                    self._file.close()
-                    self._file = open(self._path, 'w', encoding='utf-8')
+                    self._rotate()
+                    if self._file is None:
+                        return
                 ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                 target = ''
                 if host:

@@ -17,7 +17,7 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
     BodyLabel, CaptionLabel, TitleLabel, isDarkTheme, RoundMenu, SwitchButton,
-    PushButton, ScrollArea)
+    PushButton, ScrollArea, TextEdit)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
@@ -26,6 +26,7 @@ from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAni
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from workers.collect_worker import CollectFilesWorker, FileCopyWorker
+from workers.newlog_worker import NewLogWorker
 from main_window.settings_dialog import SettingsDialog
 
 # ==================== 版本信息（帮助→关于） ====================
@@ -210,6 +211,86 @@ class _ShortcutKeyEdit(LineEdit):
         self._sequence = QKeySequence(e.modifiers() | Qt.Key(key))
         self.setText(self._sequence.toString())
         e.accept()
+
+
+class NewLogDialog(MessageBoxBase):
+    """视频/日志批量整理对话框（Task #40）：署名输入 + 运行输出实时展示。
+
+    yesButton 状态机：开始整理 → 运行中（禁用）→ 完成后变「打开结果目录」。
+    运行期间拦截关闭，避免对话框销毁后 Worker 信号打到已删除对象。
+    """
+
+    def __init__(self, parent, default_target):
+        super().__init__(parent)
+        self._running = False
+        self._out_path = ""
+        self.on_start = None  # 由主窗口注入启动回调
+
+        self.titleLabel = BodyLabel("视频/日志批量整理", self)
+        self.viewLayout.addWidget(self.titleLabel)
+
+        row = QHBoxLayout()
+        row.addWidget(BodyLabel("筛选署名:", self))
+        self.target_edit = LineEdit(self)
+        self.target_edit.setText(default_target)
+        self.target_edit.setPlaceholderText("按 Excel 中「署名」列筛选")
+        row.addWidget(self.target_edit, 1)
+        self.viewLayout.addLayout(row)
+
+        self.viewLayout.addWidget(CaptionLabel("运行输出:", self))
+        self.log_view = TextEdit(self)
+        self.log_view.setReadOnly(True)
+        self.log_view.setFixedHeight(300)
+        # 等宽字体便于对齐阅读进度日志
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.Monospace)
+        self.log_view.setFont(mono)
+        self.viewLayout.addWidget(self.log_view)
+
+        # 接管 yesButton：不自动关闭对话框，按状态分发动作
+        self.yesButton.clicked.disconnect()
+        self.yesButton.clicked.connect(self._on_yes_clicked)
+
+    def _on_yes_clicked(self):
+        if self._out_path:
+            try:
+                os.startfile(self._out_path)
+            except Exception:
+                pass
+            return
+        if not self._running and self.on_start:
+            self.on_start()
+
+    def append_line(self, text):
+        self.log_view.append(text)
+
+    def enter_running(self):
+        self._running = True
+        self.target_edit.setEnabled(False)
+        self.yesButton.setEnabled(False)
+        self.yesButton.setText("整理中...")
+        self.cancelButton.setEnabled(False)
+
+    def enter_finished(self, out_path):
+        self._running = False
+        self._out_path = out_path
+        self.yesButton.setEnabled(True)
+        self.yesButton.setText("打开结果目录")
+        self.cancelButton.setEnabled(True)
+
+    def enter_failed(self):
+        self._running = False
+        self.target_edit.setEnabled(True)
+        self.yesButton.setEnabled(True)
+        self.yesButton.setText("开始整理")
+        self.cancelButton.setEnabled(True)
+
+    def closeEvent(self, e):
+        # 运行中禁止关闭：防止 Worker 信号打到已销毁的文本区
+        if self._running:
+            e.ignore()
+            return
+        super().closeEvent(e)
 
 
 if sys.platform == 'win32':
@@ -602,6 +683,14 @@ class UIMixin:
         act_upload_list.setToolTip("查看已收集待上传的文件（视频/日志目录/upload）")
         act_upload_list.triggered.connect(lambda: QTimer.singleShot(0, self._on_show_upload_list))
         func_menu.addAction(act_upload_list)
+        act_conn_diag = Action(FluentIcon.DEVELOPER_TOOLS, "连接诊断", self)
+        act_conn_diag.setToolTip("查看 SSH/SFTP 连接日志与失败记录（含归档）")
+        act_conn_diag.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_conn_diag))
+        func_menu.addAction(act_conn_diag)
+        act_newlog = Action(FluentIcon.VIDEO, "视频/日志批量整理", self)
+        act_newlog.setToolTip("按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog）")
+        act_newlog.triggered.connect(lambda: QTimer.singleShot(0, self._on_newlog_organize))
+        func_menu.addAction(act_newlog)
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
@@ -864,6 +953,77 @@ class UIMixin:
         self._table_panel.show()
         self._table_panel.raise_()
         self._table_panel.activateWindow()
+
+    def _on_open_conn_diag(self):
+        """打开连接诊断面板（非模态独立窗口，单例：已打开则激活）"""
+        from windows.conn_diag_panel import ConnDiagPanel
+        if not hasattr(self, '_conn_diag') or self._conn_diag is None:
+            self._conn_diag = ConnDiagPanel()
+            self._conn_diag.destroyed.connect(
+                lambda: setattr(self, '_conn_diag', None))
+        self._conn_diag.show()
+        self._conn_diag.raise_()
+        self._conn_diag.activateWindow()
+
+    # ==================== 视频/日志批量整理（NewLog 收编，Task #40） ====================
+
+    def _on_newlog_organize(self):
+        """功能菜单「视频/日志批量整理」：弹署名确认对话框，后台 Worker 运行 NewLog"""
+        worker = getattr(self, "_newlog_worker", None)
+        if worker is not None and worker.isRunning():
+            self._show_info_bar("整理任务正在运行中，请等待完成", "warning")
+            return
+
+        # 延迟 import：NewLog 依赖 openpyxl，缺失时给出明确提示而非崩溃
+        try:
+            import NewLog
+            default_name = NewLog.load_target_name_from_settings()
+        except ImportError as e:
+            self._show_info_bar(f"无法加载 NewLog 模块（请确认已安装 openpyxl）: {e}",
+                                "error", duration=5000)
+            return
+
+        dlg = NewLogDialog(self, default_name)
+        dlg.yesButton.setText("开始整理")
+        dlg.cancelButton.setText("关闭")
+        dlg.widget.setMinimumWidth(600)
+
+        def _start():
+            target = dlg.target_edit.text().strip()
+            if not target:
+                self._show_info_bar("请输入筛选署名", "warning")
+                return
+            # 记住本次署名，下次直接作为默认值
+            self._save_settings({"newlog_target_name": target})
+            dlg.enter_running()
+            w = NewLogWorker(target)
+            self._newlog_worker = w
+            w.line.connect(dlg.append_line)
+            w.finished_ok.connect(lambda out, d=dlg: self._on_newlog_finished(d, out))
+            w.error.connect(lambda msg, d=dlg: self._on_newlog_failed(d, msg))
+            w.start()
+            self._append_log(f"[整理] 开始视频/日志批量整理（署名：{target}）")
+
+        dlg.on_start = _start
+        dlg.open()
+
+    def _on_newlog_finished(self, dlg, out_path):
+        """NewLog Worker 成功完成：InfoBar 提示，对话框内可直接打开结果目录"""
+        self._newlog_worker = None
+        dlg.append_line("")
+        dlg.append_line(f"✔ 完成，输出目录: {out_path}")
+        dlg.enter_finished(out_path)
+        self._append_log(f"[整理] 视频/日志批量整理完成: {out_path}")
+        self._show_info_bar(f"整理完成，输出目录: {out_path}", "success", duration=4000)
+
+    def _on_newlog_failed(self, dlg, msg):
+        """NewLog Worker 失败：错误 InfoBar + 对话框恢复可重新发起"""
+        self._newlog_worker = None
+        dlg.append_line("")
+        dlg.append_line(f"✘ {msg}")
+        dlg.enter_failed()
+        self._append_log(f"[整理] 视频/日志批量整理失败: {msg}")
+        self._show_info_bar(msg, "error", duration=4000)
 
     def _on_open_settings(self):
         """统一设置面板：分组展示所有可配置项，支持路径浏览、即时编辑"""

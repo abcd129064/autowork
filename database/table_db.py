@@ -228,6 +228,38 @@ CREATE TABLE IF NOT EXISTS kd_status (
 CREATE INDEX IF NOT EXISTS idx_kd_status_path_id ON kd_status(file_path, id);
 """
 
+# ==================== 精度/问题提交本地台账（C1） ====================
+
+_CREATE_SUBMISSION_SQL = """
+CREATE TABLE IF NOT EXISTS submission_log (
+    id             INTEGER PRIMARY KEY,
+    created_at     TEXT DEFAULT '',
+    device_code    TEXT DEFAULT '',
+    table_id       TEXT DEFAULT '',
+    club_name      TEXT DEFAULT '',
+    category       TEXT DEFAULT '',
+    file_name      TEXT DEFAULT '',
+    file_path_date TEXT DEFAULT '',
+    collect_ok     INTEGER DEFAULT 0,
+    upload_zip     TEXT,
+    upload_ok      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_submission_device_time
+    ON submission_log(device_code, created_at);
+"""
+
+# ==================== 设备映射表（C4：设备码 → 本地 videos 目录） ====================
+
+_CREATE_MAPPING_SQL = """
+CREATE TABLE IF NOT EXISTS device_mapping (
+    device_code TEXT PRIMARY KEY,
+    local_dir   TEXT DEFAULT '',
+    source      TEXT DEFAULT 'auto',
+    created_at  TEXT DEFAULT '',
+    updated_at  TEXT DEFAULT ''
+);
+"""
+
 # 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
 # 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
 # 反序列化大量 JSON 带来的 CPU/内存开销
@@ -246,6 +278,8 @@ def _ensure_initialized(conn: sqlite3.Connection):
         return
     conn.executescript(_CREATE_SQL)
     conn.executescript(_CREATE_STATUS_SQL)
+    conn.executescript(_CREATE_SUBMISSION_SQL)
+    conn.executescript(_CREATE_MAPPING_SQL)
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
     cols = [r[1] for r in conn.execute("PRAGMA table_info(billiard_tables)").fetchall()]
     if cols and "name" not in cols:
@@ -436,6 +470,22 @@ def get_snk_by_name(name: str) -> str:
         "SELECT snk_code FROM billiard_tables WHERE TRIM(name) = ? LIMIT 1",
         (name,)).fetchone()
     return str(row[0] or "") if row else ""
+
+
+def get_tables_online_map() -> dict:
+    """批量取全部球桌 name → onlineStatusName 映射（C4 在线状态交叉校验用）
+
+    键为 TRIM 后的球桌号，与 kd_status.table_id 同款关联方式（参见
+    get_snk_by_name）；一次全量查询，调用方按页内行匹配，无逐行 N+1。
+    """
+    conn = _get_conn()
+    result = {}
+    for name, status in conn.execute(
+            "SELECT name, onlineStatusName FROM billiard_tables"):
+        key = str(name or "").strip()
+        if key:
+            result[key] = str(status or "").strip()
+    return result
 
 
 def get_meta() -> tuple:
@@ -671,6 +721,90 @@ def query_kd_by_device(device_code: str, file_path: str = "") -> dict:
     return row_dict
 
 
+# 文件字段 → 中文分类名（C6 日志↔kd 双向跳转反查展示用，
+# 与 management_panel.FILE_FIELD_CATEGORIES 保持一致）
+_KD_FILE_CATEGORY_CN = {
+    "normal_files": "正常",
+    "except_files": "操作",
+    "untreated_files": "待处理",
+    "operation_files": "使用",
+    "accuracy_files": "精度",
+    "already_files": "问题",
+    "rubbish_files": "废弃",
+    "version_files": "版本",
+}
+
+
+def _clip_base(fname: str) -> str:
+    """截取文件名 'kd' 之前的部分作为基础名
+
+    与 collect_worker.clip_base_name 同规则，独立实现避免数据层反向
+    依赖 workers 包。
+    """
+    fname = str(fname or "").strip()
+    idx = fname.find("kd")
+    if idx > 0:
+        return fname[:idx]
+    return os.path.splitext(fname)[0]
+
+
+def find_kd_file_status(device_code: str, date: str, clip_base: str) -> dict:
+    """按 设备码 + 日期分区 反查文件基础名在 kd_status 中的所属分类（C6）
+
+    kd 照片与本地日志共享时间戳前缀（如 20260724_225031），利用该同源
+    关系由日志文件名反查 kd 记录状态。单分区单设备 + 8 类文件清单
+    JSON 字段 LIKE 预筛（命中分区索引，毫秒级），再在 Python 侧按
+    基础名精确比对，避免子串误匹配。
+
+    Args:
+        device_code: 设备码（kd_status.device_code 精确匹配）
+        date: 日期，兼容 "2026-07-24" / "2026/07/24" / "20260724"
+        clip_base: 文件基础名（时间戳前缀，如 "20260724_225031"）
+
+    Returns:
+        {"category": 字段key, "category_cn": 中文分类, "file_name": 命中的
+        清单文件名, "kd_id": 记录 id}；未找到返回空 dict。
+    """
+    code = str(device_code or "").strip()
+    base = str(clip_base or "").strip()
+    if not code or not base:
+        return {}
+    # 日期归一化为 file_path 格式 yyyy/MM/dd
+    d = str(date or "").strip().replace("/", "-").replace(".", "-")
+    if len(d) == 8 and d.isdigit():
+        d = f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
+    parts = d.split("-")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return {}
+    file_path = "/".join(parts)
+
+    conn = _get_conn()
+    like = f"%{base}%"
+    like_conds = " OR ".join(f"{f} LIKE ?" for f in KD_FILE_FIELDS)
+    cur = conn.execute(
+        "SELECT id, " + ", ".join(KD_FILE_FIELDS) +
+        " FROM kd_status WHERE device_code = ? AND file_path = ?"
+        f" AND ({like_conds}) LIMIT 1",
+        [code, file_path] + [like] * len(KD_FILE_FIELDS))
+    row = cur.fetchone()
+    if row is None:
+        return {}
+    kd_id = row[0]
+    for idx, field in enumerate(KD_FILE_FIELDS):
+        try:
+            names = json.loads(row[1 + idx] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for fname in names:
+            fname = str(fname or "")
+            # 基础名精确相等，或清单文件名以基础名开头（容忍后缀差异）
+            if _clip_base(fname) == base or fname.startswith(base):
+                return {"category": field,
+                        "category_cn": _KD_FILE_CATEGORY_CN.get(field, field),
+                        "file_name": fname, "kd_id": kd_id}
+    return {}
+
+
 def get_kd_row_full(row_id: int) -> dict:
     """按 id 查询 kd_status 完整行（含 8 类文件清单反序列化）
 
@@ -699,6 +833,319 @@ def get_kd_dates() -> list:
     cursor = conn.execute(
         "SELECT DISTINCT file_path FROM kd_status WHERE file_path != '' ORDER BY file_path DESC")
     return [r[0] for r in cursor.fetchall()]
+
+
+def get_kd_synced_dates() -> list:
+    """从 sync_meta 提取曾同步过的 kd 日期（含接口返回空数据的日期）
+
+    save_kd/upsert_kd 落库时都会写 last_sync_kd_YYYYMMDD 元数据，即使该日
+    无设备数据；历史补漏（C2）用它区分「从未拉取」与「拉过但为空」，
+    避免对接口确实无数据的日期反复重试。
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT key FROM sync_meta WHERE key LIKE 'last_sync_kd_%'").fetchall()
+    dates = []
+    for (key,) in rows:
+        s = key.replace("last_sync_kd_", "")
+        if len(s) == 8 and s.isdigit():
+            dates.append(f"{s[:4]}/{s[4:6]}/{s[6:]}")
+    return dates
+
+
+def get_latest_kd_status(table_id: str) -> dict:
+    """查指定球桌最近一次上报的设备状态（轻量单条 SQL，远程前置检查用）
+
+    按 file_path 倒序取该球桌最新分区记录（而非全局最新分区——该设备可能
+    不在当天分区中）。status: 0=下线 1=空闲 2=使用。
+
+    Returns:
+        {"status": "0/1/2", "file_path": "yyyy/MM/dd"}；未找到返回空 dict
+    """
+    tid = str(table_id or "").strip()
+    if not tid:
+        return {}
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT status, file_path FROM kd_status WHERE TRIM(table_id) = ? "
+        "ORDER BY file_path DESC LIMIT 1", (tid,)).fetchone()
+    return {"status": str(row[0] or "").strip(), "file_path": row[1]} if row else {}
+
+
+# ==================== kd 健康度聚合查询（C3 趋势看板） ====================
+
+# 排行榜排序字段白名单（防 SQL 注入；均为数值列，排序统一 CAST AS REAL）
+_KD_RANK_FIELDS = frozenset({
+    "error_rate", "operation_rate", "accuracy_count",
+    "already_count", "except_count", "rubbish_count",
+})
+
+
+def query_kd_trend(device_code: str, days: int = 30) -> list:
+    """单设备近 N 天按日期的指标序列（单条 SQL，趋势折线图数据源）
+
+    Returns:
+        list[dict]: {"file_path", "error_rate", "operation_rate", "accuracy_count"}
+        数值字段已 CAST 为 REAL（"12.5%" → 12.5），按日期升序。
+        数据空洞（未拉取日期）自然缺行，前端按断点绘制即可。
+    """
+    code = str(device_code or "").strip()
+    if not code:
+        return []
+    conn = _get_conn()
+    cutoff = (datetime.now() - timedelta(days=max(1, days) - 1)).strftime("%Y/%m/%d")
+    cur = conn.execute(
+        "SELECT file_path, CAST(error_rate AS REAL) AS error_rate, "
+        "CAST(operation_rate AS REAL) AS operation_rate, "
+        "CAST(accuracy_count AS REAL) AS accuracy_count "
+        "FROM kd_status WHERE device_code = ? AND file_path != '' AND file_path >= ? "
+        "ORDER BY file_path ASC", (code, cutoff))
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def query_kd_ranking(date: str = "", top: int = 10, by: str = "error_rate") -> dict:
+    """指定日期设备指标 TOP N 排行（单条 SQL，白名单校验排序字段）
+
+    Args:
+        date: file_path 日期如 "2026/08/06"；空串取最近一个已存分区
+            （当天未拉取时自动回退，避免空榜）
+        top: 排行条数
+        by: 排序字段，限 _KD_RANK_FIELDS，非法值回退 error_rate，降序
+
+    Returns:
+        {"date": 实际分区日期, "rows": [{club_name, device_code, table_id,
+        status, error_rate, operation_rate, accuracy_count, already_count}]}
+        无数据时 rows 为空列表。
+    """
+    conn = _get_conn()
+    fp = str(date or "").strip()
+    if not fp:
+        row = conn.execute(
+            "SELECT MAX(file_path) FROM kd_status WHERE file_path != ''").fetchone()
+        fp = row[0] if row and row[0] else ""
+    if not fp:
+        return {"date": "", "rows": []}
+    field = by if by in _KD_RANK_FIELDS else "error_rate"
+    cur = conn.execute(
+        "SELECT club_name, device_code, table_id, status, "
+        "CAST(error_rate AS REAL) AS error_rate, "
+        "CAST(operation_rate AS REAL) AS operation_rate, "
+        "CAST(accuracy_count AS REAL) AS accuracy_count, "
+        "CAST(already_count AS REAL) AS already_count "
+        "FROM kd_status WHERE file_path = ? AND device_code != '' "
+        f"ORDER BY CAST({field} AS REAL) DESC LIMIT ?",
+        (fp, max(1, int(top))))
+    cols = [d[0] for d in cur.description]
+    return {"date": fp, "rows": [dict(zip(cols, r)) for r in cur.fetchall()]}
+
+
+def query_kd_alerts(days: int = 7) -> list:
+    """突增预警：最新分区 error_rate > 前 N 日均值×2 的设备（单条 CTE SQL）
+
+    「今日」取最新已存分区（当天未拉取时回退最近一天，不会漏报前一天突增）；
+    历史均值为该分区之前 N 天窗口（不含当日）。历史均值为 0 或无历史
+    记录的设备不报（避免除零噪声与首次出现即误报）。
+
+    Returns:
+        list[dict]: {device_code, club_name, table_id, today_rate, avg_rate,
+        hist_days, file_path}，按突增幅度降序。
+    """
+    conn = _get_conn()
+    days = max(1, int(days))
+    # date() 不认 yyyy/MM/dd，先换连字符运算再换回；days 已 int 化可安全拼接
+    cur = conn.execute(f"""
+    WITH latest(fp) AS (
+        SELECT MAX(file_path) FROM kd_status WHERE file_path != ''
+    ),
+    cutoff(c) AS (
+        SELECT replace(date(replace(fp, '/', '-'), '-{days} days'), '-', '/')
+        FROM latest
+    ),
+    today AS (
+        SELECT device_code, MAX(club_name) AS club_name,
+               MAX(table_id) AS table_id,
+               MAX(CAST(error_rate AS REAL)) AS today_rate
+        FROM kd_status
+        WHERE file_path = (SELECT fp FROM latest) AND device_code != ''
+        GROUP BY device_code
+    ),
+    hist AS (
+        SELECT device_code, AVG(CAST(error_rate AS REAL)) AS avg_rate,
+               COUNT(*) AS hist_days
+        FROM kd_status
+        WHERE file_path >= (SELECT c FROM cutoff)
+          AND file_path < (SELECT fp FROM latest)
+          AND device_code != ''
+        GROUP BY device_code
+    )
+    SELECT t.device_code, t.club_name, t.table_id, t.today_rate,
+           ROUND(h.avg_rate, 2) AS avg_rate, h.hist_days,
+           (SELECT fp FROM latest) AS file_path
+    FROM today t JOIN hist h ON t.device_code = h.device_code
+    WHERE h.avg_rate > 0 AND t.today_rate > h.avg_rate * 2.0
+    ORDER BY t.today_rate - h.avg_rate DESC
+    """)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+# ==================== 精度/问题提交台账操作（C1） ====================
+
+def log_submission(device_code: str = "", table_id: str = "", club_name: str = "",
+                   category: str = "", file_name: str = "", file_path_date: str = "",
+                   collect_ok: bool = False) -> int:
+    """写入一条精度/问题提交台账，返回新记录 id
+
+    Args:
+        category: '精度' / '问题'
+        collect_ok: 收集结果；迁移成功写入时通常未知，先 False 待收集完成后回填
+    """
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO submission_log "
+        "(created_at, device_code, table_id, club_name, category, file_name, "
+        "file_path_date, collect_ok) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+         str(device_code or ""), str(table_id or ""), str(club_name or ""),
+         str(category or ""), str(file_name or ""), str(file_path_date or ""),
+         1 if collect_ok else 0))
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_submission_collect(log_id: int, ok: bool) -> int:
+    """回填收集结果（collect_ok），返回受影响行数；log_id 无效时返回 0"""
+    if not log_id:
+        return 0
+    conn = _get_conn()
+    cur = conn.execute(
+        "UPDATE submission_log SET collect_ok = ? WHERE id = ?",
+        (1 if ok else 0, log_id))
+    conn.commit()
+    return cur.rowcount
+
+
+def update_submission_upload(upload_zip: str, ok: bool, within_hours: int = 24) -> int:
+    """回填上传结果：打包上传是整目录 zip（多设备合并），无法定位单条记录，
+    故批量更新 within_hours 内「已收集但未上传」的全部记录（upload_ok 为空者）
+
+    无匹配记录时补写一条仅含上传结果的台账（直接打包上传、未经迁移台账的
+    场景），保证上传动作留痕。返回更新条数。
+    """
+    conn = _get_conn()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (datetime.now() - timedelta(hours=within_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        "UPDATE submission_log SET upload_zip = ?, upload_ok = ? "
+        "WHERE collect_ok = 1 AND upload_ok IS NULL AND created_at >= ?",
+        (str(upload_zip or ""), 1 if ok else 0, cutoff))
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO submission_log (created_at, upload_zip, upload_ok) "
+            "VALUES (?, ?, ?)",
+            (now, str(upload_zip or ""), 1 if ok else 0))
+    conn.commit()
+    return cur.rowcount
+
+
+def get_submission_stats(device_code: str = None, days: int = 30) -> dict:
+    """近 N 天提交次数聚合（单条 GROUP BY SQL，列表页批量匹配无 N+1）
+
+    Args:
+        device_code: 仅统计该设备；None 统计全部设备
+        days: 统计窗口天数（常用 7/30）
+
+    Returns:
+        {"by_device": {device_code: 次数}, "by_table": {table_id: 次数}}
+        两个映射由同一条聚合结果合并而来：设备页按 device_code 匹配，
+        球桌页按 table_id（球桌号）匹配。
+    """
+    conn = _get_conn()
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    sql = ("SELECT device_code, table_id, COUNT(*) FROM submission_log "
+           "WHERE created_at >= ?")
+    params = [cutoff]
+    if device_code:
+        sql += " AND device_code = ?"
+        params.append(str(device_code).strip())
+    sql += " GROUP BY device_code, table_id"
+    by_device, by_table = {}, {}
+    for dev, tid, n in conn.execute(sql, params):
+        dev = str(dev or "").strip()
+        tid = str(tid or "").strip()
+        if dev:
+            by_device[dev] = by_device.get(dev, 0) + n
+        if tid:
+            by_table[tid] = by_table.get(tid, 0) + n
+    return {"by_device": by_device, "by_table": by_table}
+
+
+# ==================== 设备映射表操作（C4） ====================
+
+def get_device_mapping(device_code: str) -> dict:
+    """按设备码查映射记录，返回 dict（无记录返回空 dict）
+
+    Returns:
+        {"device_code", "local_dir", "source", "created_at", "updated_at"}
+        source: 'auto'=模糊匹配自动落库 / 'manual'=人工指定（自愈向导预留）
+    """
+    code = str(device_code or "").strip()
+    if not code:
+        return {}
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT device_code, local_dir, source, created_at, updated_at "
+        "FROM device_mapping WHERE device_code = ?", (code,)).fetchone()
+    if not row:
+        return {}
+    return dict(zip(("device_code", "local_dir", "source",
+                     "created_at", "updated_at"), row))
+
+
+def set_device_mapping(device_code: str, local_dir: str, source: str = "auto") -> bool:
+    """写入/更新设备码 → 本地目录映射，返回是否写入成功
+
+    首次插入记录 created_at；后续更新只刷新 local_dir/source/updated_at，
+    created_at 保留首次建立时间。source 取值 'auto' / 'manual'（manual
+    由自愈向导人工选择落库时使用，manual 优先级语义上高于 auto）。
+    """
+    code = str(device_code or "").strip()
+    local_dir = str(local_dir or "").strip()
+    if not code or not local_dir:
+        return False
+    if source not in ("auto", "manual"):
+        source = "auto"
+    conn = _get_conn()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT INTO device_mapping (device_code, local_dir, source, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(device_code) DO UPDATE SET "
+        "local_dir = excluded.local_dir, source = excluded.source, "
+        "updated_at = excluded.updated_at",
+        (code, local_dir, source, now, now))
+    conn.commit()
+    return True
+
+
+def get_all_device_mappings() -> dict:
+    """全部设备映射 {device_code: local_dir}（收集入口批量预取可用）"""
+    conn = _get_conn()
+    return {code: d for code, d in conn.execute(
+        "SELECT device_code, local_dir FROM device_mapping")}
+
+
+def delete_device_mapping(device_code: str) -> int:
+    """删除指定设备映射（清除错误映射入口），返回受影响行数"""
+    code = str(device_code or "").strip()
+    if not code:
+        return 0
+    conn = _get_conn()
+    cur = conn.execute(
+        "DELETE FROM device_mapping WHERE device_code = ?", (code,))
+    conn.commit()
+    return cur.rowcount
 
 
 # ==================== 通用内部函数 ====================

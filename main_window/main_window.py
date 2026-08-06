@@ -4,9 +4,10 @@
 import os
 import re
 import glob
+import time
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
-    QListWidgetItem)
+    QListWidgetItem, QSplitter)
 from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
 from qfluentwidgets import (InfoBar, InfoBarPosition, FluentTitleBar,
@@ -167,6 +168,10 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._init_context_menus()
         self._init_menubar()
         self._init_shortcuts()
+        # B5: 帧偏移持久化恢复
+        self._restore_frame_offset()
+        # B3: 第三列日志内容过滤框（须在 _apply_layout 之前安装好布局切换钩子）
+        self._init_log_filter()
         # 从 settings.json 加载并应用用户自定义设置（高亮颜色、字号、字体等）
         self._apply_highlight_color()
         self._apply_font_size()
@@ -177,7 +182,6 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # Fluent ComboBox 使用自定义弹出视图，无需 setView
         self.ui.choose_exe.setMinimumWidth(150)  # 保证下拉框不被压成一条线
         # 远程状态
-        self._frpc_process = None
         self._p2p_visitors = []
         self._p2p_current_index = -1
         self._tcp_worker = None
@@ -249,6 +253,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._id_search_sc.activated.connect(self._on_search_shortcut)
         self._id_search_esc = QShortcut(QKeySequence('Escape'), self)
         self._id_search_esc.activated.connect(self._hide_all_search)
+
+        # A1: 监听 SFTP 下载完成全局信号（方法内延迟 import，避免循环依赖）
+        self._connect_sftp_download_signal()
 
     # ==================== 日志智能自动滚动 ====================
 
@@ -507,8 +514,16 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
     def _on_search_shortcut(self):
         """Ctrl+F：根据焦点所在列表切换对应搜索框的显示/隐藏"""
         focused = self.focusWidget()
+        # 焦点在日志内容列表（或其过滤框）→ 操作 log_filter（第三态）
+        if focused is self.ui.log_list or focused is self.ui.log_filter:
+            if self.ui.log_filter.isVisible():
+                self._hide_log_filter()
+            else:
+                self._log_filter_shown = True
+                self.ui.log_filter.show()
+                self.ui.log_filter.setFocus()
         # 焦点在日志文件列表（或其搜索框）→ 操作 video_search
-        if (self.ui.local_video_list.isAncestorOf(focused)
+        elif (self.ui.local_video_list.isAncestorOf(focused)
                 or focused is self.ui.local_video_list
                 or focused is self.ui.video_search):
             if self.ui.video_search.isVisible():
@@ -544,10 +559,22 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self.ui.local_video_list.item(i).setHidden(False)
         self._update_empty_hint(self.ui.local_video_list)
 
+    def _hide_log_filter(self):
+        """隐藏日志内容过滤框，清空关键字并恢复全部行显示"""
+        self._log_filter_shown = False
+        self.ui.log_filter.blockSignals(True)
+        self.ui.log_filter.clear()
+        self.ui.log_filter.blockSignals(False)
+        self.ui.log_filter.hide()
+        for i in range(self.ui.log_list.count()):
+            self.ui.log_list.item(i).setHidden(False)
+        self._update_empty_hint(self.ui.log_list)
+
     def _hide_all_search(self):
         """隐藏所有搜索框（Esc 触发）"""
         self._hide_id_search()
         self._hide_video_search()
+        self._hide_log_filter()
 
     def _on_id_search_changed(self, text):
         """实时过滤设备列表：不区分大小写子串匹配，用 setHidden 控制显隐（不重建列表）"""
@@ -564,6 +591,90 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             item = self.ui.local_video_list.item(i)
             item.setHidden(bool(kw) and kw not in item.text().lower())
         self._update_empty_hint(self.ui.local_video_list)
+
+    # ==================== 第三列日志内容过滤 (B3) ====================
+
+    def _init_log_filter(self):
+        """B3: 在第三列（log_list）顶部安装过滤输入框。
+
+        autowork_with_table 中 log_list 被两种布局直接引用，这里给它包一层
+        容器（过滤框在上、列表在下），并钩住 switch_layout：布局切换后
+        自动把容器重新放回 log_list 原本的位置，保证过滤框不丢失。
+        """
+        from autowork_with_table import _create_search_line_edit
+        filt = _create_search_line_edit()
+        filt.setObjectName(u"log_filter")
+        filt.setPlaceholderText("过滤日志内容...")
+        filt.setClearButtonEnabled(True)
+        filt.setVisible(False)
+        self.ui.log_filter = filt
+
+        container = QWidget()
+        container.setObjectName(u"log_list_container")
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(filt)
+        lay.addWidget(self.ui.log_list, 1)
+        self.ui.log_list_container = container
+
+        filt.textChanged.connect(self._on_log_filter_debounce)
+        self._log_filter_shown = False  # 过滤框显示状态（布局切换后用于恢复）
+        self._place_log_list_container()
+
+        # 钩住布局切换：原 switch_layout 会把 log_list 直接搬进新布局，
+        # 切换完成后需重新装回容器并放回原位
+        orig_switch = self.ui.switch_layout
+
+        def _switch_layout_with_log_container(classic=False):
+            orig_switch(classic)
+            self._place_log_list_container()
+            # 容器曾被旧布局 removeWidget 连带标记为隐藏，
+            # 需显式恢复可见（新布局激活时其他控件会被自动刷新，
+            # 但动态插入的容器不在此列）
+            container = self.ui.log_list_container
+            container.show()
+            self.ui.log_filter.setVisible(
+                getattr(self, '_log_filter_shown', False))
+
+        self.ui.switch_layout = _switch_layout_with_log_container
+
+    def _place_log_list_container(self):
+        """把 log_list 装回过滤容器，并将容器放回 log_list 原位置（兼容两种布局）"""
+        container = self.ui.log_list_container
+        log_list = self.ui.log_list
+        parent = log_list.parentWidget()
+        if parent is container:
+            return
+        lay = container.layout()
+        if isinstance(parent, QSplitter):
+            # 经典布局：log_list 直接挂在 splitter 中，记录索引原位放回
+            idx = parent.indexOf(log_list)
+            lay.addWidget(log_list)
+            parent.insertWidget(idx, container)
+        elif parent is not None and parent.layout() is not None:
+            # 面板布局：log_list 在带 header 的容器 layout 末尾
+            lay.addWidget(log_list)
+            parent.layout().addWidget(container, 1)
+
+    def _on_log_filter_debounce(self, text):
+        """log_filter 输入防抖：150ms 内的连续输入合并为一次过滤"""
+        self._search_debounce_callback = lambda: self._on_log_filter_changed(text)
+        self._search_debounce_timer.start()
+
+    def _on_log_filter_changed(self, text):
+        """实时过滤日志内容列表：不区分大小写子串匹配（同构第一、二列）"""
+        kw = text.strip().lower()
+        for i in range(self.ui.log_list.count()):
+            item = self.ui.log_list.item(i)
+            item.setHidden(bool(kw) and kw not in item.text().lower())
+        self._update_empty_hint(self.ui.log_list)
+
+    def _reapply_log_filter(self):
+        """日志内容重载后重新应用当前过滤条件"""
+        filt = getattr(self.ui, 'log_filter', None)
+        if filt is not None:
+            self._on_log_filter_changed(filt.text())
 
     def _on_p2p_search_changed(self, text):
         """实时过滤远程面板 visitor/服务器列表：不区分大小写子串匹配"""
@@ -613,6 +724,32 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             pass
 
     # ==================== 日期/帧数工具 ====================
+
+    def _restore_frame_offset(self):
+        """B5: 启动时从 settings.json 恢复帧偏移，并挂接持久化（防抖写入，
+        复用 settings_mixin 的缓存读写机制）"""
+        settings = self._load_settings()
+        saved = settings.get("frame_offset")
+        try:
+            if saved is not None:
+                self.ui.input_frame.setText(str(int(saved)))
+        except (TypeError, ValueError):
+            pass
+        self._frame_offset_save_timer = QTimer(self)
+        self._frame_offset_save_timer.setInterval(500)
+        self._frame_offset_save_timer.setSingleShot(True)
+        self._frame_offset_save_timer.timeout.connect(self._save_frame_offset)
+        self.ui.input_frame.textChanged.connect(self._frame_offset_save_timer.start)
+
+    def _save_frame_offset(self):
+        """帧偏移输入框防抖结束：合法整数才写入 settings.json"""
+        try:
+            val = int(self.ui.input_frame.text().strip())
+        except ValueError:
+            return
+        if val != self._load_settings().get("frame_offset"):
+            self._save_settings({"frame_offset": val})
+            self._append_log(f"[配置] 已保存帧偏移: {val}")
 
     def _get_selected_date_str(self):
         """获取日期选择器中的日期，格式如 2026-07-05"""
@@ -822,6 +959,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 保存路径供回调使用
         self._current_log_path = full_log_path
 
+        # C6: 用时间戳前缀反查 kd_status，状态栏显示对应 kd 记录分类
+        self._update_kd_record_status(device_code, log_filename)
+
         # 取消前一个正在运行的 worker（用户快速切换场景）
         if self._log_worker is not None and self._log_worker.isRunning():
             self._log_worker.requestInterruption()
@@ -838,6 +978,101 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._log_worker = worker  # 防止 GC
         worker.start()
 
+    # ==================== C6: 日志↔kd 记录双向跳转 ====================
+
+    # kd 分类 → 状态栏醒目色（精度/问题需突出提示，其余分类用默认色）
+    _KD_STATUS_ACCENTS = {"accuracy_files": "#e67e22", "already_files": "#e5393f"}
+
+    def _update_kd_record_status(self, device_code, log_filename):
+        """C6 正向：选中日志时用时间戳前缀反查 kd_status 文件分类并展示
+
+        kd 照片与本地日志共享时间戳前缀（clip_base_name 机制），单分区
+        单设备 LIKE 预筛毫秒级，同步执行即可；任何异常静默降级不影响
+        日志加载主流程。
+        """
+        try:
+            from workers.collect_worker import clip_base_name
+            from database import table_db
+            base = clip_base_name(log_filename)
+            if not base:
+                return
+            date_str = self._get_selected_date_str()
+            t0 = time.perf_counter()
+            info = table_db.find_kd_file_status(device_code, date_str, base)
+            cost_ms = (time.perf_counter() - t0) * 1000
+            if cost_ms > 50:
+                self._append_log(f"[提示] kd 记录反查耗时 {cost_ms:.0f}ms，建议转后台执行")
+            if info:
+                cn = info.get("category_cn") or info.get("category") or ""
+                accent = self._KD_STATUS_ACCENTS.get(info.get("category"))
+                self._show_kd_status_message(f"对应 kd 记录：已标【{cn}】", accent)
+                if accent:
+                    # 已标精度/问题：InfoBar 醒目提示
+                    self._show_info_bar(
+                        f"对应 kd 记录：已标【{cn}】（{info.get('file_name')}）",
+                        "warning", title="kd 记录", duration=3500)
+            else:
+                self._show_kd_status_message("未找到对应 kd 记录")
+        except Exception as e:
+            self._append_log(f"[警告] kd 记录反查失败: {e}")
+
+    def _show_kd_status_message(self, msg, accent=None, timeout=6000):
+        """状态栏显示 kd 反查结果；accent 非空时临时醒目着色，超时恢复"""
+        self._show_status_message(msg, timeout)
+        if accent:
+            self._status_message.setStyleSheet(f"color: {accent}; font-weight: 600;")
+            QTimer.singleShot(timeout, self._status_message.clearStyleSheet)
+
+    def focus_log_file(self, device_dir, date_str, log_fname):
+        """C6 反向跳转入口：切换到指定设备+日期并选中日志文件
+
+        复用现有选中链路：id_list 选中 → on_id_selected 加载第二列；
+        日期变化 → dateChanged 重载；最后 _locate_video_item 定位选中
+        （setCurrentItem 触发 on_video_selected 加载日志内容）。
+        """
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+        # 1. 选中设备（不在列表时刷新一次重试）
+        target = None
+        for _ in range(2):
+            for i in range(self.ui.id_list.count()):
+                if self.ui.id_list.item(i).text() == device_dir:
+                    target = self.ui.id_list.item(i)
+                    break
+            if target is not None:
+                break
+            self._load_device_list()
+        if target is None:
+            self._show_info_bar(f"设备列表中未找到: {device_dir}", "warning")
+            return
+        if self.ui.id_list.currentItem() is not target:
+            self.ui.id_list.setCurrentItem(target)
+
+        # 2. 对齐日期（dateChanged 会自动重载第二列）
+        reload_pending = True
+        qdate = QDate.fromString(str(date_str), "yyyy-MM-dd")
+        if qdate.isValid() and qdate != self.ui.date.date:
+            self.ui.date.setDate(qdate)
+            reload_pending = False
+        if reload_pending and self.ui.id_list.currentItem() is target:
+            # 设备/日期均未变化 → 手动刷新第二列
+            self._load_videos_for_device(device_dir)
+
+        # 3. 定位并选中日志文件（复用 SFTP 下载联动的定位逻辑）
+        # 先清除第二列搜索过滤，避免目标项被隐藏而无法定位
+        self._on_video_search_changed("")
+        search = getattr(self.ui, 'video_search', None)
+        if search is not None and search.text():
+            search.blockSignals(True)
+            search.clear()
+            search.blockSignals(False)
+        self._locate_video_item(str(log_fname))
+
     def _on_log_loaded(self, lines_data, line_count, truncated, size_mb):
         """日志加载完成，填充 UI"""
         self.ui.log_list.setUpdatesEnabled(False)
@@ -849,6 +1084,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self.ui.log_list.addItem(item)
         self.ui.log_list.setUpdatesEnabled(True)
         self._update_empty_hint(self.ui.log_list)
+        # B3: 重载后重新应用过滤条件
+        self._reapply_log_filter()
 
         if truncated:
             self._append_log(f"[日志内容] 文件 {size_mb:.1f}MB 过大，仅显示尾部 {line_count} 行")
@@ -942,6 +1179,116 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._append_log(f"[配置] 已保存程序选择: {exe_name}")
             self._show_info_bar(f"已保存程序选择: {exe_name}", "success")
 
+    # ==================== SFTP 下载联动 (A1 接收端) ====================
+
+    def _connect_sftp_download_signal(self):
+        """A1: 连接 SFTP 下载完成全局信号（延迟 import，避免潜在循环依赖）"""
+        try:
+            from windows.sftp_window import GLOBAL_SIGNALS
+        except Exception as e:
+            self._append_log(f"[警告] SFTP 下载联动信号连接失败: {e}")
+            return
+        # 信号可能从 SFTP 面板的其他线程上下文发射，强制排队到主线程执行
+        GLOBAL_SIGNALS.file_downloaded.connect(
+            self._on_sftp_file_downloaded, Qt.QueuedConnection)
+
+    @Slot(str, str, int)
+    def _on_sftp_file_downloaded(self, device_code, file_path, batch_count):
+        """A1 接收端槽：刷新设备/日志文件列表并定位高亮刚下载的文件（仅 UI 操作）"""
+        fname = os.path.basename(file_path) if file_path else ""
+        self._append_log(f"[SFTP] 接收到下载文件: {file_path}")
+        self._show_info_bar(f"已接收 SFTP 下载文件 {fname}", "success")
+
+        # 1. 设备目录名非空且不在列表 → 刷新设备列表，然后选中该设备
+        reload_pending = True  # 是否需要手动刷新第二列
+        if device_code:
+            names = [self.ui.id_list.item(i).text()
+                     for i in range(self.ui.id_list.count())]
+            if device_code not in names:
+                self._load_device_list()
+            for i in range(self.ui.id_list.count()):
+                item = self.ui.id_list.item(i)
+                if item.text() == device_code:
+                    if self.ui.id_list.currentItem() is not item:
+                        # 选中变化 → on_id_selected 会自动加载第二列
+                        self.ui.id_list.setCurrentItem(item)
+                        reload_pending = False
+                    break
+
+        # 2. 日期选择器对齐下载文件所属日期（dateChanged 会自动重载第二列）
+        qdate = self._parse_download_file_date(file_path, device_code)
+        if qdate is not None and qdate.isValid() and qdate != self.ui.date.date:
+            self.ui.date.setDate(qdate)
+            reload_pending = False
+
+        # 3. 设备/日期均未变化 → 手动复用现有逻辑刷新第二列
+        current_device = self.ui.id_list.currentItem()
+        if reload_pending and current_device is not None:
+            self._load_videos_for_device(current_device.text())
+
+        # 4. 仅日志类型文件（.log/.txt）才定位高亮，其他类型只刷新不定位
+        if fname.lower().endswith(('.log', '.txt')):
+            self._locate_video_item(fname)
+
+    def _parse_download_file_date(self, file_path, device_code):
+        """从下载路径推断文件所属日期：
+        videos/{设备}/YYYY-MM-DD/xxx 或 videos/{设备}/YYYYMMDD_xxx，
+        解析失败返回 None（保持日期选择器不变）"""
+        if not file_path:
+            return None
+        if device_code:
+            try:
+                rel = os.path.relpath(
+                    file_path, os.path.join(self.videos_dir, device_code))
+            except ValueError:
+                rel = os.path.basename(file_path)
+        else:
+            rel = os.path.basename(file_path)
+        parts = rel.replace('\\', '/').split('/')
+        if len(parts) >= 2:
+            qdate = QDate.fromString(parts[0], "yyyy-MM-dd")
+            if qdate.isValid():
+                return qdate
+        fname = parts[-1]
+        if len(fname) >= 9 and fname[8] == '_':
+            qdate = QDate.fromString(fname[:8], "yyyyMMdd")
+            if qdate.isValid():
+                return qdate
+        return None
+
+    def _locate_video_item(self, fname):
+        """在第二列定位并闪烁高亮匹配 basename 的项"""
+        list_w = self.ui.local_video_list
+        target = None
+        for i in range(list_w.count()):
+            item = list_w.item(i)
+            if item.text() == fname and not item.isHidden():
+                target = item
+                break
+        if target is None:
+            self._append_log(f"[SFTP] 第二列未找到下载文件: {fname}（可能不属于当前日期）")
+            return
+        list_w.setCurrentItem(target)
+        list_w.scrollToItem(target)
+        self._flash_list_item(target)
+
+    def _flash_list_item(self, item, times=4, interval=250):
+        """列表项背景色闪烁提示（主题色 ↔ 原背景交替，结束后恢复）"""
+        accent = QBrush(QColor(0, 188, 212))  # 与 setThemeColor("#00BCD4") 一致
+        orig = item.data(Qt.BackgroundRole)
+        state = {'n': 0}
+
+        def _tick():
+            state['n'] += 1
+            if state['n'] > times:
+                item.setData(Qt.BackgroundRole, orig)
+                return
+            item.setData(Qt.BackgroundRole,
+                         accent if state['n'] % 2 == 1 else orig)
+            QTimer.singleShot(interval, _tick)
+
+        _tick()
+
     # ==================== 窗口关闭清理 ====================
 
     def closeEvent(self, event):
@@ -955,19 +1302,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             except (RuntimeError, OSError):
                 pass
 
-        # 1. 终止 frpc 进程
-        proc = getattr(self, '_frpc_process', None)
-        if proc is not None:
-            self._frpc_process = None
-            try:
-                proc.kill()
-                proc.waitForFinished(2000)
-            except (RuntimeError, OSError):
-                pass
-            try:
-                proc.deleteLater()
-            except RuntimeError:
-                pass
+        # 1. 关闭统一远程会话中心（单一 frpc 进程 + 全局隧道/会话窗口）
+        try:
+            from core.frp_remote import get_session_manager
+            get_session_manager().shutdown()
+        except (RuntimeError, OSError):
+            pass
 
         # 2. 保存远程会话信息（在关闭窗口之前）
         self._save_remote_sessions()

@@ -9,6 +9,7 @@ from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import QLineEdit
 
 from core.app_paths import get_app_dir
+from core.secrets import decrypt_settings, encrypt_settings
 
 
 class SettingsMixin:
@@ -47,13 +48,13 @@ class SettingsMixin:
         return os.path.join(self._get_app_dir(), "settings.json")
 
     def _reload_settings_cache(self):
-        """从 settings.json 一次性加载到内存缓存"""
+        """从 settings.json 一次性加载到内存缓存（敏感字段透明解密）"""
         path = self._get_settings_path()
         self._settings_cache = dict(self.DEFAULT_PATHS)  # 默认值作为基础
         if os.path.exists(path):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
-                    self._settings_cache.update(json.load(f))
+                    self._settings_cache.update(decrypt_settings(json.load(f)))
             except Exception:
                 pass
 
@@ -64,13 +65,17 @@ class SettingsMixin:
         return self._settings_cache
 
     def _save_settings(self, data):
-        """将配置写入 settings.json，同时更新内存缓存"""
+        """将配置写入 settings.json，同时更新内存缓存
+
+        内存缓存保存明文供各调用方直接使用；落盘时对敏感字段统一加密。
+        """
         path = self._get_settings_path()
         try:
             self._load_settings()  # 确保缓存已初始化
             self._settings_cache.update(data)
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(self._settings_cache, f, ensure_ascii=False, indent=2)
+                json.dump(encrypt_settings(self._settings_cache), f,
+                          ensure_ascii=False, indent=2)
         except Exception as e:
             self._append_log(f"[警告] 保存配置失败: {e}")
 

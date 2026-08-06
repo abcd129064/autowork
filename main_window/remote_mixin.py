@@ -2,13 +2,15 @@
 """MainWindow 远程连接 Mixin：P2P 面板、XTCP/TCP 连接、frpc 管理、SFTP/SSH/RDP 窗口启动"""
 from __future__ import annotations
 
-import os
 import sys
-import re
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QProcess
-from PySide6.QtWidgets import QFormLayout
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtWidgets import QFormLayout, QWidget, QHBoxLayout
+from qfluentwidgets import (SearchLineEdit, FluentIcon,
+                            PushButton as FluentPushButton,
+                            RoundMenu, Action, CaptionLabel)
 
 if TYPE_CHECKING:
     from autowork_with_table import Ui_MainWindow
@@ -25,6 +27,8 @@ from windows.ssh_terminal import SSHTerminalPanel
 from windows.rdp_window import RDPPanel
 from windows.remote_session_window import RemoteSessionWindow
 from p2p import generate_random_port
+from core.frp_remote import get_session_manager, SOURCE_MANUAL
+from database import table_db
 
 
 class RemoteMixin:
@@ -35,7 +39,6 @@ class RemoteMixin:
         ui: Ui_MainWindow
         _p2p_visitors: list
         _p2p_current_index: int
-        _frpc_process: QProcess | None
         _tcp_worker: TCPWorker | None
         _remote_session_window: RemoteSessionWindow | None
 
@@ -47,16 +50,13 @@ class RemoteMixin:
         def _on_p2p_search_changed(self, text: str) -> None: ...
         def _resolve_remote_target(self, tag: str, feature_name: str) -> tuple[str, int, str, str, str] | None: ...
 
-    # frpc 服务器默认配置（不含敏感凭据，auth_token 由 settings.json 读取/设置面板填写）
-    _FRPC_SERVER_DEFAULTS = {
-        "serverAddr": "49.235.34.253",
-        "serverPort": 7900,
-        "auth_method": "token",
-        "auth_token": "",
-    }
+    # 球桌库选择：下拉候选最大条数 / 单次查询上限 / 输入防抖延时(ms)
+    _TABLE_PICKER_MAX_ITEMS = 50
+    _TABLE_PICKER_QUERY_LIMIT = 2000
+    _TABLE_PICKER_DEBOUNCE_MS = 150
 
     def _init_p2p_panel(self):
-        """初始化远程面板状态，从已有的 frpc_xtcp.toml 恢复 visitor 列表"""
+        """初始化远程面板状态，从统一会话中心恢复手工 visitor 列表"""
         settings = self._load_settings()
         ssh_user = settings.get("ssh_user", "")
         ssh_pass = settings.get("ssh_pass", "")
@@ -64,41 +64,122 @@ class RemoteMixin:
             self.ui.p2p_ssh_user.setText(ssh_user)
         if ssh_pass:
             self.ui.p2p_ssh_pass.setText(ssh_pass)
-        self._load_visitors_from_toml()
+        # 接入统一远程会话中心：frpc 日志转发到日志区，状态变化刷新按钮
+        self._session_mgr = get_session_manager()
+        self._session_mgr.log_message.connect(self._append_log)
+        self._session_mgr.frpc_state_changed.connect(
+            lambda _running: self._update_p2p_buttons())
+        self._load_visitors_from_manager()
         self._refresh_p2p_list()
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
+        self._init_table_picker()
+        # 布局调整（Task #46）：按钮归位 + 服务器搜索框默认隐藏(Ctrl+F 唤起)
+        self._rearrange_p2p_layout()
+        self._init_p2p_search_shortcuts()
+        # 「当前隧道」入口：挂在远程面板标题下方，展示全局活跃隧道
+        self._tunnel_panel_window = None
+        self._p2p_tunnels_btn = FluentPushButton(
+            FluentIcon.LINK, "当前隧道", self.ui.p2p_panel)
+        self._p2p_tunnels_btn.setObjectName(u"p2p_tunnels_btn")
+        self._p2p_tunnels_btn.clicked.connect(self._open_tunnel_panel)
+        self.ui.p2p_panel.layout().insertWidget(1, self._p2p_tunnels_btn)
         self._update_p2p_visibility()
         self._update_p2p_buttons()
 
-    def _load_visitors_from_toml(self):
-        """从已有的 frpc_xtcp.toml 解析 [[visitors]] 段恢复 visitor 列表"""
-        toml_path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
-        if not os.path.exists(toml_path):
-            self._append_log("[远程] 未找到 frpc_xtcp.toml")
-            return
-        try:
-            with open(toml_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            blocks = content.split('[[visitors]]')
-            for block in blocks[1:]:
-                visitor = {}
-                m_server = re.search(r'serverName\s*=\s*"([^"]+)"', block)
-                m_key = re.search(r'secretKey\s*=\s*"([^"]+)"', block)
-                m_port = re.search(r'bindPort\s*=\s*(\d+)', block)
-                if m_server and m_port:
-                    visitor["serverName"] = m_server.group(1)
-                    visitor["secretKey"] = m_key.group(1) if m_key else "abc123"
-                    visitor["bindPort"] = int(m_port.group(1))
-                    self._p2p_visitors.append(visitor)
-            if self._p2p_visitors:
-                self._append_log(f"[远程] 从 TOML 恢复了 {len(self._p2p_visitors)} 个 visitor")
-        except Exception as e:
-            self._append_log(f"[远程] 解析 TOML 失败: {e}")
+    def _rearrange_p2p_layout(self):
+        """布局调整：添加/删除按钮移到 secretKey 下方，连接/断开按钮移到密码框下方
+
+        控件均在 Ui 构建阶段创建且信号已绑定，此处仅做运行时布局重排，
+        不改变功能与信号连接。添加/删除按钮保留常显（TCP 模式复用为
+        保存/删除服务器），故不加入 p2p_xtcp_widgets 显隐列表。
+        """
+        main_lay = self.ui.p2p_panel.layout()
+        # 1) 从面板主布局取出「添加/删除」所在行布局，改挂到 XTCP 表单 secretKey 下方
+        for i in range(main_lay.count()):
+            sub = main_lay.itemAt(i).layout()
+            if sub is not None and sub.indexOf(self.ui.p2p_add_btn) >= 0:
+                main_lay.removeItem(sub)
+                self.ui.p2p_xtcp_form.addRow("", sub)
+                break
+        # 2) 连接/断开按钮容器从主布局移到「权限与配置」密码框下方（跨列行）
+        main_lay.removeWidget(self.ui.p2p_conn_widget)
+        self.ui.p2p_ssh_form.addRow(self.ui.p2p_conn_widget)
+
+    def _init_p2p_search_shortcuts(self):
+        """服务器搜索框默认隐藏：Ctrl+F 显示并聚焦，Esc/清空后隐藏
+
+        快捷键以 WidgetWithChildrenShortcut 上下文挂在远程面板上，仅焦点在
+        面板区域内生效，不与主窗口全局 Ctrl+F/Esc 冲突。
+        """
+        self.ui.p2p_search.setVisible(False)
+        self._p2p_search_fresh = False  # 刚被快捷键唤起（尚未输入）时不因空文本隐藏
+        self.ui.p2p_search.textChanged.connect(self._on_p2p_search_edited)
+        ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
+        self._p2p_search_sc = QShortcut(QKeySequence('Ctrl+F'), self.ui.p2p_panel)
+        self._p2p_search_sc.setContext(ctx)
+        self._p2p_search_sc.activated.connect(self._toggle_p2p_search)
+        self._p2p_search_esc = QShortcut(QKeySequence('Escape'), self.ui.p2p_panel)
+        self._p2p_search_esc.setContext(ctx)
+        self._p2p_search_esc.setEnabled(False)  # 仅搜索框可见时拦截 Esc
+        self._p2p_search_esc.activated.connect(self._hide_p2p_search)
+
+    def _toggle_p2p_search(self):
+        """Ctrl+F：切换服务器搜索框显示/隐藏（参考主窗口搜索快捷键模式）"""
+        if self.ui.p2p_search.isVisible():
+            self._hide_p2p_search()
+        else:
+            self._p2p_search_fresh = True
+            self.ui.p2p_search.show()
+            self.ui.p2p_search.setFocus()
+            self.ui.p2p_search.selectAll()
+            self._p2p_search_esc.setEnabled(True)
+
+    def _hide_p2p_search(self):
+        """隐藏服务器搜索框：清空内容并恢复完整列表（过滤逻辑不变）"""
+        self._p2p_search_fresh = False
+        self.ui.p2p_search.blockSignals(True)
+        self.ui.p2p_search.clear()
+        self.ui.p2p_search.blockSignals(False)
+        self.ui.p2p_search.hide()
+        self._p2p_search_esc.setEnabled(False)
+        self._on_p2p_search_changed("")
+
+    def _on_p2p_search_edited(self, text):
+        """搜索框清空后自动隐藏（刚唤起尚未输入时除外）"""
+        if text:
+            self._p2p_search_fresh = False
+        elif not self._p2p_search_fresh and self.ui.p2p_search.isVisible():
+            self.ui.p2p_search.hide()
+            self._p2p_search_esc.setEnabled(False)
+            self._on_p2p_search_changed("")
+
+    def _load_visitors_from_manager(self):
+        """从统一会话中心恢复手工 visitor 列表（manager 启动时已解析 frpc_xtcp.toml）"""
+        restored = self._session_mgr.manual_visitors()
+        self._p2p_visitors.extend(restored)
+        if restored:
+            self._append_log(f"[远程] 从会话中心恢复了 {len(restored)} 个 visitor")
+
+    def _open_tunnel_panel(self):
+        """打开全局「当前隧道」面板（单例复用，展示所有入口的活跃隧道）"""
+        from windows.tunnel_panel import TunnelPanelWindow
+        win = self._tunnel_panel_window
+        if win is not None:
+            try:
+                win.isVisible()  # 探测 C++ 对象是否已销毁
+                win.show()
+                win.raise_()
+                win.activateWindow()
+                return
+            except RuntimeError:
+                self._tunnel_panel_window = None
+        win = TunnelPanelWindow()
+        win.destroyed.connect(lambda: setattr(self, "_tunnel_panel_window", None))
+        self._tunnel_panel_window = win
 
     def _get_new_random_port(self):
-        """生成不冲突的随机端口（排除已添加 visitor 的端口）"""
-        used_ports = {v["bindPort"] for v in self._p2p_visitors}
-        return generate_random_port(exclude_ports=used_ports)
+        """生成不冲突的随机端口（排除会话中心已注册 visitor 的端口）"""
+        return generate_random_port(exclude_ports=self._session_mgr.used_ports())
 
     def _on_p2p_toggled(self, checked):
         """切换远程面板显示/隐藏"""
@@ -114,10 +195,13 @@ class RemoteMixin:
             self._append_log("[远程] 请填写 serverName")
             return
         port = self.ui.p2p_form_port.value()
-        for i, v in enumerate(self._p2p_visitors):
-            if v["bindPort"] == port and i != self._p2p_current_index:
-                self._append_log(f"[远程] 端口 {port} 已被 {v['serverName']} 使用，请更换端口")
-                return
+        taken = set(self._session_mgr.used_ports())
+        taken |= {v["bindPort"] for v in self._p2p_visitors}
+        if 0 <= self._p2p_current_index < len(self._p2p_visitors):
+            taken.discard(self._p2p_visitors[self._p2p_current_index].get("bindPort"))
+        if port in taken:
+            self._append_log(f"[远程] 端口 {port} 已被其他隧道使用，请更换端口")
+            return
         visitor = {
             "serverName": server_name,
             "bindPort": port,
@@ -138,9 +222,17 @@ class RemoteMixin:
             return
         row = self.ui.p2p_visitor_list.currentRow()
         if 0 <= row < len(self._p2p_visitors):
-            self._p2p_visitors.pop(row)
+            removed = self._p2p_visitors.pop(row)
             self._p2p_current_index = -1
             self._refresh_p2p_list()
+            # frpc 运行中时同步移除会话中心注册并重写配置，避免残留隧道
+            name = removed.get("serverName", "")
+            if name and self._session_mgr.is_running() \
+                    and self._session_mgr.remove_visitor(name):
+                try:
+                    self._session_mgr.apply()
+                except (OSError, RuntimeError) as e:
+                    self._append_log(f"[远程] 应用变更失败: {e}")
 
     def _on_p2p_visitor_selected(self, row):
         """列表选择：XTCP 模式加载 visitor 到表单，TCP 模式填充 host/port"""
@@ -175,6 +267,165 @@ class RemoteMixin:
             self.ui.p2p_visitor_list.addItem(v.get("serverName", ""))
         # 重新应用搜索过滤
         self._on_p2p_search_changed(self.ui.p2p_search.text())
+
+    # ------------------------------------------------------------------ 从球桌库选择
+
+    def _init_table_picker(self):
+        """在 XTCP visitor 表单顶部插入「从球桌库选择」动态下拉搜索控件
+
+        实时搜索 balliard_tables 中 snk_code 非空的球桌（输入即弹候选，
+        子串包含匹配），选中后自动填充 serverName/secretKey 到表单。
+        直连入口由面板下方「功能」区的文件管理/SSH 终端/远程桌面承担，
+        此处不再重复提供快捷按钮。
+        """
+        self._p2p_selected_table = None   # 当前选中的球桌行 dict
+        self._p2p_table_menu = None       # 当前弹出的候选菜单
+        self._p2p_picking = False         # 选中回填时抑制 textChanged 重弹菜单
+
+        self._p2p_table_search = SearchLineEdit(self.ui.p2p_panel)
+        self._p2p_table_search.setObjectName(u"p2p_table_search")
+        self._p2p_table_search.setPlaceholderText("从球桌库选择（球桌/球房/snk，输入即搜）")
+        self._p2p_table_search.setClearButtonEnabled(True)
+
+        # 单行紧凑布局：搜索框 + 已选标签（标签作为 picker 子控件，
+        # 随模式切换显隐时随容器一起隐藏，无需单独加入显隐列表）
+        self._p2p_table_search.setMinimumWidth(150)
+        picker = QWidget(self.ui.p2p_panel)
+        picker.setObjectName(u"p2p_table_picker")
+
+        self._p2p_table_selected_label = CaptionLabel("", picker)
+        self._p2p_table_selected_label.setObjectName(u"p2p_table_selected_label")
+        self._p2p_table_selected_label.setWordWrap(True)
+        self._p2p_table_selected_label.hide()
+
+        lay = QHBoxLayout(picker)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self._p2p_table_search, 1)
+        lay.addWidget(self._p2p_table_selected_label)
+
+        # 插入 XTCP 表单首行：随模式切换的显隐复用既有遍历（标签按行索引、
+        # 控件按 p2p_xtcp_widgets 列表），无需改动 _update_p2p_visibility
+        self.ui.p2p_xtcp_form.insertRow(0, "球桌库:", picker)
+        self.ui.p2p_xtcp_widgets.append(picker)
+
+        self._p2p_table_search.textChanged.connect(self._schedule_table_search)
+        self._p2p_table_search.returnPressed.connect(self._on_table_search_return)
+        self._p2p_search_timer = QTimer(self)
+        self._p2p_search_timer.setSingleShot(True)
+        self._p2p_search_timer.setInterval(self._TABLE_PICKER_DEBOUNCE_MS)
+        self._p2p_search_timer.timeout.connect(self._show_table_matches)
+
+    def _close_table_menu(self):
+        """关闭当前候选下拉菜单（容忍 C++ 对象已销毁的情况）"""
+        menu = self._p2p_table_menu
+        self._p2p_table_menu = None
+        if menu is not None:
+            try:
+                menu.close()
+            except (RuntimeError, OSError):
+                pass
+
+    def _schedule_table_search(self, _text=""):
+        """输入防抖：选中回填触发的 textChanged 不重新弹候选菜单"""
+        if self._p2p_picking:
+            return
+        self._p2p_search_timer.start()
+
+    def _on_table_search_return(self):
+        """回车：直接选中首个匹配球桌（免鼠标点选）"""
+        self._p2p_search_timer.stop()
+        matches, _overflow = self._query_snk_tables(self._p2p_table_search.text())
+        if matches:
+            self._on_table_picked(matches[0])
+        else:
+            self._append_log("[球桌库] 未找到含 snk 标识的匹配球桌")
+
+    def _query_snk_tables(self, keyword: str):
+        """查询 snk_code 非空的球桌（复用表已有 FTS/LIKE 子串模糊搜索）
+
+        Returns:
+            (rows, overflow)  rows 最多 _TABLE_PICKER_MAX_ITEMS 条；
+            overflow=True 表示匹配超出上限，调用方应提示缩小范围。
+        """
+        try:
+            _, rows = table_db.query_page(1, self._TABLE_PICKER_QUERY_LIMIT,
+                                          keyword.strip())
+        except Exception as e:
+            self._append_log(f"[球桌库] 查询失败: {e}")
+            return [], False
+        picked = []
+        overflow = False
+        for r in rows:
+            snk = str(r.get("snk_code") or "").strip()
+            if not snk:
+                continue
+            r["snk_code"] = snk
+            if len(picked) >= self._TABLE_PICKER_MAX_ITEMS:
+                overflow = True
+                break
+            picked.append(r)
+        return picked, overflow
+
+    def _show_table_matches(self):
+        """实时下拉候选：显示「球桌名 / 球房名 (snk_xxx)」
+
+        输入为空时不弹列表；用非阻塞 popup 展示，避免 exec_ 嵌套事件循环，
+        输入过程中菜单随内容实时刷新。
+        """
+        self._close_table_menu()
+        kw = self._p2p_table_search.text().strip()
+        if not kw:
+            return
+        matches, overflow = self._query_snk_tables(kw)
+        menu = RoundMenu(parent=self.ui.p2p_panel)
+        if not matches:
+            menu.addAction(Action(FluentIcon.INFO, "无含 snk 标识的匹配球桌", menu))
+        else:
+            title = f"匹配到 {len(matches)}+ 台球桌" if overflow \
+                else f"匹配到 {len(matches)} 台球桌"
+            menu.addAction(Action(FluentIcon.LIBRARY, title, menu))
+            menu.addSeparator()
+            for r in matches:
+                name = str(r.get("name") or "").strip() or "未命名"
+                room = str(r.get("roomName") or "").strip()
+                label = f"{name} / {room} ({r['snk_code']})" if room else f"{name} ({r['snk_code']})"
+                act = Action(FluentIcon.IOT, label, menu)
+                act.triggered.connect(lambda _=False, row=r: self._on_table_picked(row))
+                menu.addAction(act)
+            if overflow:
+                menu.addSeparator()
+                menu.addAction(Action(
+                    FluentIcon.INFO, "匹配过多，输入更多字符缩小范围", menu))
+        self._p2p_table_menu = menu
+        menu.aboutToHide.connect(self._on_table_menu_hidden)
+        menu.popup(self._p2p_table_search.mapToGlobal(
+            self._p2p_table_search.rect().bottomLeft()))
+
+    def _on_table_menu_hidden(self):
+        """菜单收起后释放引用（避免对已关闭菜单重复 close）"""
+        if self._p2p_table_menu is self.sender():
+            self._p2p_table_menu = None
+
+    def _on_table_picked(self, row: dict):
+        """选中球桌：自动填充 visitor 表单（用户仍可手工修改）"""
+        self._p2p_picking = True
+        try:
+            self._p2p_search_timer.stop()
+            snk = row["snk_code"]
+            name = str(row.get("name") or "").strip() or "未命名"
+            room = str(row.get("roomName") or "").strip()
+            self.ui.p2p_form_server.setText(snk)
+            # secretKey 与会话中心生成逻辑一致（settings 优先，缺省 abc123）
+            secret = str(self._load_settings().get("xtcp_secret_key") or "abc123")
+            self.ui.p2p_form_key.setText(secret)
+            self._p2p_selected_table = row
+            shown = f"已选：{name} / {room} ({snk})" if room else f"已选：{name} ({snk})"
+            self._p2p_table_selected_label.setText(shown)
+            self._p2p_table_selected_label.show()
+            self._append_log(f"[球桌库] 已选择 {shown[3:]}，serverName 已填入表单")
+        finally:
+            self._p2p_picking = False
 
     # ------------------------------------------------------------------ TCP 保存的服务器
     def _load_tcp_servers(self):
@@ -286,6 +537,11 @@ class RemoteMixin:
             "◎ 服务器 / visitors" if is_xtcp else "◎ 保存的服务器")
         for w in self.ui.p2p_xtcp_widgets:
             w.setVisible(is_xtcp)
+        # 球桌库「已选」标签：仅 XTCP 模式且已选中球桌时显示
+        picked_label = getattr(self, "_p2p_table_selected_label", None)
+        if picked_label is not None and is_xtcp \
+                and not getattr(self, "_p2p_selected_table", None):
+            picked_label.hide()
         for i in range(self.ui.p2p_xtcp_form.rowCount()):
             lbl = self.ui.p2p_xtcp_form.itemAt(i * 2, QFormLayout.ItemRole.LabelRole)
             if lbl and lbl.widget():
@@ -301,57 +557,53 @@ class RemoteMixin:
         self._update_p2p_buttons()
 
     def _on_xtcp_connect(self):
-        """生成 TOML 并启动 frpc"""
+        """将手工 visitor 注册到统一会话中心并启动 frpc（共享单一进程/TOML）"""
         self._save_current_form()
         if not self._p2p_visitors:
             self._append_log("[远程] 请先添加 visitor 配置")
             return
-        if self._frpc_process is not None:
-            self._append_log("[远程] frpc 已在运行中")
-            return
-        app_dir = self._get_app_dir()
-        toml_path = os.path.join(app_dir, "frpc_xtcp.toml")
+        mgr = self._session_mgr
         try:
-            self._write_frpc_config(toml_path)
-            self._append_log(f"[远程] 已生成 {toml_path}")
-        except Exception as e:
-            self._append_log(f"[远程] 生成配置失败: {e}")
+            # 先清除旧的手工注册，再按表单逐项注册（同名 serverName 复用隧道）
+            mgr.remove_visitors_by_source(SOURCE_MANUAL)
+            for v in self._p2p_visitors:
+                mgr.register_visitor(
+                    v.get("serverName", ""),
+                    bind_port=v.get("bindPort"),
+                    secret_key=v.get("secretKey") or "abc123",
+                    source=SOURCE_MANUAL)
+            mgr.apply()
+        except (OSError, RuntimeError, ValueError) as e:
+            self._append_log(f"[远程] 启动失败: {e}")
             return
-        frpc_exe = os.path.join(app_dir, "frpc.exe")
-        if not os.path.exists(frpc_exe):
-            self._append_log(f"[远程] frpc.exe 不存在: {frpc_exe}")
-            return
-        self._frpc_process = QProcess()
-        self._frpc_process.setWorkingDirectory(app_dir)
-        self._frpc_process.readyReadStandardOutput.connect(self._on_frpc_output)
-        self._frpc_process.readyReadStandardError.connect(self._on_frpc_error)
-        self._frpc_process.finished.connect(self._on_frpc_finished)
-        self._frpc_process.start(frpc_exe, ["-c", toml_path])
-        self._append_log(f"[远程] 已启动 frpc: {frpc_exe} -c {toml_path}")
+        total = len(mgr.records())
+        self._append_log(f"[远程] frpc 已启动，共 {total} 条隧道（含 snk 快捷连接）")
         self._update_p2p_buttons()
 
     def _on_xtcp_disconnect(self):
-        """停止 frpc 进程"""
-        if self._frpc_process is None:
+        """断开：注销手工 visitor；仍有其他隧道时 frpc 保持运行，否则停止"""
+        mgr = self._session_mgr
+        removed = 0
+        for v in self._p2p_visitors:
+            name = v.get("serverName", "")
+            if name and mgr.remove_visitor(name):
+                removed += 1
+        if not removed and not mgr.is_running():
             self._append_log("[远程] frpc 未在运行")
             return
-        self._append_log("[远程] 正在停止 frpc...")
-        proc = self._frpc_process
-        self._frpc_process = None
-        proc.finished.connect(self._on_proc_cleanup_done)
-        proc.kill()
-
-    def _on_proc_cleanup_done(self, *_args):
-        """frpc 进程终止后的清理回调（替代 waitForFinished 阻塞等待）"""
-        proc = self.sender()
-        if proc is not None:
-            proc.deleteLater()
-        self.ui.p2p_sftp_btn.setEnabled(False)
-        self.ui.p2p_ssh_terminal_btn.setEnabled(False)
-        self.ui.p2p_rdp_btn.setEnabled(False)
+        self._append_log("[远程] 正在断开手工 visitor...")
+        try:
+            mgr.apply()
+        except (OSError, RuntimeError) as e:
+            self._append_log(f"[远程] 应用变更失败: {e}")
+        remaining = len(mgr.records())
+        if remaining:
+            self._append_log(
+                f"[远程] 已断开手工 visitor，frpc 保持运行（剩余 {remaining} 条隧道）")
+        else:
+            self._append_log("[远程] frpc 已停止")
         self._close_p2p_windows()
         self._update_p2p_buttons()
-        self._append_log("[远程] frpc 已停止")
 
     def _on_tcp_connect(self):
         """启动 TCP 连接"""
@@ -429,66 +681,11 @@ class RemoteMixin:
         self.ui.p2p_rdp_btn.setEnabled(False)
         self._update_p2p_buttons()
 
-    def _write_frpc_config(self, path):
-        """生成 frpc_xtcp.toml 文件"""
-        settings = self._load_settings()
-        frpc_server = settings.get("frpc_server")
-        if not frpc_server:
-            frpc_server = dict(self._FRPC_SERVER_DEFAULTS)
-            self._save_settings({"frpc_server": frpc_server})
-            self._append_log("[远程] settings.json 中未找到 frpc_server，已自动生成默认配置")
-        server_addr = frpc_server.get("serverAddr", self._FRPC_SERVER_DEFAULTS["serverAddr"])
-        server_port = frpc_server.get("serverPort", self._FRPC_SERVER_DEFAULTS["serverPort"])
-        auth_method = frpc_server.get("auth_method", self._FRPC_SERVER_DEFAULTS["auth_method"])
-        auth_token = frpc_server.get("auth_token", self._FRPC_SERVER_DEFAULTS["auth_token"])
-        if not auth_token:
-            self._append_log("[远程] 警告: frpc auth_token 未配置，请在 设置 → 认证 Token 中填写")
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(f'serverAddr = "{server_addr}"\n')
-            f.write(f'serverPort = {server_port}\n')
-            f.write(f'auth.method = "{auth_method}"\n')
-            f.write(f'auth.token = "{auth_token}"\n')
-            f.write('\n')
-            for v in self._p2p_visitors:
-                sn = v["serverName"]
-                f.write("[[visitors]]\n")
-                f.write(f'name = "{sn}"\n')
-                f.write(f'type = "xtcp"\n')
-                f.write(f'serverName = "{sn}"\n')
-                f.write(f'secretKey = "{v["secretKey"]}"\n')
-                f.write(f'bindPort = {v["bindPort"]}\n')
-                f.write("\n")
-
-    def _on_frpc_output(self):
-        if self._frpc_process:
-            output = self._frpc_process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
-            if output.strip():
-                self._append_log(f"[frpc] {output.strip()}")
-
-    def _on_frpc_error(self):
-        if self._frpc_process:
-            error = self._frpc_process.readAllStandardError().data().decode('utf-8', errors='ignore')
-            if error.strip():
-                self._append_log(f"[frpc] {error.strip()}")
-
-    def _on_frpc_finished(self, exit_code, _exit_status):
-        self._append_log(f"[远程] frpc 已退出，退出码: {exit_code}")
-        # 释放 QProcess 对象（避免 C++ 侧泄漏）
-        proc = self._frpc_process
-        self._frpc_process = None
-        if proc is not None:
-            proc.deleteLater()
-        self.ui.p2p_sftp_btn.setEnabled(False)
-        self.ui.p2p_ssh_terminal_btn.setEnabled(False)
-        self.ui.p2p_rdp_btn.setEnabled(False)
-        self._close_p2p_windows()
-        self._update_p2p_buttons()
-
     def _update_p2p_buttons(self):
         """更新连接/断开按钮状态，以及 SFTP/SSH 终端/远程桌面按钮状态"""
         mode = self.ui.p2p_mode_combo.currentText()
         if mode == "XTCP":
-            running = self._frpc_process is not None
+            running = self._session_mgr.is_running()
             self.ui.p2p_sftp_btn.setEnabled(running)
             self.ui.p2p_ssh_terminal_btn.setEnabled(running)
             self.ui.p2p_rdp_btn.setEnabled(running)

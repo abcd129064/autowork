@@ -54,6 +54,14 @@ def main():
 
     # 应用 DPI 缩放（必须在 QApplication 创建前设置环境变量）
     settings_path = os.path.join(get_app_dir(), "settings.json")
+
+    # 启动时自动迁移：明文敏感字段（密码/token）一次性 DPAPI 加密回写，用户无感
+    try:
+        from core.secrets import migrate_settings_file
+        migrate_settings_file(settings_path)
+    except Exception:
+        pass
+
     MainWindow.apply_dpi_scale(settings_path)
 
     app = QApplication(sys.argv)
