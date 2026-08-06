@@ -287,7 +287,7 @@ class RemoteMixin:
 
         self._p2p_table_search = SearchLineEdit(self.ui.p2p_panel)
         self._p2p_table_search.setObjectName(u"p2p_table_search")
-        self._p2p_table_search.setPlaceholderText("从球桌库选择（球桌/球房/snk，输入即搜）")
+        self._p2p_table_search.setPlaceholderText("从球桌库选择")
         self._p2p_table_search.setClearButtonEnabled(True)
 
         # 单行紧凑布局：搜索框 + 已选标签（标签作为 picker 子控件，
@@ -309,7 +309,9 @@ class RemoteMixin:
 
         # 插入 XTCP 表单首行：随模式切换的显隐复用既有遍历（标签按行索引、
         # 控件按 p2p_xtcp_widgets 列表），无需改动 _update_p2p_visibility
-        self.ui.p2p_xtcp_form.insertRow(0, "球桌库:", picker)
+        # 「球桌库」标题暂时隐藏腾出列表空间（Task #51），picker 改为跨整行插入
+        # self.ui.p2p_xtcp_form.insertRow(0, "球桌库:", picker)
+        self.ui.p2p_xtcp_form.insertRow(0, picker)
         self.ui.p2p_xtcp_widgets.append(picker)
 
         self._p2p_table_search.textChanged.connect(self._schedule_table_search)

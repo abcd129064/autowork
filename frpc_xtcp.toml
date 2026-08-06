@@ -5,3 +5,24 @@ serverName = "snk_4002"
 secretKey = "abc123"
 bindPort = 21529
 
+[[visitors]]
+name = "snk_1801"
+type = "xtcp"
+serverName = "snk_1801"
+secretKey = "abc123"
+bindPort = 17192
+
+[[visitors]]
+name = "snk_1802"
+type = "xtcp"
+serverName = "snk_1802"
+secretKey = "abc123"
+bindPort = 23890
+
+[[visitors]]
+name = "snk_1803"
+type = "xtcp"
+serverName = "snk_1803"
+secretKey = "abc123"
+bindPort = 17844
+

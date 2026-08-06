@@ -3701,6 +3701,28 @@ class TrendPage(QWidget):
         if code:
             self._jump_to_device({"device_code": code})
 
+class HealthPage(QWidget):
+    """设备健康度管理页面"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("该页面尚未完成\n没错")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("color: #8a8f98; font-size: 15px;")
+        layout.addWidget(label)
+
+
+class GamePage(QWidget):
+    """小游戏页面"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("该页面尚未完成\n摸鱼")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("color: #8a8f98; font-size: 15px;")
+        layout.addWidget(label)
 
 # ==================== 主窗口 ====================
 
@@ -3720,14 +3742,22 @@ class ManagementPanelWindow(FluentWindow):
         self.device_page.setObjectName("devicePage")
         self.trend_page = TrendPage(self)
         self.trend_page.setObjectName("trendPage")
+        self.health_page = HealthPage(self)
+        self.health_page.setObjectName("healthPage")
+        self.game_page = GamePage(self)
+        self.game_page.setObjectName("gamePage")
         self.settings_page = AdminSettingsPage(self)
         self.settings_page.setObjectName("adminSettingsPage")
 
         # 注册导航
         self.addSubInterface(self.table_page, FluentIcon.LIBRARY, "球桌管理")
         self.addSubInterface(self.device_page, FluentIcon.IOT, "设备状态")
-        self.addSubInterface(self.trend_page, FluentIcon.PIE_SINGLE, "健康趋势")
+        # 隐藏「健康趋势」页导航入口，恢复时取消下行注释即可
+        # （TrendPage 实例仍会构建但无导航入口，不会被展示；closeEvent 清理不受影响）
+        # self.addSubInterface(self.trend_page, FluentIcon.PIE_SINGLE, "健康趋势")
+        self.addSubInterface(self.health_page, FluentIcon.PIE_SINGLE, "设备健康度管理")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "管理设置")
+        self.addSubInterface(self.game_page, FluentIcon.PIE_SINGLE, "小游戏")
 
         # 导航亚克力与「性能选项」联动：关闭 perf_acrylic 后不再强制开启，
         # 避免关闭菜单亚克力后导航栏仍有额外核显消耗
@@ -3760,38 +3790,58 @@ class ManagementPanelWindow(FluentWindow):
             pass
 
     def closeEvent(self, event):
-        """关闭窗口时清理所有 Worker
+        """关闭窗口时快速清理所有 Worker（目标 <300ms）
 
         注意：远程会话中心为全局单例，frpc/隧道可能被其他入口使用中，
         面板关闭不 shutdown，统一由主窗口 closeEvent 关闭。
+
+        各 Worker 均为「run() 直接跑同步函数」的 QThread，无事件循环，
+        quit() 是 no-op，wait(N) 只能干等函数自然跑完（最长 N 毫秒/
+        每个运行中 worker）——之前对多个 worker 各 wait(2000) 导致关闭
+        卡顿约 2 秒的回归。现改为：先 disconnect 防止关闭后回调，再
+        requestInterruption + 一次性短等待（200ms），未退出的直接放弃；
+        worker 持有引用由 GC 回收，落库操作幂等（历史补漏下次打开续补）。
+        table_db 是模块级单连接，面板关闭不关。
         """
         # 停止补漏队列（防止关闭后继续拉取）
-        getattr(self.device_page, "_backfill_queue", []).clear()
-        for page in (self.table_page, self.device_page, self.trend_page,
+        dev = self.device_page
+        getattr(dev, "_backfill_queue", []).clear()
+        dev._backfill_running = False
+
+        def _detach(worker):
+            """断开信号并请求中断；未运行的 worker 直接跳过不等待。
+
+            worker 均挂在页面属性上，引用随面板关闭一并回收；
+            若被 GC 在 run() 执行中途销毁，Qt 层 C++ QThread 对象仍存活
+            至线程结束，不会崩溃，落库操作幂等可重试。
+            """
+            if not (worker and worker.isRunning()):
+                return
+            try:
+                worker.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                worker.requestInterruption()
+            except RuntimeError:
+                pass
+
+        for page in (self.table_page, dev, self.trend_page,
                      self.settings_page):
             for attr in ("_worker", "_migrate_worker", "_refresh_worker",
                          "_test_worker", "_upload_worker", "_query_worker",
                          "_save_worker", "_meta_worker", "_export_worker",
                          "_time_worker", "_backfill_worker", "_backfill_save_worker",
                          "_alerts_worker", "_cand_worker", "_trend_worker",
-                         "_rank_worker"):
-                worker = getattr(page, attr, None)
-                if worker and worker.isRunning():
-                    try:
-                        worker.disconnect()
-                    except (RuntimeError, TypeError):
-                        pass
-                    worker.quit()
-                    worker.wait(2000)
+                         "_rank_worker", "_hourly_worker"):
+                _detach(getattr(page, attr, None))
         # 收集 Worker（不同设备可并行，列表管理）
-        for worker in list(getattr(self.device_page, "_collect_workers", [])):
-            if worker.isRunning():
-                try:
-                    worker.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-                worker.quit()
-                worker.wait(2000)
+        for worker in list(getattr(dev, "_collect_workers", [])):
+            _detach(worker)
+        # 一次性短等待：所有 worker 同时给 200ms 自行收尾；未退出的直接放弃，
+        # 绝不在关闭路径上串行 wait（旧实现对每个运行中 worker 各 wait(2000)，
+        # 是无事件循环线程的干等，累积出 ~2s 关闭卡顿的根因）
+        QThread.msleep(200)
         super().closeEvent(event)
 
 

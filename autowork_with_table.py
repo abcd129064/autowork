@@ -516,8 +516,9 @@ class Ui_MainWindow(object):
 
         # --- 模块1: 服务器/网络 ---
         # 分区标题随连接模式切换文本（XTCP=visitors，TCP=保存的服务器），见 main.py _update_p2p_visibility
+        # 控件保留创建（_update_p2p_visibility 会 setText），仅暂时隐藏腾出列表空间（Task #51）
         self.p2p_server_section_label = _make_section_label("◎ 服务器 / visitors")
-        p2p_main_layout.addWidget(self.p2p_server_section_label)
+        # p2p_main_layout.addWidget(self.p2p_server_section_label)
 
         self.p2p_visitor_list = ListWidget(self.p2p_panel)
         self.p2p_visitor_list.setObjectName(u"p2p_visitor_list")
@@ -535,7 +536,8 @@ class Ui_MainWindow(object):
         p2p_main_layout.addWidget(self.p2p_search)
 
         p2p_list_btn_layout = QHBoxLayout()
-        self.p2p_add_btn = FluentPushButton("添加")
+        # 添加/删除按钮样式与连接/断开成组一致：添加=Primary 蓝色（仿连接）、删除=普通灰（仿断开）
+        self.p2p_add_btn = PrimaryPushButton("添加")
         self.p2p_add_btn.setObjectName(u"p2p_add_btn")
         self.p2p_delete_btn = FluentPushButton("删除")
         self.p2p_delete_btn.setObjectName(u"p2p_delete_btn")
@@ -585,7 +587,8 @@ class Ui_MainWindow(object):
         p2p_main_layout.addWidget(_make_separator())
 
         # --- 模块2: 权限与配置 ---
-        p2p_main_layout.addWidget(_make_section_label("◎ 权限与配置"))
+        # 分区标题暂时隐藏腾出列表空间（Task #51）
+        # p2p_main_layout.addWidget(_make_section_label("◎ 权限与配置"))
 
         mode_layout = QHBoxLayout()
         mode_label = CaptionLabel("连接方式:", self.p2p_panel)
@@ -636,7 +639,8 @@ class Ui_MainWindow(object):
         p2p_main_layout.addWidget(_make_separator())
 
         # --- 模块3: 高级功能 ---
-        p2p_main_layout.addWidget(_make_section_label("◎ 功能"))
+        # 分区标题暂时隐藏腾出列表空间（Task #51）
+        # p2p_main_layout.addWidget(_make_section_label("◎ 功能"))
 
         self.p2p_sftp_btn = FluentPushButton("文件管理")
         self.p2p_sftp_btn.setObjectName(u"p2p_sftp_btn")
