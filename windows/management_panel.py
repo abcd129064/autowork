@@ -647,6 +647,12 @@ class UploadListDialog(QDialog):
         self._lbl_progress = CaptionLabel("", self)
         bottom.addWidget(self._lbl_progress)
         bottom.addStretch(1)
+        # 最小化：仅上传进行中可用，隐藏对话框后上传后台继续，完成后重新激活
+        self._btn_min = PushButton(FluentIcon.MINIMIZE, "最小化", self)
+        self._btn_min.setToolTip("上传后台继续进行，完成后重新弹出本窗口")
+        self._btn_min.setEnabled(False)
+        self._btn_min.clicked.connect(self.hide)
+        bottom.addWidget(self._btn_min)
         btn_open = PushButton(FluentIcon.FOLDER, "打开目录", self)
         btn_open.clicked.connect(self._open_dir)
         bottom.addWidget(btn_open)
@@ -806,9 +812,10 @@ class UploadListDialog(QDialog):
         凭据用上传专用字段 upload_user/upload_pass（不复用 SSH 凭据）；
         目标由 upload_host/upload_port/upload_remote_dir 配置。
         密码不在代码中内置默认值，未配置时提示用户在设置中填写。
+        上传进行中此按钮语义切换为「取消上传」（Task #57）。
         """
         if self._upload_worker is not None and self._upload_worker.isRunning():
-            InfoBar.warning("提示", "已有上传进行中，请稍候", parent=self, duration=2000)
+            self._on_cancel_upload()
             return
         if not os.path.isdir(self._upload_root) or not os.listdir(self._upload_root):
             InfoBar.info("提示", "upload 目录为空，无文件可上传", parent=self, duration=3000)
@@ -838,7 +845,10 @@ class UploadListDialog(QDialog):
         if not box.exec():
             return
 
-        self._btn_package.setEnabled(False)
+        # 上传期间按钮语义切换：打包上传 → 取消上传（二次确认后中断 worker）
+        self._btn_package.setText("取消上传")
+        self._btn_package.setEnabled(True)
+        self._btn_min.setEnabled(True)
         self._progress_bar.setValue(0)
         self._progress_bar.show()
         self._upload_worker = ZipUploadWorker(
@@ -849,7 +859,57 @@ class UploadListDialog(QDialog):
         self._upload_worker.percent.connect(self._on_upload_percent)
         self._upload_worker.done.connect(self._on_upload_done)
         self._upload_worker.error.connect(self._on_upload_fail)
+        self._upload_worker.cancelled.connect(self._on_upload_cancelled)
         self._upload_worker.start()
+
+    def _on_cancel_upload(self):
+        """取消上传：二次确认后请求中断（压缩中/上传中均可取消）
+
+        实际的临时 zip 清理与 SFTP 连接关闭由 ZipUploadWorker 完成，
+        中断完成后 cancelled 信号恢复按钮状态。
+        """
+        box = MessageBox("取消上传", "上传进行中，确定取消？", self)
+        box.yesButton.setText("确定取消")
+        box.cancelButton.setText("继续上传")
+        if not box.exec():
+            return
+        if self._upload_worker is not None and self._upload_worker.isRunning():
+            self._btn_package.setEnabled(False)
+            self._lbl_progress.setText("正在取消...")
+            self._upload_worker.requestInterruption()
+
+    def _restore_upload_ui(self):
+        """上传结束（成功/失败/取消）后恢复按钮与进度条状态
+
+        done/error/cancelled 信号在 worker.run() 内部发出，此时线程可能仍在
+        关闭 SFTP/SSH 连接；若直接释放引用，GC 会销毁仍在运行的 QThread 触发
+        "Destroyed while thread is still running" 崩溃，因此先安全释放。
+        """
+        w = self._upload_worker
+        self._upload_worker = None
+        try:
+            if w is not None:
+                if w.isRunning():
+                    # lambda 包装必须：PySide6 对 finished.connect(w.deleteLater)
+                    # 走 C++ 直连不持有 Python 引用，worker 会被 GC 在运行中销毁
+                    w.finished.connect(lambda w=w: w.deleteLater())
+                else:
+                    w.deleteLater()
+        except RuntimeError:
+            pass
+        self._btn_package.setText("打包上传")
+        self._btn_package.setEnabled(True)
+        self._btn_min.setEnabled(False)
+        self._lbl_progress.setText("")
+        self._progress_bar.hide()
+        self._progress_bar.setValue(0)
+
+    def _reactivate_if_hidden(self):
+        """对话框被最小化时重新弹出并激活（上传后台完成的提示入口）"""
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _on_upload_percent(self, p):
         """上传字节进度：进度条 + 百分比文字（含显示保护）"""
@@ -859,10 +919,8 @@ class UploadListDialog(QDialog):
         self._lbl_progress.setText(f"上传中 {p}%")
 
     def _on_upload_done(self, info):
-        self._btn_package.setEnabled(True)
-        self._lbl_progress.setText("")
-        self._progress_bar.hide()
-        self._progress_bar.setValue(0)
+        self._restore_upload_ui()
+        self._reactivate_if_hidden()
         self._tree.clear()
         self._populate()  # upload 目录已被 worker 清空，刷新为空清单
         # C1 台账：回填上传结果（匹配近期已收集未上传记录，失败静默）
@@ -874,11 +932,16 @@ class UploadListDialog(QDialog):
                         parent=self, duration=5000)
 
     def _on_upload_fail(self, msg):
-        self._btn_package.setEnabled(True)
-        self._lbl_progress.setText("")
-        self._progress_bar.hide()
-        self._progress_bar.setValue(0)
+        self._restore_upload_ui()
+        self._reactivate_if_hidden()
         InfoBar.error("上传失败", msg.split(chr(10))[0], parent=self, duration=5000)
+
+    def _on_upload_cancelled(self):
+        """取消完成：恢复按钮状态、清理 worker 引用（临时 zip 已由 worker 删除）"""
+        self._restore_upload_ui()
+        self._reactivate_if_hidden()
+        InfoBar.info("已取消上传", "临时 zip 已清理，可重新发起打包上传",
+                     parent=self, duration=4000)
 
     @staticmethod
     def file_count(upload_root: str) -> int:
@@ -2114,13 +2177,6 @@ class DevicePage(QWidget):
             _hf_stats = table_db.get_submission_stats(days=_HF_DAYS)
         except Exception:
             _hf_stats = {"by_device": {}, "by_table": {}}
-        # C4 在线状态交叉校验：一次批量取全部球桌 name→onlineStatusName
-        # 映射（kd 行 table_id ↔ billiard_tables.name，与 get_snk_by_name
-        # 同款关联），页内逐行内存匹配，无逐行查库；失败静默不校验
-        try:
-            _online_map = table_db.get_tables_online_map()
-        except Exception:
-            _online_map = {}
         # 填充期间关闭界面更新与信号，完成后一次性恢复
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
@@ -2143,24 +2199,6 @@ class DevicePage(QWidget):
                             text = f"{text} · 高频问题"
                             color = _HF_COLOR
                             tip += f"\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）"
-                        # C4 交叉校验：kd.status 与球桌 onlineStatusName 矛盾时醒目标记
-                        _tid = str(item.get("table_id") or "").strip()
-                        _tb_online = _online_map.get(_tid) if _tid else None
-                        _kd_code = str(val).strip()
-                        if _tb_online and _kd_code in ("0", "1", "2"):
-                            _kd_online = _kd_code != "0"
-                            # 仅比较已知状态值（在线/运行中/空闲/下线），未知值不判矛盾
-                            if _tb_online in ("在线", "运行中", "空闲", "下线"):
-                                _conflict = _kd_online == (_tb_online == "下线")
-                            else:
-                                _conflict = False
-                            if _conflict:
-                                text = f"{text} ⚠状态矛盾"
-                                color = _HF_COLOR
-                                tip += (f"\n⚠ 状态矛盾: kd 接口 status={_kd_code}"
-                                        f"（{'在线' if _kd_online else '下线'}），"
-                                        f"但球桌管理 onlineStatusName=「{_tb_online}」，"
-                                        f"两个数据源不一致")
                         cell = QTableWidgetItem(text)
                         cell.setToolTip(tip)
                         if color is not None:

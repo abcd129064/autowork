@@ -57,6 +57,7 @@ class RemoteMixin:
     _TABLE_PICKER_MAX_ITEMS = 50
     _TABLE_PICKER_QUERY_LIMIT = 2000
     _TABLE_PICKER_DEBOUNCE_MS = 150
+    _TABLE_PICKER_LABEL_HIDE_MS = 3000  # 「已选」标签自动消失延时(ms)
 
     def _init_p2p_panel(self):
         """初始化远程面板状态，从统一会话中心恢复手工 visitor 列表"""
@@ -321,6 +322,14 @@ class RemoteMixin:
         self._p2p_search_timer.setInterval(self._TABLE_PICKER_DEBOUNCE_MS)
         self._p2p_search_timer.timeout.connect(self._show_table_matches)
 
+        # 「已选」标签自动消失：每次选中 show() 后重启计时（快速连续选择
+        # 时后一次重新计时），到期仅 hide() 标签，布局自动收拢不留空行
+        self._p2p_selected_label_timer = QTimer(self)
+        self._p2p_selected_label_timer.setSingleShot(True)
+        self._p2p_selected_label_timer.setInterval(self._TABLE_PICKER_LABEL_HIDE_MS)
+        self._p2p_selected_label_timer.timeout.connect(
+            self._p2p_table_selected_label.hide)
+
         # 候选下拉：Qt 原生 QCompleter（popup 为顶层 QListView，自动锚定输入框
         # 正下方且不抢焦点，用户可在列表显示期间继续输入）。候选内容由本类
         # 动态查库更新 model（UnfilteredPopupCompletion 全量展示 model）。
@@ -445,7 +454,7 @@ class RemoteMixin:
         self._on_table_picked(row)
 
     def _on_table_picked(self, row: dict):
-        """选中球桌：自动填充 visitor 表单（用户仍可手工修改）"""
+        """选中球桌：回填表单后自动走「添加」流程，注册为 visitor 加入列表"""
         self._p2p_picking = True
         try:
             self._p2p_search_timer.stop()
@@ -461,9 +470,32 @@ class RemoteMixin:
             shown = f"已选：{name} / {room} ({snk})" if room else f"已选：{name} ({snk})"
             self._p2p_table_selected_label.setText(shown)
             self._p2p_table_selected_label.show()
-            self._append_log(f"[球桌库] 已选择 {shown[3:]}，serverName 已填入表单")
+            self._p2p_selected_label_timer.start()  # 重启 3s 自动消失计时
+            self._append_log(f"[球桌库] 已选择 {shown[3:]}，自动添加到 visitor 列表")
+            self._add_picked_table(snk)
         finally:
             self._p2p_picking = False
+
+    def _add_picked_table(self, snk: str):
+        """把选中的球桌按表单注册为 XTCP visitor（复用「添加」按钮完整路径）
+
+        重复添加保护：serverName 已在列表中时仅 InfoBar 提示并选中该行。
+        球桌库仅在 XTCP 模式下可见，故此处按 XTCP visitor 语义添加。
+        """
+        existing = next(
+            (i for i, v in enumerate(self._p2p_visitors)
+             if v.get("serverName", "").strip() == snk), -1)
+        if existing >= 0:
+            self._show_info_bar(f"{snk} 已在列表中", "info")
+            self._p2p_current_index = existing
+            self.ui.p2p_visitor_list.setCurrentRow(existing)
+            self._append_log(f"[球桌库] {snk} 已在 visitor 列表中，跳过重复添加")
+            return
+        # 复用添加按钮槽函数（表单已回填，内部完成端口校验/列表刷新/选中新行）
+        self._on_p2p_add()
+        if self._p2p_visitors \
+                and self._p2p_visitors[-1].get("serverName") == snk:
+            self._show_info_bar(f"已添加 {snk}", "success")
 
     # ------------------------------------------------------------------ TCP 保存的服务器
     def _load_tcp_servers(self):
@@ -678,7 +710,8 @@ class RemoteMixin:
         worker = self._tcp_worker
         self._tcp_worker = None
         if worker.isRunning():
-            worker.finished.connect(worker.deleteLater)
+            # lambda 包装必须：PySide6 C++ 直连不持有 Python 引用，worker 会被 GC
+            worker.finished.connect(lambda w=worker: w.deleteLater())
         else:
             worker.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)
@@ -699,7 +732,7 @@ class RemoteMixin:
             w = self._tcp_worker
             self._tcp_worker = None
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                w.finished.connect(lambda w=w: w.deleteLater())
             else:
                 w.deleteLater()
 
@@ -711,7 +744,7 @@ class RemoteMixin:
             w = self._tcp_worker
             self._tcp_worker = None
             if w.isRunning():
-                w.finished.connect(w.deleteLater)
+                w.finished.connect(lambda w=w: w.deleteLater())
             else:
                 w.deleteLater()
         self.ui.p2p_sftp_btn.setEnabled(False)

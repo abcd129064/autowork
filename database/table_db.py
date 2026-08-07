@@ -497,22 +497,6 @@ def get_snk_by_name(name: str) -> str:
     return str(row[0] or "") if row else ""
 
 
-def get_tables_online_map() -> dict:
-    """批量取全部球桌 name → onlineStatusName 映射（C4 在线状态交叉校验用）
-
-    键为 TRIM 后的球桌号，与 kd_status.table_id 同款关联方式（参见
-    get_snk_by_name）；一次全量查询，调用方按页内行匹配，无逐行 N+1。
-    """
-    conn = _get_conn()
-    result = {}
-    for name, status in conn.execute(
-            "SELECT name, onlineStatusName FROM billiard_tables"):
-        key = str(name or "").strip()
-        if key:
-            result[key] = str(status or "").strip()
-    return result
-
-
 def get_meta() -> tuple:
     """返回 (总条数, 最后同步时间字符串)，无数据时返回 (0, '')"""
     conn = _get_conn()

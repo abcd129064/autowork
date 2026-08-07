@@ -68,14 +68,26 @@ class SettingsMixin:
         """将配置写入 settings.json，同时更新内存缓存
 
         内存缓存保存明文供各调用方直接使用；落盘时对敏感字段统一加密。
+
+        【防覆盖】写盘前以磁盘最新内容为基础合并，而非直接回写启动时的
+        内存缓存：管理面板等其他模块可能在会话中途保存了新键（如
+        upload_pass/api_credentials），若用启动时一次性加载的旧缓存整体
+        回写，会把这些新保存的配置静默冲掉（重启后表现为"密码丢失"）。
         """
         path = self._get_settings_path()
         try:
-            self._load_settings()  # 确保缓存已初始化
-            self._settings_cache.update(data)
+            base = dict(self.DEFAULT_PATHS)
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        base.update(decrypt_settings(json.load(f)))
+                except Exception:
+                    pass  # 文件损坏时以默认值+本次数据重建，不影响保存
+            base.update(data)
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(encrypt_settings(self._settings_cache), f,
+                json.dump(encrypt_settings(base), f,
                           ensure_ascii=False, indent=2)
+            self._settings_cache = base
         except Exception as e:
             self._append_log(f"[警告] 保存配置失败: {e}")
 
@@ -152,9 +164,11 @@ class SettingsMixin:
         s_daily = QShortcut(QKeySequence(sc["shortcut_open_daily"]), self)
         s_daily.activated.connect(self.on_open_daily_clicked)
         self._shortcuts.append(s_daily)
-        # 打开配置文件（弹模态对话框，用 singleShot 避免事件循环冲突）
+        # 打开配置文件（默认 settings.json，singleShot 避免事件循环冲突；
+        # 内层 lambda 包装：否则 _open_config_file 被立即求值返回 None 传给 singleShot）
         s_config = QShortcut(QKeySequence(sc["shortcut_open_config"]), self)
-        s_config.activated.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
+        s_config.activated.connect(
+            lambda: QTimer.singleShot(0, lambda: self._open_config_file("settings.json")))
         self._shortcuts.append(s_config)
         # 切换 P2P 远程面板
         s_p2p = QShortcut(QKeySequence(sc["shortcut_p2p_panel"]), self)

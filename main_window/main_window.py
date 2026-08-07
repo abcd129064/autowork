@@ -197,7 +197,6 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.start.clicked.connect(self.on_start_clicked)
         self.ui.open_daily.clicked.connect(self.on_open_daily_clicked)
         self.ui.write_table.clicked.connect(self.on_open_dir_clicked)
-        self.ui.open_config.clicked.connect(lambda: QTimer.singleShot(0, self.on_open_config_clicked))
         self.ui.pause_btn.clicked.connect(self._on_pause_clicked)
         # 球桌管理面板入口
         self.ui.table_panel_btn.clicked.connect(lambda: QTimer.singleShot(0, self._on_open_table_panel))
@@ -256,6 +255,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         # A1: 监听 SFTP 下载完成全局信号（方法内延迟 import，避免循环依赖）
         self._connect_sftp_download_signal()
+
+        # 工具栏改造（刷新图标化 / 配置按钮迁移 / 日期步进键）须在全部信号连接后执行
+        self._upgrade_toolbar()
 
     # ==================== 日志智能自动滚动 ====================
 
@@ -878,31 +880,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._append_log(f"[打开目录] {device_dir}")
 
     @Slot()
-    def on_open_config_clicked(self):
-        """配置按钮点击事件 - 选择打开 settings.json / cfg.json / frpc_xtcp.toml（Fluent 对话框）"""
-
-        class ConfigFileDialog(MessageBoxBase):
-            def __init__(self, parent, options):
-                super().__init__(parent)
-                self.titleLabel = BodyLabel("选择要打开的配置文件：", self)
-                self.viewLayout.addWidget(self.titleLabel)
-                self.comboBox = ComboBox(self)
-                self.comboBox.addItems(options)
-                self.comboBox.setMinimumWidth(260)
-                self.viewLayout.addWidget(self.comboBox)
-
-        options = ["settings.json", "cfg.json", "frpc_xtcp.toml"]
-        dlg = ConfigFileDialog(self, options)
-        dlg.yesButton.setText("打开")
-        dlg.cancelButton.setText("取消")
-        dlg.widget.setMinimumWidth(320)
-        if not dlg.exec():
-            return
-
-        choice = dlg.comboBox.currentText()
-        if choice == "settings.json":
+    def _open_config_file(self, name: str):
+        """打开指定配置文件（菜单栏「配置」下拉项 / Ctrl+, 快捷键）"""
+        if name == "settings.json":
             path = self._get_settings_path()
-        elif choice == "cfg.json":
+        elif name == "cfg.json":
             path = os.path.join(self.exe_dir, "cfg.json")
         else:  # frpc_xtcp.toml
             path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
@@ -913,6 +895,20 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         os.startfile(path)
         self._append_log(f"[配置] 已打开: {path}")
+
+    def _step_date(self, delta_days: int):
+        """日期步进：负数前移、正数后移；setDate 触发 dateChanged → 现有加载链路"""
+        self.ui.date.setDate(self.ui.date.date.addDays(delta_days))
+
+    def _upgrade_toolbar(self):
+        """工具栏接线补充（须在 connect_signals 之后执行）：日期步进键点击。
+        刷新按钮与日期步进键已在 Ui_MainWindow 中直接创建为图标按钮，
+        不在运行时改动布局结构（FlowLayout 的 replaceWidget/takeAt 删除
+        会造成索引错位，控件重叠）。
+        「配置」按钮已迁移至菜单栏「配置」下拉菜单。
+        """
+        self.ui.date_prev.clicked.connect(lambda _=False: self._step_date(-1))
+        self.ui.date_next.clicked.connect(lambda _=False: self._step_date(1))
 
     @Slot()
     def _on_id_current_changed(self, current, previous):
@@ -1349,7 +1345,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._tcp_worker = None
             try:
                 if tw.isRunning():
-                    tw.finished.connect(tw.deleteLater)
+                    # lambda 包装必须：PySide6 C++ 直连不持有 Python 引用
+                    tw.finished.connect(lambda w=tw: w.deleteLater())
                 else:
                     tw.deleteLater()
             except RuntimeError:
@@ -1365,6 +1362,18 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                     lw.wait(1000)
             except RuntimeError:
                 pass
+
+        # 7b. 清理批量整理 worker（NewLog 整理 / 打包上传，中断并短等待）
+        for attr in ('_newlog_worker', '_newlog_upload_worker'):
+            nw = getattr(self, attr, None)
+            if nw is not None:
+                setattr(self, attr, None)
+                try:
+                    if nw.isRunning():
+                        nw.requestInterruption()
+                        nw.wait(1000)
+                except (RuntimeError, OSError):
+                    pass
 
         # 8. 终止异步解码进程
         dp = getattr(self, '_decode_process', None)

@@ -320,11 +320,15 @@ def build_image_path(file_path: str, device_code: str, category: str) -> str:
 
 
 class MigrateImageWorker(QThread):
-    """异步执行图像分类迁移
+    """异步执行图像分类迁移，将图片从一个分类目录移动到另一个分类目录
+
+    通过接口2的 migrate_image 接口逐张迁移图片，支持 Token 过期自动重登。
+    迁移完成后根据成功/失败数量分别触发 success 或 error 信号。
+
     Signals:
-        success(int): 成功迁移的图片数量
-        error(str): 错误信息
-        progress(int, int): 当前进度, 总数
+        success(int): 全部迁移成功时触发，参数为成功数量
+        error(str): 存在失败或异常时触发，参数为错误描述
+        progress(int, int): 每迁移一张触发，参数为(当前序号, 总数)
     """
     success = Signal(int)
     error = Signal(str)
@@ -335,11 +339,12 @@ class MigrateImageWorker(QThread):
                  username=None, password=None, parent=None):
         """
         Args:
-            file_path: 日期路径，如 "2026/08/02"
+            file_path: 日期路径，"2026/08/02"
             device_code: 设备编码
             file_names: 要迁移的文件名列表
-            src_category: 源分类（中文名，如 "操作"）
-            dest_category: 目标分类（中文名，如 "待处理"）
+            src_category: 源分类（ "操作"）
+            dest_category: 目标分类（"待处理"）
+            username/password: 可选，优先使用传入值，否则从配置读取
         """
         super().__init__(parent)
         self.file_path = file_path
@@ -347,29 +352,32 @@ class MigrateImageWorker(QThread):
         self.file_names = file_names
         self.src_category = src_category
         self.dest_category = dest_category
+        # 账号密码：优先用外部传入，兜底从 settings.json 配置读取
         creds = _load_api_credentials()
         api2_cfg = creds.get("api2", {})
         self.username = username or api2_cfg.get("username", "")
         self.password = password or api2_cfg.get("password", "")
-        self._token = None
+        self._token = None  # JWT token，登录后赋值
 
     def _login(self):
-        """登录获取 JWT token"""
+        """登录接口2获取 JWT token，成功返回 token，失败返回 None"""
         try:
             resp = requests.post(API2_LOGIN_URL, json={
                 "username": self.username,
                 "password": self.password,
             }, timeout=15)
             if resp.status_code == 200:
+                # 接口返回格式: {"access": "eyJhbGciOi..."}
                 self._token = resp.json().get("access")
                 return self._token
         except requests.exceptions.RequestException:
-            pass
+            pass  # 网络异常静默处理，由调用方判断并提示
         return None
 
     def _migrate_one(self, file_name: str, src_path: str, dest_path: str) -> bool:
-        """迁移单张图片，返回是否成功"""
+        """迁移单张图片，成功返回 True，失败返回 False"""
         headers = {"Authorization": f"Bearer {self._token}"}
+        # 接口要求 multipart/form-data 格式提交路径参数
         form_data = {
             "src_path": (None, src_path),
             "dest_path": (None, dest_path),
@@ -378,10 +386,10 @@ class MigrateImageWorker(QThread):
         resp = requests.post(API2_MIGRATE_URL, files=form_data,
                              headers=headers, timeout=20)
 
-        # Token 过期重试一次
+        # Token 过期(401)时自动重登重试一次，避免整批任务因单次过期全部失败
         if resp.status_code == 401:
             if not self._login():
-                return False
+                return False  # 重登也失败，直接返回
             headers = {"Authorization": f"Bearer {self._token}"}
             resp = requests.post(API2_MIGRATE_URL, files=form_data,
                                  headers=headers, timeout=20)
@@ -389,29 +397,35 @@ class MigrateImageWorker(QThread):
         return resp.status_code == 200
 
     def run(self):
+        """线程主入口：登录 → 构造路径 → 逐张迁移 → 汇总结果"""
         try:
+            # 前置校验：账号密码必须已配置
             if not self.username or not self.password:
                 self.error.emit("接口2账号密码未配置")
                 return
 
+            # 第一步：登录拿 token
             if not self._login():
                 self.error.emit("接口2登录失败，请检查账号密码")
                 return
 
+            # 第二步：拼接源路径和目标路径（media/{日期}/{设备码}/{分类}/）
             src_path = build_image_path(self.file_path, self.device_code, self.src_category)
             dest_path = build_image_path(self.file_path, self.device_code, self.dest_category)
 
+            # 第三步：逐张迁移并实时更新进度
             total = len(self.file_names)
             ok_count = 0
-            fail_list = []
+            fail_list = []  # 记录失败文件名，方便排查
 
             for i, fname in enumerate(self.file_names, 1):
                 if self._migrate_one(fname, src_path, dest_path):
                     ok_count += 1
                 else:
                     fail_list.append(fname)
-                self.progress.emit(i, total)
+                self.progress.emit(i, total)  # 通知 UI 刷新进度条
 
+            # 第四步：汇总结果，全部成功走 success，有失败走 error
             if fail_list:
                 self.error.emit(
                     f"迁移完成：成功 {ok_count} 张，失败 {len(fail_list)} 张\n"

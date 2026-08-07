@@ -33,6 +33,8 @@ from qfluentwidgets import (
     CardWidget,
     CaptionLabel,
     BodyLabel,
+    ToolButton,
+    FluentIcon,
     setFont,
     setCustomStyleSheet,
     isDarkTheme,
@@ -332,8 +334,9 @@ class Ui_MainWindow(object):
         self.horizontalLayout.setContentsMargins(10, 6, 10, 6)
 
         # --- 组1: 文件操作 ---
-        self.flush = FluentPushButton(self.toolbar_widget)
+        self.flush = ToolButton(FluentIcon.SYNC, self.toolbar_widget)
         self.flush.setObjectName(u"flush")
+        self.flush.setFixedSize(32, 32)
         self.horizontalLayout.addWidget(self.flush)
 
         self.date = CalendarPicker(self.toolbar_widget)
@@ -341,6 +344,16 @@ class Ui_MainWindow(object):
         self.date.setMinimumWidth(150)
         self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
+
+        # 日期步进键（复用运维面板 DevicePage 模式：前一天/后一天）
+        self.date_prev = ToolButton(FluentIcon.LEFT_ARROW, self.toolbar_widget)
+        self.date_prev.setObjectName(u"date_prev")
+        self.date_prev.setFixedSize(26, 32)
+        self.horizontalLayout.addWidget(self.date_prev)
+        self.date_next = ToolButton(FluentIcon.RIGHT_ARROW, self.toolbar_widget)
+        self.date_next.setObjectName(u"date_next")
+        self.date_next.setFixedSize(26, 32)
+        self.horizontalLayout.addWidget(self.date_next)
 
         self.table_panel_btn = FluentPushButton(self.toolbar_widget)
         self.table_panel_btn.setObjectName(u"table_panel_btn")
@@ -350,9 +363,7 @@ class Ui_MainWindow(object):
         self.write_table.setObjectName(u"write_table")
         self.horizontalLayout.addWidget(self.write_table)
 
-        self.open_config = FluentPushButton(self.toolbar_widget)
-        self.open_config.setObjectName(u"open_config")
-        self.horizontalLayout.addWidget(self.open_config)
+        # 「配置」按钮已迁移至第二行菜单栏「配置」下拉菜单，此处不再创建
 
         self.horizontalLayout.addWidget(_make_separator(vertical=True))
 
@@ -668,11 +679,12 @@ class Ui_MainWindow(object):
     def retranslateUi(self, MainWindow):
         if hasattr(MainWindow, 'setCentralWidget'):  # 仅对真正的窗口设置标题
             MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"AutoWork", None))
-        self.flush.setText(QCoreApplication.translate("MainWindow", u"刷新", None))
+        self.flush.setToolTip(QCoreApplication.translate("MainWindow", u"刷新（重新扫描程序与设备列表）", None))
         self.date.setDateFormat(QCoreApplication.translate("MainWindow", u"yyyy-MM-dd", None))
+        self.date_prev.setToolTip(QCoreApplication.translate("MainWindow", u"前一天", None))
+        self.date_next.setToolTip(QCoreApplication.translate("MainWindow", u"后一天", None))
         self.table_panel_btn.setText(QCoreApplication.translate("MainWindow", u"球桌管理", None))
         self.write_table.setText(QCoreApplication.translate("MainWindow", u"打开目录", None))
-        self.open_config.setText(QCoreApplication.translate("MainWindow", u"配置", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"程序:", None))
         self.input_frame_before.setText(QCoreApplication.translate("MainWindow", u"帧前", None))
         self.input_frame_set.setText(QCoreApplication.translate("MainWindow", u"帧后", None))

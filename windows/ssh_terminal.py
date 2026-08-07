@@ -32,12 +32,12 @@ import threading
 from datetime import datetime
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QWidget, QFrame,
-                               QLabel, QListWidget, QMenu)
+                               QLabel, QListWidget)
 from PySide6.QtGui import QAction
 from PySide6.QtCore import QTimer, Qt, Signal
 from qfluentwidgets import (PushButton, PrimaryPushButton, DropDownPushButton,
                             TransparentToolButton, LineEdit, FluentIcon, MessageBox,
-                            InfoBar, setFont)
+                            InfoBar, setFont, RoundMenu)
 
 from core.app_paths import get_app_dir
 from core.conn_logger import conn_logger
@@ -573,7 +573,7 @@ class SSHTerminalPanel(QWidget):
             commands = list(DEFAULT_SSH_COMMANDS)
         self._auto_run = bool(settings.get("ssh_cmd_auto_run", False))
 
-        menu = QMenu(self)
+        menu = RoundMenu("常用命令", self)
         for cmd in commands:
             act = QAction(str(cmd), menu)
             act.triggered.connect(lambda checked=False, c=str(cmd): self._send_command(c))

@@ -17,7 +17,7 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
     BodyLabel, CaptionLabel, TitleLabel, isDarkTheme, RoundMenu, SwitchButton,
-    PushButton, ScrollArea, TextEdit)
+    PushButton, ScrollArea, TextEdit, ProgressBar)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
@@ -25,7 +25,8 @@ from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAni
 
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
-from workers.collect_worker import CollectFilesWorker, FileCopyWorker
+from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
+    ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
 from main_window.settings_dialog import SettingsDialog
 
@@ -214,17 +215,24 @@ class _ShortcutKeyEdit(LineEdit):
 
 
 class NewLogDialog(MessageBoxBase):
-    """视频/日志批量整理对话框（Task #40）：署名输入 + 运行输出实时展示。
+    """视频/日志批量整理对话框（Task #40 / #57）
 
-    yesButton 状态机：开始整理 → 运行中（禁用）→ 完成后变「打开结果目录」。
-    运行期间拦截关闭，避免对话框销毁后 Worker 信号打到已删除对象。
+    署名输入 + 运行输出实时展示；整理完成后可一键打包上传（复用运维
+    面板 ZipUploadWorker）。
+
+    yesButton 状态机：开始整理 → 整理中（禁用）→ 打包上传 →
+    上传中（按钮变为「取消上传」，二次确认）。上传进行中可最小化
+    （worker 由主窗口持有，后台继续，完成后 InfoBar 提示并重新激活）。
+    整理中禁止关闭（Worker 输出直写本对话框文本区）；上传中允许关闭。
     """
 
     def __init__(self, parent, default_target):
         super().__init__(parent)
-        self._running = False
+        self._phase = "idle"  # idle/organizing/organized/uploading
         self._out_path = ""
-        self.on_start = None  # 由主窗口注入启动回调
+        self.on_start = None          # 由主窗口注入：启动整理
+        self.on_upload = None         # 由主窗口注入：发起打包上传
+        self.on_cancel_upload = None  # 由主窗口注入：取消上传（含二次确认）
 
         self.titleLabel = BodyLabel("视频/日志批量整理", self)
         self.viewLayout.addWidget(self.titleLabel)
@@ -247,47 +255,99 @@ class NewLogDialog(MessageBoxBase):
         self.log_view.setFont(mono)
         self.viewLayout.addWidget(self.log_view)
 
+        # 上传字节进度条（仅打包上传阶段显示）
+        self.progress_bar = ProgressBar(self)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.hide()
+        self.viewLayout.addWidget(self.progress_bar)
+
+        # 底部按钮区补充：打开结果目录 + 最小化（初始隐藏/禁用）
+        self.btn_open_out = PushButton(FluentIcon.FOLDER, "打开结果目录", self)
+        self.btn_open_out.clicked.connect(self._on_open_out)
+        self.btn_open_out.hide()
+        self.btn_min = PushButton(FluentIcon.MINIMIZE, "最小化", self)
+        self.btn_min.setToolTip("上传后台继续进行，完成后主窗口弹出提示")
+        self.btn_min.setEnabled(False)
+        self.btn_min.clicked.connect(self.hide)
+        self.buttonLayout.insertWidget(0, self.btn_min)
+        self.buttonLayout.insertWidget(0, self.btn_open_out)
+
         # 接管 yesButton：不自动关闭对话框，按状态分发动作
         self.yesButton.clicked.disconnect()
         self.yesButton.clicked.connect(self._on_yes_clicked)
 
     def _on_yes_clicked(self):
+        if self._phase == "uploading":
+            if self.on_cancel_upload:
+                self.on_cancel_upload()
+            return
+        if self._phase == "organized":
+            if self.on_upload:
+                self.on_upload()
+            return
+        if self._phase == "idle" and self.on_start:
+            self.on_start()
+
+    def _on_open_out(self):
         if self._out_path:
             try:
                 os.startfile(self._out_path)
             except Exception:
                 pass
-            return
-        if not self._running and self.on_start:
-            self.on_start()
 
     def append_line(self, text):
         self.log_view.append(text)
 
     def enter_running(self):
-        self._running = True
+        self._phase = "organizing"
         self.target_edit.setEnabled(False)
         self.yesButton.setEnabled(False)
         self.yesButton.setText("整理中...")
         self.cancelButton.setEnabled(False)
 
-    def enter_finished(self, out_path):
-        self._running = False
+    def enter_organized(self, out_path):
+        """整理完成待打包上传（上传取消/失败后也回到此状态，可再次发起）"""
+        self._phase = "organized"
         self._out_path = out_path
+        self.target_edit.setEnabled(True)
         self.yesButton.setEnabled(True)
-        self.yesButton.setText("打开结果目录")
+        self.yesButton.setText("打包上传")
         self.cancelButton.setEnabled(True)
+        self.btn_open_out.setEnabled(True)
+        self.btn_open_out.show()
+        self.btn_min.setEnabled(False)
+        self.progress_bar.hide()
+        self.progress_bar.setValue(0)
+
+    def enter_uploading(self):
+        self._phase = "uploading"
+        self.target_edit.setEnabled(False)
+        self.yesButton.setEnabled(True)
+        self.yesButton.setText("取消上传")
+        self.cancelButton.setEnabled(False)
+        self.btn_open_out.setEnabled(False)
+        self.btn_min.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+
+    def set_upload_percent(self, p):
+        if self.progress_bar.isHidden():
+            self.progress_bar.show()
+        self.progress_bar.setValue(p)
 
     def enter_failed(self):
-        self._running = False
+        self._phase = "idle"
         self.target_edit.setEnabled(True)
         self.yesButton.setEnabled(True)
         self.yesButton.setText("开始整理")
         self.cancelButton.setEnabled(True)
 
     def closeEvent(self, e):
-        # 运行中禁止关闭：防止 Worker 信号打到已销毁的文本区
-        if self._running:
+        # 整理中禁止关闭：防止 Worker 信号打到已销毁的文本区；
+        # 上传中允许关闭：worker 由主窗口持有，后台继续并 InfoBar 提示
+        if self._phase == "organizing":
             e.ignore()
             return
         super().closeEvent(e)
@@ -702,6 +762,17 @@ class UIMixin:
         func_btn.setMenu(func_menu)
         _mb_layout.addWidget(func_btn)
 
+        # 「配置」菜单：原第三行功能栏「配置」按钮迁移，下拉直接选择要打开的文件
+        cfg_menu = _create_menu("配置", self)
+        for name in ("settings.json", "cfg.json", "frpc_xtcp.toml"):
+            act = Action(FluentIcon.DOCUMENT, name, self)
+            act.triggered.connect(
+                lambda _=False, n=name: QTimer.singleShot(0, lambda n=n: self._open_config_file(n)))
+            cfg_menu.addAction(act)
+        cfg_btn = TransparentDropDownPushButton("配置", self._menubar_widget)
+        cfg_btn.setMenu(cfg_menu)
+        _mb_layout.addWidget(cfg_btn)
+
         # 「视图」菜单
         view_menu = _create_menu("视图", self)
         settings = self._load_settings()
@@ -968,10 +1039,18 @@ class UIMixin:
     # ==================== 视频/日志批量整理（NewLog 收编，Task #40） ====================
 
     def _on_newlog_organize(self):
-        """功能菜单「视频/日志批量整理」：弹署名确认对话框，后台 Worker 运行 NewLog"""
+        """功能菜单「视频/日志批量整理」：弹署名确认对话框，后台 Worker 运行 NewLog
+
+        整理完成后对话框进入「打包上传」阶段（复用运维面板
+        ZipUploadWorker，Task #57），上传中可最小化/取消。
+        """
         worker = getattr(self, "_newlog_worker", None)
         if worker is not None and worker.isRunning():
             self._show_info_bar("整理任务正在运行中，请等待完成", "warning")
+            return
+        up_worker = getattr(self, "_newlog_upload_worker", None)
+        if up_worker is not None and up_worker.isRunning():
+            self._show_info_bar("打包上传进行中，请等待完成或先取消", "warning")
             return
 
         # 延迟 import：NewLog 依赖 openpyxl，缺失时给出明确提示而非崩溃
@@ -987,6 +1066,9 @@ class UIMixin:
         dlg.yesButton.setText("开始整理")
         dlg.cancelButton.setText("关闭")
         dlg.widget.setMinimumWidth(600)
+        # 对话框引用挂主窗口：隐藏/销毁后上传回调需判断存活（防悬挂引用）
+        self._newlog_dlg = dlg
+        dlg.destroyed.connect(self._on_newlog_dlg_destroyed)
 
         def _start():
             target = dlg.target_edit.text().strip()
@@ -1001,29 +1083,209 @@ class UIMixin:
             w.line.connect(dlg.append_line)
             w.finished_ok.connect(lambda out, d=dlg: self._on_newlog_finished(d, out))
             w.error.connect(lambda msg, d=dlg: self._on_newlog_failed(d, msg))
+            w.finished.connect(lambda w=w: self._release_worker_safe(w))
             w.start()
             self._append_log(f"[整理] 开始视频/日志批量整理（署名：{target}）")
 
         dlg.on_start = _start
+        dlg.on_upload = self._start_newlog_upload
+        dlg.on_cancel_upload = self._on_newlog_cancel_upload
         dlg.open()
 
+    def _on_newlog_dlg_destroyed(self):
+        """对话框销毁（含上传中被用户关闭）：清引用，后续回调不再碰它"""
+        self._newlog_dlg = None
+
+    @staticmethod
+    def _release_worker_safe(worker):
+        """安全释放 QThread：线程仍在运行时交由 finished → deleteLater 延迟销毁
+
+        ZipUploadWorker 的 done/error/cancelled 信号在 run() 内部发出，信号槽
+        执行时线程可能仍在收尾（关闭 SFTP/SSH 连接）。此时直接置 None 释放引用
+        会让 Python GC 销毁仍在运行的 QThread，触发
+        "QThread: Destroyed while thread is still running" 崩溃。
+
+        注意：finished 必须连接 lambda 包装而非 worker.deleteLater 本身——
+        PySide6 对 C++ 内建方法直连不持有 Python 引用，worker 仍会被 GC。
+        """
+        try:
+            if worker.isRunning():
+                worker.finished.connect(lambda w=worker: w.deleteLater())
+            else:
+                worker.deleteLater()
+        except RuntimeError:
+            pass
+
     def _on_newlog_finished(self, dlg, out_path):
-        """NewLog Worker 成功完成：InfoBar 提示，对话框内可直接打开结果目录"""
+        """NewLog 整理完成：进入「打包上传」待发起状态"""
+        w = getattr(self, "_newlog_worker", None)
         self._newlog_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
         dlg.append_line("")
-        dlg.append_line(f"✔ 完成，输出目录: {out_path}")
-        dlg.enter_finished(out_path)
+        dlg.append_line(f"✔ 整理完成，输出目录: {out_path}")
+        dlg.enter_organized(out_path)
         self._append_log(f"[整理] 视频/日志批量整理完成: {out_path}")
-        self._show_info_bar(f"整理完成，输出目录: {out_path}", "success", duration=4000)
+        self._show_info_bar("整理完成，可在对话框中点击「打包上传」上传服务器",
+                            "success", duration=4000)
 
     def _on_newlog_failed(self, dlg, msg):
         """NewLog Worker 失败：错误 InfoBar + 对话框恢复可重新发起"""
+        w = getattr(self, "_newlog_worker", None)
         self._newlog_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
         dlg.append_line("")
         dlg.append_line(f"✘ {msg}")
         dlg.enter_failed()
         self._append_log(f"[整理] 视频/日志批量整理失败: {msg}")
         self._show_info_bar(msg, "error", duration=4000)
+
+    # ---------- 批量整理产物打包上传（复用 ZipUploadWorker，Task #57） ----------
+
+    @staticmethod
+    def _newlog_upload_target(settings):
+        """读取上传目标配置（与运维面板默认值保持一致）"""
+        host = str(settings.get("upload_host") or "49.235.34.253").strip()
+        try:
+            port = int(settings.get("upload_port") or 22)
+        except (TypeError, ValueError):
+            port = 22
+        remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
+        username = str(settings.get("upload_user") or "root").strip()
+        password = str(settings.get("upload_pass") or "")
+        return host, port, remote_dir, username, password
+
+    def _start_newlog_upload(self):
+        """将整理产物打包为 zip 放入 videos/upload/ 后走 ZipUploadWorker 上传
+
+        Excel 读取与整理产物保持不变；仅打包/上传两步复用运维面板模式。
+        zip 落在 upload 目录（zip_prefix=newlog），不清空共享的 upload
+        收集目录，上传成功后删除本地 zip。worker 挂主窗口引用，对话框
+        隐藏后上传后台继续。
+        """
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is None:
+            return
+        running = getattr(self, "_newlog_upload_worker", None)
+        if running is not None and running.isRunning():
+            self._show_info_bar("已有上传进行中，请稍候", "warning")
+            return
+        out_path = getattr(dlg, "_out_path", "")
+        if not out_path or not os.path.isdir(out_path) or not os.listdir(out_path):
+            self._show_info_bar("整理输出目录为空，无法打包上传", "warning")
+            return
+        videos_dir = getattr(self, "videos_dir", "") or ""
+        if not videos_dir or not os.path.isdir(videos_dir):
+            self._show_info_bar("videos_dir 未配置或目录不存在，请先在设置中配置视频/日志目录",
+                                "warning", duration=4000)
+            return
+        host, port, remote_dir, username, password = self._newlog_upload_target(
+            self._load_settings())
+        if not password:
+            # 与运维面板行为一致：凭据缺失时提示去管理设置配置
+            dlg.append_line("✘ 未配置上传密码（upload_pass），请在管理设置中配置")
+            self._show_info_bar("未配置上传密码，请先在管理设置中填写后重试",
+                                "warning", duration=4000)
+            return
+
+        upload_root = os.path.join(videos_dir, "upload")
+        worker = ZipUploadWorker(
+            upload_root, host, port, username, password, remote_dir,
+            content_root=out_path, zip_prefix="newlog", zip_dir=upload_root,
+            cleanup_after_done=False, remove_zip_after_done=True)
+        self._newlog_upload_worker = worker
+        worker.progress.connect(self._on_newlog_upload_progress)
+        worker.percent.connect(self._on_newlog_upload_percent)
+        worker.done.connect(self._on_newlog_upload_done)
+        worker.error.connect(self._on_newlog_upload_fail)
+        worker.cancelled.connect(self._on_newlog_upload_cancelled)
+        dlg.enter_uploading()
+        dlg.append_line("")
+        dlg.append_line(f"▶ 开始打包上传 → {host}:{remote_dir}")
+        worker.start()
+        self._append_log(f"[整理] 开始打包上传整理产物: {os.path.basename(out_path)}")
+
+    def _on_newlog_cancel_upload(self):
+        """对话框「取消上传」：二次确认后请求中断（压缩中/上传中均可）"""
+        worker = getattr(self, "_newlog_upload_worker", None)
+        if worker is None or not worker.isRunning():
+            return
+        box = MessageBox("取消上传", "上传进行中，确定取消？", self)
+        box.yesButton.setText("确定取消")
+        box.cancelButton.setText("继续上传")
+        if not box.exec():
+            return
+        # 确认弹窗阻塞期间上传可能恰好完成，再确认一次避免误锁按钮
+        if not worker.isRunning():
+            return
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is not None:
+            dlg.append_line("… 正在取消上传...")
+            dlg.yesButton.setEnabled(False)
+        worker.requestInterruption()
+
+    def _reactivate_newlog_dlg(self, dlg):
+        """对话框被最小化/隐藏时重新弹出并激活（后台上传完成提示入口）"""
+        if not dlg.isVisible():
+            dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_newlog_upload_progress(self, msg):
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is not None:
+            dlg.append_line(msg)
+
+    def _on_newlog_upload_percent(self, p):
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is not None:
+            dlg.set_upload_percent(p)
+
+    def _on_newlog_upload_done(self, info):
+        """上传成功：安全释放 worker + 主窗口 InfoBar + 重新激活对话框"""
+        w = getattr(self, "_newlog_upload_worker", None)
+        self._newlog_upload_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
+        self._append_log(f"[整理] 打包上传成功: {info}")
+        self._show_info_bar(f"打包上传成功: {info}", "success", duration=5000)
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is None:
+            return
+        dlg.append_line(f"✔ 上传成功: {info}（本地临时 zip 已清理）")
+        dlg.enter_organized(dlg._out_path)
+        self._reactivate_newlog_dlg(dlg)
+
+    def _on_newlog_upload_fail(self, msg):
+        """上传失败：恢复对话框可再次发起，错误 InfoBar"""
+        w = getattr(self, "_newlog_upload_worker", None)
+        self._newlog_upload_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
+        self._append_log(f"[整理] 打包上传失败: {msg}")
+        self._show_info_bar(msg.split(chr(10))[0], "error", duration=4000)
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is None:
+            return
+        dlg.append_line(f"✘ 上传失败: {msg}")
+        dlg.enter_organized(dlg._out_path)
+        self._reactivate_newlog_dlg(dlg)
+
+    def _on_newlog_upload_cancelled(self):
+        """取消完成：恢复按钮状态、安全释放 worker（临时 zip 已由 worker 删除）"""
+        w = getattr(self, "_newlog_upload_worker", None)
+        self._newlog_upload_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
+        self._append_log("[整理] 打包上传已取消（临时 zip 已清理）")
+        self._show_info_bar("上传已取消，临时 zip 已清理", "info", duration=4000)
+        dlg = getattr(self, "_newlog_dlg", None)
+        if dlg is None:
+            return
+        dlg.append_line("✘ 上传已取消（临时 zip 已清理）")
+        dlg.enter_organized(dlg._out_path)
+        self._reactivate_newlog_dlg(dlg)
 
     def _on_open_settings(self):
         """统一设置面板：分组展示所有可配置项，支持路径浏览、即时编辑"""

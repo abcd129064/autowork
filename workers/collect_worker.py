@@ -238,25 +238,45 @@ class CollectFilesWorker(QThread):
             self.error.emit(f"收集失败: {e}")
 
 
+class _UploadCancelled(Exception):
+    """内部标记异常：打包/上传被用户取消（requestInterruption 后抛出）"""
+
+
 class ZipUploadWorker(QThread):
     """打包 upload 目录为 zip → SFTP 上传 → 清空本地 upload 目录
 
     凭据用上传专用字段 upload_user / upload_pass（不复用 SSH 凭据）；
     上传目标由 upload_host / upload_port / upload_remote_dir 配置。
 
+    取消支持（Task #57）：调用方 requestInterruption() 后，压缩循环
+    （每 8 个文件检查一次）与 SFTP put 回调会检查中断标志并提前终止；
+    取消后删除临时 zip、关闭 SFTP/SSH 连接，发 cancelled 信号。
+    现有调用方不请求中断时行为与原先完全一致（向后兼容）。
+
+    可选参数（批量整理等复用场景，均有兼容默认值）：
+        content_root: 实际打包的源目录，默认 upload_root；
+        zip_prefix:   zip 文件名前缀，默认 'upload'；
+        zip_dir:      zip 落地目录，默认 upload_root 的上级目录；
+        cleanup_after_done: 上传成功后是否清空 upload_root，默认 True；
+        remove_zip_after_done: 上传成功后是否删除本地 zip，默认 False。
+
     Signals:
         progress(str): 阶段提示（打包中/连接中/上传中）
         percent(int): 上传字节进度 0-100（SFTP put 回调驱动）
         done(str): 成功信息（zip 名与远端路径）
         error(str): 错误信息
+        cancelled(): 用户取消完成（临时 zip 已清理）
     """
     progress = Signal(str)
     percent = Signal(int)
     done = Signal(str)
     error = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, upload_root, host, port, username, password,
-                 remote_dir, parent=None):
+                 remote_dir, parent=None, content_root=None,
+                 zip_prefix="upload", zip_dir=None,
+                 cleanup_after_done=True, remove_zip_after_done=False):
         super().__init__(parent)
         self.upload_root = upload_root
         self.host = host
@@ -264,10 +284,21 @@ class ZipUploadWorker(QThread):
         self.username = username
         self.password = password
         self.remote_dir = (remote_dir or "").strip() or "/"
+        self.content_root = content_root  # 打包源目录；None 时等价 upload_root
+        self.zip_prefix = zip_prefix or "upload"
+        self.zip_dir = zip_dir  # zip 落地目录；None 时取 upload_root 上级目录
+        self.cleanup_after_done = cleanup_after_done
+        self.remove_zip_after_done = remove_zip_after_done
         self._last_percent = -1
+        self._zip_path = ""
 
     def _put_callback(self, transferred, total):
-        """paramiko SFTP put 回调：字节进度去重后发 percent 信号"""
+        """paramiko SFTP put 回调：字节进度去重后发 percent 信号
+
+        回调在 put 传输循环内逐块调用，此处抛异常可立即中断传输（取消上传）。
+        """
+        if self.isInterruptionRequested():
+            raise _UploadCancelled()
         if not total:
             return
         p = int(transferred * 100 / total)
@@ -275,17 +306,42 @@ class ZipUploadWorker(QThread):
             self._last_percent = p
             self.percent.emit(p)
 
+    def _remove_temp_zip(self):
+        """删除本次生成的临时 zip（取消时清理未完成的包，失败静默）"""
+        if self._zip_path and os.path.exists(self._zip_path):
+            try:
+                os.remove(self._zip_path)
+            except OSError:
+                pass
+        self._zip_path = ""
+
     def _make_zip(self) -> str:
-        """将 upload 目录打包为 videos_dir/upload_{时间戳}.zip（zip 内为设备目录结构）"""
+        """将打包源目录压缩为 {zip_dir}/{前缀}_{时间戳}.zip（zip 内为源目录结构）
+
+        压缩循环每 8 个文件检查一次中断标志，取消时删除未完成的 zip 并抛
+        _UploadCancelled。
+        """
+        content_root = self.content_root or self.upload_root
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_path = os.path.join(
-            os.path.dirname(self.upload_root), f"upload_{stamp}.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _dirs, files in os.walk(self.upload_root):
-                for name in files:
-                    full = os.path.join(root, name)
-                    arc = os.path.relpath(full, self.upload_root)
-                    zf.write(full, arc)
+        zip_dir = self.zip_dir or os.path.dirname(self.upload_root)
+        os.makedirs(zip_dir, exist_ok=True)
+        zip_path = os.path.join(zip_dir, f"{self.zip_prefix}_{stamp}.zip")
+        self._zip_path = zip_path
+        count = 0
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, _dirs, files in os.walk(content_root):
+                    for name in files:
+                        count += 1
+                        # 每 8 个文件检查一次取消请求，大文件包也能及时响应
+                        if count % 8 == 0 and self.isInterruptionRequested():
+                            raise _UploadCancelled()
+                        full = os.path.join(root, name)
+                        arc = os.path.relpath(full, content_root)
+                        zf.write(full, arc)
+        except _UploadCancelled:
+            self._remove_temp_zip()
+            raise
         return zip_path
 
     def _sftp_mkdirs(self, sftp, remote_dir):
@@ -303,9 +359,11 @@ class ZipUploadWorker(QThread):
                     pass
 
     def run(self):
-        zip_path = ""
+        sftp = None
+        client = None
         try:
-            if not os.path.isdir(self.upload_root) or not os.listdir(self.upload_root):
+            content_root = self.content_root or self.upload_root
+            if not os.path.isdir(content_root) or not os.listdir(content_root):
                 self.error.emit("上传收集目录为空，请先点击精度/问题收集文件")
                 return
             if not self.username or not self.password:
@@ -318,33 +376,58 @@ class ZipUploadWorker(QThread):
             zip_path = self._make_zip()
             zip_name = os.path.basename(zip_path)
 
+            # 打包完成到连接之间的间隙再检查一次，取消不必白跑连接
+            if self.isInterruptionRequested():
+                raise _UploadCancelled()
+
             self.progress.emit(f"正在连接 {self.host}:{self.port}...")
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(self.host, port=self.port, username=self.username,
                            password=self.password, timeout=15,
                            banner_timeout=15, auth_timeout=15)
+            sftp = client.open_sftp()
+            remote_path = f"{self.remote_dir.rstrip('/')}/{zip_name}"
+            self.progress.emit(f"正在上传 {zip_name}...")
+            self._last_percent = -1
+            self.percent.emit(0)
             try:
-                sftp = client.open_sftp()
-                remote_path = f"{self.remote_dir.rstrip('/')}/{zip_name}"
-                self.progress.emit(f"正在上传 {zip_name}...")
+                sftp.put(zip_path, remote_path, callback=self._put_callback)
+            except IOError:
+                if self.isInterruptionRequested():
+                    raise _UploadCancelled()
+                # 远端目录可能不存在：尝试逐级创建后重试一次
+                self._sftp_mkdirs(sftp, self.remote_dir)
                 self._last_percent = -1
                 self.percent.emit(0)
-                try:
-                    sftp.put(zip_path, remote_path, callback=self._put_callback)
-                except IOError:
-                    # 远端目录可能不存在：尝试逐级创建后重试一次
-                    self._sftp_mkdirs(sftp, self.remote_dir)
-                    self._last_percent = -1
-                    self.percent.emit(0)
-                    sftp.put(zip_path, remote_path, callback=self._put_callback)
-                self.percent.emit(100)
-                sftp.close()
-            finally:
-                client.close()
+                sftp.put(zip_path, remote_path, callback=self._put_callback)
+            self.percent.emit(100)
 
-            # 上传成功后清空本地收集目录
-            shutil.rmtree(self.upload_root, ignore_errors=True)
+            # 上传成功后按需清空本地收集目录（批量整理模式保留共享 upload 目录）
+            if self.cleanup_after_done:
+                shutil.rmtree(self.upload_root, ignore_errors=True)
+            if self.remove_zip_after_done:
+                self._remove_temp_zip()
             self.done.emit(f"{zip_name} → {self.host}:{remote_path}")
+        except _UploadCancelled:
+            self._remove_temp_zip()
+            self.cancelled.emit()
         except Exception as e:
-            self.error.emit(f"打包上传失败: {e}")
+            # 取消请求发出后底层抛出的连接/传输异常一律按取消处理
+            if self.isInterruptionRequested():
+                self._remove_temp_zip()
+                self.cancelled.emit()
+            else:
+                self.error.emit(f"打包上传失败: {e}")
+        finally:
+            # 无论成功/失败/取消，SFTP 与 SSH 连接资源都要关闭
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
