@@ -9,7 +9,9 @@ collect() 采用数据驱动：配置项描述表 + 统一收集循环。
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout,
     QHBoxLayout, QStackedWidget, QFileDialog)
 from qfluentwidgets import (MessageBoxBase, SpinBox, ComboBox, LineEdit,
-    ToolButton, FluentIcon, BodyLabel, CaptionLabel, Pivot)
+    ToolButton, FluentIcon, BodyLabel, CaptionLabel, Pivot, SwitchButton)
+
+from core.ai_providers import AI_PROVIDERS, get_provider
 
 
 class SettingsDialog(MessageBoxBase):
@@ -21,6 +23,7 @@ class SettingsDialog(MessageBoxBase):
         ("remote", "远程连接"),
         ("upload", "收集与上传"),
         ("frpc", "FRPC 服务器"),
+        ("ai", "API Key"),
         ("appearance", "外观"),
     ]
 
@@ -95,6 +98,26 @@ class SettingsDialog(MessageBoxBase):
                        },
                        lambda cfg: _fallback_frpc(cfg)))
 
+        # ai（4项：厂商/模型/开关 + 各厂商 API Key 字典）
+        items.append(("ai_vendor", "ai",
+                       lambda s: getattr(s, '_combo_ai_vendor', None),
+                       lambda w: w.currentData() or "deepseek",
+                       lambda cfg: str(cfg.get("ai_vendor", "deepseek") or "deepseek")))
+        items.append(("ai_model", "ai",
+                       lambda s: getattr(s, '_edit_ai_model', None),
+                       lambda w: w.text().strip(),
+                       lambda cfg: str(cfg.get("ai_model", "") or "")))
+        items.append(("forensic_ai_analysis", "ai",
+                       lambda s: getattr(s, '_switch_ai_enabled', None),
+                       lambda w: bool(w.isChecked()),
+                       lambda cfg: bool(cfg.get("forensic_ai_analysis", True))))
+        # ai_api_keys 与 frpc 同为特殊项：widget_fn 返回 self，
+        # reader 将当前厂商的 Key 合并回已有字典（未编辑的其他厂商 Key 不丢失）
+        items.append(("ai_api_keys", "ai",
+                       lambda s: getattr(s, '_ai_built', False) and s or None,
+                       lambda s: _collect_ai_keys(s),
+                       lambda cfg: dict(cfg.get("ai_api_keys", {}) or {})))
+
         # 外观（3项）
         items.append(("font_size", "appearance",
                        lambda s: getattr(s, '_spin_font_size', None),
@@ -129,6 +152,7 @@ class SettingsDialog(MessageBoxBase):
         self._built = set()    # 已构建的分区 key
         self._pages = {}       # key -> 占位页 widget
         self._frpc_built = False  # FRPC 分区是否已构建
+        self._ai_built = False    # AI 分析分区是否已构建
 
         # Pivot 分页导航 + 页面堆栈（页面控件首次切入时才创建）
         self.pivot = Pivot(self)
@@ -210,11 +234,11 @@ class SettingsDialog(MessageBoxBase):
         self._edit_sftp_path.setPlaceholderText("如 /home/user/project")
         form.addRow("SFTP默认路径:", self._edit_sftp_path)
 
-        self._edit_tcp_servers = LineEdit(self)
-        servers = cfg.get("tcp_servers", [])
-        self._edit_tcp_servers.setText(", ".join(servers))
-        self._edit_tcp_servers.setPlaceholderText("多个用逗号分隔，如 ip:port, ip:port")
-        form.addRow("TCP服务器:", self._edit_tcp_servers)
+        # self._edit_tcp_servers = LineEdit(self)
+        # servers = cfg.get("tcp_servers", [])
+        # self._edit_tcp_servers.setText(", ".join(servers))
+        # self._edit_tcp_servers.setPlaceholderText("多个用逗号分隔，如 ip:port, ip:port")
+        # form.addRow("TCP服务器:", self._edit_tcp_servers)
 
         self.main_layout.addLayout(form)
 
@@ -231,7 +255,7 @@ class SettingsDialog(MessageBoxBase):
 
         self._edit_upload_port = LineEdit(self)
         self._edit_upload_port.setText(str(cfg.get("upload_port", 22)))
-        self._edit_upload_port.setPlaceholderText("端口号（默认 22）")
+        self._edit_upload_port.setPlaceholderText("端口号")
         form.addRow("上传端口:", self._edit_upload_port)
 
         self._edit_upload_dir = LineEdit(self)
@@ -242,7 +266,7 @@ class SettingsDialog(MessageBoxBase):
 
         self._edit_upload_user = LineEdit(self)
         self._edit_upload_user.setText(cfg.get("upload_user", "root"))
-        self._edit_upload_user.setPlaceholderText("上传用户名（默认 root）")
+        self._edit_upload_user.setPlaceholderText("上传用户名")
         form.addRow("上传用户名:", self._edit_upload_user)
 
         self._edit_upload_pass = LineEdit(self)
@@ -255,7 +279,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- FRPC 服务器 ----------
     def _build_frpc_section(self, cfg):
-        self._add_section_header("🔗 FRPC 穿透服务器")
+        self._add_section_header("🔗 FRPC 穿透")
         frpc = cfg.get("frpc_server", {})
         form = QFormLayout()
         form.setSpacing(8)
@@ -277,6 +301,79 @@ class SettingsDialog(MessageBoxBase):
 
         self.main_layout.addLayout(form)
         self._frpc_built = True
+
+    # ---------- AI 分析 ----------
+    def _build_ai_section(self, cfg):
+        self._add_section_header("🤖 AI SSH日志分析")
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self._switch_ai_enabled = SwitchButton(self)
+        self._switch_ai_enabled.setChecked(
+            bool(cfg.get("forensic_ai_analysis", True)))
+        self._switch_ai_enabled.setOnText("开")
+        self._switch_ai_enabled.setOffText("关")
+        form.addRow("启用 AI SSH日志分析:", self._switch_ai_enabled)
+
+        self._combo_ai_vendor = ComboBox(self)
+        for p in AI_PROVIDERS:
+            # 注意：qfluentwidgets addItem 第二参是 icon，userData 必须关键字传参
+            self._combo_ai_vendor.addItem(p["label"], userData=p["id"])
+        cur_vendor = str(cfg.get("ai_vendor", "deepseek") or "deepseek")
+        for i in range(self._combo_ai_vendor.count()):
+            if self._combo_ai_vendor.itemData(i) == cur_vendor:
+                self._combo_ai_vendor.setCurrentIndex(i)
+                break
+        form.addRow("模型厂商:", self._combo_ai_vendor)
+
+        self._edit_ai_key = LineEdit(self)
+        self._edit_ai_key.setEchoMode(LineEdit.EchoMode.Password)
+        self._edit_ai_key.setPlaceholderText(
+            "各厂商开放平台创建的 API Key")
+        form.addRow("API Key:", self._edit_ai_key)
+
+        self._edit_ai_model = LineEdit(self)
+        self._edit_ai_model.setPlaceholderText("模型名")
+        form.addRow("模型:", self._edit_ai_model)
+
+        # 接口地址提示（随厂商切换更新）
+        self._lbl_ai_base_url = CaptionLabel("", self)
+        self._lbl_ai_base_url.setWordWrap(True)
+        form.addRow("接口地址:", self._lbl_ai_base_url)
+
+        # 先填充当前厂商的 Key/模型/地址，再接信号（避免填充过程误触发）
+        self._apply_ai_vendor(cur_vendor, initial=True)
+        self._combo_ai_vendor.currentIndexChanged.connect(
+            lambda _idx: self._on_ai_vendor_changed())
+
+        self.main_layout.addLayout(form)
+        self._ai_built = True
+
+    def _get_saved_ai_keys(self) -> dict:
+        """已保存的各厂商 API Key（明文，来自打开对话框时的配置）"""
+        keys = self._cfg.get("ai_api_keys", {})
+        return keys if isinstance(keys, dict) else {}
+
+    def _apply_ai_vendor(self, vendor_id: str, initial: bool = False):
+        """按厂商刷新 Key 输入框（各家 Key 分别保存）、模型与接口地址
+
+        initial=True 时保留已保存的自定义模型；后续手动切换厂商则
+        重置为该厂商官方默认模型（避免拿错模型名，用户可再改）。
+        """
+        provider = get_provider(vendor_id)
+        self._edit_ai_key.setText(
+            str(self._get_saved_ai_keys().get(provider["id"]) or ""))
+        saved_model = str(self._cfg.get("ai_model", "") or "").strip()
+        if initial and saved_model:
+            self._edit_ai_model.setText(saved_model)
+        else:
+            self._edit_ai_model.setText(provider["default_model"])
+        self._lbl_ai_base_url.setText(
+            f"{provider['base_url']}（环境变量：{provider['env_key']}）")
+
+    def _on_ai_vendor_changed(self):
+        vendor_id = self._combo_ai_vendor.currentData() or "deepseek"
+        self._apply_ai_vendor(vendor_id)
 
     # ---------- 外观 ----------
     def _build_appearance_section(self, cfg):
@@ -351,4 +448,17 @@ def _fallback_frpc(cfg):
         "auth_method": frpc.get("auth_method", "token"),
         "auth_token": str(frpc.get("auth_token", "") or ""),
     }
+
+
+def _collect_ai_keys(dialog):
+    """收集各厂商 API Key：已有字典为基础，用当前编辑的厂商 Key 覆盖；
+    清空 Key 时删除对应条目（保持 settings.json 整洁）"""
+    keys = dict(dialog._get_saved_ai_keys())
+    vendor_id = dialog._combo_ai_vendor.currentData() or "deepseek"
+    value = dialog._edit_ai_key.text().strip()
+    if value:
+        keys[vendor_id] = value
+    else:
+        keys.pop(vendor_id, None)
+    return keys
 

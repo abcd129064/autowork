@@ -81,6 +81,8 @@ a = Analysis(
         'bcrypt',
         'darkdetect',
         'darkdetect._windows_detect',
+        # AI 厂商分析（取证报告，forensic_report 内延迟 import，显式声明保险）
+        'openai',
         # 亚克力补丁依赖（打包环境无 numpy/scipy 时 PIL 替代实现需要）
         'PIL.ImageQt',
         'PIL.ImageFilter',

@@ -41,7 +41,7 @@ from qfluentwidgets import (PushButton, PrimaryPushButton, DropDownPushButton,
 
 from core.app_paths import get_app_dir
 from core.conn_logger import conn_logger
-from core.utils import safe_close_transport
+from core.utils import safe_close_transport, cleanup_log_dir
 from workers.network_workers import SSHConnectWorker
 from windows.ansi_terminal import ANSITerminalWidget
 from windows.forensic_report import ForensicWorker
@@ -209,8 +209,9 @@ class SSHTerminalPanel(QWidget):
         setFont(self._forensic_btn, 11)
         self._forensic_btn.setFocusPolicy(Qt.NoFocus)
         self._forensic_btn.setToolTip(
-            "后台运行预置诊断命令组并汇总会话/连接日志、设备状态生成故障取证报告"
-            "（仅连接建立后可用）")
+            "后台运行预置诊断命令组（含 dmesg/journalctl/syslog 系统错误日志）"
+            "并汇总会话/连接日志、设备状态，调用 AI 大模型分析生成故障取证报告"
+            "（厂商可在设置面板「AI 分析」页配置，仅连接建立后可用）")
         self._forensic_btn.setEnabled(False)
         self._forensic_btn.clicked.connect(self._start_forensic)
         btn_layout.addWidget(self._forensic_btn)
@@ -390,6 +391,7 @@ class SSHTerminalPanel(QWidget):
         try:
             session_dir = get_session_log_dir()
             os.makedirs(session_dir, exist_ok=True)
+            self._cleanup_session_logs(session_dir)
             now = datetime.now()
             tag = self._server_name or self._host
             tag = re.sub(r'[\\/:*?"<>|\s]+', '_', tag).strip('_') or 'ssh'
@@ -409,6 +411,22 @@ class SSHTerminalPanel(QWidget):
             self._session_path = None
             conn_logger.exception('SSH', '创建会话日志文件失败', exc=e,
                                   host=self._host, port=self._port)
+
+    @staticmethod
+    def _cleanup_session_logs(session_dir: str):
+        """会话日志闭环清理：每次新建会话前执行，防止目录无限增长占满磁盘。
+        默认保留 30 天内且不超过 500 个，可用 settings.json 的
+        ssh_session_log_retention_days / ssh_session_log_max_files 调整。"""
+        try:
+            settings = _load_settings()
+            max_age = int(settings.get("ssh_session_log_retention_days", 30))
+            max_files = int(settings.get("ssh_session_log_max_files", 500))
+            removed = cleanup_log_dir(session_dir, max_files=max_files,
+                                      max_age_days=max_age, suffix='.log')
+            if removed:
+                conn_logger.info('SSH', f'会话日志闭环清理: 删除 {removed} 个历史文件')
+        except Exception:
+            pass  # 清理失败不影响会话
 
     def _write_session(self, text: str):
         """剥离 ANSI 后追加写入会话日志（仅 GUI 线程调用，写入失败静默降级）"""

@@ -33,6 +33,8 @@ Thumbs.db
 
 # Project specific
 database/*.db
+database/*.db-shm
+database/*.db-wal
 videos/*
 !videos/.gitkeep
 settings.json

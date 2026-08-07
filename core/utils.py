@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""通用工具函数：网络异常分类、自然排序、Transport 安全关闭"""
+"""通用工具函数：网络异常分类、自然排序、Transport 安全关闭、日志目录闭环清理"""
 
+import os
 import re
 import socket
+import time
 
 try:
     import paramiko
@@ -66,3 +68,55 @@ def safe_close_transport(transport, join_timeout=3):
         transport.join(join_timeout)
     except Exception:
         pass
+
+
+def cleanup_log_dir(dir_path, max_files=500, max_age_days=30, suffix='.log'):
+    """日志目录闭环清理，防止无限增长占满磁盘：
+    1) 删除修改时间超过 max_age_days 天的文件（<=0 时不按龄清理）
+    2) 剩余文件数仍超过 max_files 时，从最旧开始删除直到不超限（<=0 时不限数量）
+
+    仅处理指定后缀的普通文件；任何失败静默降级，绝不影响主流程。
+    返回实际删除的文件数。
+    """
+    if not dir_path or not os.path.isdir(dir_path):
+        return 0
+    removed = 0
+    try:
+        suffix = (suffix or '').lower()
+        entries = []
+        for name in os.listdir(dir_path):
+            if suffix and not name.lower().endswith(suffix):
+                continue
+            path = os.path.join(dir_path, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                entries.append((os.path.getmtime(path), path))
+            except OSError:
+                continue
+        # 1) 超龄清理
+        if max_age_days and max_age_days > 0:
+            cutoff = time.time() - max_age_days * 86400
+            kept = []
+            for mtime, path in entries:
+                if mtime < cutoff:
+                    try:
+                        os.remove(path)
+                        removed += 1
+                        continue
+                    except OSError:
+                        pass
+                kept.append((mtime, path))
+            entries = kept
+        # 2) 超量清理（按修改时间新→旧排序，保留最新的 max_files 个）
+        if max_files and max_files > 0 and len(entries) > max_files:
+            entries.sort(reverse=True)
+            for _, path in entries[max_files:]:
+                try:
+                    os.remove(path)
+                    removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return removed

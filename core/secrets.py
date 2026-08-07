@@ -11,6 +11,7 @@
 
 敏感 key 清单（顶层）：ssh_pass / upload_pass / xtcp_secret_key
 嵌套敏感路径：frpc_server.auth_token、api_credentials.api{1,2}.password
+敏感字典（全部值加密）：ai_api_keys（各 AI 厂商的 API Key）
 """
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ NESTED_SENSITIVE_PATHS = (
     ("api_credentials", "api1", "password"),
     ("api_credentials", "api2", "password"),
 )
+
+# 敏感字典：顶层 key -> 字典内全部字符串值逐一加解密（子键动态，如厂商 id）
+SENSITIVE_DICT_KEYS = ("ai_api_keys",)
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -150,6 +154,17 @@ def _transform_nested(settings: dict, path, convert):
         node[last] = convert(node[last])
 
 
+def _transform_dict_values(settings: dict, key, convert):
+    """将 settings[key] 字典中的全部字符串值逐一转换（不修改入参深层对象）"""
+    child = settings.get(key)
+    if not isinstance(child, dict):
+        return
+    new_child = {}
+    for k, v in child.items():
+        new_child[k] = convert(v) if isinstance(v, str) else v
+    settings[key] = new_child
+
+
 def encrypt_settings(settings: dict) -> dict:
     """返回敏感字段已加密的副本（不修改入参），非敏感字段原样保留"""
     if not isinstance(settings, dict):
@@ -160,6 +175,8 @@ def encrypt_settings(settings: dict) -> dict:
             result[key] = encrypt_secret(result[key])
     for path in NESTED_SENSITIVE_PATHS:
         _transform_nested(result, path, encrypt_secret)
+    for key in SENSITIVE_DICT_KEYS:
+        _transform_dict_values(result, key, encrypt_secret)
     return result
 
 
@@ -173,6 +190,8 @@ def decrypt_settings(settings: dict) -> dict:
             result[key] = decrypt_secret(result[key])
     for path in NESTED_SENSITIVE_PATHS:
         _transform_nested(result, path, decrypt_secret)
+    for key in SENSITIVE_DICT_KEYS:
+        _transform_dict_values(result, key, decrypt_secret)
     return result
 
 
@@ -196,6 +215,11 @@ def has_plaintext_secret(settings: dict) -> bool:
         else:
             if isinstance(node, dict) and _is_plaintext(node.get(path[-1])):
                 return True
+    for key in SENSITIVE_DICT_KEYS:
+        child = settings.get(key)
+        if isinstance(child, dict) and any(
+                _is_plaintext(v) for v in child.values()):
+            return True
     return False
 
 

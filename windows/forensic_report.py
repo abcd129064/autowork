@@ -12,6 +12,7 @@ SSH 终端工具栏"取证"按钮的后台实现：
 数据库查询使用独立只读连接（WAL 库支持并发读），不占用 table_db 模块单连接。
 """
 
+import json
 import os
 import re
 import socket
@@ -21,13 +22,21 @@ from datetime import datetime
 from PySide6.QtCore import QThread, Signal
 
 from core.app_paths import get_app_dir
+from core.ai_providers import resolve_ai_config
 from core.conn_logger import conn_logger
+from core.secrets import decrypt_settings
+from core.utils import cleanup_log_dir
 
 # ─── 预置诊断命令组（模块级常量，便于维护） ─────────────────────────────
 # 元素为 (报告分节标题, shell 命令)
 FORENSIC_COMMANDS = (
     ("系统时间与运行时长", "date; uptime"),
     ("内核日志错误/警告（最近 50 条）", "dmesg --level=err,warn | tail -50"),
+    ("系统错误日志（journalctl/syslog 最近 200 条）",
+     "journalctl -p err -n 200 --no-pager 2>/dev/null"
+     " || tail -n 200 /var/log/syslog 2>/dev/null"
+     " || tail -n 200 /var/log/messages 2>/dev/null"
+     " || echo '(journalctl/syslog 均不可用)'"),
     ("systemd 失败的服务", "systemctl --failed --no-pager"),
     ("磁盘空间", "df -h"),
     ("内存使用", "free -m"),
@@ -37,6 +46,23 @@ FORENSIC_COMMANDS = (
 FORENSIC_CMD_TIMEOUT = 5      # 单条命令超时（秒）
 SESSION_TAIL_LINES = 200      # 会话日志截取行数
 CONN_LOG_ENTRIES = 30         # 连接日志截取条数
+
+# ─── AI 智能分析配置（厂商注册表见 core/ai_providers.py） ──────────────────────────────────────
+AI_REQUEST_TIMEOUT = 120         # AI 请求超时（秒）
+AI_CMD_OUTPUT_MAX_CHARS = 2000   # 单条命令输出送 AI 的最大字符数
+AI_EVIDENCE_MAX_CHARS = 12000    # 证据文本总长度上限（控制 token 成本）
+
+_AI_SYSTEM_PROMPT = (
+    "你是一名资深 Linux 运维与嵌入式设备故障诊断专家。"
+    "用户将提供一台远程设备（斯诺克球桌智能终端）的取证数据，"
+    "包括内核日志错误、系统错误日志（journalctl/syslog）、失败的服务、"
+    "磁盘/内存/CPU 状态等。请完成：\n"
+    "1. 发现的问题：按严重程度排序列出，每条注明证据来源（哪段日志/哪个指标）\n"
+    "2. 可能原因：针对每个问题给出最可能的原因\n"
+    "3. 处理建议：给出可操作的排查/修复步骤（命令行优先）\n"
+    "若数据中没有明显异常，请明确说明系统状态正常。"
+    "用中文回答，Markdown 格式，简洁清晰，不要大段复述原始日志。"
+)
 
 # snk 标识提取规则（与 table_db._SNK_PATTERN 一致）
 _SNK_RE = re.compile(r"snk[\w\-]*", re.IGNORECASE)
@@ -57,9 +83,13 @@ _KD_REPORT_FIELDS = (
 
 
 def get_forensic_dir() -> str:
-    """取证报告目录：{app_dir}/logs/forensic（不存在则创建）"""
+    """取证报告目录：{app_dir}/logs/forensic（不存在则创建）
+
+    附带闭环清理：保留 90 天内且不超过 200 个报告，防止无限增长占满磁盘。
+    """
     path = os.path.join(get_app_dir(), "logs", "forensic")
     os.makedirs(path, exist_ok=True)
+    cleanup_log_dir(path, max_files=200, max_age_days=90, suffix='.md')
     return path
 
 
@@ -198,6 +228,79 @@ def collect_conn_log(host: str, limit: int = CONN_LOG_ENTRIES) -> str:
     return "".join("".join(e) for e in tail).rstrip()
 
 
+# ─── AI 智能分析（后台线程调用，失败不影响报告生成） ──────────────
+
+def _load_forensic_settings() -> dict:
+    """读取 settings.json（AI 分析相关配置，敏感字段解密），失败时返回空字典"""
+    try:
+        with open(os.path.join(get_app_dir(), "settings.json"),
+                  "r", encoding="utf-8") as f:
+            return decrypt_settings(json.load(f) or {})
+    except Exception:
+        return {}
+
+
+def build_ai_evidence(cmd_results: list) -> str:
+    """拼装送 AI 的取证证据文本：仅取执行成功的命令输出，
+    单条截断到 AI_CMD_OUTPUT_MAX_CHARS，总量截断到 AI_EVIDENCE_MAX_CHARS"""
+    parts = []
+    for title, cmd, ok, output in cmd_results:
+        if not ok:
+            continue
+        text = (output or "").strip()
+        if len(text) > AI_CMD_OUTPUT_MAX_CHARS:
+            text = text[:AI_CMD_OUTPUT_MAX_CHARS] + "\n...(输出过长已截断)"
+        parts.append(f"### {title}\n$ {cmd}\n{text if text else '(无输出)'}")
+    evidence = "\n\n".join(parts)
+    if len(evidence) > AI_EVIDENCE_MAX_CHARS:
+        evidence = evidence[:AI_EVIDENCE_MAX_CHARS] + "\n...(证据过长已截断)"
+    return evidence
+
+
+def analyze_with_ai(evidence: str) -> str:
+    """调用所选 AI 厂商的 OpenAI 兼容接口分析取证证据，返回分析文本（Markdown）。
+
+    厂商/Key/模型由设置面板「AI 分析」分区配置（ai_vendor / ai_api_keys /
+    ai_model），兼容旧键 deepseek_api_key/deepseek_model，并支持厂商官方
+    环境变量兑底。优先带思考模式参数调用；API 拒绝该参数（400）时降级为
+    普通调用。失败抛 RuntimeError（调用方记录到报告，不阻断取证）。
+    """
+    settings = _load_forensic_settings()
+    if not settings.get("forensic_ai_analysis", True):
+        raise RuntimeError("AI 分析已在设置面板关闭（forensic_ai_analysis）")
+    cfg = resolve_ai_config(settings)
+    if not cfg["api_key"]:
+        raise RuntimeError(
+            f"未配置 {cfg['label']} API Key，"
+            f"或设置环境变量 {cfg['env_key']}）")
+    try:
+        from openai import OpenAI, BadRequestError
+    except ImportError:
+        raise RuntimeError("未安装 openai SDK（pip install openai）")
+    if not evidence.strip():
+        raise RuntimeError("无有效取证数据可供分析")
+
+    client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"],
+                    timeout=AI_REQUEST_TIMEOUT)
+    messages = [
+        {"role": "system", "content": _AI_SYSTEM_PROMPT},
+        {"role": "user", "content": evidence},
+    ]
+    try:
+        resp = client.chat.completions.create(
+            model=cfg["model"], messages=messages, stream=False,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}})
+    except BadRequestError:
+        # 模型不支持 reasoning_effort/thinking 参数时降级为普通调用
+        resp = client.chat.completions.create(
+            model=cfg["model"], messages=messages, stream=False)
+    content = str(resp.choices[0].message.content or "").strip()
+    if not content:
+        raise RuntimeError("AI 返回空内容")
+    return content
+
+
 # ─── 报告生成（纯函数，可离线自测） ──────────────────────────────────────
 
 def _md_code_block(text: str) -> str:
@@ -207,7 +310,9 @@ def _md_code_block(text: str) -> str:
 
 
 def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
-                          kd_info: dict, session_tail: str, conn_log: str) -> str:
+                          kd_info: dict, session_tail: str, conn_log: str,
+                          ai_analysis: str = "", ai_error: str = "",
+                          ai_label: str = "") -> str:
     """汇总生成 Markdown 诊断报告文本
 
     Args:
@@ -217,6 +322,9 @@ def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
         kd_info: lookup_kd_status 结果（可为空）
         session_tail: 会话日志尾部文本
         conn_log: 连接日志记录文本
+        ai_analysis: AI 分析结果（成功时非空）
+        ai_error: AI 分析未完成的原因（失败时非空）
+        ai_label: AI 厂商展示名（如 DeepSeek/通义千问，用于章节标题）
     """
     now = datetime.now()
     host = str(meta.get("host") or "")
@@ -287,6 +395,17 @@ def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
     # 最近连接日志
     lines += [f"## 五、最近连接日志（该 host 最近 {CONN_LOG_ENTRIES} 条）", ""]
     lines.append(_md_code_block(conn_log) if conn_log else "(未找到该 host 的连接日志)")
+    lines.append("")
+
+    # AI 智能分析（厂商名随配置变化）
+    lines += [f"## 六、AI 智能分析（{ai_label or 'AI'}）", ""]
+    if ai_analysis:
+        lines.append(ai_analysis)
+    elif ai_error:
+        lines.append(f"> ⚠ 分析未完成：{ai_error}")
+    else:
+        lines.append("(AI 分析未启用：可在设置面板「AI 分析」页配置"
+                     "厂商与 API Key)")
     lines.append("")
 
     return "\n".join(lines)
@@ -361,11 +480,26 @@ class ForensicWorker(QThread):
             session_tail = read_session_tail(self._session_log_path)
             conn_log = collect_conn_log(self._host)
 
-            # 4. 生成报告并落盘
+            # 4. AI 分析系统日志（失败仅记录原因，不阻断报告生成）
+            self.progress.emit(total, total, "AI 分析系统日志")
+            ai_analysis = ""
+            ai_error = ""
+            ai_label = resolve_ai_config(_load_forensic_settings())["label"]
+            try:
+                ai_analysis = analyze_with_ai(build_ai_evidence(cmd_results))
+            except Exception as e:
+                ai_error = (str(e).splitlines()[0] if str(e)
+                            else type(e).__name__)
+                conn_logger.error('FORENSIC', f'AI 分析未完成: {ai_error}',
+                                  host=self._host, port=self._port,
+                                  user=self._username)
+
+            # 5. 生成报告并落盘
             report = build_forensic_report(
                 {"host": self._host, "port": self._port,
                  "username": self._username, "server_name": self._server_name},
-                cmd_results, table_info, kd_info, session_tail, conn_log)
+                cmd_results, table_info, kd_info, session_tail, conn_log,
+                ai_analysis, ai_error, ai_label)
             path = self._save_report(report)
             conn_logger.info('FORENSIC', f'取证报告已生成: {os.path.basename(path)}',
                              host=self._host, port=self._port, user=self._username)
