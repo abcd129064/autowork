@@ -33,8 +33,8 @@ class SettingsDialog(MessageBoxBase):
     #   读取函数: lambda widget -> 从控件读值
     #   回退函数: lambda cfg -> 未构建时从原始配置取值
 
+    @staticmethod
     def _build_config_items():
-        """构建配置项描述表（静态方法，初始化时调用一次）"""
         items = []
 
         # 路径配置（5项）—— 控件存在 _path_edits 字典中
