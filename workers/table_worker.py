@@ -306,26 +306,25 @@ class DevicesFetchWorker(QThread):
 # ==================== 图像迁移 Worker ====================
 
 def build_image_path(file_path: str, device_code: str, category: str) -> str:
-    """构造迁移路径: media/{日期}/{设备码}/{分类}/
-
+    """
+    构造迁移路径: media/{日期}/{设备码}/{分类}/
     Args:
-        file_path: 日期路径，如 "2026/08/02"
+        file_path: 日期路径，"2026/08/02"
         device_code: 设备编码
-        category: 中文分类名（正常/操作/待处理/使用/精度/问题/废弃）
+        category: 分类名（正常/操作/待处理/使用/精度/问题/废弃）
     Returns:
-        如 "media/2026/08/02/1M2WJ13CNPE1009A50167/except/"
+        media/2026/08/02/1M2WJ13CNPE1009A50167/except/
     """
     dir_name = CATEGORY_DIRS.get(category, category)
     return f"media/{file_path}/{device_code}/{dir_name}/"
 
 
 class MigrateImageWorker(QThread):
-    """异步执行图像分类迁移（支持批量）
-
+    """异步执行图像分类迁移
     Signals:
         success(int): 成功迁移的图片数量
         error(str): 错误信息
-        progress(int, int): (当前进度, 总数)
+        progress(int, int): 当前进度, 总数
     """
     success = Signal(int)
     error = Signal(str)
