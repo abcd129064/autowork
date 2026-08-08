@@ -22,6 +22,9 @@ class SettingsMixin:
         "cipher_tool": r"C:\Users\shen_zhe\Desktop\videos\AESBase64CipherTool.exe",
         "front_exe": r"C:\Users\shen_zhe\Desktop\snooker\win-unpacked\SnookerNewbvMaster.exe",
         "backend_exe": r"C:\Users\shen_zhe\Desktop\snooker\backend\SnookerServer.exe",
+        # NewLog 批量整理路径（设置面板可配置，保存后写入 settings.json）
+        "newlog_excel_dir": os.path.expanduser(r"~\Desktop\excel"),
+        "newlog_out_dir": os.path.expanduser(r"~\Desktop"),
     }
     # 默认快捷键配置
     DEFAULT_SHORTCUTS = {

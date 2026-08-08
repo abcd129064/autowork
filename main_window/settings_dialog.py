@@ -6,12 +6,19 @@
 collect() 采用数据驱动：配置项描述表 + 统一收集循环。
 """
 
+import os
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout,
     QHBoxLayout, QStackedWidget, QFileDialog)
 from qfluentwidgets import (MessageBoxBase, SpinBox, ComboBox, LineEdit,
     ToolButton, FluentIcon, BodyLabel, CaptionLabel, Pivot, SwitchButton)
 
 from core.ai_providers import AI_PROVIDERS, get_provider
+
+
+# NewLog 批量整理路径默认值（与 settings_mixin.DEFAULT_PATHS 保持一致）
+_DEFAULT_EXCEL_DIR = os.path.expanduser(r"~\Desktop\excel")
+_DEFAULT_OUT_DIR = os.path.expanduser(r"~\Desktop")
 
 
 class SettingsDialog(MessageBoxBase):
@@ -45,6 +52,16 @@ class SettingsDialog(MessageBoxBase):
                 lambda s, k=key: s._path_edits.get(k),
                 lambda w: w.text().strip(),
                 lambda cfg, k=key: str(cfg.get(k, "") or ""),
+            ))
+
+        # NewLog 批量整理路径（2项）—— 默认值 = 当前用户桌面
+        for key, default in (("newlog_excel_dir", _DEFAULT_EXCEL_DIR),
+                             ("newlog_out_dir", _DEFAULT_OUT_DIR)):
+            items.append((
+                key, "paths",
+                lambda s, k=key: s._path_edits.get(k),
+                lambda w: w.text().strip(),
+                lambda cfg, k=key, d=default: str(cfg.get(k, "") or d),
             ))
 
         # 远程连接（4项）
@@ -194,6 +211,10 @@ class SettingsDialog(MessageBoxBase):
             ("cipher_tool", "加密工具", cfg.get("cipher_tool", ""), "file"),
             ("front_exe", "前端程序", cfg.get("front_exe", ""), "file"),
             ("backend_exe", "后端程序", cfg.get("backend_exe", ""), "file"),
+            ("newlog_excel_dir", "整理Excel目录",
+             cfg.get("newlog_excel_dir", _DEFAULT_EXCEL_DIR), "dir"),
+            ("newlog_out_dir", "整理输出目录",
+             cfg.get("newlog_out_dir", _DEFAULT_OUT_DIR), "dir"),
         ]
         for key, label, value, mode in path_items:
             row = QHBoxLayout()

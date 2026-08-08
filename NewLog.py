@@ -5,6 +5,7 @@
 # ==============================================
 import os
 import sys
+import json
 import shutil
 import openpyxl
 from datetime import datetime, timedelta
@@ -13,7 +14,24 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 
 # GUI 收编默认署名（与历史行为一致；GUI 调用方通过 target_name 参数覆盖）
-DEFAULT_TARGET_NAME = "张思雨"
+DEFAULT_TARGET_NAME = "沈喆"
+
+# 路径默认值（settings.json 缺失时回退到当前用户桌面）
+_DEFAULT_VIDEOS_DIR = os.path.expanduser(r"~\Desktop\videos")
+_DEFAULT_EXCEL_DIR = os.path.expanduser(r"~\Desktop\excel")
+_DEFAULT_OUT_DIR = os.path.expanduser(r"~\Desktop")
+
+
+def _load_settings() -> dict:
+    """读取 settings.json（与主程序同目录，敏感字段透明解密）；失败返回 {}"""
+    try:
+        from core.app_paths import get_app_dir
+        from core.secrets import decrypt_settings
+        path = os.path.join(get_app_dir(), "settings.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return decrypt_settings(json.load(f))
+    except Exception:
+        return {}
 
 
 def parse_time_from_line(line):
@@ -163,7 +181,8 @@ def get_today_excel_path():
     # 格式化为 "2026 07 29" 这样的格式
     date_str = today.strftime("%Y %m %d")
     excel_filename = f"{date_str}.xlsx"
-    excel_dir = r"C:\Users\Administrator\Desktop\excel"
+    # Excel 目录来自 settings.json 的 newlog_excel_dir，缺失时回退桌面默认值
+    excel_dir = str(_load_settings().get("newlog_excel_dir") or _DEFAULT_EXCEL_DIR)
     return os.path.join(excel_dir, excel_filename)
 
 
@@ -174,12 +193,13 @@ def main(target_name=None, interactive=False):
     print("==================================================\n")
 
     # GUI 收编（NewLogWorker 后台线程）调用时传入 target_name；
-    # 独立 CLI 运行时使用默认署名，路径保持历史硬编码
+    # 独立 CLI 运行时使用默认署名
     target_name = (str(target_name or "").strip() or DEFAULT_TARGET_NAME)
     
-    # 配置路径
-    work_root = r"C:\Users\Administrator\Desktop\videos"
-    out_save_dir = r"C:\Users\Administrator\Desktop"
+    # 配置路径（settings.json 驱动：videos_dir / newlog_excel_dir / newlog_out_dir）
+    settings = _load_settings()
+    work_root = str(settings.get("videos_dir") or _DEFAULT_VIDEOS_DIR)
+    out_save_dir = str(settings.get("newlog_out_dir") or _DEFAULT_OUT_DIR)
 
     # 自动获取当天日期的Excel文件路径
     excel_path = get_today_excel_path()
