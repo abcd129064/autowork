@@ -25,7 +25,8 @@ from datetime import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
     QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser, QTreeWidgetItem,
-    QFileDialog, QToolTip, QFrame, QListWidget, QListWidgetItem, QAbstractScrollArea)
+    QFileDialog, QToolTip, QFrame, QListWidget, QListWidgetItem, QAbstractScrollArea,
+    QTabWidget)
 from PySide6.QtCore import (Qt, QItemSelectionModel, QDate, QPoint, QPropertyAnimation,
     QEasingCurve, QTimer, QEvent, QThread, Signal, QRectF, QSize)
 from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QPalette, QCursor,
@@ -52,6 +53,7 @@ from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     resolve_device_dir,
                                     fuzzy_match_device_dir, norm_device_suffix)
 from database import table_db
+from windows.moyu_widgets import Game2048Widget, SnakeWidget, MoyuReaderWidget
 
 logger = logging.getLogger(__name__)
 
@@ -3752,15 +3754,43 @@ class HealthPage(QWidget):
 
 
 class GamePage(QWidget):
-    """小游戏页面"""
+    """摸鱼中心：2048 / 贪吃蛇 / 小说阅读（三页签）"""
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("该页面尚未完成\n摸鱼")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("color: #8a8f98; font-size: 15px;")
-        layout.addWidget(label)
+
+        area = ScrollArea(self)
+        area.setWidgetResizable(True)
+        area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        container = QWidget()
+        box = QVBoxLayout(container)
+        box.setContentsMargins(10, 6, 10, 10)
+
+        self.tabs = QTabWidget(container)
+        self.tabs.setDocumentMode(True)
+        self.game_2048 = Game2048Widget(self.tabs)
+        self.game_snake = SnakeWidget(self.tabs)
+        self.reader = MoyuReaderWidget(self.tabs)
+        self.tabs.addTab(self.game_2048, "2048")
+        self.tabs.addTab(self.game_snake, "贪吃蛇")
+        self.tabs.addTab(self.reader, "小说阅读")
+        box.addWidget(self.tabs)
+
+        area.setWidget(container)
+        layout.addWidget(area)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _on_tab_changed(self, index):
+        """页签切换：游戏控件取键盘焦点；贪吃蛇切走暂停、切回恢复"""
+        current = self.tabs.widget(index)
+        if current is self.game_snake:
+            self.game_snake.auto_resume()
+        else:
+            self.game_snake.auto_pause()
+        if current is not self.reader:
+            current.setFocus()
 
 # ==================== 主窗口 ====================
 
@@ -3795,7 +3825,7 @@ class ManagementPanelWindow(FluentWindow):
         # self.addSubInterface(self.trend_page, FluentIcon.PIE_SINGLE, "健康趋势")
         self.addSubInterface(self.health_page, FluentIcon.PIE_SINGLE, "设备健康度管理")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "管理设置")
-        self.addSubInterface(self.game_page, FluentIcon.PIE_SINGLE, "小游戏")
+        self.addSubInterface(self.game_page, FluentIcon.GAME, "小游戏")
 
         # 导航亚克力与「性能选项」联动：关闭 perf_acrylic 后不再强制开启，
         # 避免关闭菜单亚克力后导航栏仍有额外核显消耗

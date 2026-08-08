@@ -38,3 +38,4 @@ database/*.db-wal
 videos/*
 !videos/.gitkeep
 settings.json
+moyu_state.json
