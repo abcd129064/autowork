@@ -10,12 +10,12 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem, QSplitter)
 from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
-from qfluentwidgets import (InfoBar, InfoBarPosition, FluentTitleBar,
+from qfluentwidgets import (FluentTitleBar,
     MessageBoxBase, BodyLabel, ComboBox)
 from qfluentwidgets.window.fluent_window import FluentWindowBase
 
 from autowork_with_table import Ui_MainWindow
-from core.utils import natural_sort_key
+from core.utils import natural_sort_key, show_info_bar
 
 from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
@@ -326,30 +326,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._log_scroll_timer.start()
 
     def _show_info_bar(self, message, message_type="info", title=None, duration=2500):
-        """弹出 Fluent InfoBar 消息条（右上角），与 _append_log 互不干涉。
+        """弹出 Fluent InfoBar 消息条（右下角），与 _append_log 互不干涉。
         参数:
             message: 消息内容
             message_type: 'success' / 'info' / 'warning' / 'error'
             title: 标题（默认按类型自动生成）
             duration: 显示时长(ms)，<=0 表示常驻不自动关闭
         """
-        if title is None:
-            title = {'success': '成功', 'info': '提示',
-                     'warning': '警告', 'error': '错误'}.get(message_type, '提示')
-        kwargs = dict(
-            title=title,
-            content=message,
-            parent=self,
-            position=InfoBarPosition.BOTTOM_RIGHT,
-            duration=duration,
-        )
-        factory = {
-            'success': InfoBar.success,
-            'info': InfoBar.info,
-            'warning': InfoBar.warning,
-            'error': InfoBar.error,
-        }.get(message_type, InfoBar.info)
-        factory(**kwargs)
+        show_info_bar(message, message_type=message_type, title=title,
+                      duration=duration, parent=self)
 
     # ==================== 列表加载 ====================
 

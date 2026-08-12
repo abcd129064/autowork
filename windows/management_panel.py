@@ -34,7 +34,7 @@ from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QPalette, QCursor,
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
-    FluentWindow, NavigationItemPosition, InfoBar, ProgressBar, TitleLabel,
+    FluentWindow, NavigationItemPosition, ProgressBar, TitleLabel,
     BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
     CardWidget, setCustomStyleSheet, qconfig, isDarkTheme, MessageBox, TreeWidget,
     MessageBoxBase, MenuAnimationType)
@@ -44,6 +44,7 @@ from core.app_paths import get_app_dir
 from core.frp_remote import get_session_manager
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from core.secrets import decrypt_settings, encrypt_settings
+from core.utils import show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
@@ -292,8 +293,8 @@ def _open_in_explorer(path: str):
 
 def _show_export_bar(parent, path: str, count: int):
     """导出成功提示条，附「打开文件夹」动作（explorer /select, 定位文件）"""
-    bar = InfoBar.success("导出成功", f"共 {count} 条 → {os.path.basename(path)}",
-                          parent=parent, duration=6000)
+    bar = show_info_bar(f"共 {count} 条 → {os.path.basename(path)}", "success",
+                        title="导出成功", parent=parent, duration=6000)
     btn = PushButton(FluentIcon.FOLDER, "打开文件夹")
     btn.clicked.connect(lambda _=False, p=path: _open_in_explorer(p))
     bar.addWidget(btn)
@@ -534,8 +535,8 @@ class DeviceDirHealDialog(MessageBoxBase):
         """点击确认：必须选中一个候选目录才放行"""
         row = self.listWidget.currentRow()
         if row is None:
-            InfoBar.warning("提示", "请先在列表中选择一个目录，或使用「手动浏览...」",
-                            parent=self, duration=2500)
+            show_info_bar("请先在列表中选择一个目录，或使用「手动浏览...」", "warning",
+                          title="提示", parent=self, duration=2500)
             return False
         self.chosen_dir = row.data(Qt.ItemDataRole.UserRole) or ""
         return bool(self.chosen_dir)
@@ -554,8 +555,8 @@ class DeviceDirHealDialog(MessageBoxBase):
         except ValueError:
             inside = False
         if not inside:
-            InfoBar.warning("提示", "所选目录必须位于视频目录（videos_dir）内",
-                            parent=self, duration=2500)
+            show_info_bar("所选目录必须位于视频目录（videos_dir）内", "warning",
+                          title="提示", parent=self, duration=2500)
             return
         self.chosen_dir = os.path.relpath(picked, root)
         self.accept()
@@ -679,8 +680,8 @@ class UploadListDialog(QDialog):
     def done(self, r):
         """上传进行中禁止关闭（含「关闭」按钮），防止 zip 传输被截断"""
         if self._upload_worker is not None and self._upload_worker.isRunning():
-            InfoBar.warning("提示", "打包上传进行中，请等待完成后再关闭",
-                            parent=self, duration=2000)
+            show_info_bar("打包上传进行中，请等待完成后再关闭", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         super().done(r)
 
@@ -770,13 +771,13 @@ class UploadListDialog(QDialog):
     def _on_delete_item(self, full_path: str, name: str):
         """行删除按钮：二次确认后删除磁盘文件/文件夹并刷新清单"""
         if self._upload_worker is not None and self._upload_worker.isRunning():
-            InfoBar.warning("提示", "打包上传进行中，请等待完成后再操作",
-                            parent=self, duration=2000)
+            show_info_bar("打包上传进行中，请等待完成后再操作", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         safe_path = self._safe_upload_path(full_path)
         if safe_path is None:
-            InfoBar.error("删除失败", "路径不在 upload 目录内，已拒绝删除",
-                          parent=self, duration=4000)
+            show_info_bar("路径不在 upload 目录内，已拒绝删除", "error",
+                          title="删除失败", parent=self, duration=4000)
             return
         box = MessageBox("删除确认", f"确定删除 {name} 吗？", self)
         box.yesButton.setText("删除")
@@ -789,17 +790,17 @@ class UploadListDialog(QDialog):
             else:
                 os.remove(safe_path)
         except FileNotFoundError:
-            InfoBar.warning("删除失败", f"{name} 已不存在，正在刷新清单",
-                            parent=self, duration=3000)
+            show_info_bar(f"{name} 已不存在，正在刷新清单", "warning",
+                          title="删除失败", parent=self, duration=3000)
         except PermissionError:
-            InfoBar.error("删除失败", f"没有权限删除 {name}（文件可能被占用）",
-                          parent=self, duration=4000)
+            show_info_bar(f"没有权限删除 {name}（文件可能被占用）", "error",
+                          title="删除失败", parent=self, duration=4000)
             return
         except OSError as e:
-            InfoBar.error("删除失败", f"{name}: {e.strerror or e}",
-                          parent=self, duration=4000)
+            show_info_bar(f"{name}: {e.strerror or e}", "error",
+                          title="删除失败", parent=self, duration=4000)
             return
-        InfoBar.success("已删除", name, parent=self, duration=2000)
+        show_info_bar(name, "success", title="已删除", parent=self, duration=2000)
         self._tree.clear()
         self._populate()
 
@@ -821,7 +822,8 @@ class UploadListDialog(QDialog):
             self._on_cancel_upload()
             return
         if not os.path.isdir(self._upload_root) or not os.listdir(self._upload_root):
-            InfoBar.info("提示", "upload 目录为空，无文件可上传", parent=self, duration=3000)
+            show_info_bar("upload 目录为空，无文件可上传", "info",
+                          title="提示", parent=self, duration=3000)
             return
         settings = _load_settings()
         host = str(settings.get("upload_host") or "49.235.34.253").strip()
@@ -833,8 +835,8 @@ class UploadListDialog(QDialog):
         username = str(settings.get("upload_user") or "root").strip()
         password = str(settings.get("upload_pass") or "")
         if not password:
-            InfoBar.warning("提示", "未配置上传密码，请先在设置中填写后重试",
-                            parent=self, duration=3000)
+            show_info_bar("未配置上传密码，请先在设置中填写后重试", "warning",
+                          title="提示", parent=self, duration=3000)
             return
 
         count = self.file_count(self._upload_root)
@@ -931,20 +933,21 @@ class UploadListDialog(QDialog):
             table_db.update_submission_upload(str(info or ""), True)
         except Exception:
             pass
-        InfoBar.success("上传成功", f"{info} · 本地 upload 目录已清空",
-                        parent=self, duration=5000)
+        show_info_bar(f"{info} · 本地 upload 目录已清空", "success",
+                      title="上传成功", parent=self, duration=5000)
 
     def _on_upload_fail(self, msg):
         self._restore_upload_ui()
         self._reactivate_if_hidden()
-        InfoBar.error("上传失败", msg.split(chr(10))[0], parent=self, duration=5000)
+        show_info_bar(msg.split(chr(10))[0], "error",
+                      title="上传失败", parent=self, duration=5000)
 
     def _on_upload_cancelled(self):
         """取消完成：恢复按钮状态、清理 worker 引用（临时 zip 已由 worker 删除）"""
         self._restore_upload_ui()
         self._reactivate_if_hidden()
-        InfoBar.info("已取消上传", "临时 zip 已清理，可重新发起打包上传",
-                     parent=self, duration=4000)
+        show_info_bar("临时 zip 已清理，可重新发起打包上传", "info",
+                      title="已取消上传", parent=self, duration=4000)
 
     @staticmethod
     def file_count(upload_root: str) -> int:
@@ -1345,7 +1348,8 @@ class TablePage(QWidget):
             pass
         bridge = getattr(self.window(), "_remote_bridge", None)
         if bridge is None:
-            InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
+            show_info_bar("远程桥接未初始化", "error",
+                          title="无法远程", parent=self, duration=3000)
             return
         bridge.open_session(kind, snk, table_id, notifier=self, source="球桌管理")
 
@@ -1358,7 +1362,8 @@ class TablePage(QWidget):
         if not path:
             return
         if self._export_worker and self._export_worker.isRunning():
-            InfoBar.warning("提示", "已有导出进行中，请稍候", parent=self, duration=2000)
+            show_info_bar("已有导出进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         # 复用异步查询机制：一次拉取当前条件下的全部记录后写文件
         # （遵循当前「公司测试」与「手动版本」筛选状态）
@@ -1368,8 +1373,8 @@ class TablePage(QWidget):
         self._export_worker.finished.connect(
             lambda result, p=path: self._on_export_query(result, p))
         self._export_worker.error.connect(
-            lambda msg: InfoBar.error("导出失败", str(msg).split(chr(10))[0],
-                                      parent=self, duration=4000))
+            lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
+                                      title="导出失败", parent=self, duration=4000))
         self._export_worker.start()
 
     def _on_export_query(self, result, path):
@@ -1383,7 +1388,8 @@ class TablePage(QWidget):
                 for item in rows:
                     writer.writerow([str(item.get(k) or "") for k in keys])
         except OSError as e:
-            InfoBar.error("导出失败", str(e), parent=self, duration=4000)
+            show_info_bar(str(e), "error",
+                          title="导出失败", parent=self, duration=4000)
             return
         _show_export_bar(self, path, len(rows))
 
@@ -1398,11 +1404,11 @@ class TablePage(QWidget):
         affected = table_db.update_snk_by_name(table_name, new_snk)
         if affected:
             self._load_local()
-            InfoBar.success("已保存",
-                            f"球桌「{table_name}」SNK 标识已更新为「{new_snk or '空'}」",
-                            parent=self, duration=2500)
+            show_info_bar(f"球桌「{table_name}」SNK 标识已更新为「{new_snk or '空'}」", "success",
+                          title="已保存", parent=self, duration=2500)
         else:
-            InfoBar.warning("未修改", "未找到匹配的球桌记录", parent=self, duration=2500)
+            show_info_bar("未找到匹配的球桌记录", "warning",
+                          title="未修改", parent=self, duration=2500)
 
 
 # ==================== 文件列表面板（右侧滑出） ====================
@@ -1614,8 +1620,8 @@ class FileListPanel(QWidget):
         if (fname.lower().endswith((".log", ".txt"))
                 or re.match(r"^\d{8}_\d{6}", base)):
             menu.addSeparator()
-            act_analyze = Action(FluentIcon.DOCUMENT, "在主窗口分析", self)
-            act_analyze.setToolTip("在主窗口定位并加载该文件对应的日志")
+            act_analyze = Action(FluentIcon.DOCUMENT, "在主窗口显示", self)
+            act_analyze.setToolTip("在主窗口显示并加载该文件对应的日志")
             act_analyze.triggered.connect(lambda _=False, f=fname: self._analyze_in_main_window(f))
             menu.addAction(act_analyze)
 
@@ -1635,8 +1641,8 @@ class FileListPanel(QWidget):
         """复制面板中全部文件名到剪贴板（每行一个，均截取 kd 前缀）"""
         names = [self._clip_name(f) for f, _ in self._entries]
         QApplication.clipboard().setText("\n".join(names))
-        InfoBar.success("已复制", f"{len(names)} 个文件名已复制到剪贴板（已截取 kd 前缀）",
-                        parent=self, duration=2000)
+        show_info_bar(f"{len(names)} 个文件名已复制到剪贴板（已截取 kd 前缀）", "success",
+                      title="已复制", parent=self, duration=2000)
 
     # ---------- C6 反向跳转：在主窗口分析 ----------
 
@@ -1651,22 +1657,21 @@ class FileListPanel(QWidget):
         base = clip_base_name(fname)
         date_str = date_from_base(base)
         if not date_str:
-            InfoBar.warning("无法定位", "文件名缺少可解析的时间戳前缀，无法关联日志",
-                            parent=self, duration=3000)
+            show_info_bar("文件名缺少可解析的时间戳前缀，无法关联日志", "warning",
+                          title="无法定位", parent=self, duration=3000)
             return
         videos_dir = (_load_settings().get("videos_dir") or "").strip()
         if not videos_dir or not os.path.isdir(videos_dir):
-            InfoBar.warning("无法定位", "videos_dir 未配置或目录不存在",
-                            parent=self, duration=3000)
+            show_info_bar("videos_dir 未配置或目录不存在", "warning",
+                          title="无法定位", parent=self, duration=3000)
             return
         # 设备目录三级解析（映射表 → 精确同名 → 模糊匹配，同收集链路）
         candidates = [str(self._row.get("table_id") or "").strip(),
                       str(self._row.get("device_code") or "").strip()]
         device_dir, _note, _src = resolve_device_dir(videos_dir, candidates)
         if not device_dir:
-            InfoBar.warning("无法定位",
-                            "本地未找到设备目录: " + " / ".join(c for c in candidates if c),
-                            parent=self, duration=3500)
+            show_info_bar("本地未找到设备目录: " + " / ".join(c for c in candidates if c),
+                          "warning", title="无法定位", parent=self, duration=3500)
             return
         # 同名日志查找：日期子目录优先，其次设备根目录（与主窗口加载规则一致）
         log_fname = ""
@@ -1680,13 +1685,13 @@ class FileListPanel(QWidget):
             if log_fname:
                 break
         if not log_fname:
-            InfoBar.warning("本地无此文件",
-                            f"{device_dir}/{date_str} 下未找到 {base}.log/.txt，请先通过 SFTP 下载",
-                            parent=self, duration=4000)
+            show_info_bar(f"{device_dir}/{date_str} 下未找到 {base}.log/.txt，请先通过 SFTP 下载",
+                          "warning", title="本地无此文件", parent=self, duration=4000)
             return
         main_win = self._find_main_window()
         if main_win is None:
-            InfoBar.error("无法跳转", "主窗口未打开", parent=self, duration=3000)
+            show_info_bar("主窗口未打开", "error",
+                          title="无法跳转", parent=self, duration=3000)
             return
         main_win.focus_log_file(device_dir, date_str, log_fname)
 
@@ -2159,8 +2164,8 @@ class DevicePage(QWidget):
         self._page_no = 1
         self._load_local()
         if not getattr(self, "_last_fetch_silent", False):
-            InfoBar.success("搜索完成", f"{date_desc} 共 {count} 台设备",
-                            parent=self, duration=2500)
+            show_info_bar(f"{date_desc} 共 {count} 台设备", "success",
+                          title="搜索完成", parent=self, duration=2500)
         # 请求在途期间关键词已变化：用最新关键词补拉一次（防抖合并后只补最新值）
         current_kw = self._search_edit.text().strip()
         if (current_kw and current_kw != getattr(self, "_fetch_keyword", "")
@@ -2170,7 +2175,7 @@ class DevicePage(QWidget):
     def _on_search_error(self, msg):
         self._sync_btn.setEnabled(True)
         self._lbl_info.setText(f"搜索失败: {msg}")
-        InfoBar.error("搜索失败", msg, parent=self, duration=4000)
+        show_info_bar(msg, "error", title="搜索失败", parent=self, duration=4000)
 
     def _populate(self, rows):
         # 缓存当前页数据，供 _get_row_at 直接按行号取用，避免每次点击都重查数据库
@@ -2385,14 +2390,15 @@ class DevicePage(QWidget):
         try:
             n = table_db.delete_device_mapping(device_code)
         except Exception as e:
-            InfoBar.error("删除失败", str(e), parent=self, duration=3000)
+            show_info_bar(str(e), "error",
+                          title="删除失败", parent=self, duration=3000)
             return
         if n:
-            InfoBar.success("已清除", f"设备映射 {device_code} 已删除",
-                            parent=self, duration=2500)
+            show_info_bar(f"设备映射 {device_code} 已删除", "success",
+                          title="已清除", parent=self, duration=2500)
         else:
-            InfoBar.info("提示", "该设备映射不存在或已被删除",
-                         parent=self, duration=2500)
+            show_info_bar("该设备映射不存在或已被删除", "info",
+                          title="提示", parent=self, duration=2500)
 
     def _add_remote_actions(self, menu, row_idx):
         """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件 / 远程桌面）"""
@@ -2430,7 +2436,8 @@ class DevicePage(QWidget):
                 return
         bridge = getattr(self.window(), "_remote_bridge", None)
         if bridge is None:
-            InfoBar.error("无法远程", "远程桥接未初始化", parent=self, duration=3000)
+            show_info_bar("远程桥接未初始化", "error",
+                          title="无法远程", parent=self, duration=3000)
             return
         bridge.open_session(kind, snk, table_id, notifier=self, source="设备状态")
 
@@ -2443,7 +2450,8 @@ class DevicePage(QWidget):
         row = self._get_full_row_at(row_idx)
         files = row.get(field) or []
         QApplication.clipboard().setText("\n".join(files))
-        InfoBar.success("已复制", f"{len(files)} 个文件名已复制到剪贴板", parent=self, duration=2000)
+        show_info_bar(f"{len(files)} 个文件名已复制到剪贴板", "success",
+                      title="已复制", parent=self, duration=2000)
 
     # ---------- 文件面板与迁移 ----------
 
@@ -2474,12 +2482,14 @@ class DevicePage(QWidget):
     def migrate_file(self, fname, src_cat, dest_cat):
         """迁移单个文件到目标分类（调用 migrate_image API）"""
         if self._migrate_worker and self._migrate_worker.isRunning():
-            InfoBar.warning("提示", "已有迁移任务进行中，请稍候", parent=self, duration=2000)
+            show_info_bar("已有迁移任务进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         date = self._current_date()
         device_code = self._file_panel._row.get("device_code", "")
         if not date or not device_code:
-            InfoBar.warning("提示", "缺少日期或设备编码，无法迁移", parent=self, duration=2500)
+            show_info_bar("缺少日期或设备编码，无法迁移", "warning",
+                          title="提示", parent=self, duration=2500)
             return
         self._migrate_worker = MigrateImageWorker(
             file_path=date, device_code=device_code, file_names=[fname],
@@ -2488,10 +2498,12 @@ class DevicePage(QWidget):
             lambda count: self._on_migrate_ok(fname, dest_cat))
         self._migrate_worker.error.connect(self._on_migrate_fail)
         self._migrate_worker.start()
-        InfoBar.info("迁移中", f"{fname} → 「{dest_cat}」...", parent=self, duration=1500)
+        show_info_bar(f"{fname} → 「{dest_cat}」...", "info",
+                      title="迁移中", parent=self, duration=1500)
 
     def _on_migrate_ok(self, fname, dest_cat):
-        InfoBar.success("迁移成功", f"{fname} 已移动到「{dest_cat}」", parent=self, duration=2500)
+        show_info_bar(f"{fname} 已移动到「{dest_cat}」", "success",
+                      title="迁移成功", parent=self, duration=2500)
         self._silent_refresh()
         # 迁移到精度/问题后自动收集对应视频/日志到 upload 目录
         # （无需再点精度/问题单元格；数据尚未刷回，先把 fname 并入字段列表）
@@ -2517,7 +2529,8 @@ class DevicePage(QWidget):
             self._last_submission_id = None
 
     def _on_migrate_fail(self, msg):
-        InfoBar.error("迁移失败", msg.split("\n")[0], parent=self, duration=4000)
+        show_info_bar(msg.split("\n")[0], "error",
+                      title="迁移失败", parent=self, duration=4000)
         self._silent_refresh()
 
     # ---------- 收集与上传 ----------
@@ -2526,8 +2539,8 @@ class DevicePage(QWidget):
         """返回上传收集目录 {videos_dir}/upload；未配置 videos_dir 时提示并返回空串"""
         videos_dir = (_load_settings().get("videos_dir") or "").strip()
         if not videos_dir:
-            InfoBar.warning("提示", "未配置 videos_dir，请先在设置中配置视频/日志目录",
-                            parent=self, duration=3000)
+            show_info_bar("未配置 videos_dir，请先在设置中配置视频/日志目录", "warning",
+                          title="提示", parent=self, duration=3000)
             return ""
         return os.path.join(videos_dir, "upload")
 
@@ -2546,8 +2559,8 @@ class DevicePage(QWidget):
         """
         videos_dir = (_load_settings().get("videos_dir") or "").strip()
         if not videos_dir or not os.path.isdir(videos_dir):
-            InfoBar.warning("无法收集", "videos_dir 未配置或目录不存在",
-                            parent=self, duration=3000)
+            show_info_bar("videos_dir 未配置或目录不存在", "warning",
+                          title="无法收集", parent=self, duration=3000)
             return
         candidates = [str(row.get("table_id") or "").strip(),
                       str(row.get("device_code") or "").strip()]
@@ -2555,10 +2568,9 @@ class DevicePage(QWidget):
         if not device_id:
             device_id = self._heal_device_dir(videos_dir, candidates)
             if not device_id:
-                InfoBar.warning("无法收集",
-                                "本地设备目录不存在: " + " / ".join(c for c in candidates if c)
-                                + "\n可在主界面设备列表找到对应文件夹，右键日志文件→添加到上传目录",
-                                parent=self, duration=5000)
+                show_info_bar("本地设备目录不存在: " + " / ".join(c for c in candidates if c)
+                              + "\n可在主界面设备列表找到对应文件夹，右键日志文件→添加到上传目录",
+                              "warning", title="无法收集", parent=self, duration=5000)
                 return
             fuzzy_note = f"已手动映射 → {device_id}"
         bases = sorted({b for b in (clip_base_name(f) for f in (row.get(field) or [])) if b})
@@ -2571,14 +2583,14 @@ class DevicePage(QWidget):
             lambda dev, n, miss, w=worker, sid=sub_id:
             self._on_collect_done(dev, n, miss, w, sid))
         worker.error.connect(
-            lambda msg: InfoBar.error("收集失败", msg.split(chr(10))[0],
-                                      parent=self, duration=4000))
+            lambda msg: show_info_bar(msg.split(chr(10))[0], "error",
+                                      title="收集失败", parent=self, duration=4000))
         self._collect_workers.append(worker)
         worker.start()
-        InfoBar.info("收集中",
-                     f"{device_id}{'（' + fuzzy_note + '）' if fuzzy_note else ''} · "
-                     f"{len(bases)} 个视频/日志 → upload 目录",
-                     parent=self, duration=1500 if not fuzzy_note else 3500)
+        show_info_bar(f"{device_id}{'（' + fuzzy_note + '）' if fuzzy_note else ''} · "
+                      f"{len(bases)} 个视频/日志 → upload 目录", "info",
+                      title="收集中", parent=self,
+                      duration=1500 if not fuzzy_note else 3500)
 
     @staticmethod
     def _norm_suffix(name: str) -> str:
@@ -2635,21 +2647,19 @@ class DevicePage(QWidget):
                 pass
         if missing:
             shown = ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else "")
-            InfoBar.warning("收集完成",
-                            f"{device_id}: 复制 {copied} 个（已存在跳过），缺失 {len(missing)} 个: {shown}",
-                            parent=self, duration=4000)
+            show_info_bar(f"{device_id}: 复制 {copied} 个（已存在跳过），缺失 {len(missing)} 个: {shown}",
+                          "warning", title="收集完成", parent=self, duration=4000)
         else:
-            InfoBar.success("收集完成",
-                            f"{device_id}: 复制 {copied} 个文件到 upload 目录（已存在跳过）",
-                            parent=self, duration=3000)
+            show_info_bar(f"{device_id}: 复制 {copied} 个文件到 upload 目录（已存在跳过）",
+                          "success", title="收集完成", parent=self, duration=3000)
 
     def _show_upload_list(self):
         root = self._upload_root()
         if not root:
             return
         if not os.path.isdir(root) or not os.listdir(root):
-            InfoBar.info("上传清单", "暂无待上传文件，请先点击精度/问题收集文件",
-                         parent=self, duration=3000)
+            show_info_bar("暂无待上传文件，请先点击精度/问题收集文件", "info",
+                          title="上传清单", parent=self, duration=3000)
             return
         UploadListDialog(root, self).exec()
 
@@ -2659,11 +2669,12 @@ class DevicePage(QWidget):
         if not root:
             return
         if not os.path.isdir(root) or not os.listdir(root):
-            InfoBar.info("提示", "upload 目录为空，请先点击精度/问题收集文件",
-                         parent=self, duration=3000)
+            show_info_bar("upload 目录为空，请先点击精度/问题收集文件", "info",
+                          title="提示", parent=self, duration=3000)
             return
         if self._upload_worker is not None and self._upload_worker.isRunning():
-            InfoBar.warning("提示", "已有上传进行中，请稍候", parent=self, duration=2000)
+            show_info_bar("已有上传进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         settings = _load_settings()
         host = str(settings.get("upload_host") or "49.235.34.253").strip()
@@ -2676,8 +2687,8 @@ class DevicePage(QWidget):
         username = str(settings.get("upload_user") or "root").strip()
         password = str(settings.get("upload_pass") or "")
         if not password:
-            InfoBar.warning("提示", "未配置上传密码，请先在设置中填写后重试",
-                            parent=self, duration=3000)
+            show_info_bar("未配置上传密码，请先在设置中填写后重试", "warning",
+                          title="提示", parent=self, duration=3000)
             return
 
         count = UploadListDialog.file_count(root)
@@ -2711,13 +2722,14 @@ class DevicePage(QWidget):
             table_db.update_submission_upload(str(info or ""), True)
         except Exception:
             pass
-        InfoBar.success("上传成功", f"{info} · 本地 upload 目录已清空",
-                        parent=self, duration=5000)
+        show_info_bar(f"{info} · 本地 upload 目录已清空", "success",
+                      title="上传成功", parent=self, duration=5000)
 
     def _on_upload_fail(self, msg):
         self._btn_package.setEnabled(True)
         self._lbl_time.setText("")
-        InfoBar.error("上传失败", msg.split(chr(10))[0], parent=self, duration=5000)
+        show_info_bar(msg.split(chr(10))[0], "error",
+                      title="上传失败", parent=self, duration=5000)
 
     def _silent_refresh(self):
         """迁移后静默重新拉取当前日期数据，刷新表格与文件面板"""
@@ -2751,7 +2763,7 @@ class DevicePage(QWidget):
         self._file_panel.refresh_if_visible()
 
     def _on_refresh_error(self, msg):
-        InfoBar.warning("刷新失败", msg, parent=self, duration=3000)
+        show_info_bar(msg, "warning", title="刷新失败", parent=self, duration=3000)
 
     # ---------- 每小时定时拉取 ----------
 
@@ -2804,7 +2816,8 @@ class DevicePage(QWidget):
         if not path:
             return
         if self._export_worker and self._export_worker.isRunning():
-            InfoBar.warning("提示", "已有导出进行中，请稍候", parent=self, duration=2000)
+            show_info_bar("已有导出进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         keyword = self._search_edit.text().strip()
         # 复用异步查询机制：按当前条件一次拉取全部记录后写文件
@@ -2819,8 +2832,8 @@ class DevicePage(QWidget):
         self._export_worker.finished.connect(
             lambda result, p=path, s=src: self._on_export_query(result, p, s))
         self._export_worker.error.connect(
-            lambda msg: InfoBar.error("导出失败", str(msg).split(chr(10))[0],
-                                      parent=self, duration=4000))
+            lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
+                                      title="导出失败", parent=self, duration=4000))
         self._export_worker.start()
 
     def _on_export_query(self, result, path, src):
@@ -2840,7 +2853,8 @@ class DevicePage(QWidget):
                         str(item.get(k) if item.get(k) is not None else "")
                         for k in keys])
         except OSError as e:
-            InfoBar.error("导出失败", str(e), parent=self, duration=4000)
+            show_info_bar(str(e), "error",
+                          title="导出失败", parent=self, duration=4000)
             return
         _show_export_bar(self, path, len(rows))
 
@@ -3034,7 +3048,8 @@ class AdminSettingsPage(QWidget):
         if page is not None:
             page._page_no = 1
             page._load_local()
-        InfoBar.success("添加成功", f"球桌「{name}」已写入本地数据库", parent=self, duration=2000)
+        show_info_bar(f"球桌「{name}」已写入本地数据库", "success",
+                      title="添加成功", parent=self, duration=2000)
 
     def _build_add_card(self, parent):
         """手动添加球桌记录：内嵌表单卡片，无需弹窗"""
@@ -3196,16 +3211,18 @@ class AdminSettingsPage(QWidget):
                 "upload_user": self._edit_upload_user.text().strip() or "root",
                 "upload_pass": self._edit_upload_pass.text(),
             })
-            InfoBar.success("已保存", "配置已写入 settings.json，即时生效",
-                            parent=self, duration=2500)
+            show_info_bar("配置已写入 settings.json，即时生效", "success",
+                          title="已保存", parent=self, duration=2500)
         except Exception as e:
-            InfoBar.error("保存失败", str(e), parent=self, duration=4000)
+            show_info_bar(str(e), "error",
+                          title="保存失败", parent=self, duration=4000)
 
     # ---------- 测试连接 ----------
 
     def _on_test(self, api_key):
         if self._test_worker and self._test_worker.isRunning():
-            InfoBar.warning("提示", "已有测试进行中，请稍候", parent=self, duration=2000)
+            show_info_bar("已有测试进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         self._test_btns[api_key].setEnabled(False)
         self._test_worker = LoginTestWorker(
@@ -3222,9 +3239,11 @@ class AdminSettingsPage(QWidget):
         self._test_btns[api_key].setEnabled(True)
         label = self._API_LABELS.get(api_key, api_key)
         if ok:
-            InfoBar.success(f"{label} 连接成功", msg, parent=self, duration=2500)
+            show_info_bar(msg, "success", title=f"{label} 连接成功",
+                          parent=self, duration=2500)
         else:
-            InfoBar.error(f"{label} 连接失败", msg, parent=self, duration=4000)
+            show_info_bar(msg, "error", title=f"{label} 连接失败",
+                          parent=self, duration=4000)
 
 
 # ==================== 健康度趋势看板（C3） ====================

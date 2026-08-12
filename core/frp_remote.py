@@ -37,8 +37,8 @@ except ImportError:
 
 from core.app_paths import get_app_dir
 from core.secrets import decrypt_settings
+from core.utils import show_info_bar
 from p2p import generate_random_port
-from qfluentwidgets import InfoBar, InfoBarPosition
 
 # 统一 TOML（所有 visitor：手工 + snk 快捷），frpc 实际加载该文件
 _PANEL_TOML_NAME = "frpc_xtcp_panel.toml"
@@ -477,11 +477,9 @@ class RemoteSessionManager(QObject):
                 from PySide6.QtWidgets import QApplication
                 parent = QApplication.activeWindow()
             if error:
-                InfoBar.error(title, msg, parent=parent, duration=4000,
-                              position=InfoBarPosition.BOTTOM_RIGHT)
+                show_info_bar(msg, "error", title=title, parent=parent, duration=4000)
             else:
-                InfoBar.info(title, msg, parent=parent, duration=2000,
-                             position=InfoBarPosition.BOTTOM_RIGHT)
+                show_info_bar(msg, "info", title=title, parent=parent, duration=2000)
         except Exception:
             pass
 

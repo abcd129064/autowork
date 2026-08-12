@@ -74,11 +74,26 @@ class TunnelPanelWindow(FramelessWindow):
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._hint)
 
-        # 状态变化自动刷新
+        # 状态变化自动刷新（全部使用 bound method，配合 closeEvent 显式断开，
+        # 避免窗口销毁后 manager 单例信号回调已删除的 C++ 控件）
         mgr = get_session_manager()
         mgr.visitors_changed.connect(self.refresh)
-        mgr.frpc_state_changed.connect(lambda _running: self.refresh())
+        mgr.frpc_state_changed.connect(self._on_frpc_state_changed)
 
+        self.refresh()
+
+    def closeEvent(self, event):
+        """关闭时显式断开 manager 信号连接，防止销毁后回调崩溃"""
+        mgr = get_session_manager()
+        try:
+            mgr.visitors_changed.disconnect(self.refresh)
+            mgr.frpc_state_changed.disconnect(self._on_frpc_state_changed)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
+
+    def _on_frpc_state_changed(self, _running: bool):
+        """frpc 状态变化回调（bound method，Qt 可在接收者销毁时自动断开）"""
         self.refresh()
 
     # ------------------------------------------------------------------ 刷新

@@ -37,11 +37,11 @@ from PySide6.QtGui import QAction
 from PySide6.QtCore import QTimer, Qt, Signal
 from qfluentwidgets import (PushButton, PrimaryPushButton, DropDownPushButton,
                             TransparentToolButton, LineEdit, FluentIcon, MessageBox,
-                            InfoBar, setFont, RoundMenu)
+                            setFont, RoundMenu)
 
 from core.app_paths import get_app_dir
 from core.conn_logger import conn_logger
-from core.utils import safe_close_transport, cleanup_log_dir
+from core.utils import safe_close_transport, cleanup_log_dir, show_info_bar
 from workers.network_workers import SSHConnectWorker
 from windows.ansi_terminal import ANSITerminalWidget
 from windows.forensic_report import ForensicWorker
@@ -555,8 +555,8 @@ class SSHTerminalPanel(QWidget):
     def _on_forensic_done(self, path: str):
         """取证完成：InfoBar 成功提示 + “打开报告文件”动作"""
         self._restore_forensic_btn()
-        bar = InfoBar.success("取证完成", f"报告已生成：{os.path.basename(path)}",
-                              parent=self, duration=6000)
+        bar = show_info_bar(f"报告已生成：{os.path.basename(path)}", "success",
+                            title="取证完成", parent=self, duration=6000)
         act = QAction("打开报告文件", bar)
         act.triggered.connect(lambda checked=False, p=path: self._reveal_forensic_report(p))
         bar.addAction(act)
@@ -565,7 +565,7 @@ class SSHTerminalPanel(QWidget):
         """取证失败：恢复按钮并提示错误首行"""
         self._restore_forensic_btn()
         first_line = str(msg or "未知错误").splitlines()[0] if msg else "未知错误"
-        InfoBar.error("取证失败", first_line, parent=self, duration=5000)
+        show_info_bar(first_line, "error", title="取证失败", parent=self, duration=5000)
 
     def _restore_forensic_btn(self):
         """恢复取证按钮文字与可用性（仅连接存活时可用）"""

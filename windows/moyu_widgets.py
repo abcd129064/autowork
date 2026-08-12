@@ -21,11 +21,11 @@ from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont,
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout,
                                QStackedWidget, QTextBrowser, QVBoxLayout,
                                QWidget)
-from qfluentwidgets import (BodyLabel, CaptionLabel, FluentIcon, InfoBar,
-                            InfoBarPosition, LineEdit, PlainTextEdit,
-                            PushButton, ToolButton)
+from qfluentwidgets import (BodyLabel, CaptionLabel, FluentIcon,
+                            LineEdit, PlainTextEdit, PushButton, ToolButton)
 
 from core.app_paths import get_app_dir
+from core.utils import show_info_bar
 
 logger = logging.getLogger(__name__)
 
@@ -844,9 +844,8 @@ class MoyuReaderWidget(QWidget):
         try:
             text = self._read_text_file(path)
         except OSError as e:
-            InfoBar.error("打开失败",
-                          f"{os.path.basename(path)}: {e.strerror or e}",
-                          parent=self, duration=4000)
+            show_info_bar(f"{os.path.basename(path)}: {e.strerror or e}", "error",
+                          title="打开失败", parent=self, duration=4000)
             return
         self._last_txt = path
         self._set_text(text, f"正在阅读：{os.path.basename(path)}")
@@ -892,13 +891,13 @@ class MoyuReaderWidget(QWidget):
 
     def _fetch_web(self):
         if self._fetch_worker is not None and self._fetch_worker.isRunning():
-            InfoBar.warning("提示", "正在抓取中，请稍候",
-                            parent=self, duration=2000)
+            show_info_bar("正在抓取中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         url = self._url_edit.text().strip()
         if not url:
-            InfoBar.warning("提示", "请先输入网页 URL",
-                            parent=self, duration=2000)
+            show_info_bar("请先输入网页 URL", "warning",
+                          title="提示", parent=self, duration=2000)
             return
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
@@ -923,13 +922,12 @@ class MoyuReaderWidget(QWidget):
     def _on_fetch_ok(self, url, text):
         self._current_ratio = 0.0
         self._set_text(text, f"正在阅读：{url}")
-        InfoBar.success("抓取成功", f"已提取 {len(text)} 字正文",
-                        parent=self, duration=2500)
+        show_info_bar(f"已提取 {len(text)} 字正文", "success",
+                      title="抓取成功", parent=self, duration=2500)
 
     def _on_fetch_failed(self, url, msg):
         first = str(msg).splitlines()[0][:120] if msg else "未知错误"
-        bar = InfoBar.error("抓取失败", first, parent=self, duration=0,
-                            position=InfoBarPosition.BOTTOM_RIGHT)
+        bar = show_info_bar(first, "error", title="抓取失败", parent=self, duration=0)
         btn = PushButton("浏览器打开", bar)
         btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
         bar.addWidget(btn)

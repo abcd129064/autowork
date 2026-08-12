@@ -120,3 +120,25 @@ def cleanup_log_dir(dir_path, max_files=500, max_age_days=30, suffix='.log'):
     except OSError:
         pass
     return removed
+
+
+def show_info_bar(message, message_type="info", title=None, duration=2500, parent=None):
+    """统一 InfoBar 提示：位置固定 BOTTOM_RIGHT，标题按类型自动映射。
+
+    参数与主窗口 _show_info_bar 一致（message/message_type/title/duration），
+    额外提供 parent（默认取当前活动窗口兜底）；返回 InfoBar 实例，
+    便于调用方追加 Action/Widget（如「打开文件夹」按钮）。
+    """
+    # 延迟导入：core 层不硬依赖 UI 库，worker 等非 GUI 上下文也可安全引用
+    from qfluentwidgets import InfoBar, InfoBarPosition
+    if parent is None:
+        from PySide6.QtWidgets import QApplication
+        parent = QApplication.activeWindow()
+    if title is None:
+        title = {'success': '成功', 'info': '提示',
+                 'warning': '警告', 'error': '错误'}.get(message_type, '提示')
+    factory = {'success': InfoBar.success, 'info': InfoBar.info,
+               'warning': InfoBar.warning, 'error': InfoBar.error}
+    return factory.get(message_type, InfoBar.info)(
+        title=title, content=message, parent=parent,
+        position=InfoBarPosition.BOTTOM_RIGHT, duration=duration)

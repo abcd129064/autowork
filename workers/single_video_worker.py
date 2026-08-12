@@ -11,7 +11,6 @@ ImportError 兜底（与 NewLogWorker 同模式，缺失依赖时给出明确提
 
 import logging
 import traceback
-
 from PySide6.QtCore import QThread, Signal
 
 
@@ -67,7 +66,7 @@ class SingleVideoWorker(QThread):
                 _, video_path, _ = result
                 self.finished_ok.emit(str(video_path))
             else:
-                self.error.emit("单杆视频生成失败（详见上方输出）")
+                self.error.emit("单杆视频生成失败，详见上方输出")
         except Exception as e:
             self.error.emit(f"单杆视频生成异常: {e}")
             self.line.emit(traceback.format_exc())

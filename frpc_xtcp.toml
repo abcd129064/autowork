@@ -1,0 +1,14 @@
+[[visitors]]
+name = "snk_1806"
+type = "xtcp"
+serverName = "snk_1806"
+secretKey = "abc123"
+bindPort = 47511
+
+[[visitors]]
+name = "snk_1805"
+type = "xtcp"
+serverName = "snk_1805"
+secretKey = "abc123"
+bindPort = 46179
+

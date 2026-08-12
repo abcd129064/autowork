@@ -15,7 +15,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (QHBoxLayout, QGridLayout, QFileDialog)
 from PySide6.QtGui import QFont
 from qfluentwidgets import (MessageBoxBase, BodyLabel, CaptionLabel,
-    LineEdit, PushButton, FluentIcon, SpinBox, ComboBox, TextEdit)
+    LineEdit, PushButton, FluentIcon, CompactSpinBox, ComboBox, TextEdit)
 
 # 与 single_json 原 CLI 一致的默认值
 _DEFAULT_SESSION_CODE = "20260322230533_HF75QY2CNPE10097102W1"
@@ -42,8 +42,9 @@ class SingleVideoDialog(MessageBoxBase):
 
     def __init__(self, parent, settings=None):
         super().__init__(parent)
-        self._phase = "idle"  # idle/running/done
+        self._phase = "idle"  # idle/running/browsing/done
         self._out_path = ""
+        self._file_dlg = None  # 异步文件对话框（open() 非阻塞，选择期间持有）
         self.on_start = None  # 由主窗口注入：校验参数并启动 Worker
         settings = settings or {}
 
@@ -55,15 +56,15 @@ class SingleVideoDialog(MessageBoxBase):
         row.addWidget(BodyLabel("日志文件:", self))
         self.log_path_edit = LineEdit(self)
         self.log_path_edit.setReadOnly(True)
-        self.log_path_edit.setPlaceholderText("选择 .log 日志文件（自动推断同名 .mp4 视频）")
+        self.log_path_edit.setPlaceholderText("选择 .log 日志文件")
         row.addWidget(self.log_path_edit, 1)
-        self.btn_browse = PushButton(FluentIcon.FOLDER, "浏览...", self)
+        self.btn_browse = PushButton(FluentIcon.FOLDER, "浏览", self)
         self.btn_browse.clicked.connect(self._on_browse)
         row.addWidget(self.btn_browse)
         self.viewLayout.addLayout(row)
 
         # ---------- 参数表单（两列排布） ----------
-        self.viewLayout.addWidget(CaptionLabel("参数（会话/选手信息）:", self))
+        self.viewLayout.addWidget(CaptionLabel("JSON 字段:", self))
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
@@ -74,18 +75,18 @@ class SingleVideoDialog(MessageBoxBase):
             grid.addWidget(BodyLabel(label1, self), row_idx, 2)
             grid.addWidget(w1, row_idx, 3)
 
-        self.spin_start = SpinBox(self)
+        self.spin_start = CompactSpinBox(self)
         self.spin_start.setRange(0, 99_999_999)
         self.spin_start.setValue(0)
-        self.spin_end = SpinBox(self)
+        self.spin_end = CompactSpinBox(self)
         self.spin_end.setRange(0, 99_999_999)
         self.spin_end.setValue(65535)
         _pair(0, "起始帧:", self.spin_start, "结束帧:", self.spin_end)
 
-        self.spin_player = SpinBox(self)
+        self.spin_player = CompactSpinBox(self)
         self.spin_player.setRange(0, 1)
         self.spin_player.setValue(1)
-        self.spin_round = SpinBox(self)
+        self.spin_round = CompactSpinBox(self)
         self.spin_round.setRange(1, 999)
         self.spin_round.setValue(1)
         _pair(1, "甲乙方 (0/1):", self.spin_player, "轮次:", self.spin_round)
@@ -151,13 +152,35 @@ class SingleVideoDialog(MessageBoxBase):
     # ---------- 控件回调 ----------
 
     def _on_browse(self):
-        """选择日志文件，自动推断同名 .mp4 视频"""
+        """异步弹出文件对话框（open() 非阻塞），选择完成后自动识别场次
+
+        用 open() 而非 getOpenFileName（exec 阻塞）：原生文件对话框打开
+        可能耗时数秒（目录枚举/缩略图），exec 会冻结主线程导致「未响应」；
+        open() 显示后立即返回，主线程持续响应，结果经信号异步回调。
+        （Qt 不允许在非 GUI 线程创建 widget，故不用子线程方案。）
+        """
+        if self._file_dlg is not None:
+            return
         start_dir = self.edit_pending.text().strip() or _DEFAULT_PENDING_ROOT
         if not os.path.isdir(start_dir):
             start_dir = ""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择日志文件", start_dir,
-            "日志文件 (*.log);;所有文件 (*.*)")
+        # 选择期间锁定对话框：禁止关闭/重复点击
+        self._phase = "browsing"
+        self.yesButton.setEnabled(False)
+        self.cancelButton.setEnabled(False)
+        self.btn_browse.setEnabled(False)
+        dlg = QFileDialog(self, "选择日志文件", start_dir,
+                          "日志文件 (*.log);;所有文件 (*.*)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+        dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+        dlg.fileSelected.connect(self._on_file_selected)
+        dlg.rejected.connect(self._on_file_rejected)
+        dlg.finished.connect(self._on_picker_finished)
+        self._file_dlg = dlg
+        dlg.open()  # 非阻塞：显示后立即返回，主线程继续处理事件
+
+    def _on_file_selected(self, path):
+        """文件选择完成：填充路径并自动识别 session 信息"""
         if not path:
             return
         self.log_path_edit.setText(path)
@@ -172,7 +195,20 @@ class SingleVideoDialog(MessageBoxBase):
             self.edit_date.setText(date)
             self.edit_session_code.setText(f"{date}_{_random_session_suffix()}")
             self.append_line(f"[选择] 自动识别 session_date={date}"
-                             f"，session_code 已生成（{date}_随机21位）")
+                             f"，session_code 已生成")
+
+    def _on_file_rejected(self):
+        """用户取消文件选择"""
+        self.append_line("[选择] 已取消")
+
+    def _on_picker_finished(self, _result):
+        """文件对话框结束（选择或取消）：清理引用并恢复控件状态"""
+        self._file_dlg = None
+        self._phase = "idle"
+        self.yesButton.setEnabled(True)
+        self.yesButton.setText("开始生成")
+        self.cancelButton.setEnabled(True)
+        self.btn_browse.setEnabled(True)
 
     def _on_yes_clicked(self):
         if self._phase == "idle" and self.on_start:
@@ -192,6 +228,7 @@ class SingleVideoDialog(MessageBoxBase):
         log_path = self.log_path_edit.text().strip()
         if not log_path or not os.path.isfile(log_path):
             self.append_line("✘ 请先选择有效的日志文件")
+            self
             return None
         try:
             with open(log_path, "r", encoding="utf-8") as f:
@@ -263,6 +300,13 @@ class SingleVideoDialog(MessageBoxBase):
     def closeEvent(self, e):
         # 生成中禁止关闭：防止 Worker 信号打到已销毁的文本区
         if self._phase == "running":
+            e.ignore()
+            return
+        # 文件选择中点关闭：主动取消文件对话框以复位状态，避免卡死
+        # （reject 触发 finished 复位；本次关闭先拦截，复位后可再次关闭）
+        if self._phase == "browsing":
+            if self._file_dlg is not None:
+                self._file_dlg.reject()
             e.ignore()
             return
         super().closeEvent(e)
