@@ -171,15 +171,15 @@ class RemoteMixin:
         if win is not None:
             try:
                 win.isVisible()  # 探测 C++ 对象是否已销毁
-                win.show()
-                win.raise_()
-                win.activateWindow()
-                return
             except RuntimeError:
-                self._tunnel_panel_window = None
-        win = TunnelPanelWindow()
-        win.destroyed.connect(lambda: setattr(self, "_tunnel_panel_window", None))
-        self._tunnel_panel_window = win
+                win = None
+        if win is None:
+            win = TunnelPanelWindow()
+            win.destroyed.connect(lambda: setattr(self, "_tunnel_panel_window", None))
+            self._tunnel_panel_window = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     def _get_new_random_port(self):
         """生成不冲突的随机端口（排除会话中心已注册 visitor 的端口）"""

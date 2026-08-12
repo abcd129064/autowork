@@ -355,7 +355,7 @@ class Ui_MainWindow(object):
         self.date_next.setFixedSize(26, 32)
         self.horizontalLayout.addWidget(self.date_next)
 
-        self.table_panel_btn = FluentPushButton(self.toolbar_widget)
+        self.table_panel_btn = PrimaryPushButton(self.toolbar_widget)
         self.table_panel_btn.setObjectName(u"table_panel_btn")
         self.horizontalLayout.addWidget(self.table_panel_btn)
 

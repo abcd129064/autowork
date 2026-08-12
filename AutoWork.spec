@@ -66,6 +66,8 @@ a = Analysis(
         # 否则打包版首次运行自建空库，球桌库搜索永远无候选。
         # 打包前由 build_exe.py 执行 WAL checkpoint，保证主库文件含全部数据
         ('database/tables.db', 'database'),
+        # 单杆视频资源（字体/头像/底图/logo，工具菜单「单杆视频」）
+        ('resource', 'resource'),
         # 注意：settings.json / frpc.exe / frpc_xtcp.toml 由 build_exe.py
         # 构建后复制到 dist 根目录（exe 旁边），不放入 datas；
         # autowork_with_table.py / p2p.py 已被 import 追踪编译进 PYZ，无需重复打包
@@ -87,11 +89,14 @@ a = Analysis(
         'PIL.ImageQt',
         'PIL.ImageFilter',
         'PIL.ImageEnhance',
+        # 单杆视频（tools/single_shot_video.py 延迟导入，显式声明保险）
+        'cv2',
+        'numpy',
     ] + qfw_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['qfluentwidgets.multimedia', 'scipy', 'numpy'],
+    excludes=['qfluentwidgets.multimedia', 'scipy'],
     noarchive=False,
     optimize=0,
 )

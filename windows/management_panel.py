@@ -125,6 +125,7 @@ TABLE_COLUMNS = [
     ("remark", "备注", 360),
     ("cameraPassExt", "相机密码", 220),
     ("snk_code", "SNK标识", 110),
+    ("code", "设备编码", 200),
 ]
 
 _STATUS_COLORS = {
@@ -974,7 +975,7 @@ class TablePage(QWidget):
         self._query_worker = None
         self._save_worker = None
         self._export_worker = None
-        self._hidden_cols = {2}
+        self._hidden_cols = {2, 6}  # 在线状态/设备编码 默认隐藏，可在「筛选」菜单勾选显示
         self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
         self._show_manual = False  # 是否显示手动版本设备（name 含 @s，默认不显示）
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
@@ -3754,7 +3755,7 @@ class HealthPage(QWidget):
 
 
 class GamePage(QWidget):
-    """摸鱼中心：2048 / 贪吃蛇 / 小说阅读（三页签）"""
+    """摸鱼中心"""
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -3771,11 +3772,12 @@ class GamePage(QWidget):
         self.tabs = QTabWidget(container)
         self.tabs.setDocumentMode(True)
         self.game_2048 = Game2048Widget(self.tabs)
-        self.game_snake = SnakeWidget(self.tabs)
+        # 隐藏「贪吃蛇」入口：实例和页签一并注释，恢复时取消下方两行即可
+        # self.game_snake = SnakeWidget(self.tabs)
+        # self.tabs.addTab(self.game_snake, "贪吃蛇")
         self.reader = MoyuReaderWidget(self.tabs)
-        self.tabs.addTab(self.game_2048, "2048")
-        self.tabs.addTab(self.game_snake, "贪吃蛇")
         self.tabs.addTab(self.reader, "小说阅读")
+        self.tabs.addTab(self.game_2048, "2048")
         box.addWidget(self.tabs)
 
         area.setWidget(container)
@@ -3785,10 +3787,12 @@ class GamePage(QWidget):
     def _on_tab_changed(self, index):
         """页签切换：游戏控件取键盘焦点；贪吃蛇切走暂停、切回恢复"""
         current = self.tabs.widget(index)
-        if current is self.game_snake:
-            self.game_snake.auto_resume()
-        else:
-            self.game_snake.auto_pause()
+        snake = getattr(self, "game_snake", None)
+        if snake is not None:
+            if current is snake:
+                snake.auto_resume()
+            else:
+                snake.auto_pause()
         if current is not self.reader:
             current.setFocus()
 

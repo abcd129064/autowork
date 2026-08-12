@@ -28,6 +28,7 @@ from core.perf import is_acrylic_enabled, is_animation_enabled
 from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
     ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
+from workers.single_video_worker import SingleVideoWorker
 from main_window.settings_dialog import SettingsDialog
 
 # ==================== 版本信息（帮助→关于） ====================
@@ -747,10 +748,6 @@ class UIMixin:
         act_conn_diag.setToolTip("查看 SSH/SFTP 连接日志与失败记录（含归档）")
         act_conn_diag.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_conn_diag))
         func_menu.addAction(act_conn_diag)
-        act_newlog = Action(FluentIcon.VIDEO, "视频/日志批量整理", self)
-        act_newlog.setToolTip("按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog）")
-        act_newlog.triggered.connect(lambda: QTimer.singleShot(0, self._on_newlog_organize))
-        func_menu.addAction(act_newlog)
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
@@ -761,6 +758,21 @@ class UIMixin:
         func_btn = TransparentDropDownPushButton("功能", self._menubar_widget)
         func_btn.setMenu(func_menu)
         _mb_layout.addWidget(func_btn)
+
+        # 「工具」菜单：单杆视频（收编 single_json）+ 视频/日志批量整理（自「功能」菜单迁入）
+        tool_menu = _create_menu("工具", self)
+        act_single_video = Action(FluentIcon.VIDEO, "单杆视频", self)
+        act_single_video.setToolTip("从日志解析单杆得分，生成带计分水印的单杆视频（single_json）")
+        act_single_video.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_single_video))
+        tool_menu.addAction(act_single_video)
+        tool_menu.addSeparator()
+        act_newlog = Action(FluentIcon.LIBRARY, "视频/日志批量整理", self)
+        act_newlog.setToolTip("按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog）")
+        act_newlog.triggered.connect(lambda: QTimer.singleShot(0, self._on_newlog_organize))
+        tool_menu.addAction(act_newlog)
+        tool_btn = TransparentDropDownPushButton("工具", self._menubar_widget)
+        tool_btn.setMenu(tool_menu)
+        _mb_layout.addWidget(tool_btn)
 
         # 「配置」菜单：原第三行功能栏「配置」按钮迁移，下拉直接选择要打开的文件
         cfg_menu = _create_menu("配置", self)
@@ -1036,10 +1048,84 @@ class UIMixin:
         self._conn_diag.raise_()
         self._conn_diag.activateWindow()
 
+    # ==================== 单杆视频（工具菜单，收编 single_json） ====================
+
+    def _on_open_single_video(self):
+        """工具菜单「单杆视频」：弹参数对话框，后台 Worker 生成单杆视频
+
+        逐帧渲染为 CPU 密集任务，必须由 QThread 后台执行（Worker 由
+        主窗口持有，日志直写对话框文本区，生成中禁止关闭对话框）。
+        """
+        worker = getattr(self, "_single_video_worker", None)
+        if worker is not None and worker.isRunning():
+            self._show_info_bar("单杆视频正在生成中，请等待完成", "warning")
+            return
+
+        # 延迟 import：tools 依赖 cv2/numpy/Pillow，缺失时给出明确提示而非崩溃
+        try:
+            import cv2  # noqa: F401
+            import numpy  # noqa: F401
+        except ImportError as e:
+            self._show_info_bar(
+                f"无法加载单杆视频依赖（请确认已安装 opencv-python、numpy）: {e}",
+                "error", duration=5000)
+            return
+
+        from windows.single_video_dialog import SingleVideoDialog
+        dlg = SingleVideoDialog(self, self._load_settings())
+        dlg.widget.setMinimumWidth(640)
+
+        def _start():
+            params = dlg.collect_params()
+            if not params:
+                return
+            # 记住本次路径配置，下次直接作为默认值
+            self._save_settings({
+                "single_pending_root": params["pending_root"],
+                "single_videos_root": params["videos_root"],
+            })
+            dlg.enter_running()
+            w = SingleVideoWorker(params)
+            self._single_video_worker = w
+            w.line.connect(dlg.append_line)
+            w.finished_ok.connect(lambda path, d=dlg: self._on_single_video_finished(d, path))
+            w.error.connect(lambda msg, d=dlg: self._on_single_video_failed(d, msg))
+            w.finished.connect(lambda w=w: self._release_worker_safe(w))
+            w.start()
+            self._append_log(f"[单杆] 开始生成单杆视频: {params['video_name']}")
+
+        dlg.on_start = _start
+        dlg.open()
+
+    def _on_single_video_finished(self, dlg, video_path):
+        """单杆视频生成完成：恢复对话框并提示输出位置"""
+        w = getattr(self, "_single_video_worker", None)
+        self._single_video_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
+        dlg.append_line("")
+        dlg.append_line(f"✔ 单杆视频生成完成: {video_path}")
+        dlg.enter_done(video_path)
+        self._append_log(f"[单杆] 单杆视频生成完成: {video_path}")
+        self._show_info_bar("单杆视频生成完成，可点击「打开视频目录」查看",
+                            "success", duration=4000)
+
+    def _on_single_video_failed(self, dlg, msg):
+        """单杆视频 Worker 失败：错误 InfoBar + 对话框恢复可重新发起"""
+        w = getattr(self, "_single_video_worker", None)
+        self._single_video_worker = None
+        if w is not None:
+            self._release_worker_safe(w)
+        dlg.append_line("")
+        dlg.append_line(f"✘ {msg}")
+        dlg.enter_failed()
+        self._append_log(f"[单杆] 单杆视频生成失败: {msg}")
+        self._show_info_bar(msg, "error", duration=4000)
+
     # ==================== 视频/日志批量整理（NewLog 收编，Task #40） ====================
 
     def _on_newlog_organize(self):
-        """功能菜单「视频/日志批量整理」：弹署名确认对话框，后台 Worker 运行 NewLog
+        """工具菜单「视频/日志批量整理」：弹署名确认对话框，后台 Worker 运行 NewLog
 
         整理完成后对话框进入「打包上传」阶段（复用运维面板
         ZipUploadWorker，Task #57），上传中可最小化/取消。

@@ -24,7 +24,7 @@ DB_PATH = os.path.join(_DB_DIR, "tables.db")
 # ==================== 原有球桌表（wechat2-billiard 接口） ====================
 
 # 存储的字段（与面板展示列一致）
-FIELDS = ("name", "roomName", "onlineStatusName", "remark", "cameraPassExt", "snk_code")
+FIELDS = ("name", "roomName", "onlineStatusName", "remark", "cameraPassExt", "snk_code", "code")
 
 # remark 中 snk 标识的提取规则（如 "... snk_001 ..." → "snk_001"），
 # 用于 frp xtcp 远程连接时定位设备（visitor serverName）
@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     onlineStatusName TEXT DEFAULT '',
     remark  TEXT DEFAULT '',
     cameraPassExt TEXT DEFAULT '',
-    snk_code TEXT DEFAULT ''
+    snk_code TEXT DEFAULT '',
+    code    TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
@@ -300,6 +301,16 @@ def _ensure_initialized(conn: sqlite3.Connection):
                 conn.execute(
                     "UPDATE billiard_tables SET snk_code = ? WHERE id = ?", (snk, rid))
         conn.commit()
+    # 迁移：旧表无 code 列时自动补列；FTS 表结构落后（缺 code 列）时
+    # 删除后由 _setup_fts 统一重建（含 rebuild），避免触发器列数不匹配降级
+    if cols and "code" not in cols:
+        conn.execute("ALTER TABLE billiard_tables ADD COLUMN code TEXT DEFAULT ''")
+        conn.execute("DROP TRIGGER IF EXISTS tables_fts_ai")
+        conn.execute("DROP TRIGGER IF EXISTS tables_fts_ad")
+        conn.execute("DROP TRIGGER IF EXISTS tables_fts_au")
+        conn.execute("DROP TABLE IF EXISTS tables_fts")
+        conn.execute("DELETE FROM sync_meta WHERE key='fts_built'")
+        conn.commit()
     # 迁移：kd_status 旧表可能缺少扩展字段，自动 ALTER ADD
     kd_cols = [r[1] for r in conn.execute("PRAGMA table_info(kd_status)").fetchall()]
     if kd_cols and "device_code" not in kd_cols:
@@ -373,11 +384,12 @@ def save_all(rows: list) -> int:
             remark,
             str(item.get("cameraPassExt") or ""),
             snk,
+            str(item.get("code") or ""),
         ))
     conn.executemany(
         "INSERT OR REPLACE INTO billiard_tables "
-        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)", data)
+        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
@@ -432,7 +444,7 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
 
     offset = (page_no - 1) * page_size
     cursor = conn.execute(
-        f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code "
+        f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code "
         f"FROM billiard_tables{where} ORDER BY id DESC LIMIT ? OFFSET ?",
         params + [page_size, offset])
     cols = [d[0] for d in cursor.description]
@@ -451,8 +463,8 @@ def insert_one(record: dict) -> int:
     snk = str(record.get("snk_code") or "").strip() or parse_snk_code(remark)
     cur = conn.execute(
         "INSERT INTO billiard_tables "
-        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             str(record.get("name") or ""),
             str(record.get("roomName") or ""),
@@ -460,6 +472,7 @@ def insert_one(record: dict) -> int:
             remark,
             str(record.get("cameraPassExt") or ""),
             snk,
+            str(record.get("code") or ""),
         ))
     conn.commit()
     return cur.lastrowid

@@ -1364,7 +1364,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 pass
 
         # 7b. 清理批量整理 worker（NewLog 整理 / 打包上传，中断并短等待）
-        for attr in ('_newlog_worker', '_newlog_upload_worker'):
+        for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker'):
             nw = getattr(self, attr, None)
             if nw is not None:
                 setattr(self, attr, None)
