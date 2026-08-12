@@ -65,9 +65,14 @@ Qt 消息处理器，将 Warning/Critical/Fatal 级别消息落盘。通过 `qIn
 | `classify_conn_error(e)` | `(Exception) -> str` | 将网络异常转为中文用户友好提示 |
 | `natural_sort_key(s)` | `(str) -> list` | 自然排序 key（数字段按数值比较） |
 | `safe_close_transport(transport, join_timeout=3)` | 安全关闭 paramiko Transport | close + join 等待线程退出 |
+| `cleanup_log_dir(dir_path, max_files=500, max_age_days=30, suffix='.log')` | `(str, int, int, str) -> int` | 日志目录闭环清理（超龄/超量），返回删除文件数，失败静默降级 |
+| `show_info_bar(message, message_type="info", title=None, duration=2500, parent=None)` | `(...) -> InfoBar` | **统一 InfoBar 提示**：位置固定 BOTTOM_RIGHT，标题按类型自动映射（success→成功/info→提示/warning→警告/error→错误），默认时长 2500ms（<=0 常驻）；parent 缺省取当前活动窗口；返回 bar 实例供追加 Action/Widget |
+| `PARAMIKO_AVAILABLE` | `bool` | paramiko 是否可用（环境探测） |
 | `RETRYABLE_KEYWORDS` | `tuple` | 可重试错误关键词 |
 | `RETRY_MAX` | `int = 5` | 最大重试次数 |
 | `RETRY_DELAY` | `int = 2` | 重试间隔（秒） |
+
+> 提示规范：全项目 InfoBar 显示统一走 `show_info_bar()`，禁止各模块直调 `InfoBar.success/error/...`（样式、位置、标题映射、时长集中维护）。主窗口 `MainWindow._show_info_bar` 为兼容入口，内部转调本函数。
 
 ---
 
@@ -82,6 +87,48 @@ import core.acrylic_patch  # noqa: F401
 - 使用 `importlib.util.find_spec('numpy')` 零副作用探测
 - numpy/scipy 不可用时注入 PIL 实现的 `gaussianBlur` 到 `sys.modules['qfluentwidgets.common.image_utils']`
 - 必须在 qfluentwidgets 任何导入之前执行
+
+---
+
+### core.perf
+
+低性能模式运行时开关（亚克力/动画即时生效，`settings.json` 持久化，兼容旧字段 `performance_mode`）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `is_acrylic_enabled()` | `() -> bool` | 亚克力磨砂效果是否开启 |
+| `is_animation_enabled()` | `() -> bool` | 界面动画是否开启 |
+| `set_acrylic_enabled(enabled)` | `(bool)` | 设置亚克力开关（持久化 + 生效） |
+| `set_animation_enabled(enabled)` | `(bool)` | 设置动画开关（持久化 + 生效） |
+| `is_performance_mode()` | `() -> bool` | 低性能模式（两者均关闭） |
+| `invalidate_cache()` | `()` | 使配置缓存失效（下次读取重载） |
+
+---
+
+### core.frp_remote
+
+frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话协调）。
+
+| 函数/常量 | 签名 | 说明 |
+|-----------|------|------|
+| `get_session_manager()` | `() -> RemoteSessionManager` | 获取全局会话管理器单例 |
+| `SOURCE_MANUAL` / `SOURCE_SNK` | `str` | visitor 来源标记（手工添加 / snk 快捷） |
+
+#### 类 `RemoteSessionManager(QObject)`
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `log_message` | `Signal(str)` | frpc 日志转发（主窗口日志区订阅） |
+| `frpc_state_changed` | `Signal(bool)` | frpc 运行状态变化 |
+
+| 方法 | 说明 |
+|------|------|
+| `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp） |
+| `shutdown()` | 停止 frpc 并关闭全局会话窗口（主窗口 closeEvent 调用） |
+
+#### 类 `FrpRemoteBridge(QObject)`
+
+主窗口注入的远程桥接（`window()._remote_bridge`），供管理面板等子窗口委托建立会话。
 
 ---
 
@@ -314,6 +361,20 @@ LoginTestWorker(api_name, username=None, password=None)
 | `success` | `Signal(str)` | 成功提示 |
 | `error` | `Signal(str)` | 失败原因 |
 
+### SingleVideoWorker
+
+单杆视频生成工作线程（工具菜单「单杆视频」）。日志解析（帧级计分提取）、视频水印合成均在子线程执行，逐行进度通过信号回传。
+
+```python
+SingleVideoWorker(params: dict)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `line` | `Signal(str)` | 处理进度日志（追加到对话框输出区） |
+| `finished_ok` | `Signal(str)` | 生成成功，返回视频路径 |
+| `error` | `Signal(str)` | 生成失败，返回错误首行 |
+
 ---
 
 ## database/ 数据层
@@ -330,6 +391,8 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 | `query_page(page_no, page_size, keyword="")` | 分页查询，返回 `(total, rows)` |
 | `insert_one(record)` | 手动插入一条记录 |
 | `get_meta()` | 获取同步元信息（条数、时间） |
+
+球桌表字段（`FIELDS`）：`name`、`roomName`、`onlineStatusName`、`remark`、`cameraPassExt`、`snk_code`（SNK 标识，手动维护）、`code`（设备编码，接口同步）。旧库自动惰性迁移：首次连接时 `ALTER TABLE ADD COLUMN` 补列并重建 FTS 索引，数据无损。
 
 #### 设备状态数据（xqzg / kd）
 
@@ -414,6 +477,55 @@ RDPWindow(host, port, username, password,
 
 ---
 
+### SingleVideoDialog
+
+单杆视频参数对话框（工具菜单「单杆视频」，`windows/single_video_dialog.py`）。继承 `MessageBoxBase`（透明模态窗口），由主窗口 `UiMixin._on_open_single_video` 注入 `_start` 回调后 `exec()` 打开。
+
+```python
+SingleVideoDialog(parent, settings=None)
+```
+
+**场次自动识别**：选择日志文件后，从文件名解析 `session_date`（正则 `^(\d{8})`，如 `20260810_230635.log` → `20260810`），并自动生成 `session_code`（`{日期}_{21位随机串}`，字符集 `[A-Z0-9]`，与球桌接口 code 同格式）。
+
+**文件对话框异步化**：使用 `QFileDialog.open()` 非阻塞模式（而非 `getOpenFileName` 阻塞调用），选择期间对话框锁定（`_phase = "browsing"` 禁用按钮/拦截 closeEvent），结果经 `fileSelected`/`finished` 信号异步回调——避免从透明模态窗口弹原生对话框导致的卡死。
+
+**关键方法**：
+
+| 方法 | 说明 |
+|------|------|
+| `collect_params()` | 校验并收集生成参数（日志路径、session_date/code、帧区间、选手信息等） |
+| `append_line(text)` | 追加输出日志行 |
+| `enter_running()` / `enter_done(path)` / `enter_failed()` | 运行中/成功/失败状态切换 |
+| `closeEvent(e)` | 运行中（running/browsing）拦截关闭 |
+
+表单控件使用 `CompactSpinBox`（紧凑版微调框，继承 QSpinBox，API 兼容）。
+
+---
+
+### RemoteSessionWindow
+
+远程会话窗口（`FramelessWindow`），展示 frpc 日志与隧道状态，由 `RemoteSessionManager` 统一管理。
+
+---
+
+### TunnelPanelWindow
+
+「当前隧道」面板（`FramelessWindow`），主窗口远程面板入口打开，展示全局活跃隧道。
+
+---
+
+### ConnDiagPanel
+
+连接诊断面板（`QDialog`），网络连通性诊断。
+
+---
+
+### MoyuReaderWidget
+
+摸鱼阅读器（`QWidget`），内置文本阅读（TXT/粘贴）、网页正文抓取、2048/贪吃蛇小游戏。
+
+---
+
 ### ManagementPanelWindow
 
 运维管理面板（`windows/management_panel.py`），qfluentwidgets `FluentWindow` + 左侧导航，三个功能页面。由主窗口「球桌管理」按钮打开（`UiMixin._on_open_table_panel`），支持 `python -m windows.management_panel` 独立调试。
@@ -426,7 +538,7 @@ ManagementPanelWindow(parent=None)
 
 | 页面 | 类 | 说明 |
 |------|------|------|
-| 球桌管理 | `TablePage` | wechat2-billiard 球桌数据：表格/搜索/分页/列筛选/右键复制/手动添加记录 |
+| 球桌管理 | `TablePage` | wechat2-billiard 球桌数据：表格/搜索/分页/列筛选/右键复制/手动添加记录；含 `code`（设备编码）列，默认隐藏可在「筛选」菜单勾选显示（`_hidden_cols = {在线状态, 设备编码}`） |
 | 设备状态 | `DevicePage` | kd / xqzg 数据源切换（`get_active_api_source()`），按日期分区查看；集成图片迁移 |
 | 管理设置 | `AdminSettingsPage` | 数据源选择（kd/xqzg）、双接口账号密码、测试连接，合并写入 `settings.json` |
 
@@ -470,6 +582,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UiMixin, FluentWindow
 | `on_open_config_clicked()` | 打开配置文件对话框 |
 | `apply_dpi_scale(settings_path)` | [静态] 应用 DPI 缩放 |
 | `_effective_is_dark(settings)` | [静态] 判断是否深色主题 |
+| `_show_info_bar(message, message_type="info", title=None, duration=2500)` | 统一 InfoBar 提示（兼容入口，内部转调 `core.utils.show_info_bar`，位置 BOTTOM_RIGHT、标题自动映射） |
 
 ---
 
@@ -540,18 +653,19 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UiMixin, FluentWindow
 
 ### UiMixin
 
-UI 辅助（状态栏、右键菜单、设置对话框、主题切换、布局切换）。
+UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切换、布局切换）。
 
 | 方法 | 说明 |
 |------|------|
 | `_init_statusbar()` | 初始化底部状态栏 |
 | `_init_context_menus()` | 初始化右键菜单 |
-| `_init_menubar()` | 初始化菜单栏 |
+| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 + 视频日志批量整理） |
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_apply_highlight_color()` | 应用日志高亮颜色 |
 | `_apply_font_size()` | 应用字号设置 |
 | `_apply_font_family()` | 应用字体设置 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
+| `_on_open_single_video()` | 工具菜单「单杆视频」：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调（参数校验 → 保存 settings → 创建 `SingleVideoWorker` 连信号 → `exec()`） |
 
 ---
 

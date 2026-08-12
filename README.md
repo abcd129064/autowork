@@ -11,8 +11,12 @@
 - **进程管理**：启动/终止/挂起/恢复 SnookerTracking 程序
 - **detect.json 解码**：自动调用 AES 解码工具生成 detect.json
 
+### 工具菜单（主界面菜单栏）
+- **单杆视频**（收编 single_json 项目）：选择日志文件自动识别场次信息——`session_date` 从文件名自动解析（如 `20260810_230635.log` → `20260810`），`session_code` 自动生成（`日期_21位随机串`，与球桌接口 code 同格式）；后台 Worker 生成带计分水印的单杆视频
+- **视频日志批量整理**：从「功能」菜单迁入工具菜单
+
 ### 运维管理面板（球桌管理按钮打开）
-- **球桌管理**：对接 wechat2-billiard 接口，表格/搜索/分页/列筛选/右键复制/手动添加记录
+- **球桌管理**：对接 wechat2-billiard 接口，表格/搜索/分页/列筛选/右键复制/手动添加记录；接口 `code` 字段（设备编码）同步入库，界面默认隐藏，可在「筛选」菜单勾选显示
 - **设备状态**：对接 kd / xqzg 双接口，数据源可切换，按日期分区查看设备状态
 - **图片迁移**：点击总数/正常/操作单元格右侧滑出文件列表，点击文件选择目标分类（问题/精度/使用/废弃）即可在服务器上移动图片
 - **管理设置**：配置双接口 API 账号密码、选择启用数据源、测试连接
@@ -28,6 +32,8 @@
 - **Fluent Design**：基于 qfluentwidgets 的现代化 UI
 - **深色/浅色/跟随系统**三种主题模式
 - **亚克力磨砂效果**：打包后通过 PIL 补丁替代 numpy/scipy 实现
+- **低性能模式**：设置中一键关闭亚克力/动画，低配机器更流畅（`perf_acrylic` / `perf_animation` 运行时即时生效）
+- **统一提示条**：所有 InfoBar 提示统一走 `core.utils.show_info_bar()`（右下角、标题按类型自动映射），各模块不再各自直调
 - **自定义快捷键**：9 个可配置快捷键
 - **设备搜索**：Ctrl+F 实时过滤设备列表
 - **双布局模式**：默认/经典布局一键切换
@@ -65,13 +71,17 @@ autowork/
 │   ├── acrylic_patch.py       #   亚克力效果 PIL 替代补丁
 │   ├── app_paths.py           #   应用路径解析（兼容 PyInstaller）
 │   ├── conn_logger.py         #   连接日志记录器 + Qt 消息处理器
-│   └── utils.py               #   错误分类、自然排序、重试常量
+│   ├── frp_remote.py          #   frpc 管理、统一远程会话中心（RemoteSessionManager）
+│   ├── perf.py                #   低性能模式开关（亚克力/动画运行时控制）
+│   ├── secrets.py             #   配置加解密（upload/api 凭据）
+│   └── utils.py               #   错误分类、自然排序、统一提示 show_info_bar
 │
 ├── win_api/                   # Windows API 层（ctypes 声明）
 │   └── windows_api.py         #   显示设置/窗口嵌入/进程挂起恢复
 │
 ├── workers/                   # 后台线程 Worker 层
 │   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
+│   ├── single_video_worker.py #   单杆视频生成 Worker（日志解析 + 计分水印）
 │   └── table_worker.py        #   球桌/设备数据 API Worker（拉取/迁移/登录测试）
 │
 ├── database/                  # 本地数据层
@@ -80,18 +90,23 @@ autowork/
 │
 ├── windows/                   # 独立窗口层
 │   ├── management_panel.py    #   运维管理面板（球桌管理/设备状态/管理设置）
+│   ├── single_video_dialog.py #   单杆视频参数对话框（工具菜单）
 │   ├── table_panel.py         #   球桌面板（旧版，仅 AddRecordDialog 仍被引用）
 │   ├── sftp_window.py         #   SFTP 双面板文件管理窗口
 │   ├── ssh_terminal.py        #   SSH 终端窗口（ANSI 渲染）
 │   ├── ansi_terminal.py       #   ANSI 虚拟终端控件
-│   └── rdp_window.py          #   RDP 远程桌面嵌入窗口
+│   ├── rdp_window.py          #   RDP 远程桌面嵌入窗口
+│   ├── remote_session_window.py # 远程会话窗口（frpc 日志/隧道状态）
+│   ├── tunnel_panel.py        #   当前隧道面板
+│   ├── conn_diag_panel.py     #   连接诊断面板
+│   └── moyu_widgets.py        #   摸鱼阅读器（内置小游戏/网页抓取）
 │
 ├── main_window/               # 主窗口层（Mixin 拆分）
 │   ├── main_window.py         #   MainWindow 主类（组合所有 Mixin）
 │   ├── settings_mixin.py      #   配置读写、快捷键
 │   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
 │   ├── remote_mixin.py        #   远程连接（frpc/SSH/SFTP/RDP）
-│   └── ui_mixin.py            #   状态栏/右键菜单/设置对话框/主题
+│   └── ui_mixin.py            #   状态栏/菜单栏（含工具菜单）/右键菜单/设置对话框/主题
 │
 ├── styles/                    # QSS 主题样式
 │   ├── dark.qss               #   深色主题
@@ -179,6 +194,18 @@ python build_exe.py
 - `api2`：kd.newbv.cn:30005 接口（JWT 认证，支持图片迁移）
 
 也可直接在「运维管理面板 → 管理设置」页中修改并测试连接。
+
+低性能模式（设置 → 性能）：
+
+```json
+"perf_acrylic": false,
+"perf_animation": false
+```
+
+- `perf_acrylic`：亚克力磨砂效果开关
+- `perf_animation`：界面动画开关
+
+均为运行时即时生效，无需重启，低配机器可全部关闭提升流畅度。
 
 ## 接口文档
 
