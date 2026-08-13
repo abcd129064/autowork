@@ -26,6 +26,7 @@ from qfluentwidgets import (
     RadioButton,
     ListWidget,
     PlainTextEdit as FluentPlainTextEdit,
+    TextEdit as FluentTextEdit,
     LineEdit as FluentLineEdit,
     PasswordLineEdit,
     SpinBox as FluentSpinBox,
@@ -481,7 +482,7 @@ class Ui_MainWindow(object):
         self.log_list.setObjectName(u"log_list")
         _ListEmptyHint(self.log_list, "请选择日志文件")
 
-        self.show_log = FluentPlainTextEdit()
+        self.show_log = FluentTextEdit()
         self.show_log.setObjectName(u"show_log")
         self.show_log.setReadOnly(True)
         self.show_log.setFont(QFont("Consolas", 10))

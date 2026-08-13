@@ -7,13 +7,26 @@ collect() 采用数据驱动：配置项描述表 + 统一收集循环。
 """
 
 import os
+import re
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout,
-    QHBoxLayout, QStackedWidget, QFileDialog)
+    QHBoxLayout, QStackedWidget, QFileDialog, QDialog, QListWidget,
+    QListWidgetItem)
 from qfluentwidgets import (MessageBoxBase, SpinBox, ComboBox, LineEdit,
-    ToolButton, FluentIcon, BodyLabel, CaptionLabel, Pivot, SwitchButton)
+    ToolButton, FluentIcon, BodyLabel, CaptionLabel, Pivot, SwitchButton,
+    PushButton, ColorDialog)
 
 from core.ai_providers import AI_PROVIDERS, get_provider
+
+
+# 日志高亮规则默认值（main_window 从本模块导入，保证设置与渲染同一来源）
+_DEFAULT_LOG_RULES = [
+    {"name": "错误", "pattern": r"ERROR|Exception|Traceback|error",
+     "color": "#ff5252", "notify": True},
+    {"name": "警告", "pattern": r"WARN|WARNING|超时|失败|timeout",
+     "color": "#f0a020", "notify": False},
+]
 
 
 # NewLog 批量整理路径默认值（与 settings_mixin.DEFAULT_PATHS 保持一致）
@@ -31,6 +44,7 @@ class SettingsDialog(MessageBoxBase):
         ("upload", "收集与上传"),
         ("frpc", "FRPC 服务器"),
         ("ai", "API Key"),
+        ("log_rules", "日志高亮"),
         ("appearance", "外观"),
     ]
 
@@ -135,6 +149,13 @@ class SettingsDialog(MessageBoxBase):
                        lambda s: _collect_ai_keys(s),
                        lambda cfg: dict(cfg.get("ai_api_keys", {}) or {})))
 
+        # 日志高亮规则（特殊项：widget_fn 返回 self，reader 收集 UI 状态）
+        items.append(("log_highlight_rules", "log_rules",
+                       lambda s: getattr(s, '_log_rules_built', False) and s or None,
+                       lambda s: s._collect_log_rules(),
+                       lambda cfg: list(cfg.get("log_highlight_rules",
+                                                _DEFAULT_LOG_RULES))))
+
         # 外观（3项）
         items.append(("font_size", "appearance",
                        lambda s: getattr(s, '_spin_font_size', None),
@@ -204,7 +225,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 路径配置 ----------
     def _build_paths_section(self, cfg):
-        self._add_section_header("📂 路径配置")
+      #  self._add_section_header("📂 路径配置")
         path_items = [
             ("exe_dir", "程序目录", cfg.get("exe_dir", ""), "dir"),
             ("videos_dir", "视频/日志目录", cfg.get("videos_dir", ""), "dir"),
@@ -235,7 +256,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 远程连接 ----------
     def _build_remote_section(self, cfg):
-        self._add_section_header("🌐 远程连接")
+       # self._add_section_header("🌐 远程连接")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -265,7 +286,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 收集与上传 ----------
     def _build_upload_section(self, cfg):
-        self._add_section_header("📦 收集与上传")
+       # self._add_section_header("📦 收集与上传")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -300,7 +321,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- FRPC 服务器 ----------
     def _build_frpc_section(self, cfg):
-        self._add_section_header("🔗 FRPC 穿透")
+       # self._add_section_header("🔗 FRPC 穿透")
         frpc = cfg.get("frpc_server", {})
         form = QFormLayout()
         form.setSpacing(8)
@@ -325,7 +346,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- AI 分析 ----------
     def _build_ai_section(self, cfg):
-        self._add_section_header("🤖 AI SSH日志分析")
+       # self._add_section_header("🤖 AI SSH日志分析")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -396,9 +417,158 @@ class SettingsDialog(MessageBoxBase):
         vendor_id = self._combo_ai_vendor.currentData() or "deepseek"
         self._apply_ai_vendor(vendor_id)
 
+    # ---------- 日志高亮规则 ----------
+    def _build_log_rules_section(self, cfg):
+        """日志高亮规则管理：列表 + 添加/编辑/删除，规则存 log_highlight_rules"""
+       # self._add_section_header("🎨 日志高亮规则")
+        tip = CaptionLabel(
+            "规则按序匹配，命中行整行着色；开启「命中通知」后弹 InfoBar"
+            "（每规则 10 秒去重）。正则写法与 Python re 一致，如 ERROR|Exception。", self)
+        tip.setWordWrap(True)
+        self.main_layout.addWidget(tip)
+
+        self._log_rules_state = list(
+            cfg.get("log_highlight_rules") or _DEFAULT_LOG_RULES)
+        self._log_rules_list = QListWidget(self)
+        self._log_rules_list.setFixedHeight(150)
+        self.main_layout.addWidget(self._log_rules_list)
+
+        row = QHBoxLayout()
+        btn_add = PushButton(FluentIcon.ADD, "添加", self)
+        btn_add.clicked.connect(self._add_log_rule)
+        btn_edit = PushButton(FluentIcon.EDIT, "编辑", self)
+        btn_edit.clicked.connect(self._edit_log_rule)
+        btn_del = PushButton(FluentIcon.DELETE, "删除", self)
+        btn_del.clicked.connect(self._del_log_rule)
+        row.addWidget(btn_add)
+        row.addWidget(btn_edit)
+        row.addWidget(btn_del)
+        row.addStretch(1)
+        self.main_layout.addLayout(row)
+
+        self._refresh_log_rules_list()
+        self._log_rules_built = True
+
+    def _refresh_log_rules_list(self):
+        """按当前规则状态重建列表（规则名 + 正则 + 颜色 + 通知开关）"""
+        self._log_rules_list.clear()
+        for r in self._log_rules_state:
+            name = r.get("name", "") or ""
+            pat = r.get("pattern", "") or ""
+            notify = "通知" if r.get("notify") else "静默"
+            item = QListWidgetItem(f"{name}  ·  {pat}  ·  {notify}")
+            color = r.get("color", "#ff5252") or "#ff5252"
+            try:
+                item.setForeground(QColor(color))
+            except Exception:
+                pass
+            item.setData(1, r)
+            self._log_rules_list.addItem(item)
+
+    def _current_log_rule(self):
+        """当前选中规则 dict，未选中返回 None"""
+        item = self._log_rules_list.currentItem()
+        return item.data(1) if item is not None else None
+
+    def _add_log_rule(self):
+        rule = self._edit_rule_dialog({"name": "", "pattern": "",
+                                        "color": "#ff5252", "notify": True})
+        if rule:
+            self._log_rules_state.append(rule)
+            self._refresh_log_rules_list()
+
+    def _edit_log_rule(self):
+        rule = self._current_log_rule()
+        if rule is None:
+            return
+        new_rule = self._edit_rule_dialog(dict(rule))
+        if new_rule:
+            self._log_rules_state[self._log_rules_state.index(rule)] = new_rule
+            self._refresh_log_rules_list()
+
+    def _del_log_rule(self):
+        rule = self._current_log_rule()
+        if rule is None:
+            return
+        self._log_rules_state.remove(rule)
+        self._refresh_log_rules_list()
+
+    def _edit_rule_dialog(self, rule):
+        """规则编辑弹窗：确定返回新规则 dict，取消/非法正则返回 None"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("编辑规则" if rule.get("name") else "添加规则")
+        dlg.resize(460, 250)
+        v = QVBoxLayout(dlg)
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        name_edit = LineEdit(dlg)
+        name_edit.setText(rule.get("name", "") or "")
+        name_edit.setPlaceholderText("规则名，如：错误")
+        form.addRow("规则名:", name_edit)
+
+        pat_edit = LineEdit(dlg)
+        pat_edit.setText(rule.get("pattern", "") or "")
+        pat_edit.setPlaceholderText("正则，如 ERROR|Exception")
+        form.addRow("匹配正则:", pat_edit)
+
+        color = QColor(rule.get("color", "#ff5252") or "#ff5252")
+        color_lbl = BodyLabel(color.name(), dlg)
+        color_lbl.setStyleSheet(f"color:{color.name()}; font-weight:bold;")
+        btn_color = PushButton("选择颜色…", dlg)
+
+        def _pick():
+            nonlocal color
+            cd = ColorDialog(color, "选择高亮颜色", dlg)
+            if cd.exec():
+                color = cd.color
+                color_lbl.setText(color.name())
+                color_lbl.setStyleSheet(
+                    f"color:{color.name()}; font-weight:bold;")
+
+        btn_color.clicked.connect(_pick)
+        h = QHBoxLayout()
+        h.addWidget(btn_color)
+        h.addWidget(color_lbl)
+        h.addStretch(1)
+        form.addRow("颜色:", h)
+
+        notify_sw = SwitchButton("命中时弹通知", dlg)
+        notify_sw.setChecked(bool(rule.get("notify")))
+        form.addRow("命中通知:", notify_sw)
+        v.addLayout(form)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_ok = PushButton("确定", dlg)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel = PushButton("取消", dlg)
+        btn_cancel.clicked.connect(dlg.reject)
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        v.addLayout(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        pat = pat_edit.text().strip()
+        if not pat:
+            return None
+        try:
+            re.compile(pat)
+        except re.error:
+            return None
+        return {"name": name_edit.text().strip() or pat,
+                "pattern": pat,
+                "color": color.name(),
+                "notify": notify_sw.isChecked()}
+
+    def _collect_log_rules(self):
+        """collect 用：返回当前规则编辑状态（未构建分区时返回空，回退走 cfg）"""
+        return list(getattr(self, "_log_rules_state", []) or [])
+
     # ---------- 外观 ----------
     def _build_appearance_section(self, cfg):
-        self._add_section_header("🎨 外观")
+       # self._add_section_header("🎨 外观")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -425,11 +595,13 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 工具 ----------
     def _add_section_header(self, text):
+        '''添加节标题'''
         lbl = CaptionLabel(text, self)
         lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 4px;")
         self.main_layout.addWidget(lbl)
 
     def _browse(self, edit, mode):
+        '''浏览目录或文件'''
         if mode == "dir":
             path = QFileDialog.getExistingDirectory(self, "选择目录", edit.text())
         else:

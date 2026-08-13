@@ -9,13 +9,14 @@ import time
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem, QSplitter)
 from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess, QThread, Signal
-from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QTextCharFormat
 from qfluentwidgets import (FluentTitleBar,
     MessageBoxBase, BodyLabel, ComboBox)
 from qfluentwidgets.window.fluent_window import FluentWindowBase
 
 from autowork_with_table import Ui_MainWindow
 from core.utils import natural_sort_key, show_info_bar
+from main_window.settings_dialog import _DEFAULT_LOG_RULES
 
 from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
@@ -23,18 +24,40 @@ from .remote_mixin import RemoteMixin
 from .ui_mixin import UIMixin
 from qfluentwidgets import Dialog
 
-# 预编译高亮正则，避免每次日志加载重复编译
-_RE_HIGHLIGHT = [re.compile(p) for p in (r'返回', r'add')]
+
+def _compile_log_rules(raw_rules):
+    """把 settings.json 中的规则配置编译为可匹配对象列表（非法正则可跳过）"""
+    rules = []
+    for r in raw_rules or []:
+        try:
+            rules.append({
+                "name": str(r.get("name", "") or ""),
+                "regex": re.compile(r.get("pattern", "") or ""),
+                "color": str(r.get("color", "#ff5252") or "#ff5252"),
+                "notify": bool(r.get("notify", False)),
+            })
+        except re.error:
+            continue
+    return rules
+
+
+def _match_log_rule(line, rules):
+    """返回首个命中规则的 (color, name)，未命中返回 (None, None)"""
+    for r in rules:
+        if r["regex"].search(line):
+            return r["color"], r["name"]
+    return None, None
 
 
 class _LogLoadWorker(QThread):
     """后台读取日志文件并匹配高亮"""
-    loaded = Signal(list, int, bool, float)  # lines_data, line_count, truncated, size_mb
+    loaded = Signal(list, int, bool, float)  # lines_data(line,color,name), line_count, truncated, size_mb
     error = Signal(str)
 
-    def __init__(self, path, tail_bytes=2 * 1024 * 1024):
+    def __init__(self, path, rules, tail_bytes=2 * 1024 * 1024):
         super().__init__()
         self.path = path
+        self.rules = rules
         self.tail_bytes = tail_bytes
 
     def run(self):
@@ -55,11 +78,11 @@ class _LogLoadWorker(QThread):
                     content = content[first_nl + 1:]
 
             lines = content.splitlines()
-            # 预计算高亮信息
+            # 预计算高亮信息（规则按序匹配，取首个命中）
             lines_data = []
             for line in lines:
-                highlight = any(r.search(line) for r in _RE_HIGHLIGHT)
-                lines_data.append((line, highlight))
+                color, name = _match_log_rule(line, self.rules)
+                lines_data.append((line, color, name))
 
             size_mb = file_size / (1024 * 1024)
             self.loaded.emit(lines_data, len(lines_data), truncated, size_mb)
@@ -174,6 +197,10 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._init_log_filter()
         # 从 settings.json 加载并应用用户自定义设置（高亮颜色、字号、字体等）
         self._apply_highlight_color()
+        # 日志高亮规则（设置对话框「日志高亮」分区维护，存 settings.json）
+        cfg_rules = self._load_settings().get("log_highlight_rules")
+        self._log_rules = _compile_log_rules(cfg_rules or _DEFAULT_LOG_RULES)
+        self._rule_last_notify = {}  # 规则名 -> 上次通知时间（防抖）
         self._apply_font_size()
         self._apply_font_family()
         self._apply_theme()
@@ -302,13 +329,31 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._log_batch_timer.start()
 
     def _flush_log_batch(self):
-        """将缓冲区内所有日志一次性写入控件（减少重绘次数）"""
+        """将缓冲区内所有日志一次性写入控件（富文本着色 + 命中通知）"""
         if not self._log_batch_buf:
             return
-        combined = '\n'.join(self._log_batch_buf)
+        # 拷贝后清空：直接 clear() 会把引用同源的 lines 一并清空
+        lines = list(self._log_batch_buf)
         self._log_batch_buf.clear()
 
-        self.ui.show_log.appendPlainText(combined)
+        # 逐行写入 + 字符格式着色
+        # （不用 insertHtml：HTML fragment 首块会与目标块合并，导致丢样式/与上行串行）
+        hit_names = []
+        cur = self.ui.show_log.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        if not cur.atBlockStart():
+            cur.insertBlock()
+        for line in lines:
+            color, name = _match_log_rule(line, self._log_rules)
+            if color and name and name not in hit_names:
+                hit_names.append(name)
+            fmt = QTextCharFormat()
+            if color:
+                fmt.setForeground(QColor(color))
+            cur.setCharFormat(fmt)
+            cur.insertText(line)
+            cur.insertBlock()
+        self.ui.show_log.setTextCursor(cur)
 
         # 行数上限截断（避免无限增长导致内存/布局开销）
         doc = self.ui.show_log.document()
@@ -319,6 +364,14 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                                 doc.blockCount() - self._LOG_MAX_LINES)
             cursor.removeSelectedText()
             cursor.deleteChar()  # 删除多余换行
+
+        # 命中通知规则 → InfoBar（每规则 10s 静默期，避免刷屏）
+        now = time.time()
+        for name in hit_names:
+            if now - self._rule_last_notify.get(name, 0) >= 10:
+                self._rule_last_notify[name] = now
+                self._show_info_bar(f"日志命中「{name}」规则", "warning",
+                                    duration=3000)
 
         if self._log_at_bottom:
             self._scroll_log_to_bottom()
@@ -602,7 +655,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(filt)
-        lay.addWidget(self.ui.log_list, 1)
+        # 注意：log_list 不在此处装入容器——若先装入，下方
+        # _place_log_list_container 会因 parent is container 直接 return，
+        # 导致容器永远不被放回布局（初始面板布局时日志列表丢失）
         self.ui.log_list_container = container
 
         filt.textChanged.connect(self._on_log_filter_debounce)
@@ -953,7 +1008,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.log_list.addItem("加载中...")
 
         # 启动后台加载
-        worker = _LogLoadWorker(full_log_path)
+        worker = _LogLoadWorker(full_log_path, self._log_rules)
         worker.loaded.connect(self._on_log_loaded)
         worker.error.connect(self._on_log_load_error)
         self._log_worker = worker  # 防止 GC
@@ -1058,13 +1113,20 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """日志加载完成，填充 UI"""
         self.ui.log_list.setUpdatesEnabled(False)
         self.ui.log_list.clear()
-        for line, highlight in lines_data:
+        for line, color, _name in lines_data:
             item = QListWidgetItem(line)
-            if highlight:
-                item.setForeground(QBrush(self.highlight_color))
+            if color:
+                item.setForeground(QBrush(QColor(color)))
             self.ui.log_list.addItem(item)
         self.ui.log_list.setUpdatesEnabled(True)
         self._update_empty_hint(self.ui.log_list)
+        # 日志文件命中通知规则 → InfoBar（复用 10s 防抖）
+        now = time.time()
+        for _line, _color, name in lines_data:
+            if name and now - self._rule_last_notify.get(name, 0) >= 10:
+                self._rule_last_notify[name] = now
+                self._show_info_bar(f"日志文件命中「{name}」规则", "warning",
+                                    duration=3000)
         # B3: 重载后重新应用过滤条件
         self._reapply_log_filter()
 
