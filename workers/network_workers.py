@@ -155,6 +155,7 @@ class SFTPOperationWorker(QThread):
         try:
             host, port, username, password = self.conn_params
             transport = paramiko.Transport((host, port))
+            # banner/auth 单独设超时：默认无限制，坏网络下 connect 可能无限阻塞
             transport.banner_timeout = 15
             transport.auth_timeout = 15
             transport.connect(username=username, password=password)
@@ -175,7 +176,8 @@ class SFTPOperationWorker(QThread):
                 sftp.mkdir(self.remote_path)
                 self.success.emit(f"已创建目录: {os.path.basename(self.remote_path)}")
             elif self.operation == 'rename':
-                # local_path 复用为 old_path
+                # local_path 复用为 old_path；posix_rename 是原子操作（覆盖存在目标），
+                # 旧版 OpenSSH 不支持时回退普通 rename（目标存在则报错）
                 try:
                     sftp.posix_rename(self.local_path, self.remote_path)
                 except (AttributeError, IOError):
@@ -268,7 +270,7 @@ class SFTPDirTransferWorker(QThread):
 
     def _upload_dir(self, sftp):
         """递归上传本地目录到远程"""
-        # 先计算总大小
+        # 第一遍 walk：收集文件清单与总大小（作为进度条分母，避免逐文件实时 stat）
         total_size = 0
         file_list = []  # [(local_file_path, relative_path), ...]
         for root, dirs, files in os.walk(self.local_dir):
@@ -278,14 +280,14 @@ class SFTPDirTransferWorker(QThread):
                 try:
                     total_size += os.path.getsize(fpath)
                 except OSError:
-                    pass
+                    pass  # 个别文件读不到大小不阻塞整体，按 0 计
                 file_list.append((fpath, rel))
 
         transferred = 0
         errors = []
-        # 创建远程根目录
+        # 先建远程根目录，再预建全部子目录：
+        # 否则逐文件 put 时 sftp 不会自动创建中间目录，会全部报错
         self._mkdir_p_remote(sftp, self.remote_dir)
-        # 预创建所有子目录
         for root, dirs, files in os.walk(self.local_dir):
             for dname in dirs:
                 dpath = os.path.join(root, dname)
@@ -293,7 +295,7 @@ class SFTPDirTransferWorker(QThread):
                 remote_sub = self.remote_dir.rstrip('/') + '/' + rel_dir
                 self._mkdir_p_remote(sftp, remote_sub)
 
-        # 逐文件上传
+        # 逐文件上传：相对路径原样拼到远程根目录，保持目录结构一致
         for fpath, rel in file_list:
             self._check_pause_stop()
             rel_remote = rel.replace('\\', '/')
@@ -313,7 +315,7 @@ class SFTPDirTransferWorker(QThread):
         if errors:
             err_summary = '; '.join(errors[:5])
             if len(errors) > 5:
-                err_summary += f' ...等共{len(errors)}个错误'
+                err_summary += f'（另有 {len(errors) - 5} 个错误未列出）'
             self.error.emit(f"目录上传部分失败 [{self.dir_name}]: {err_summary}")
         else:
             self.success.emit(f"已上传目录: {self.dir_name} ({len(file_list)} 个文件)")
@@ -356,7 +358,7 @@ class SFTPDirTransferWorker(QThread):
         if errors:
             err_summary = '; '.join(errors[:5])
             if len(errors) > 5:
-                err_summary += f' ...等共{len(errors)}个错误'
+                err_summary += f'（另有 {len(errors) - 5} 个错误未列出）'
             self.error.emit(f"目录下载部分失败 [{self.dir_name}]: {err_summary}")
         else:
             self.success.emit(f"已下载目录: {self.dir_name} ({len(file_list)} 个文件)")
@@ -439,6 +441,7 @@ class _BaseConnectWorker(QThread):
     # ---- 通用重试循环 ----
     def run(self):
         for attempt in range(1, RETRY_MAX + 1):
+            # 用户取消（窗口关闭/手动中止）优先于重试逻辑
             if self._abort:
                 conn_logger.info(self._log_name, '连接已中止（用户取消）',
                                  host=self.host, port=self.port, user=self.username)
@@ -451,21 +454,25 @@ class _BaseConnectWorker(QThread):
                 self.connected.emit(obj)
                 return
             except Exception as e:
+                # 失败后先安全释放资源，避免残留连接句柄泄漏
                 self._safe_close()
                 err_msg = str(e)
                 friendly = classify_conn_error(e)
+                # 仅对「可重试」类错误（超时/拒绝等）继续重试，
+                # 认证失败等确定性错误重试也无意义，直接终报
                 if any(kw in err_msg for kw in RETRYABLE_KEYWORDS) and attempt < RETRY_MAX:
                     conn_logger.error(self._log_name,
                                       f'连接失败，将重试 ({attempt}/{RETRY_MAX}): {err_msg}',
                                       host=self.host, port=self.port, user=self.username,
                                       error_type=type(e).__name__)
-                    time.sleep(RETRY_DELAY)
+                    time.sleep(RETRY_DELAY)  # 间隔后进入下一轮重试
                     continue
                 if self._abort:
                     return
                 conn_logger.exception(self._log_name,
                                       f'连接最终失败 (已尝试{attempt}次): {friendly}', exc=e,
                                       host=self.host, port=self.port, user=self.username)
+                # 提示信息区分「重试过多次」与「首次即败」，便于用户判断问题性质
                 if attempt > 1:
                     self.error.emit(f'连接失败（已重试{RETRY_MAX}次）: {friendly}')
                 else:

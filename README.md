@@ -13,13 +13,16 @@
 
 ### 工具菜单（主界面菜单栏）
 - **单杆视频**（收编 single_json 项目）：选择日志文件自动识别场次信息——`session_date` 从文件名自动解析（如 `20260810_230635.log` → `20260810`），`session_code` 自动生成（`日期_21位随机串`，与球桌接口 code 同格式）；后台 Worker 生成带计分水印的单杆视频
-- **视频日志批量整理**：从「功能」菜单迁入工具菜单
+- **视频/日志批量整理**：按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog），完成后可一键打包上传
+- **端口占用**：真实监听指定端口模拟服务占用（`netstat -ano` 可见 LISTENING），用于测试端口冲突/验证服务检测逻辑
 
 ### 运维管理面板（球桌管理按钮打开）
 - **球桌管理**：对接 wechat2-billiard 接口，表格/搜索/分页/列筛选/右键复制/手动添加记录；接口 `code` 字段（设备编码）同步入库，界面默认隐藏，可在「筛选」菜单勾选显示
-- **设备状态**：对接 kd / xqzg 双接口，数据源可切换，按日期分区查看设备状态
+- **设备状态**：对接 kd / xqzg 双接口，数据源可切换，按日期分区查看设备状态；总数/正常/操作列点击可查看文件清单，双击/右键预览图片（左右键翻页，支持分类迁移）
+- **设备健康度管理**：基于接口 `health` 字段的健康度异常告警（每 30 分钟自动拉取，阈值 4000/5000/40 万），支持标记已处理，异常恢复后自动重新告警
 - **图片迁移**：点击总数/正常/操作单元格右侧滑出文件列表，点击文件选择目标分类（问题/精度/使用/废弃）即可在服务器上移动图片
 - **管理设置**：配置双接口 API 账号密码、选择启用数据源、测试连接
+- **小游戏**：摸鱼中心（2048/贪吃蛇等）
 
 ### 远程连接（P2P）
 - **XTCP 模式**：基于 frp 的 P2P 内网穿透，支持多 visitor 管理
@@ -27,16 +30,19 @@
 - **SFTP 文件管理**：双面板文件浏览器，上传/下载/删除/重命名/创建，整目录递归传输，传输队列（暂停/恢复/取消）
 - **SSH 终端**：交互式 PTY + ANSI 彩色渲染，Tab 补全，命令历史，Windows Terminal 风格
 - **RDP 远程桌面**：嵌入系统 mstsc.exe 窗口，持续看门狗自动重连
+- **SSH 故障取证**：连接失败时一键生成诊断取证包（球桌信息/设备状态/会话日志/连接日志 + 诊断命令输出），可选 AI 分析定位问题
 
 ### 界面与交互
 - **Fluent Design**：基于 qfluentwidgets 的现代化 UI
 - **深色/浅色/跟随系统**三种主题模式
 - **亚克力磨砂效果**：打包后通过 PIL 补丁替代 numpy/scipy 实现
 - **低性能模式**：设置中一键关闭亚克力/动画，低配机器更流畅（`perf_acrylic` / `perf_animation` 运行时即时生效）
+- **日志高亮规则**：设置中可配置多条正则高亮规则（颜色 + 通知开关），日志区实时匹配着色，命中可弹窗提醒
 - **统一提示条**：所有 InfoBar 提示统一走 `core.utils.show_info_bar()`（右下角、标题按类型自动映射），各模块不再各自直调
 - **自定义快捷键**：9 个可配置快捷键
 - **设备搜索**：Ctrl+F 实时过滤设备列表
 - **双布局模式**：默认/经典布局一键切换
+- **自动版本号**：基于 git 提交数自动计算（`core/version.py`），标题栏展示 `主.次.提交数`
 
 ## 技术栈
 
@@ -69,27 +75,34 @@ autowork/
 │
 ├── core/                      # 基础层（路径、日志、工具函数）
 │   ├── acrylic_patch.py       #   亚克力效果 PIL 替代补丁
+│   ├── ai_providers.py        #   AI 厂商注册表（六家 OpenAI 兼容接入）
 │   ├── app_paths.py           #   应用路径解析（兼容 PyInstaller）
 │   ├── conn_logger.py         #   连接日志记录器 + Qt 消息处理器
 │   ├── frp_remote.py          #   frpc 管理、统一远程会话中心（RemoteSessionManager）
 │   ├── perf.py                #   低性能模式开关（亚克力/动画运行时控制）
-│   ├── secrets.py             #   配置加解密（upload/api 凭据）
-│   └── utils.py               #   错误分类、自然排序、统一提示 show_info_bar
+│   ├── secrets.py             #   配置加解密（DPAPI，SSH/upload/AI 凭据）
+│   ├── utils.py               #   错误分类、自然排序、统一提示 show_info_bar
+│   └── version.py             #   版本号自动计算（主.次.git提交数）
 │
 ├── win_api/                   # Windows API 层（ctypes 声明）
 │   └── windows_api.py         #   显示设置/窗口嵌入/进程挂起恢复
 │
 ├── workers/                   # 后台线程 Worker 层
+│   ├── collect_worker.py      #   视频/日志收集与打包上传 Worker（设备状态页）
 │   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
+│   ├── newlog_worker.py       #   NewLog 批量整理 Worker（日志逐行转发 GUI）
 │   ├── single_video_worker.py #   单杆视频生成 Worker（日志解析 + 计分水印）
 │   └── table_worker.py        #   球桌/设备数据 API Worker（拉取/迁移/登录测试）
 │
 ├── database/                  # 本地数据层
-│   ├── table_db.py            #   SQLite 存取（球桌/xqzg/kd 按日期分区）
+│   ├── table_db.py            #   SQLite 存取（FTS5 搜索、球桌/xqzg/kd 按日期分区）
 │   └── tables.db              #   SQLite 数据库文件
 │
 ├── windows/                   # 独立窗口层
-│   ├── management_panel.py    #   运维管理面板（球桌管理/设备状态/管理设置）
+│   ├── management_panel.py    #   运维管理面板（球桌/设备/健康度/设置/小游戏六页）
+│   ├── forensic_report.py     #   SSH 故障取证报告面板（含 AI 分析）
+│   ├── image_viewer.py        #   图片预览查看器（翻页/分类迁移）
+│   ├── port_fake.py           #   端口占用模拟器（真实监听指定端口）
 │   ├── single_video_dialog.py #   单杆视频参数对话框（工具菜单）
 │   ├── table_panel.py         #   球桌面板（旧版，仅 AddRecordDialog 仍被引用）
 │   ├── sftp_window.py         #   SFTP 双面板文件管理窗口
@@ -104,9 +117,14 @@ autowork/
 ├── main_window/               # 主窗口层（Mixin 拆分）
 │   ├── main_window.py         #   MainWindow 主类（组合所有 Mixin）
 │   ├── settings_mixin.py      #   配置读写、快捷键
+│   ├── settings_dialog.py     #   设置对话框（七分区，数据驱动 collect 机制）
 │   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
 │   ├── remote_mixin.py        #   远程连接（frpc/SSH/SFTP/RDP）
-│   └── ui_mixin.py            #   状态栏/菜单栏（含工具菜单）/右键菜单/设置对话框/主题
+│   └── ui_mixin.py            #   状态栏/菜单栏（含工具菜单）/右键菜单/主题
+│
+├── tools/                     # 独立工具模块（从 single_json 项目收编）
+│   ├── single_shot_video.py   #   单杆视频渲染服务（计分水印）
+│   └── single_video_tool.py   #   单杆 json 生成（generate_json/extract_break）
 │
 ├── styles/                    # QSS 主题样式
 │   ├── dark.qss               #   深色主题
@@ -208,6 +226,56 @@ python build_exe.py
 
 均为运行时即时生效，无需重启，低配机器可全部关闭提升流畅度。
 
+上传与 NewLog 批量整理配置（设置 → 收集与上传）：
+
+```json
+"upload_host": "49.235.34.253",
+"upload_port": 22,
+"upload_remote_dir": "/lhcos-data/videos",
+"upload_user": "root",
+"upload_pass": "...",
+"newlog_excel_dir": "C:/Users/xxx/Desktop/excel",
+"newlog_out_dir": "C:/Users/xxx/Desktop"
+```
+
+- `upload_*`：视频/日志批量整理后的打包上传目标（独立 SFTP 账号，不复用 SSH 凭据，密码 DPAPI 加密）
+- `newlog_excel_dir` / `newlog_out_dir`：NewLog 批量整理的署名 Excel 目录与输出目录
+
+AI 分析配置（设置 → AI）：
+
+```json
+"ai_vendor": "deepseek",
+"ai_model": "",
+"forensic_ai_analysis": true,
+"ai_api_keys": { "deepseek": "...", "qwen": "..." }
+```
+
+- `ai_vendor`：厂商标识，支持 deepseek / qwen / kimi / zhipu / openai / gemini 六家（均走 OpenAI 兼容接口）
+- `ai_model`：模型名，留空使用所选厂商默认模型
+- `forensic_ai_analysis`：SSH 故障取证报告的 AI 分析开关
+- `ai_api_keys`：各厂商 API Key 字典（DPAPI 加密），未配置时回退官方环境变量
+
+frp 服务器配置（设置 → 远程连接）：
+
+```json
+"frpc_server": {
+  "serverAddr": "...",
+  "serverPort": 7000,
+  "auth_method": "token",
+  "auth_token": "..."
+}
+```
+
+日志高亮规则（设置 → 日志高亮，默认「错误」红色通知 / 「警告」橙色静默）：
+
+```json
+"log_highlight_rules": [
+  { "name": "错误", "pattern": "错误|ERROR", "color": [255, 82, 82], "notify": true }
+]
+```
+
+- 每条规则包含名称、正则 pattern、颜色、通知开关；命中 `notify: true` 规则时弹窗提醒
+
 ## 接口文档
 
 完整的模块接口说明请参阅 [docs/API.md](docs/API.md)。
@@ -220,6 +288,8 @@ python build_exe.py
 - 主题样式文件位于 `styles/`，打包时通过 `AutoWork.spec` 的 `datas` 包含
 - 新增模块请遵循单向依赖链，避免循环导入
 - 连接日志自动落盘到 `logs/autowork_conn.log`（2MB 轮转）
+- 版本号由 `core/version.py` 自动计算（git 提交数），无 git 环境时回退 `2.8.0`
+- 敏感配置（`ssh_pass` / `upload_pass` / `ai_api_keys` 等）经 DPAPI 加密后落盘，换机器或系统用户后需重新填写
 
 ## 许可证
 

@@ -144,6 +144,7 @@ class RemoteSessionManager(QObject):
         info = self._visitors.get(server_name)
         changed = False
         if info is None:
+            # 新注册：未指定端口时随机分配一个未被占用的端口
             port = int(bind_port) if bind_port else \
                 generate_random_port(exclude_ports=self.used_ports())
             self._visitors[server_name] = {
@@ -156,9 +157,12 @@ class RemoteSessionManager(QObject):
             }
             changed = True
         else:
+            # 已存在：仅更新显式传入且有变化的字段，
+            # 未指定端口时保持原端口不变（避免每次调用都换端口）
             if bind_port:
                 port = int(bind_port)
                 if port != info["bindPort"]:
+                    # 新端口若已被其他 visitor 占用则报错，防止隧道端口冲突
                     owner = self._port_owner(port)
                     if owner is not None:
                         raise RuntimeError(f"端口 {port} 已被 {owner} 使用")
@@ -170,6 +174,8 @@ class RemoteSessionManager(QObject):
             if table_id:
                 info["tableId"] = str(table_id)
             info["source"] = str(source or info["source"])
+        # changed 标志：仅注册表有实质变化时才发信号，
+        # 让 UI（隧道面板）避免无谓刷新
         if changed:
             self.visitors_changed.emit()
         return self._visitors[server_name]["bindPort"], changed
@@ -181,11 +187,13 @@ class RemoteSessionManager(QObject):
         if not snk:
             raise ValueError("snk 不能为空")
         info = self._visitors.get(snk)
+        # 已注册且 frpc 在运行：直接复用现有隧道（不重启），只刷新使用时间
         if info is not None and self.is_running():
             info["lastUsed"] = _now_str()
             if table_id:
                 info["tableId"] = str(table_id)
             return info["bindPort"], False
+        # 否则注册并重启 frpc 应用新配置（新隧道或 frpc 已退出）
         self.register_visitor(snk, source=source, table_id=table_id)
         self.apply()
         info = self._visitors[snk]
@@ -252,18 +260,23 @@ class RemoteSessionManager(QObject):
     def apply(self):
         """按当前注册表重写 TOML 并（重新）启动 frpc；注册表为空时停止 frpc"""
         app_dir = get_app_dir()
+        # 先持久化手工 visitor 到独立文件：程序重启后能恢复手工隧道配置
         self._write_manual_toml(os.path.join(app_dir, _MAIN_TOML_NAME))
         if not self._visitors:
+            # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
             self._stop_frpc()
             return
         frpc_exe = os.path.join(app_dir, "frpc.exe")
         if not os.path.exists(frpc_exe):
             raise OSError(f"frpc.exe 不存在: {frpc_exe}")
+        # 先停旧进程再启新进程：旧进程持有旧配置（端口/visitor 列表），
+        # 直接复用会导致新配置不生效或端口冲突
         self._stop_frpc()
         toml_path = os.path.join(app_dir, _PANEL_TOML_NAME)
         self._write_toml(toml_path)
         proc = QProcess(self)
         proc.setWorkingDirectory(app_dir)
+        # 信号在 start 之前接好：frpc 可能在极短时间内退出，晚接会错过 finished 事件
         proc.readyReadStandardOutput.connect(self._on_frpc_output)
         proc.readyReadStandardError.connect(self._on_frpc_error)
         proc.finished.connect(self._on_frpc_finished)
@@ -276,11 +289,14 @@ class RemoteSessionManager(QObject):
         self._frpc_process = None
         if proc is not None:
             try:
+                # 先摘掉常规回调：kill() 也会触发 finished 信号，
+                # 若不清除会误走 _on_frpc_finished 的「意外退出」分支
                 proc.readyReadStandardOutput.disconnect(self._on_frpc_output)
                 proc.readyReadStandardError.disconnect(self._on_frpc_error)
                 proc.finished.disconnect(self._on_frpc_finished)
             except (RuntimeError, TypeError):
-                pass
+                pass  # 信号未连接过时 disconnect 抛异常，忽略即可
+            # 换成清理专用回调：进程真正结束后删除 QProcess 对象释放资源
             proc.finished.connect(self._on_stop_cleanup_done)
             proc.kill()
             self.frpc_state_changed.emit(False)

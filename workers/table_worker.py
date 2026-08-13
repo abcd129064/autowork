@@ -82,12 +82,14 @@ class TableFetchWorker(QThread):
     def _fetch_page(self, page_no: int) -> dict:
         """拉取单页数据，返回接口 data 字段（含 lists/total）"""
         params = {"pageNo": page_no, "pageSize": self._PAGE_SIZE}
+        # 固定查询条件与分页参数合并：接口要求全量字段，缺省会改变返回结果
         params.update(self._FIXED_PARAMS)
         resp = requests.get(BASE_URL, params=params,
                             headers=DEFAULT_HEADERS, timeout=20)
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("code") != 200:
+            # 业务层错误码（非 HTTP 状态码）：接口约定 code=200 才算成功
             raise RuntimeError(payload.get('msg', '未知错误'))
         return payload.get("data") or {}
 
@@ -96,6 +98,7 @@ class TableFetchWorker(QThread):
             # 首页：拿到 total 与首批数据（接口返回字段名为 count）
             inner = self._fetch_page(1)
             rows = list(inner.get("lists") or [])
+            # 兼容两种字段命名：新接口返回 count，旧版可能叫 total
             total = inner.get("count") or inner.get("total")
             # total 可能为字符串，统一转 int；无法解析时按已拉取数量处理
             try:
@@ -306,14 +309,15 @@ class DevicesFetchWorker(QThread):
 # ==================== 图像迁移 Worker ====================
 
 def build_image_path(file_path: str, device_code: str, category: str) -> str:
-    """
-    构造迁移路径: media/{日期}/{设备码}/{分类}/
+    """构造迁移路径: media/{日期}/{设备码}/{分类}/
+
     Args:
-        file_path: 日期路径，"2026/08/02"
+        file_path: 日期路径，如 "2026/08/02"
         device_code: 设备编码
         category: 分类名（正常/操作/待处理/使用/精度/问题/废弃）
+
     Returns:
-        media/2026/08/02/1M2WJ13CNPE1009A50167/except/
+        完整远程目录路径，如 media/2026/08/02/1M2WJ13CNPE1009A50167/except/
     """
     dir_name = CATEGORY_DIRS.get(category, category)
     return f"media/{file_path}/{device_code}/{dir_name}/"
@@ -427,10 +431,11 @@ class MigrateImageWorker(QThread):
 
             # 第四步：汇总结果，全部成功走 success，有失败走 error
             if fail_list:
+                shown = ', '.join(fail_list[:5])
+                suffix = f'（另有 {len(fail_list) - 5} 个文件未列出）' if len(fail_list) > 5 else ''
                 self.error.emit(
                     f"迁移完成：成功 {ok_count} 张，失败 {len(fail_list)} 张\n"
-                    f"失败文件: {', '.join(fail_list[:5])}"
-                    + ("..." if len(fail_list) > 5 else ""))
+                    f"失败文件: {shown}{suffix}")
             else:
                 self.success.emit(ok_count)
 

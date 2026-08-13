@@ -793,6 +793,7 @@ class Ui_MainWindow(object):
 
     def switch_layout(self, classic=False):
         """切换布局模式，复用核心控件实例（保留数据和信号连接）"""
+        # 幂等检查：目标布局与当前一致时直接返回，避免重复切换丢控件
         if classic == self._is_classic_layout:
             return
 
@@ -805,10 +806,11 @@ class Ui_MainWindow(object):
         self.log_status_bar.setParent(None)
 
         # 2. 从 horizontalLayout_main 中移除旧 splitter 并删除
+        # 此时核心控件已脱离，删除 splitter 不会连带销毁它们（Qt 父子关系决定）
         self.horizontalLayout_main.removeWidget(self.splitter)
         self.splitter.deleteLater()
 
-        # 3. 构建新布局
+        # 3. 构建新布局：经典=四列 Splitter，面板=带卡片容器的面板布局
         if classic:
             self._build_classic_content()
         else:
