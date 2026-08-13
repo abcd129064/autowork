@@ -765,6 +765,11 @@ class UIMixin:
         act_single_video.setToolTip("从日志解析单杆得分，生成带计分水印的单杆视频（single_json）")
         act_single_video.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_single_video))
         tool_menu.addAction(act_single_video)
+        act_port_fake = Action(FluentIcon.CONNECT, "端口占用", self)
+        act_port_fake.setToolTip("真实监听指定端口模拟服务占用（netstat 可见 LISTENING）")
+        act_port_fake.triggered.connect(
+            lambda: QTimer.singleShot(0, self._on_open_port_fake))
+        tool_menu.addAction(act_port_fake)
         tool_menu.addSeparator()
         act_newlog = Action(FluentIcon.LIBRARY, "视频/日志批量整理", self)
         act_newlog.setToolTip("按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog）")
@@ -1047,6 +1052,27 @@ class UIMixin:
         self._conn_diag.show()
         self._conn_diag.raise_()
         self._conn_diag.activateWindow()
+
+    # ==================== 端口占用（工具菜单） ====================
+
+    def _on_open_port_fake(self):
+        """工具菜单「端口占用」：弹窗真实监听指定端口，模拟服务占用
+
+        绑定后 netstat -ano 可见 LISTENING，用于测试端口冲突/验证服务
+        检测逻辑；支持多端口同时占用，关闭弹窗自动释放全部端口。
+        """
+        from PySide6.QtWidgets import QDialog, QVBoxLayout
+        from windows.port_fake import PortFakeWidget
+        dlg = QDialog(self)
+        dlg.setWindowTitle("端口占用")
+        dlg.resize(480, 420)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        w = PortFakeWidget(dlg)
+        lay.addWidget(w)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.finished.connect(lambda: w._release_all(notify=False))
+        dlg.open()
 
     # ==================== 单杆视频（工具菜单，收编 single_json） ====================
 
