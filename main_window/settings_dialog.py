@@ -81,6 +81,10 @@ class SettingsDialog(MessageBoxBase):
                        lambda s: getattr(s, '_edit_tcp_servers', None),
                        lambda w: [x.strip() for x in w.text().strip().split(",") if x.strip()],
                        lambda cfg: list(cfg.get("tcp_servers", []) or [])))
+        items.append(("web_port", "remote",
+                       lambda s: getattr(s, '_spin_web_port', None),
+                       lambda w: int(w.value()),
+                       lambda cfg: _safe_int(cfg.get("web_port", 0), 0)))
 
         # 收集与上传（5项）
         items.append(("upload_host", "upload",
@@ -254,6 +258,14 @@ class SettingsDialog(MessageBoxBase):
         self._edit_sftp_path.setText(cfg.get("sftp_default_remote_path", ""))
         self._edit_sftp_path.setPlaceholderText("如 /home/user/project")
         form.addRow("SFTP默认路径:", self._edit_sftp_path)
+
+        self._spin_web_port = SpinBox(self)
+        self._spin_web_port.setRange(0, 65535)
+        self._spin_web_port.setValue(_safe_int(cfg.get("web_port", 0), 0))
+        # self._spin_web_port.setSuffix(" 端口")
+        self._spin_web_port.setToolTip(
+            "Web 服务端口：0 表示由程序自动探测并强制占用空闲端口")
+        form.addRow("Web端口:", self._spin_web_port)
 
         # self._edit_tcp_servers = LineEdit(self)
         # servers = cfg.get("tcp_servers", [])
@@ -461,7 +473,7 @@ def _safe_int(value, default):
 
 
 def _fallback_frpc(cfg):
-    """FRPC 配置回退值（未构建分区时使用）"""
+    """FRPC 配置回退值"""
     frpc = dict(cfg.get("frpc_server", {}) or {})
     return {
         "serverAddr": str(frpc.get("serverAddr", "") or ""),
@@ -482,4 +494,6 @@ def _collect_ai_keys(dialog):
     else:
         keys.pop(vendor_id, None)
     return keys
+
+
 
