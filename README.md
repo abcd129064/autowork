@@ -113,7 +113,8 @@ autowork/
 │   └── light.qss              #   浅色主题
 │
 ├── docs/                      # 文档
-│   └── API.md                 #   接口文档
+│   ├── API.md                 #   接口文档
+│   └── frp-source-integration.md # frp 源码接入调研报告（frpc.exe 替代方案）
 │
 ├── videos/                    # 视频/日志文件目录
 ├── logs/                      # 运行日志目录
