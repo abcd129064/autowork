@@ -32,9 +32,10 @@ from workers.single_video_worker import SingleVideoWorker
 from main_window.settings_dialog import SettingsDialog
 
 # ==================== 版本信息（帮助→关于） ====================
-# 仓库暂无 git tag，版本号按语义化手工维护：新增功能→小版本+1
-# 2.4.0 之后新增：收集上传工作流、上传清单、打包上传字节进度、SNK 标识等
-APP_VERSION = "2.5.0"
+# 版本号由 core/version.py 根据 git 分支与提交次数自动计算：
+# {主.次版本}.{提交数}[-分支]，如 2.5.114-ai_build；主.次版本在
+# core/version.py 的 BASE_VERSION 手工维护，修订号随提交自动递增
+from core.version import APP_VERSION
 GITHUB_REPO = "https://github.com/abcd129064/autowork"
 
 # 关于弹窗「链接」区
@@ -854,7 +855,8 @@ class UIMixin:
 
         view_btn = TransparentDropDownPushButton("视图", self._menubar_widget)
         view_btn.setMenu(view_menu)
-        _mb_layout.addWidget(view_btn)
+        # 菜单栏顺序：功能、视图、工具、配置、帮助 —— 视图插到功能之后（index 1）
+        _mb_layout.insertWidget(1, view_btn)
 
         # 「帮助」菜单
         help_menu = _create_menu("帮助", self)

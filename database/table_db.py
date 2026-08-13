@@ -286,6 +286,7 @@ def _ensure_initialized(conn: sqlite3.Connection):
     conn.executescript(_CREATE_STATUS_SQL)
     conn.executescript(_CREATE_SUBMISSION_SQL)
     conn.executescript(_CREATE_MAPPING_SQL)
+    conn.executescript(_CREATE_HEALTH_ALERT_SQL)
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
     cols = [r[1] for r in conn.execute("PRAGMA table_info(billiard_tables)").fetchall()]
     if cols and "name" not in cols:
@@ -509,6 +510,130 @@ def get_snk_by_name(name: str) -> str:
         "SELECT snk_code FROM billiard_tables WHERE TRIM(name) = ? LIMIT 1",
         (name,)).fetchone()
     return str(row[0] or "") if row else ""
+
+
+# ==================== 健康度异常告警（设备健康度管理页） ====================
+
+# 阈值（基准 4000）：4000 是接口默认值视为空值不算异常；
+# 4000~5000 健康度异常；>5000 严重异常；>40 万为脏数据直接排除
+HEALTH_WARN = 4000.0
+HEALTH_SEVERE = 5000.0
+HEALTH_INVALID_MAX = 400000.0
+
+_CREATE_HEALTH_ALERT_SQL = """
+CREATE TABLE IF NOT EXISTS health_alerts (
+    name            TEXT PRIMARY KEY,
+    roomName        TEXT DEFAULT '',
+    onlineStatusName TEXT DEFAULT '',
+    health          REAL DEFAULT 0,
+    resolved_health REAL,
+    updated_at      TEXT DEFAULT ''
+);
+"""
+
+
+def sync_health_alerts(rows: list) -> int:
+    """按最新拉取的球桌数据同步健康度告警表，返回当前应展示条数
+
+    规则（基准 4000）：
+    - health <= 4000：正常或接口默认值（4000 视为空值），不展示；
+    - health > 40万：脏数据（异常数字），直接排除不展示；
+    - roomName 为「公司测试」：内部测试数据，排除（与球桌管理页口径一致）；
+    - 4000 < health：写入/更新记录；已标记处理（resolved_health 非空）时：
+        health 与处理时一致 → 保持已处理不展示；
+        health 变化但仍异常 → 清除已处理标记重新展示；
+    - 接口中消失的设备一并清理。
+    """
+    conn = _get_conn()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    seen = set()
+    for item in rows or []:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            h = float(item.get("health") or 0)
+        except (TypeError, ValueError):
+            continue
+        # 排除：默认值/正常（<=4000）与脏数据（>40万）
+        if h <= HEALTH_WARN or h > HEALTH_INVALID_MAX:
+            continue
+        # 排除：内部测试球房数据（同球桌管理页筛选口径）
+        if str(item.get("roomName") or "").strip() == TEST_ROOM_NAME:
+            continue
+        seen.add(name)
+        old = conn.execute(
+            "SELECT health, resolved_health FROM health_alerts WHERE name = ?",
+            (name,)).fetchone()
+        if old is None:
+            conn.execute(
+                "INSERT INTO health_alerts "
+                "(name, roomName, onlineStatusName, health, resolved_health, updated_at) "
+                "VALUES (?, ?, ?, ?, NULL, ?)",
+                (name, str(item.get("roomName") or ""),
+                 str(item.get("onlineStatusName") or ""), h, now))
+            continue
+        resolved = old[1]
+        if resolved is None:
+            # 未处理：仅更新基础字段
+            conn.execute(
+                "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
+                "health=?, updated_at=? WHERE name=?",
+                (str(item.get("roomName") or ""),
+                 str(item.get("onlineStatusName") or ""), h, now, name))
+        elif abs(h - float(resolved)) > 1e-9:
+            # 已处理但 health 变化：仍异常 → 清除标记重新展示（默认值/脏数据已在上方排除）
+            conn.execute(
+                "UPDATE health_alerts SET roomName=?, onlineStatusName=?, health=?, "
+                "resolved_health=NULL, updated_at=? WHERE name=?",
+                (str(item.get("roomName") or ""),
+                 str(item.get("onlineStatusName") or ""), h, now, name))
+        else:
+            # health 未变化：保持已处理状态，仅刷新基础字段
+            conn.execute(
+                "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
+                "updated_at=? WHERE name=?",
+                (str(item.get("roomName") or ""),
+                 str(item.get("onlineStatusName") or ""), now, name))
+    if seen:
+        conn.execute(
+            f"DELETE FROM health_alerts WHERE name NOT IN "
+            f"({','.join('?' * len(seen))})", tuple(seen))
+    conn.commit()
+    return conn.execute(
+        "SELECT COUNT(*) FROM health_alerts WHERE resolved_health IS NULL"
+    ).fetchone()[0]
+
+
+def query_health_alerts() -> list:
+    """查询当前应展示的告警条目（未处理），按需求排序：
+
+    ① 空闲且严重异常（health>5000）；② 健康度异常（4000<health<=5000）；
+    ③ 其余严重异常；同级按 health 降序。
+    """
+    conn = _get_conn()
+    cur = conn.execute(
+        "SELECT name, roomName, onlineStatusName, health FROM health_alerts "
+        "WHERE resolved_health IS NULL ORDER BY "
+        "CASE WHEN onlineStatusName='空闲' AND health > ? THEN 0 "
+        "     WHEN health <= ? THEN 1 ELSE 2 END, "
+        "health DESC",
+        (HEALTH_SEVERE, HEALTH_SEVERE))
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def mark_health_alerts_resolved(names: list) -> int:
+    """标记告警为已处理：记录当时的 health 值，返回受影响行数"""
+    names = [str(n or "").strip() for n in (names or []) if str(n or "").strip()]
+    if not names:
+        return 0
+    conn = _get_conn()
+    cur = conn.execute(
+        f"UPDATE health_alerts SET resolved_health = health WHERE name IN "
+        f"({','.join('?' * len(names))})", tuple(names))
+    conn.commit()
+    return cur.rowcount
 
 
 def get_meta() -> tuple:

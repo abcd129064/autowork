@@ -28,9 +28,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QFileDialog, QToolTip, QFrame, QListWidget, QListWidgetItem, QAbstractScrollArea,
     QTabWidget)
 from PySide6.QtCore import (Qt, QItemSelectionModel, QDate, QPoint, QPropertyAnimation,
-    QEasingCurve, QTimer, QEvent, QThread, Signal, QRectF, QSize)
+    QEasingCurve, QTimer, QEvent, QThread, Signal, QRectF, QSize, QDateTime)
 from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QPalette, QCursor,
-    QPainter, QPen, QFont, QFontMetrics)
+    QPainter, QPen, QFont, QFontMetrics, QBrush)
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
@@ -3804,15 +3804,170 @@ class TrendPage(QWidget):
             self._jump_to_device({"device_code": code})
 
 class HealthPage(QWidget):
-    """设备健康度管理页面"""
+    """设备健康度管理页：健康度异常告警（wechat2-billiard 接口 health 字段）
+
+    数据获取：每 30 分钟全量拉取最新 health（TableFetchWorker → sync_health_alerts 落库）；
+    展示刷新：每 1 小时从库重载重建表格（页面载入时立即拉取+展示一次）。
+    阈值判定（基准 4000）：4000 为接口默认值视为空值不算异常；
+    4000~5000 健康度异常；>5000 严重异常需立即处理；>40 万为脏数据排除。
+    排序：① 空闲且严重异常；② 健康度异常（4000~5000）；③ 其余严重异常。
+    勾选+「已处理」：处理时记录当时 health；后续刷新 health 未变化不再展示，
+    变化且仍异常则重新展示（变化后 <4000 自动消失）。
+    """
+
+    _FETCH_INTERVAL_MS = 30 * 60 * 1000    # 数据获取：每 30 分钟
+    _DISPLAY_INTERVAL_MS = 60 * 60 * 1000  # 展示刷新：每 1 小时
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._fetch_worker = None
+        self._init_ui()
+
+        self._fetch_timer = QTimer(self)
+        self._fetch_timer.setInterval(self._FETCH_INTERVAL_MS)
+        self._fetch_timer.timeout.connect(self._fetch_health_data)
+        self._fetch_timer.start()
+
+        self._display_timer = QTimer(self)
+        self._display_timer.setInterval(self._DISPLAY_INTERVAL_MS)
+        self._display_timer.timeout.connect(self._refresh_display)
+        self._display_timer.start()
+
+        # 页面载入立即拉取一次（完成后自动刷新展示）
+        self._fetch_health_data()
+
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("该页面尚未完成\n没错")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("color: #8a8f98; font-size: 15px;")
-        layout.addWidget(label)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = TitleLabel("健康度异常告警", self)
+        header.addWidget(title)
+        header.addStretch(1)
+        self._lbl_sync = CaptionLabel("正在获取数据", self)
+        header.addWidget(self._lbl_sync)
+        layout.addLayout(header)
+
+        hint = CaptionLabel(
+            "基准 4000；>4000~5000 为健康度异常；"
+            ">5000 为严重异常。"
+            "勾选条目后点「已处理」，health 未变化则不再展示", self)
+        layout.addWidget(hint)
+
+        self._table = TableWidget(self)
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(
+            ["", "球桌号", "球房名称", "在线状态", "健康度"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(0, 40)
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self._table, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self._btn_resolved = PrimaryPushButton("已处理", self)
+        self._btn_resolved.setEnabled(False)
+        self._btn_resolved.setToolTip("将勾选的告警标记为已处理（记录当前 health 值）")
+        self._btn_resolved.clicked.connect(self._on_resolved_clicked)
+        btn_row.addWidget(self._btn_resolved)
+        layout.addLayout(btn_row)
+
+    # ---------- 展示 ----------
+
+    def _refresh_display(self):
+        """重载告警条目重建表格（展示刷新定时器 / 拉取完成后调用）"""
+        try:
+            rows = table_db.query_health_alerts()
+        except Exception as e:
+            self._lbl_sync.setText(f"查询失败: {e}")
+            return
+        self._table.setRowCount(0)
+        for r in rows:
+            h = float(r.get("health") or 0)
+            severe = h > table_db.HEALTH_SEVERE
+            color = QColor("#ff5252") if severe else QColor("#f0a020")
+            level = "严重异常" if severe else "健康度异常"
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            cb = CheckBox(self)
+            cb.setToolTip("勾选后可标记已处理")
+            cb.setProperty("alert_name", r.get("name") or "")
+            cb.toggled.connect(lambda _c: self._update_resolved_enabled())
+            self._table.setCellWidget(row, 0, cb)
+            for col, key in ((1, "name"), (2, "roomName"), (3, "onlineStatusName")):
+                it = QTableWidgetItem(str(r.get(key) or ""))
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._table.setItem(row, col, it)
+            it_h = QTableWidgetItem(f"{h:.0f} · {level}")
+            it_h.setFlags(it_h.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_h.setForeground(QBrush(color))
+            self._table.setItem(row, 4, it_h)
+        self._update_resolved_enabled()
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        self._lbl_sync.setText(f"{len(rows)} 条异常 · 展示刷新于 {now}")
+
+    def _iter_checkboxes(self):
+        for row in range(self._table.rowCount()):
+            cb = self._table.cellWidget(row, 0)
+            if isinstance(cb, CheckBox):
+                yield cb
+
+    def _update_resolved_enabled(self):
+        """有勾选条目时启用「已处理」按钮"""
+        self._btn_resolved.setEnabled(
+            any(cb.isChecked() for cb in self._iter_checkboxes()))
+
+    # ---------- 数据获取 ----------
+
+    def _fetch_health_data(self):
+        """全量拉取球桌数据（含 health 字段）并同步告警表"""
+        if self._fetch_worker is not None and self._fetch_worker.isRunning():
+            return
+        self._fetch_worker = TableFetchWorker(self)
+        self._fetch_worker.result_ready.connect(self._on_fetch_ok)
+        self._fetch_worker.error.connect(self._on_fetch_fail)
+        self._fetch_worker.start()
+
+    def _on_fetch_ok(self, rows):
+        try:
+            count = table_db.sync_health_alerts(rows)
+        except Exception as e:
+            self._lbl_sync.setText(f"同步失败: {e}")
+            return
+        now = QDateTime.currentDateTime().toString("HH:mm:ss")
+        self._lbl_sync.setText(f"数据获取于 {now} · {count} 条异常")
+        self._refresh_display()
+
+    def _on_fetch_fail(self, msg):
+        self._lbl_sync.setText(f"获取失败: {str(msg).split(chr(10))[0]}")
+
+    # ---------- 处理交互 ----------
+
+    def _on_resolved_clicked(self):
+        """「已处理」：记录勾选条目当时的 health 值，后续未变化不再展示"""
+        names = [cb.property("alert_name")
+                 for cb in self._iter_checkboxes() if cb.isChecked()]
+        if not names:
+            return
+        n = table_db.mark_health_alerts_resolved(names)
+        show_info_bar(f"已标记 {n} 条告警为已处理", "success",
+                      title="已处理", parent=self, duration=2500)
+        self._refresh_display()
 
 
 class GamePage(QWidget):
