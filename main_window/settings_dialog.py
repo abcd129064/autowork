@@ -204,7 +204,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 路径配置 ----------
     def _build_paths_section(self, cfg):
-        self._add_section_header("📂 路径配置")
+        # self._add_section_header("📂 路径配置")
         path_items = [
             ("exe_dir", "程序目录", cfg.get("exe_dir", ""), "dir"),
             ("videos_dir", "视频/日志目录", cfg.get("videos_dir", ""), "dir"),
@@ -235,7 +235,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 远程连接 ----------
     def _build_remote_section(self, cfg):
-        self._add_section_header("🌐 远程连接")
+        # self._add_section_header("🌐 远程连接")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -265,7 +265,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 收集与上传 ----------
     def _build_upload_section(self, cfg):
-        self._add_section_header("📦 收集与上传")
+       # self._add_section_header("📦 收集与上传")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -300,7 +300,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- FRPC 服务器 ----------
     def _build_frpc_section(self, cfg):
-        self._add_section_header("🔗 FRPC 穿透")
+       # self._add_section_header("🔗 FRPC 穿透")
         frpc = cfg.get("frpc_server", {})
         form = QFormLayout()
         form.setSpacing(8)
@@ -325,7 +325,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- AI 分析 ----------
     def _build_ai_section(self, cfg):
-        self._add_section_header("🤖 AI SSH日志分析")
+       # self._add_section_header("🤖 AI SSH日志分析")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -398,7 +398,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 外观 ----------
     def _build_appearance_section(self, cfg):
-        self._add_section_header("🎨 外观")
+       # self._add_section_header("🎨 外观")
         form = QFormLayout()
         form.setSpacing(8)
 
