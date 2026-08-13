@@ -1454,6 +1454,12 @@ class FileListPanel(QWidget):
         header = QHBoxLayout()
         self._lbl_title = BodyLabel("文件列表", self)
         header.addWidget(self._lbl_title, 1)
+        # 图片预览入口：标题行右侧，选中图片条目后可用
+        self._btn_preview = ToolButton(FluentIcon.PHOTO, self)
+        self._btn_preview.setToolTip("预览选中图片（卡片查看 + 左右翻页）")
+        self._btn_preview.setEnabled(False)
+        self._btn_preview.clicked.connect(self._open_image_preview)
+        header.addWidget(self._btn_preview)
         self._btn_close = ToolButton(FluentIcon.CLOSE, self)
         self._btn_close.setToolTip("关闭")
         self._btn_close.clicked.connect(self.slide_out)
@@ -1481,19 +1487,6 @@ class FileListPanel(QWidget):
             self._on_copy_shortcut)
         layout.addWidget(self._list, 1)
 
-        # 图片预览入口：独立一行，始终可用（总数/正常等不可迁移视图也能看图）
-        self._preview_wrap = QWidget(self)
-        preview_row = QHBoxLayout(self._preview_wrap)
-        preview_row.setContentsMargins(0, 0, 0, 0)
-        preview_row.setSpacing(6)
-        self._btn_preview = ToolButton(FluentIcon.PHOTO, self)
-        self._btn_preview.setToolTip("预览选中图片（卡片查看 + 左右翻页）")
-        self._btn_preview.setEnabled(False)
-        self._btn_preview.clicked.connect(self._open_image_preview)
-        preview_row.addWidget(self._btn_preview)
-        preview_row.addStretch(1)
-        layout.addWidget(self._preview_wrap)
-
         # 底部四个迁移目标按钮（选中条目后可用，点击直接迁移）
         # 容器可整体隐藏：总数/正常等不可迁移的视图不显示迁移按钮
         self._migrate_wrap = QWidget(self)
@@ -1514,7 +1507,7 @@ class FileListPanel(QWidget):
             btn_row.addWidget(btn, 1)
         layout.addWidget(self._migrate_wrap)
 
-        hint = CaptionLabel("双击或右键进行复制 · 选中图片后可预览", self)
+        hint = CaptionLabel("双击或右键进行复制", self)
         layout.addWidget(hint)
 
     def _apply_theme(self):
@@ -1539,6 +1532,9 @@ class FileListPanel(QWidget):
             for btn in self._migrate_btns.values():
                 btn.setEnabled(False)
         self._reload_entries()
+        # 默认选中首条：打开即可直接使用预览/迁移按钮（触发选中信号启用按钮）
+        if self._entries:
+            self._list.selectRow(0)
         self.slide_in()
 
     def _reload_entries(self):
@@ -1641,6 +1637,13 @@ class FileListPanel(QWidget):
         self._list.selectRow(row)
         fname, _src_cat = self._entries[row]
         menu = RoundMenu(parent=self)
+
+        # 图片条目：通过图片查看器打开（卡片展示 + 左右翻页 + 迁移）
+        if is_image_file(fname):
+            act_view = Action(FluentIcon.PHOTO, "通过图片打开", self)
+            act_view.triggered.connect(self._open_image_preview)
+            menu.addAction(act_view)
+            menu.addSeparator()
 
         act_copy = Action(FluentIcon.COPY, "复制文件名", self)
         act_copy.triggered.connect(
