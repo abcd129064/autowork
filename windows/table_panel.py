@@ -172,7 +172,7 @@ class TablePanelWindow(QDialog):
         self._hidden_cols: set = {2}   # 默认隐藏「在线状态」列
         self._rows: list = []          # 当前页行数据（右键远程连接需读取 snk_code）
         self._show_test: bool = False    # 是否显示「公司测试」数据（默认不显示）
-        self._show_manual: bool = False  # 是否显示手动版本设备（name 含 @s，默认不显示）
+        self._show_manual: bool = False  # 是否显示手动版本设备（name 或 roomName 含 @s，默认不显示）
 
         self._init_ui()
         self._load_local()
@@ -300,11 +300,11 @@ class TablePanelWindow(QDialog):
         self._test_cb.setToolTip("显示内部测试球房数据")
         self._test_cb.checkStateChanged.connect(self._toggle_test_data)
         menu.addWidget(self._test_cb, selectable=False)
-        # 「手动版本」设备开关：默认不勾选（不显示 name 含 @s 的设备），勾选后才展示
+        # 「手动版本」设备开关：默认不勾选（不显示 name/roomName 含 @s 的设备），勾选后才展示
         self._manual_cb = CheckBox("手动版本", self)
         self._manual_cb.setChecked(self._show_manual)
         self._manual_cb.setFixedSize(max(self._manual_cb.sizeHint().width() + 30, 120), 36)
-        self._manual_cb.setToolTip("显示手动版本设备（球桌号含 @s）")
+        self._manual_cb.setToolTip("显示手动版本设备（名称或球房名含 @s）")
         self._manual_cb.checkStateChanged.connect(self._toggle_manual_data)
         menu.addWidget(self._manual_cb, selectable=False)
         self._col_btn.setMenu(menu)

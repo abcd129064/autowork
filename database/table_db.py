@@ -400,7 +400,7 @@ def save_all(rows: list) -> int:
 # 「公司测试」球房名称（内部测试数据，面板筛选默认不展示，数据仍入库保留）
 TEST_ROOM_NAME = "公司测试"
 
-# 手动版本设备标识（name 中含 @s，面板筛选默认不展示，数据仍入库保留）
+# 手动版本设备标识（name 或 roomName 中含 @s，面板筛选默认不展示，数据仍入库保留）
 MANUAL_DEVICE_FLAG = "@s"
 
 
@@ -410,7 +410,7 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
 
     Args:
         include_test: 是否包含「公司测试」球房数据；False 时排除（面板默认）
-        include_manual: 是否包含手动版本设备（name 含 @s）；False 时排除（面板默认）
+        include_manual: 是否包含手动版本设备（name 或 roomName 含 @s）；False 时排除（面板默认）
 
     Returns:
         (total, rows)  rows 为 list[dict]
@@ -422,8 +422,9 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
         conds.append("TRIM(roomName) != ?")
         params.append(TEST_ROOM_NAME)
     if not include_manual:
-        conds.append("name NOT LIKE ?")
-        params.append(f"%{MANUAL_DEVICE_FLAG}%")
+        # 实际数据中 @s 标记出现在球房名（roomName）里，仅查 name 会漏排
+        conds.append("(name NOT LIKE ? AND roomName NOT LIKE ?)")
+        params.extend([f"%{MANUAL_DEVICE_FLAG}%", f"%{MANUAL_DEVICE_FLAG}%"])
     kw = keyword.strip()
     if kw:
         # 优先 FTS5 trigram 索引（子串匹配），短关键词/不可用时回退多列 LIKE

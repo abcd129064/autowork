@@ -980,7 +980,7 @@ class TablePage(QWidget):
         self._export_worker = None
         self._hidden_cols = {2, 6}  # 在线状态/设备编码 默认隐藏，可在「筛选」菜单勾选显示
         self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
-        self._show_manual = False  # 是否显示手动版本设备（name 含 @s，默认不显示）
+        self._show_manual = False  # 是否显示手动版本设备（name 或 roomName 含 @s，默认不显示）
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
@@ -1103,11 +1103,11 @@ class TablePage(QWidget):
         self._test_cb.setToolTip("显示内部测试球房数据")
         self._test_cb.checkStateChanged.connect(self._toggle_test_data)
         menu.addWidget(self._test_cb, selectable=False)
-        # 「手动版本」设备开关：默认不勾选（不显示 name 含 @s 的设备），勾选后才展示
+        # 「手动版本」设备开关：默认不勾选（不显示 name/roomName 含 @s 的设备），勾选后才展示
         self._manual_cb = CheckBox("手动版本", self)
         self._manual_cb.setChecked(self._show_manual)
         self._manual_cb.setFixedSize(max(self._manual_cb.sizeHint().width() + 30, 120), 36)
-        self._manual_cb.setToolTip("显示手动版本设备（球桌号含 @s）")
+        self._manual_cb.setToolTip("显示手动版本设备（名称或球房名含 @s）")
         self._manual_cb.checkStateChanged.connect(self._toggle_manual_data)
         menu.addWidget(self._manual_cb, selectable=False)
         # 菜单由 ToolButton 代为弹出（库内固定 DROP_DOWN），打实例补丁以跟随动画开关
