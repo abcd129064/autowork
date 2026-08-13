@@ -229,16 +229,18 @@ class _TextInputDialog(MessageBoxBase):
 
     def __init__(self, title, label, default='', parent=None):
         super().__init__(parent)
-        self.titleLabel.setText(title)
-        CaptionLabel(label, self.view).setObjectName('fieldLabel')
-        self.view.layout.addWidget(self.titleLabel)
-        self.view.layout.addWidget(self.view.findChild(CaptionLabel, 'fieldLabel'))
-        self.edit = LineEdit(self)
+        # qfluentwidgets 1.11+ 的 MessageBoxBase 不再提供 titleLabel/view，
+        # 标题与输入控件需自行创建并加入 viewLayout
+        self.titleLabel = BodyLabel(title, self.widget)
+        self.fieldLabel = CaptionLabel(label, self.widget)
+        self.edit = LineEdit(self.widget)
         self.edit.setText(default)
         if default:
             self.edit.selectAll()
         self.edit.setMinimumWidth(280)
-        self.view.layout.addWidget(self.edit)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.fieldLabel)
+        self.viewLayout.addWidget(self.edit)
         self.widget.setMinimumWidth(380)
 
 
