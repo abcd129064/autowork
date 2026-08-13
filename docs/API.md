@@ -123,12 +123,61 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 
 | 方法 | 说明 |
 |------|------|
-| `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp） |
+| `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪 |
 | `shutdown()` | 停止 frpc 并关闭全局会话窗口（主窗口 closeEvent 调用） |
 
 #### 类 `FrpRemoteBridge(QObject)`
 
 主窗口注入的远程桥接（`window()._remote_bridge`），供管理面板等子窗口委托建立会话。
+
+---
+
+### core.secrets
+
+敏感配置 DPAPI 加解密（Windows 环境），其他平台自动降级为明文透传。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `dpapi_available()` | `() -> bool` | DPAPI 是否可用（仅 Windows） |
+| `encrypt_secret(value)` | `(str) -> str` | 加密单个值，返回 `"enc:base64"`；空值/非字符串/加密失败原样返回 |
+| `decrypt_secret(value)` | `(str) -> str` | 解密单个值；无 `enc:` 前缀原样返回，密文损坏（换用户/机器）返回空串 |
+| `encrypt_settings(settings)` | `(dict) -> dict` | 返回敏感字段已加密的副本（不修改入参） |
+| `decrypt_settings(settings)` | `(dict) -> dict` | 返回敏感字段已解密的副本（不修改入参） |
+| `has_plaintext_secret(settings)` | `(dict) -> bool` | 检测是否存在未加密的敏感值（自动迁移判断用） |
+| `migrate_settings_file(path=None)` | `(str?) -> bool` | 启动时自动迁移：明文敏感字段加密回写一次（幂等） |
+
+敏感字段集合：顶层键（`ssh_pass` 等）+ 嵌套路径（`api_credentials.api1.password` 等）统一由 `SENSITIVE_KEYS` / `NESTED_SENSITIVE_PATHS` 维护。
+
+---
+
+### core.version
+
+应用版本号：基于 git 分支与提交次数自动计算。
+
+| 常量/函数 | 签名 | 说明 |
+|-----------|------|------|
+| `BASE_VERSION` | `str = "2.8"` | 主.次版本（手工维护，新增功能集 → 次版本 +1） |
+| `APP_VERSION` | `str` | 模块级缓存完整版本号（导入时计算一次） |
+| `get_branch_name()` | `() -> str` | 当前分支名；detached HEAD / 非 git 环境返回空串 |
+| `get_commit_count()` | `() -> int` | 当前分支累计提交次数；失败返回 0 |
+| `get_app_version()` | `() -> str` | 完整版本号 `BASE.提交数[-分支]`，如 `2.8.114` 或 `2.8.114-ai_build` |
+
+非主分支（main/master）版本号附带分支标记；git 不可用时回退 `{BASE_VERSION}.0`，保证版本号始终可用。
+
+---
+
+### core.ai_providers
+
+AI 厂商注册表：统一各厂商的 OpenAI 兼容接入参数（DeepSeek / 通义千问 / Kimi / 智谱 GLM / OpenAI GPT / Gemini）。
+
+| 函数/常量 | 签名 | 说明 |
+|-----------|------|------|
+| `AI_PROVIDERS` | `tuple` | 厂商注册表：`{id, label, base_url, default_model, env_key}` |
+| `DEFAULT_VENDOR` | `str = "deepseek"` | 默认厂商标识 |
+| `get_provider(vendor_id)` | `(str) -> dict` | 按标识取注册信息，未知名/空值回退 DeepSeek |
+| `resolve_ai_config(settings)` | `(dict) -> dict` | 解析完整 AI 调用配置 `{vendor, label, base_url, api_key, model, env_key}`；API Key 优先级：`ai_api_keys[厂商]` > 旧键 `deepseek_api_key` > 厂商环境变量 |
+
+相关配置键：`ai_vendor`（厂商标识）、`ai_api_keys`（各厂商 Key，DPAPI 加密落盘）、`ai_model`（模型名，空用默认）、`forensic_ai_analysis`（AI 分析总开关）。
 
 ---
 
@@ -377,6 +426,84 @@ SingleVideoWorker(params: dict)
 
 ---
 
+## workers/collect_worker.py 收集与上传 Worker
+
+设备文件收集（视频/日志/CPP 日志/detect.bin）与打包上传后台线程。
+
+#### 模块级函数
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `clip_base_name(fname)` | `(str) -> str` | 截取文件名 `kd` 之前的部分作为基础名（视频/日志同名关联） |
+| `date_from_base(base)` | `(str) -> str` | 从基础名提取日期（`20260724_225031` → `2026-07-24`），无法解析返回空串 |
+| `norm_device_suffix(name)` | `(str) -> str` | 设备后缀归一化：只留数字并去前导零（S8/08/TV2 → 8/8/2） |
+| `fuzzy_match_device_dir(videos_dir, candidates)` | `(str, list) -> tuple` | 模糊搜索本地设备目录（命名与球桌号不一致时兜底）：店号前缀相同 + 后缀归一化匹配 |
+| `resolve_device_dir(videos_dir, candidates)` | `(str, list) -> tuple` | 收集入口的设备目录三级解析（C4）：精确目录 → 球桌号变化匹配 → 模糊搜索 |
+
+### FileCopyWorker
+
+异步文件拷贝（`shutil.copy2` 的线程替代）。
+
+```python
+FileCopyWorker(src, dst)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `copy_finished` | `Signal()` | 拷贝成功完成 |
+| `error` | `Signal(str)` | 拷贝失败 |
+
+### CollectFilesWorker
+
+异步收集设备视频/日志/CPP 日志/detect.bin 到 `upload` 工作区。已存在的目标文件直接跳过（重复点击不重复复制）。
+
+```python
+CollectFilesWorker(videos_dir, device_id, base_names)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `done` | `Signal(str, int, list)` | (设备目录名, 实际复制文件数, 缺失项说明列表) |
+| `error` | `Signal(str)` | 错误信息 |
+
+### ZipUploadWorker
+
+打包 upload 目录为 zip → SFTP 上传 → 清空本地 upload 目录。凭据用上传专用字段（不复用 SSH 凭据），支持取消（取消后自动清理临时 zip）。
+
+```python
+ZipUploadWorker(upload_root, host, port, username, password,
+                remote_dir, parent=None, content_root=None,
+                zip_prefix="upload", zip_dir=None, remove_zip_after_done=False)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `progress` | `Signal(str)` | 阶段提示（打包中/连接中/上传中） |
+| `percent` | `Signal(int)` | 上传字节进度 0-100 |
+| `done` | `Signal(str)` | 成功信息（zip 名与远端路径） |
+| `error` | `Signal(str)` | 错误信息 |
+| `cancelled` | `Signal()` | 用户取消完成（临时 zip 已清理） |
+
+---
+
+## workers/newlog_worker.py 批量整理 Worker
+
+### NewLogWorker
+
+后台运行 NewLog 批量整理主流程（按 Excel 署名筛选，批量归类视频/日志/配置文件）。
+
+```python
+NewLogWorker(target_name)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `line` | `Signal(str)` | 逐行运行日志（临时 Handler 转发 NewLog 模块 logger 输出） |
+| `finished_ok` | `Signal(str)` | 整理完成，返回输出目录 |
+| `error` | `Signal(str)` | 运行失败 |
+
+---
+
 ## database/ 数据层
 
 ### database.table_db
@@ -387,20 +514,37 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 
 | 函数 | 说明 |
 |------|------|
-| `save_all(rows)` | 全量覆盖写入球桌表，返回条数 |
-| `query_page(page_no, page_size, keyword="")` | 分页查询，返回 `(total, rows)` |
-| `insert_one(record)` | 手动插入一条记录 |
-| `get_meta()` | 获取同步元信息（条数、时间） |
+| `parse_snk_code(remark)` | 从 remark 正则提取 snk 标识（如 `snk_001`），无则返回空串 |
+| `save_all(rows)` | 全量覆盖写入球桌表，返回条数（自动解析 snk_code；remark 无 snk 时保留旧库手动值） |
+| `query_page(page_no, page_size, keyword="", include_test=True, include_manual=True)` | 分页查询，返回 `(total, rows)`；`include_test` 排除「公司测试」球房、`include_manual` 排除手动版本设备（name/roomName 含 `@s`） |
+| `insert_one(record)` | 手动插入一条记录（API 失效时的兜底入口） |
+| `update_snk_by_name(name, snk_code)` | 按球桌号手动写入/修改 snk（TRIM 匹配），空串表示清空 |
+| `get_snk_by_name(name)` | 按球桌号查 snk（设备状态页 table_id ↔ 球桌管理 name 关联） |
 
 球桌表字段（`FIELDS`）：`name`、`roomName`、`onlineStatusName`、`remark`、`cameraPassExt`、`snk_code`（SNK 标识，手动维护）、`code`（设备编码，接口同步）。旧库自动惰性迁移：首次连接时 `ALTER TABLE ADD COLUMN` 补列并重建 FTS 索引，数据无损。
+
+**全文搜索（FTS5）**：三张表均建 trigram 虚拟表 + 触发器增量同步（external content 模式）；关键词 ≥3 字符走 FTS 子串匹配，短关键词或 SQLite 缺 FTS5 支持时自动回退多列 `LIKE`。排序列名经白名单校验，数值字段（TEXT 存储）自动 `CAST AS REAL` 防字典序错误。
+
+#### 健康度告警（health_alerts）
+
+| 函数/常量 | 说明 |
+|------|------|
+| `HEALTH_WARN = 4000.0` / `HEALTH_SEVERE = 5000.0` / `HEALTH_INVALID_MAX = 400000.0` | 阈值：4000 为接口默认值视为空值；4000~5000 异常；>5000 严重异常；>40 万脏数据 |
+| `sync_health_alerts(rows)` | 按最新球桌数据同步告警表，返回当前应展示条数（排除默认值/脏数据/公司测试；已处理且 health 变化时清除标记重新展示；消失设备清理） |
+| `query_health_alerts()` | 查询未处理告警，按需排序：空闲且严重异常 > 健康度异常 > 其余严重异常，同级按 health 降序 |
+| `mark_health_alerts_resolved(names)` | 标记告警为已处理（记录当时 health 值），返回受影响行数 |
 
 #### 设备状态数据（xqzg / kd）
 
 | 函数 | 说明 |
 |------|------|
-| `save_xqzg(rows)` / `query_xqzg_page(page_no, page_size, keyword="")` | xqzg 数据存取（无日期分区，数据在 `results` 键） |
-| `save_kd(rows, file_path="")` / `query_kd_page(page_no, page_size, keyword="", file_path="")` | kd 数据按日期分区存取（自动序列化/反序列化文件列表字段） |
-| `get_kd_dates()` | 获取本地已有的 kd 日期分区列表 |
+| `save_xqzg(rows)` / `query_xqzg_page(page_no, page_size, keyword="", order_by="", desc=False)` | xqzg 数据存取（无日期分区，数据在 `results` 键） |
+| `save_kd(rows, file_path="")` / `query_kd_page(page_no, page_size, keyword="", file_path="", order_by="", desc=False, include_files=False)` | kd 数据按日期分区存取（自动序列化/反序列化文件列表字段）；`include_files=False` 时轻量查询不含 8 类文件 JSON |
+| `upsert_kd(rows, file_path="")` | 按 `(file_path, device_code)` 增量更新/插入（keyword 搜索拉取专用，不覆盖同日期其他设备） |
+| `get_kd_row_full(row_id)` | 按 id 查完整行（含文件清单反序列化，配合轻量列表页懒加载） |
+| `get_kd_dates()` | 获取本地已有的 kd 日期分区列表（降序） |
+
+kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动清理过期分区。
 
 ---
 
@@ -528,7 +672,7 @@ SingleVideoDialog(parent, settings=None)
 
 ### ManagementPanelWindow
 
-运维管理面板（`windows/management_panel.py`），qfluentwidgets `FluentWindow` + 左侧导航，三个功能页面。由主窗口「球桌管理」按钮打开（`UiMixin._on_open_table_panel`），支持 `python -m windows.management_panel` 独立调试。
+运维管理面板（`windows/management_panel.py`），qfluentwidgets `FluentWindow` + 左侧导航，六个功能页面。由主窗口「球桌管理」按钮打开（`UiMixin._on_open_table_panel`），支持 `python -m windows.management_panel` 独立调试。
 
 ```python
 ManagementPanelWindow(parent=None)
@@ -540,7 +684,10 @@ ManagementPanelWindow(parent=None)
 |------|------|------|
 | 球桌管理 | `TablePage` | wechat2-billiard 球桌数据：表格/搜索/分页/列筛选/右键复制/手动添加记录；含 `code`（设备编码）列，默认隐藏可在「筛选」菜单勾选显示（`_hidden_cols = {在线状态, 设备编码}`） |
 | 设备状态 | `DevicePage` | kd / xqzg 数据源切换（`get_active_api_source()`），按日期分区查看；集成图片迁移 |
+| 设备健康度管理 | `HealthPage` | 健康度异常告警：每 30 分钟全量拉取 health（`TableFetchWorker` → `sync_health_alerts` 落库），每 1 小时重载展示；阈值 4000/5000/40 万；支持标记已处理 |
 | 管理设置 | `AdminSettingsPage` | 数据源选择（kd/xqzg）、双接口账号密码、测试连接，合并写入 `settings.json` |
+| 小游戏 | `GamePage` | 摸鱼中心（2048/贪吃蛇等） |
+| （隐藏）健康趋势 | `TrendPage` | 健康度趋势看板（C3）：突增预警 + 单设备趋势折线 + TOP N 排行，仅 kd 数据源可用；导航入口已注释隐藏，恢复取消注释即可 |
 
 **图片迁移交互（DevicePage）**：
 
@@ -558,6 +705,61 @@ ManagementPanelWindow(parent=None)
 
 ---
 
+### ForensicReportPanel（SSH 故障取证包）
+
+`windows/forensic_report.py`：SSH 连接失败时一键生成诊断取证包（模块级函数 + `ForensicWorker` 后台线程）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `get_forensic_dir()` | `() -> str` | 取证报告目录 `{app_dir}/logs/forensic`（自动创建 + 闭环清理：保留 90 天且不超 200 个） |
+| `lookup_table_info(snk, host)` | `(str, str) -> dict` | 从 billiard_tables 反查球桌信息（匹配优先级：snk_code 精确 → remark 含 snk → remark 含 host） |
+| `lookup_kd_status(table_id, snk)` | `(str, str) -> dict` | 查 kd_status 最新分区关键字段（优先 table_id TRIM 匹配，再按 snk 当 device_code） |
+| `read_session_tail(path, n=SESSION_TAIL_LINES)` | `(str, int) -> str` | 读会话日志最近 n 行 |
+| `collect_conn_log(host, limit=CONN_LOG_ENTRIES)` | `(str, int) -> str` | 从连接日志及归档中提取该 host 最近记录（时间正序） |
+| `build_ai_evidence(cmd_results)` | `(list) -> str` | 拼装送 AI 的取证证据（仅成功命令输出，单条/总量截断） |
+| `analyze_with_ai(evidence)` | `(str) -> str` | 调用所选 AI 厂商 OpenAI 兼容接口分析证据，返回 Markdown 文本 |
+| `build_forensic_report(meta, cmd_results, table_info, kd_info, session_tail, conn_log, ai_analysis="", ai_error="", ai_label="")` | `(...) -> str` | 组装完整 Markdown 报告 |
+
+**类 `ForensicWorker(QThread)`**：后台逐条执行诊断命令组并生成报告（exec_command 独立 channel，不阻塞交互）。
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `line` | `Signal(str)` | 逐条命令执行进度 |
+| `done` | `Signal(str)` | 报告文件路径 |
+| `error` | `Signal(str)` | 失败信息 |
+
+---
+
+### ImageViewerDialog
+
+`windows/image_viewer.py`：设备状态图片查看卡片对话框（左右键翻页，支持分类迁移）。
+
+```python
+ImageViewerDialog(entries, index, file_path, device_code, device_page,
+                  can_migrate=True, dest_options=(), btn_qss=None, parent=None)
+```
+
+- `_ImageFetchWorker`：后台下载图片字节流（静态资源无需认证头，可 cancel）
+- `_image_urls(fname, src_cat)`：候选 URL 展开——分类目录优先、`pic/` 目录兜底，文件名按变体展开（原名优先，去 Django 去重后缀的原图兜底，`_name_variants`）
+- `is_image_file(fname)`：按扩展名判断是否图片文件
+
+---
+
+### PortFakeWidget
+
+`windows/port_fake.py`：虚假端口占用工具（工具菜单「端口占用」）——真实 `bind + listen` 模拟服务占用，`netstat -ano` 可见 `LISTENING`。
+
+```python
+PortFakeWidget(parent=None)
+```
+
+- `_occupy()`：占用输入框端口（保持监听）；支持多端口同时占用
+- `_release_all()` / `_release_one(port)`：释放端口
+- `closeEvent`：页面/窗口关闭时自动释放全部端口，避免占用残留
+- 随机端口范围 20000~60000（`_RANDOM_MIN` / `_RANDOM_MAX`）
+
+---
+
 ## main_window/ 主窗口层
 
 ### MainWindow
@@ -565,7 +767,7 @@ ManagementPanelWindow(parent=None)
 主窗口类，组合所有 Mixin：
 
 ```python
-class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UiMixin, FluentWindowBase):
+class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindowBase):
     ...
 ```
 
@@ -659,13 +861,29 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 |------|------|
 | `_init_statusbar()` | 初始化底部状态栏 |
 | `_init_context_menus()` | 初始化右键菜单 |
-| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 + 视频日志批量整理） |
+| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 + 端口占用 + 视频/日志批量整理） |
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_apply_highlight_color()` | 应用日志高亮颜色 |
 | `_apply_font_size()` | 应用字号设置 |
 | `_apply_font_family()` | 应用字体设置 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
 | `_on_open_single_video()` | 工具菜单「单杆视频」：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调（参数校验 → 保存 settings → 创建 `SingleVideoWorker` 连信号 → `exec()`） |
+| `_on_open_port_fake()` | 工具菜单「端口占用」：弹窗真实监听指定端口模拟服务占用（`PortFakeWidget`） |
+| `_on_newlog_organize()` | 工具菜单「视频/日志批量整理」：按 Excel 署名筛选批量归类（`NewLogDialog` + `NewLogWorker`），支持一键打包上传 |
+
+---
+
+### SettingsDialog
+
+设置对话框（`main_window/settings_dialog.py`），继承 `MessageBoxBase`，Pivot 导航 + 分区懒加载（首次切入才构建控件）。
+
+**分区**：路径配置 / 远程连接 / 收集与上传 / FRPC 服务器 / API Key / 日志高亮 / 外观。
+
+**数据驱动 collect 机制**：`_CONFIG_ITEMS` 配置表描述每项 `(配置key, 所属分区, 控件获取lambda, 读取函数, 回退函数)`，`collect()` 循环统一收集——未构建分区的项用回退函数从原始配置取值，已构建的从控件读值。
+
+**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`，默认规则「错误」（红，通知）/「警告」（橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
+
+**NewLog 路径默认值**：`newlog_excel_dir` 默认 `~/Desktop/excel`、`newlog_out_dir` 默认 `~/Desktop`。
 
 ---
 
@@ -725,19 +943,29 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `cipher_tool` | str | — | AES 解码工具路径 |
 | `front_exe` | str | — | 前端程序路径 |
 | `backend_exe` | str | — | 后端程序路径 |
+| `newlog_excel_dir` | str | `~/Desktop/excel` | NewLog 批量整理 Excel 目录 |
+| `newlog_out_dir` | str | `~/Desktop` | NewLog 批量整理输出目录 |
 | `last_exe` | str | — | 上次选择的程序名 |
 | `dpi_scale` | int | 100 | DPI 缩放百分比 |
 | `font_size` | int | 10 | 全局字号 |
-| `font_family` | str | — | 全局字体 |
+| `font_family` | str | `Microsoft YaHei UI` | 全局字体 |
 | `dark_theme` | bool | false | 深色主题开关（旧字段） |
 | `theme_mode` | str | "auto" | 主题模式：auto/light/dark |
 | `classic_layout` | bool | false | 经典布局模式 |
-| `highlight_color` | [r,g,b] | [220,80,20] | 日志高亮颜色 |
+| `highlight_color` | [r,g,b] | [220,80,20] | 日志高亮颜色（旧字段） |
+| `log_highlight_rules` | [object] | 见默认 | 日志高亮规则列表 `[{name, pattern, color, notify}]` |
 | `ssh_user` | str | — | SSH 默认用户名 |
-| `ssh_pass` | str | — | SSH 默认密码 |
+| `ssh_pass` | str | — | SSH 默认密码（DPAPI 加密） |
 | `tcp_servers` | [str] | [] | 保存的 TCP 服务器列表（ip:port） |
-| `frpc_server` | object | — | frp 服务器配置 |
 | `sftp_default_remote_path` | str | — | SFTP 默认远程路径 |
+| `frpc_server` | object | — | frp 服务器配置（serverAddr/serverPort/auth_method/auth_token） |
+| `upload_host` / `upload_port` | str/int | `49.235.34.253` / 22 | 上传 SFTP 服务器地址与端口 |
+| `upload_remote_dir` | str | `/lhcos-data/videos` | 上传远端目录 |
+| `upload_user` / `upload_pass` | str | `root` / — | 上传专用账号密码（DPAPI 加密，不复用 SSH 凭据） |
+| `ai_vendor` | str | "deepseek" | AI 厂商标识（deepseek/qwen/kimi/zhipu/openai/gemini） |
+| `ai_model` | str | — | AI 模型名（空则用厂商默认） |
+| `ai_api_keys` | object | — | 各厂商 API Key 字典（DPAPI 加密） |
+| `forensic_ai_analysis` | bool | true | 取证报告 AI 分析开关 |
 | `remote_sessions` | [object] | [] | 保存的远程会话列表 |
 | `perf_acrylic` | bool | true | 亚克力效果性能开关 |
 | `perf_animation` | bool | true | 界面动画性能开关 |

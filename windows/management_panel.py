@@ -4015,7 +4015,7 @@ class GamePage(QWidget):
 # ==================== 主窗口 ====================
 
 class ManagementPanelWindow(FluentWindow):
-    """运维管理面板：FluentWindow + 左侧导航 + 三个功能页面"""
+    """运维管理面板：FluentWindow + 左侧导航 + 六个功能页面（球桌/设备/健康度/趋势/设置/小游戏）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)

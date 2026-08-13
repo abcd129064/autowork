@@ -357,8 +357,10 @@ class TablePanelWindow(QDialog):
         for r, item in enumerate(rows):
             for c, (key, _, _) in enumerate(COLUMNS):
                 val = item.get(key) or ""
+                # 单元格内不支持换行显示：换行符压平为空格避免行高错乱
                 val = str(val).replace("\n", " ").strip()
                 cell = QTableWidgetItem(val)
+                # tooltip 保留未压平的原始值：窄列显示不全时可悬停查看全文
                 cell.setToolTip(str(item.get(key) or ""))
                 # 在线状态着色
                 if key == "onlineStatusName":

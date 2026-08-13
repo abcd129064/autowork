@@ -72,7 +72,7 @@ class SingleShotVideoServer:
                     cfg = json.load(fp)
                 # 注意：文件关闭后再删除，Windows 不允许删除仍被打开的文件
                 result = self.single_shot_video(cfg)
-                os.remove(json_path)  # 删除文件
+                os.remove(json_path)
             except json.JSONDecodeError as e:
                 logger.error(f"JSON 解析失败: {e}")
             except FileNotFoundError:

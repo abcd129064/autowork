@@ -66,13 +66,17 @@ class _LogLoadWorker(QThread):
             truncated = False
             with open(self.path, 'rb') as f:
                 if file_size > self.tail_bytes:
+                    # 大文件只读尾部 tail_bytes(默认 2MB)：整读几十 MB 日志会卡住 UI
                     f.seek(-self.tail_bytes, os.SEEK_END)
                     raw = f.read()
                     truncated = True
                 else:
                     raw = f.read()
+            # errors='ignore' 容忍日志中的非法 UTF-8 字节（崩溃残留/GBK 混合），
+            # 保证任何情况下都能展示已有内容而不是整批解码失败
             content = raw.decode('utf-8', errors='ignore')
             if truncated:
+                # 尾部截断起点在任意字节处，首行必然不完整：丢弃到第一个换行为止
                 first_nl = content.find('\n')
                 if first_nl != -1:
                     content = content[first_nl + 1:]
@@ -341,6 +345,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         hit_names = []
         cur = self.ui.show_log.textCursor()
         cur.movePosition(cur.MoveOperation.End)
+        # 光标不在块首则先补一个块：否则 insertText 会与末行尾字符粘在同一行
         if not cur.atBlockStart():
             cur.insertBlock()
         for line in lines:
@@ -358,12 +363,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 行数上限截断（避免无限增长导致内存/布局开销）
         doc = self.ui.show_log.document()
         if doc.blockCount() > self._LOG_MAX_LINES:
+            # 从文档头选中「超出上限的行数」，整体移除最早的历史行
             cursor = self.ui.show_log.textCursor()
             cursor.movePosition(cursor.Start)
             cursor.movePosition(cursor.Down, cursor.KeepAnchor,
                                 doc.blockCount() - self._LOG_MAX_LINES)
             cursor.removeSelectedText()
-            cursor.deleteChar()  # 删除多余换行
+            cursor.deleteChar()  # 删除选区末尾残留的换行符
 
         # 命中通知规则 → InfoBar（每规则 10s 静默期，避免刷屏）
         now = time.time()

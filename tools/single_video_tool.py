@@ -22,7 +22,7 @@ def extract_break(log_text, start_frame, end_frame, player):
     scores = []
     total = 0
 
-    # 起始占位
+    # 起始 0 分占位：输出列表从 0 分起步，前端计分按此对齐渲染
     scores.append({
         "score_0": 0,
         "score_1": 0,
