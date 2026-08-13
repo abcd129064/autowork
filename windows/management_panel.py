@@ -55,6 +55,7 @@ from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     fuzzy_match_device_dir, norm_device_suffix)
 from database import table_db
 from windows.moyu_widgets import Game2048Widget, SnakeWidget, MoyuReaderWidget
+from windows.image_viewer import is_image_file
 
 logger = logging.getLogger(__name__)
 
@@ -980,7 +981,7 @@ class TablePage(QWidget):
         self._export_worker = None
         self._hidden_cols = {2, 6}  # 在线状态/设备编码 默认隐藏，可在「筛选」菜单勾选显示
         self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
-        self._show_manual = False  # 是否显示手动版本设备（name 含 @s，默认不显示）
+        self._show_manual = False  # 是否显示手动版本设备（name 或 roomName 含 @s，默认不显示）
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
@@ -1103,11 +1104,11 @@ class TablePage(QWidget):
         self._test_cb.setToolTip("显示内部测试球房数据")
         self._test_cb.checkStateChanged.connect(self._toggle_test_data)
         menu.addWidget(self._test_cb, selectable=False)
-        # 「手动版本」设备开关：默认不勾选（不显示 name 含 @s 的设备），勾选后才展示
+        # 「手动版本」设备开关：默认不勾选（不显示 name/roomName 含 @s 的设备），勾选后才展示
         self._manual_cb = CheckBox("手动版本", self)
         self._manual_cb.setChecked(self._show_manual)
         self._manual_cb.setFixedSize(max(self._manual_cb.sizeHint().width() + 30, 120), 36)
-        self._manual_cb.setToolTip("显示手动版本设备（球桌号含 @s）")
+        self._manual_cb.setToolTip("显示手动版本设备（名称或球房名含 @s）")
         self._manual_cb.checkStateChanged.connect(self._toggle_manual_data)
         menu.addWidget(self._manual_cb, selectable=False)
         # 菜单由 ToolButton 代为弹出（库内固定 DROP_DOWN），打实例补丁以跟随动画开关
@@ -1126,7 +1127,8 @@ class TablePage(QWidget):
         """异步分页查询本地数据库，快速切换时取消前一个 Worker"""
         if self._query_worker and self._query_worker.isRunning():
             self._query_worker.requestInterruption()
-            self._query_worker.disconnect()
+            # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
+            self._query_worker.disconnect(self)
         keyword = self._search_edit.text().strip()
         self._query_worker = _DBQueryWorker(
             table_db.query_page, self._page_no, self._page_size, keyword,
@@ -1479,7 +1481,20 @@ class FileListPanel(QWidget):
             self._on_copy_shortcut)
         layout.addWidget(self._list, 1)
 
-        # 底部四个迁移目标图标按钮（选中条目后可用，点击直接迁移）
+        # 图片预览入口：独立一行，始终可用（总数/正常等不可迁移视图也能看图）
+        self._preview_wrap = QWidget(self)
+        preview_row = QHBoxLayout(self._preview_wrap)
+        preview_row.setContentsMargins(0, 0, 0, 0)
+        preview_row.setSpacing(6)
+        self._btn_preview = ToolButton(FluentIcon.PHOTO, self)
+        self._btn_preview.setToolTip("预览选中图片（卡片查看 + 左右翻页）")
+        self._btn_preview.setEnabled(False)
+        self._btn_preview.clicked.connect(self._open_image_preview)
+        preview_row.addWidget(self._btn_preview)
+        preview_row.addStretch(1)
+        layout.addWidget(self._preview_wrap)
+
+        # 底部四个迁移目标按钮（选中条目后可用，点击直接迁移）
         # 容器可整体隐藏：总数/正常等不可迁移的视图不显示迁移按钮
         self._migrate_wrap = QWidget(self)
         self._migrate_wrap.hide()
@@ -1499,7 +1514,7 @@ class FileListPanel(QWidget):
             btn_row.addWidget(btn, 1)
         layout.addWidget(self._migrate_wrap)
 
-        hint = CaptionLabel("双击或右键进行复制", self)
+        hint = CaptionLabel("双击或右键进行复制 · 选中图片后可预览", self)
         layout.addWidget(hint)
 
     def _apply_theme(self):
@@ -1552,7 +1567,8 @@ class FileListPanel(QWidget):
         # 取消前一个刷新 Worker，避免堆积
         if self._query_worker and self._query_worker.isRunning():
             self._query_worker.requestInterruption()
-            self._query_worker.disconnect()
+            # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
+            self._query_worker.disconnect(self)
         self._query_worker = _DBQueryWorker(
             table_db.query_kd_by_device, code, date)
         self._query_worker.finished.connect(self._on_refresh_query)
@@ -1582,11 +1598,32 @@ class FileListPanel(QWidget):
                 QApplication.clipboard().setText(self._clip_name(item.text()))
 
     def _on_selection_changed(self):
-        """选中状态变化：有选中条目时启用底部迁移按钮"""
+        """选中状态变化：有选中条目时启用底部迁移按钮（预览按钮仅限图片）"""
         rows = sorted({it.row() for it in self._list.selectedItems()})
         enabled = bool(rows)
         for btn in self._migrate_btns.values():
             btn.setEnabled(enabled)
+        preview_ok = False
+        if enabled and 0 <= rows[0] < len(self._entries):
+            preview_ok = is_image_file(self._entries[rows[0]][0])
+        self._btn_preview.setEnabled(preview_ok)
+
+    def _open_image_preview(self):
+        """打开图片查看对话框：卡片式展示当前选中图片，支持左右翻页与迁移"""
+        rows = sorted({it.row() for it in self._list.selectedItems()})
+        if not rows or not (0 <= rows[0] < len(self._entries)):
+            return
+        from windows.image_viewer import ImageViewerDialog
+        dlg = ImageViewerDialog(
+            self._entries, rows[0],
+            file_path=self._device_page._current_date(),
+            device_code=self._row.get("device_code", ""),
+            device_page=self._device_page,
+            can_migrate=self._migrate_wrap.isVisible(),
+            dest_options=MIGRATE_DEST_OPTIONS,
+            btn_qss=_MIGRATE_BTN_QSS,
+            parent=self.window())
+        dlg.exec()
 
     def _on_migrate_btn(self, dest_cat):
         """底部迁移按钮：将当前选中的文件直接迁移到 dest_cat"""
@@ -2072,7 +2109,8 @@ class DevicePage(QWidget):
         """异步分页查询本地数据库，快速切换时取消前一个 Worker"""
         if self._query_worker and self._query_worker.isRunning():
             self._query_worker.requestInterruption()
-            self._query_worker.disconnect()
+            # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
+            self._query_worker.disconnect(self)
         keyword = self._search_edit.text().strip()
         if self._active_source() == "xqzg":
             self._query_worker = _DBQueryWorker(
@@ -3597,7 +3635,8 @@ class TrendPage(QWidget):
         old = getattr(self, attr, None)
         if old is not None and old.isRunning():
             try:
-                old.disconnect()
+                # PySide6 不支持无参 QObject.disconnect()：指定接收者断开全部信号
+                old.disconnect(self)
             except (RuntimeError, TypeError):
                 pass
         worker = _DBQueryWorker(func, *args)
@@ -3909,7 +3948,8 @@ class ManagementPanelWindow(FluentWindow):
             if not (worker and worker.isRunning()):
                 return
             try:
-                worker.disconnect()
+                # PySide6 不支持无参 QObject.disconnect()：指定接收者断开全部信号
+                worker.disconnect(self)
             except (RuntimeError, TypeError):
                 pass
             try:
