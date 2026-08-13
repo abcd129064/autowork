@@ -54,30 +54,6 @@ def natural_sort_key(s):
             for part in re.split(r'(\d+)', s)]
 
 
-# 端口占用：持有绑定后的 socket，防止被垃圾回收导致端口释放
-_WEB_PORT_HOLDER = None
-
-
-def occupy_web_port(preferred=0):
-    """强制占用一个端口并返回端口号：
-    - preferred > 0 时优先尝试该端口，被占用则向后递增探测；
-    - preferred <= 0 时从 8080 开始自动探测；
-    绑定成功后持有 socket，程序运行期间该端口被本程序独占。
-    """
-    global _WEB_PORT_HOLDER
-    start = preferred if 0 < preferred < 65536 else 8080
-    for port in range(start, 65536):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind(("0.0.0.0", port))
-        except OSError:
-            sock.close()
-            continue
-        _WEB_PORT_HOLDER = sock
-        return port
-    return 0  # 理论不可达：探测范围覆盖全部可用端口
-
-
 def safe_close_transport(transport, join_timeout=3):
     """安全关闭 paramiko Transport：先 close 再 join 等待后台线程退出。
     避免线程仍在读 socket 时 socket 被销毁导致 C 层崩溃 (0xC0000409)。

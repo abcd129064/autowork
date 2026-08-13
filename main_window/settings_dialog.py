@@ -81,10 +81,6 @@ class SettingsDialog(MessageBoxBase):
                        lambda s: getattr(s, '_edit_tcp_servers', None),
                        lambda w: [x.strip() for x in w.text().strip().split(",") if x.strip()],
                        lambda cfg: list(cfg.get("tcp_servers", []) or [])))
-        items.append(("web_port", "remote",
-                       lambda s: getattr(s, '_spin_web_port', None),
-                       lambda w: int(w.value()),
-                       lambda cfg: _safe_int(cfg.get("web_port", 0), 0)))
 
         # 收集与上传（5项）
         items.append(("upload_host", "upload",
@@ -208,7 +204,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 路径配置 ----------
     def _build_paths_section(self, cfg):
-        # self._add_section_header("📂 路径配置")
+        self._add_section_header("📂 路径配置")
         path_items = [
             ("exe_dir", "程序目录", cfg.get("exe_dir", ""), "dir"),
             ("videos_dir", "视频/日志目录", cfg.get("videos_dir", ""), "dir"),
@@ -239,7 +235,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 远程连接 ----------
     def _build_remote_section(self, cfg):
-        # self._add_section_header("🌐 远程连接")
+        self._add_section_header("🌐 远程连接")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -259,14 +255,6 @@ class SettingsDialog(MessageBoxBase):
         self._edit_sftp_path.setPlaceholderText("如 /home/user/project")
         form.addRow("SFTP默认路径:", self._edit_sftp_path)
 
-        self._spin_web_port = SpinBox(self)
-        self._spin_web_port.setRange(0, 65535)
-        self._spin_web_port.setValue(_safe_int(cfg.get("web_port", 0), 0))
-        # self._spin_web_port.setSuffix(" 端口")
-        self._spin_web_port.setToolTip(
-            "Web 服务端口：0 表示由程序自动探测并强制占用空闲端口")
-        form.addRow("Web端口:", self._spin_web_port)
-
         # self._edit_tcp_servers = LineEdit(self)
         # servers = cfg.get("tcp_servers", [])
         # self._edit_tcp_servers.setText(", ".join(servers))
@@ -277,7 +265,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 收集与上传 ----------
     def _build_upload_section(self, cfg):
-       # self._add_section_header("📦 收集与上传")
+        self._add_section_header("📦 收集与上传")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -312,7 +300,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- FRPC 服务器 ----------
     def _build_frpc_section(self, cfg):
-       # self._add_section_header("🔗 FRPC 穿透")
+        self._add_section_header("🔗 FRPC 穿透")
         frpc = cfg.get("frpc_server", {})
         form = QFormLayout()
         form.setSpacing(8)
@@ -337,7 +325,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- AI 分析 ----------
     def _build_ai_section(self, cfg):
-       # self._add_section_header("🤖 AI SSH日志分析")
+        self._add_section_header("🤖 AI SSH日志分析")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -410,7 +398,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 外观 ----------
     def _build_appearance_section(self, cfg):
-       # self._add_section_header("🎨 外观")
+        self._add_section_header("🎨 外观")
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -495,5 +483,9 @@ def _collect_ai_keys(dialog):
         keys.pop(vendor_id, None)
     return keys
 
-
+def _web_port():
+    if os.environ.get("WEB_PORT") is not None:
+        return int(os.environ.get("WEB_PORT"))
+    else:
+        return 8080
 
