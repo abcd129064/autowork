@@ -881,7 +881,7 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 
 **数据驱动 collect 机制**：`_CONFIG_ITEMS` 配置表描述每项 `(配置key, 所属分区, 控件获取lambda, 读取函数, 回退函数)`，`collect()` 循环统一收集——未构建分区的项用回退函数从原始配置取值，已构建的从控件读值。
 
-**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`，默认规则「错误」（红，通知）/「警告」（橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
+**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`，默认规则「错误」（红，通知）/「警告」（橙，静默）/「返回」「加分」「add」（旧版硬编码关键词迁移，橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
 
 **NewLog 路径默认值**：`newlog_excel_dir` 默认 `~/Desktop/excel`、`newlog_out_dir` 默认 `~/Desktop`。
 

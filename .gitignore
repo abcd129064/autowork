@@ -44,3 +44,4 @@ moyu_state.json
 # frpc 隧道配置（含内网地址等敏感信息，不提交）
 frpc_xtcp.toml
 frpc_xtcp_panel.toml
+frpc.exe

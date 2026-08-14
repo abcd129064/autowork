@@ -29,7 +29,8 @@ from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
     ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
-from main_window.settings_dialog import SettingsDialog
+from main_window.settings_dialog import (SettingsDialog, _DEFAULT_LOG_RULES,
+    _compile_log_rules)
 
 # ==================== 版本信息（帮助→关于） ====================
 # 版本号由 core/version.py 根据 git 分支与提交次数自动计算：
@@ -1488,6 +1489,10 @@ class UIMixin:
             self._save_settings(new_data)
             self._reload_settings_cache()
             self._load_paths()
+            # 日志高亮规则即时生效：notify/颜色/正则改动无需重启
+            # （_log_rules 是渲染与通知共用的编译结果，不刷新则旧规则仍生效）
+            self._log_rules = _compile_log_rules(
+                new_data.get("log_highlight_rules") or _DEFAULT_LOG_RULES)
             # 外观变更即时应用
             if new_data.get("font_size") != old_font_size or new_data.get("font_family") != old_font_family:
                 self._apply_global_font()
