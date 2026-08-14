@@ -29,7 +29,8 @@ from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
     ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
-from main_window.settings_dialog import SettingsDialog
+from main_window.settings_dialog import (SettingsDialog, _DEFAULT_LOG_RULES,
+    _compile_log_rules)
 
 # ==================== 版本信息（帮助→关于） ====================
 # 版本号由 core/version.py 根据 git 分支与提交次数自动计算：
@@ -817,8 +818,9 @@ class UIMixin:
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
-        act_hc = Action(FluentIcon.HIGHTLIGHT, "高亮颜色设置", self)
-        act_hc.triggered.connect(lambda: QTimer.singleShot(0, self._on_highlight_color))
+        act_hc = Action(FluentIcon.PALETTE, "主题颜色设置", self)
+        act_hc.setToolTip("设置全局强调色（按钮/选中态/进度条/链接，即时生效并持久化）")
+        act_hc.triggered.connect(lambda: QTimer.singleShot(0, self._on_theme_color))
         func_menu.addAction(act_sc)
         func_menu.addAction(act_hc)
         func_btn = TransparentDropDownPushButton("功能", self._menubar_widget)
@@ -983,19 +985,18 @@ class UIMixin:
             self._init_shortcuts()
             self._append_log(f"[配置] 已更新快捷键: {new_sc}")
 
-    def _on_highlight_color(self):
-        """弹出颜色选择对话框（Fluent ColorDialog）"""
-        current = self.highlight_color
-        dlg = ColorDialog(current, "选择高亮颜色", self)
+    def _on_theme_color(self):
+        """弹出主题强调色选择对话框（Fluent ColorDialog）：选择后全局即时生效并持久化"""
+        current = QColor(self._theme_color)
+        dlg = ColorDialog(current, "选择主题强调色", self)
         if dlg.exec():
             color = dlg.color
-            self.highlight_color = color
-            self._save_settings({
-                "highlight_color": [color.red(), color.green(), color.blue()]
-            })
+            self._theme_color = color.name()
+            self._save_settings({"theme_color": color.name()})
+            setThemeColor(color.name(), lazy=True)
             self._append_log(
-                f"[配置] 已更新高亮颜色: RGB({color.red()},{color.green()},{color.blue()})")
-            self._show_info_bar(f"[配置] 已更新高亮颜色: RGB({color.red()},{color.green()},{color.blue()})")
+                f"[配置] 已更新主题强调色: {color.name()}")
+            self._show_info_bar(f"[配置] 已更新主题强调色: {color.name()}")
 
     def _on_font_size(self):
         """弹出字号选择对话框（Fluent SpinBox）"""
@@ -1488,6 +1489,10 @@ class UIMixin:
             self._save_settings(new_data)
             self._reload_settings_cache()
             self._load_paths()
+            # 日志高亮规则即时生效：notify/颜色/正则改动无需重启
+            # （_log_rules 是渲染与通知共用的编译结果，不刷新则旧规则仍生效）
+            self._log_rules = _compile_log_rules(
+                new_data.get("log_highlight_rules") or _DEFAULT_LOG_RULES)
             # 外观变更即时应用
             if new_data.get("font_size") != old_font_size or new_data.get("font_family") != old_font_family:
                 self._apply_global_font()
@@ -1561,11 +1566,24 @@ class UIMixin:
 
     # ==================== 设置应用 ====================
 
-    def _apply_highlight_color(self):
-        """从 settings.json 加载高亮颜色"""
-        settings = self._load_settings()
-        rgb = settings.get("highlight_color", self.DEFAULT_HIGHLIGHT_COLOR)
-        self.highlight_color = QColor(rgb[0], rgb[1], rgb[2])
+    @staticmethod
+    def _parse_theme_color(settings):
+        """解析主题强调色：优先 theme_color（HEX），兼容旧 highlight_color（RGB 列表）"""
+        # 函数级导入：DEFAULT_THEME_COLOR 是 SettingsMixin 的类属性（非模块级名字），
+        # 且包初始化链路上模块级导入可能遭遇部分初始化，延迟到调用时最稳妥
+        from main_window.settings_mixin import SettingsMixin
+        color = settings.get("theme_color")
+        if isinstance(color, str) and color.startswith("#"):
+            return color
+        rgb = settings.get("highlight_color")
+        if isinstance(rgb, (list, tuple)) and len(rgb) == 3:
+            return "#{:02x}{:02x}{:02x}".format(
+                *(max(0, min(255, int(c))) for c in rgb))
+        return SettingsMixin.DEFAULT_THEME_COLOR
+
+    def _apply_theme_color(self):
+        """从 settings.json 加载主题强调色到内存（_apply_theme 时应用 setThemeColor）"""
+        self._theme_color = self._parse_theme_color(self._load_settings())
 
     def _apply_font_size(self):
         self._apply_global_font()
@@ -1642,7 +1660,7 @@ class UIMixin:
         is_dark = self._effective_is_dark(settings)
 
         setTheme(Theme.DARK if is_dark else Theme.LIGHT)
-        setThemeColor("#00BCD4", lazy=True)
+        setThemeColor(self._parse_theme_color(settings), lazy=True)
         QApplication.styleHints().setColorScheme(
             Qt.ColorScheme.Dark if is_dark else Qt.ColorScheme.Light)
 

@@ -611,11 +611,24 @@ class ConnDiagPanel(QDialog):
 if __name__ == '__main__':
     # 独立调试：python -m windows.conn_diag_panel
     import sys
+    import json
+    import os
     from PySide6.QtWidgets import QApplication
     from qfluentwidgets import setTheme, Theme, setThemeColor
+
+    def _debug_theme_color():
+        """调试入口读取 settings.json 主题强调色（与主程序入口一致）"""
+        try:
+            p = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "settings.json")
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f).get("theme_color", "#00BCD4")
+        except Exception:
+            return "#00BCD4"
+
     app = QApplication(sys.argv)
     setTheme(Theme.DARK)
-    setThemeColor("#00BCD4", lazy=True)
+    setThemeColor(_debug_theme_color(), lazy=True)
     win = ConnDiagPanel()
     win.show()
     sys.exit(app.exec())

@@ -863,7 +863,8 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 | `_init_context_menus()` | 初始化右键菜单 |
 | `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 + 端口占用 + 视频/日志批量整理） |
 | `_apply_theme()` | 应用深色/浅色主题 |
-| `_apply_highlight_color()` | 应用日志高亮颜色 |
+| `_parse_theme_color(settings)` | [静态] 解析主题强调色：优先 `theme_color`（HEX），兼容旧 `highlight_color`（RGB 列表） |
+| `_apply_theme_color()` | 从 settings.json 加载主题强调色到内存（`_apply_theme` 时应用） |
 | `_apply_font_size()` | 应用字号设置 |
 | `_apply_font_family()` | 应用字体设置 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
@@ -881,7 +882,7 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 
 **数据驱动 collect 机制**：`_CONFIG_ITEMS` 配置表描述每项 `(配置key, 所属分区, 控件获取lambda, 读取函数, 回退函数)`，`collect()` 循环统一收集——未构建分区的项用回退函数从原始配置取值，已构建的从控件读值。
 
-**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`，默认规则「错误」（红，通知）/「警告」（橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
+**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`，默认规则「错误」（红，通知）/「警告」（橙，静默）/「返回」「加分」「add」（旧版硬编码关键词迁移，橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
 
 **NewLog 路径默认值**：`newlog_excel_dir` 默认 `~/Desktop/excel`、`newlog_out_dir` 默认 `~/Desktop`。
 
@@ -952,7 +953,8 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `dark_theme` | bool | false | 深色主题开关（旧字段） |
 | `theme_mode` | str | "auto" | 主题模式：auto/light/dark |
 | `classic_layout` | bool | false | 经典布局模式 |
-| `highlight_color` | [r,g,b] | [220,80,20] | 日志高亮颜色（旧字段） |
+| `theme_color` | str | "#00BCD4" | 主题强调色（功能菜单「主题颜色设置」修改，即时生效） |
+| `highlight_color` | [r,g,b] | [220,80,20] | 日志高亮颜色（旧字段，已废弃，仅作 theme_color 兼容回退） |
 | `log_highlight_rules` | [object] | 见默认 | 日志高亮规则列表 `[{name, pattern, color, notify}]` |
 | `ssh_user` | str | — | SSH 默认用户名 |
 | `ssh_pass` | str | — | SSH 默认密码（DPAPI 加密） |

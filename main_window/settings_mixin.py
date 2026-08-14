@@ -38,8 +38,8 @@ class SettingsMixin:
         "shortcut_open_config": "Ctrl+,",
         "shortcut_p2p_panel": "F9",
     }
-    # 默认高亮颜色（橙色）
-    DEFAULT_HIGHLIGHT_COLOR = [220, 80, 20]
+    # 默认主题强调色（青色，与早期硬编码 setThemeColor("#00BCD4") 一致）
+    DEFAULT_THEME_COLOR = "#00BCD4"
 
     @staticmethod
     def _get_app_dir():

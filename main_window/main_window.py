@@ -16,7 +16,7 @@ from qfluentwidgets.window.fluent_window import FluentWindowBase
 
 from autowork_with_table import Ui_MainWindow
 from core.utils import natural_sort_key, show_info_bar
-from main_window.settings_dialog import _DEFAULT_LOG_RULES
+from main_window.settings_dialog import _DEFAULT_LOG_RULES, _compile_log_rules
 
 from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
@@ -25,33 +25,17 @@ from .ui_mixin import UIMixin
 from qfluentwidgets import Dialog
 
 
-def _compile_log_rules(raw_rules):
-    """把 settings.json 中的规则配置编译为可匹配对象列表（非法正则可跳过）"""
-    rules = []
-    for r in raw_rules or []:
-        try:
-            rules.append({
-                "name": str(r.get("name", "") or ""),
-                "regex": re.compile(r.get("pattern", "") or ""),
-                "color": str(r.get("color", "#ff5252") or "#ff5252"),
-                "notify": bool(r.get("notify", False)),
-            })
-        except re.error:
-            continue
-    return rules
-
-
 def _match_log_rule(line, rules):
-    """返回首个命中规则的 (color, name)，未命中返回 (None, None)"""
+    """返回首个命中规则的 (color, name, notify)，未命中返回 (None, None, False)（notify 决定是否弹 InfoBar）"""
     for r in rules:
         if r["regex"].search(line):
-            return r["color"], r["name"]
-    return None, None
+            return r["color"], r["name"], r["notify"]
+    return None, None, False
 
 
 class _LogLoadWorker(QThread):
     """后台读取日志文件并匹配高亮"""
-    loaded = Signal(list, int, bool, float)  # lines_data(line,color,name), line_count, truncated, size_mb
+    loaded = Signal(list, int, bool, float)  # lines_data(line,color,name,notify), line_count, truncated, size_mb
     error = Signal(str)
 
     def __init__(self, path, rules, tail_bytes=2 * 1024 * 1024):
@@ -85,8 +69,8 @@ class _LogLoadWorker(QThread):
             # 预计算高亮信息（规则按序匹配，取首个命中）
             lines_data = []
             for line in lines:
-                color, name = _match_log_rule(line, self.rules)
-                lines_data.append((line, color, name))
+                color, name, notify = _match_log_rule(line, self.rules)
+                lines_data.append((line, color, name, notify))
 
             size_mb = file_size / (1024 * 1024)
             self.loaded.emit(lines_data, len(lines_data), truncated, size_mb)
@@ -199,8 +183,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._restore_frame_offset()
         # B3: 第三列日志内容过滤框（须在 _apply_layout 之前安装好布局切换钩子）
         self._init_log_filter()
-        # 从 settings.json 加载并应用用户自定义设置（高亮颜色、字号、字体等）
-        self._apply_highlight_color()
+        # 从 settings.json 加载并应用用户自定义设置（主题强调色、字号、字体等）
+        self._apply_theme_color()
         # 日志高亮规则（设置对话框「日志高亮」分区维护，存 settings.json）
         cfg_rules = self._load_settings().get("log_highlight_rules")
         self._log_rules = _compile_log_rules(cfg_rules or _DEFAULT_LOG_RULES)
@@ -349,8 +333,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         if not cur.atBlockStart():
             cur.insertBlock()
         for line in lines:
-            color, name = _match_log_rule(line, self._log_rules)
-            if color and name and name not in hit_names:
+            color, name, notify = _match_log_rule(line, self._log_rules)
+            if notify and name not in hit_names:
                 hit_names.append(name)
             fmt = QTextCharFormat()
             if color:
@@ -1119,17 +1103,17 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """日志加载完成，填充 UI"""
         self.ui.log_list.setUpdatesEnabled(False)
         self.ui.log_list.clear()
-        for line, color, _name in lines_data:
+        for line, color, _name, _notify in lines_data:
             item = QListWidgetItem(line)
             if color:
                 item.setForeground(QBrush(QColor(color)))
             self.ui.log_list.addItem(item)
         self.ui.log_list.setUpdatesEnabled(True)
         self._update_empty_hint(self.ui.log_list)
-        # 日志文件命中通知规则 → InfoBar（复用 10s 防抖）
+        # 日志文件命中通知规则 → InfoBar（仅 notify=True 的规则，复用 10s 防抖）
         now = time.time()
-        for _line, _color, name in lines_data:
-            if name and now - self._rule_last_notify.get(name, 0) >= 10:
+        for _line, _color, name, notify in lines_data:
+            if notify and name and now - self._rule_last_notify.get(name, 0) >= 10:
                 self._rule_last_notify[name] = now
                 self._show_info_bar(f"日志文件命中「{name}」规则", "warning",
                                     duration=3000)
@@ -1323,7 +1307,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     def _flash_list_item(self, item, times=4, interval=250):
         """列表项背景色闪烁提示（主题色 ↔ 原背景交替，结束后恢复）"""
-        accent = QBrush(QColor(0, 188, 212))  # 与 setThemeColor("#00BCD4") 一致
+        accent = QBrush(QColor(self._theme_color))  # 与主题强调色一致
         orig = item.data(Qt.BackgroundRole)
         state = {'n': 0}
 

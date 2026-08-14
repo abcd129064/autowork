@@ -85,7 +85,7 @@ def main():
         _settings = {}
     _is_dark = MainWindow._effective_is_dark(_settings)
     setTheme(Theme.DARK if _is_dark else Theme.LIGHT)
-    setThemeColor("#00BCD4", lazy=True)
+    setThemeColor(MainWindow._parse_theme_color(_settings), lazy=True)
     # 锁定 Qt 调色板，禁止 Windows 深色模式向应用注入深色调色板
     QApplication.styleHints().setColorScheme(
         Qt.ColorScheme.Dark if _is_dark else Qt.ColorScheme.Light)

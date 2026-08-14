@@ -4138,14 +4138,26 @@ class ManagementPanelWindow(FluentWindow):
 
 if __name__ == "__main__":
     import sys
+    import json
+    import os
     import core.acrylic_patch  # noqa: F401
     from PySide6.QtWidgets import QApplication
     from qfluentwidgets import setTheme, setThemeColor, Theme
 
+    def _debug_theme_color():
+        """调试入口读取 settings.json 主题强调色（与主程序入口一致）"""
+        try:
+            p = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "settings.json")
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f).get("theme_color", "#00BCD4")
+        except Exception:
+            return "#00BCD4"
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     setTheme(Theme.DARK)
-    setThemeColor("#00BCD4", lazy=True)
+    setThemeColor(_debug_theme_color(), lazy=True)
     win = ManagementPanelWindow()
     win.show()
     sys.exit(app.exec())
