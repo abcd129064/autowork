@@ -81,17 +81,14 @@ def _dir_similarity(name: str, candidates: list) -> int:
         cp, _, cs = c.rpartition("-")
         if np and cp:
             nps, cps = norm_device_suffix(np), norm_device_suffix(cp)
-            # 前缀完全相同时基础 55 分；后缀归一化相等再 +40（结构化最高档）
             if np == cp:
                 score += 55
                 if ns and norm_device_suffix(ns) and norm_device_suffix(ns) == norm_device_suffix(cs):
                     score += 40
-            # 仅前缀归一化相同（如 281 与 281-08 的店号部分）：+30，后缀相同再 +60
             elif nps and nps == cps:
                 score += 30
                 if ns and ns == cs:
                     score += 60
-        # 字符级相似度兑底：最高 60 分，与结构化得分取较大值
         ratio = difflib.SequenceMatcher(None, n.lower(), c.lower()).ratio()
         score = max(score, int(round(ratio * 60)))
         best = max(best, score)
@@ -471,7 +468,6 @@ class AddRecordDialog(QDialog):
         self.accept()
 
     def get_record(self) -> dict:
-        """收集表单内容为球桌记录（onlineStatusName 留空，同步时由接口数据覆盖）"""
         return {
             "name": self._edit_name.text().strip(),
             "roomName": self._edit_room.text().strip(),
@@ -719,7 +715,6 @@ class UploadListDialog(QDialog):
         return btn
 
     def _populate(self):
-        """扫描 upload 根目录构建清单树：一级=设备目录，二级=文件/子文件夹，逐行挂删除按钮"""
         total_files = 0
         total_size = 0
         try:
@@ -811,7 +806,6 @@ class UploadListDialog(QDialog):
         self._populate()
 
     def _open_dir(self):
-        """在资源管理器中打开 upload 根目录"""
         if os.path.isdir(self._upload_root):
             os.startfile(self._upload_root)
 
@@ -1159,7 +1153,6 @@ class TablePage(QWidget):
         self._lbl_time.setText(f"数据时间: {sync_time}" if sync_time else "未同步")
 
     def _sync_from_api(self):
-        """从服务器拉取全量球桌数据并落库（任务运行中忽略重复点击）"""
         if self._worker and self._worker.isRunning():
             return
         self._refresh_btn.setEnabled(False)
@@ -1238,7 +1231,6 @@ class TablePage(QWidget):
         self._search_timer.start()
 
     def _do_search(self):
-        """搜索防抖到期：回到第一页按当前关键词重查"""
         self._page_no = 1
         self._load_local()
 
@@ -1263,7 +1255,6 @@ class TablePage(QWidget):
             self._load_local()
 
     def _toggle_col(self, col_idx, visible):
-        """列显隐切换：维护隐藏集合并同步表头"""
         if visible:
             self._hidden_cols.discard(col_idx)
         else:
@@ -1316,7 +1307,6 @@ class TablePage(QWidget):
         snk 优先取行数据 snk_code 列（存储时已从 remark 解析/手动写入），
         兜底再从 remark 正则解析；两者皆无则该球桌不可远程。
         """
-        # 列索引：5=SNK标识列（存储时已从 remark 解析/手动写入），3=备注列兑底正则解析
         snk_item = self._table.item(row_idx, 5)
         remark_item = self._table.item(row_idx, 3)
         table_item = self._table.item(row_idx, 0)
@@ -1534,7 +1524,6 @@ class FileListPanel(QWidget):
     # ---------- 展示 ----------
 
     def show_files(self, row: dict, title: str, fields: list, can_migrate: bool = True):
-        """打开面板展示指定分类的文件列表：重建条目、默认选中首条并滑入"""
         self._row = row
         self._title = title
         self._fields = fields
@@ -1549,7 +1538,6 @@ class FileListPanel(QWidget):
         self.slide_in()
 
     def _reload_entries(self):
-        """按当前 _fields 重建文件条目与表格（源分类随条目保留，仅供迁移使用）"""
         self._entries = []
         for field in self._fields:
             src_cat = FIELD_CATEGORY.get(field, "")
@@ -2066,7 +2054,6 @@ class DevicePage(QWidget):
         return self._date_picker.date.toString("yyyy/MM/dd")
 
     def _on_date_changed(self, _=None):
-        """日期切换：回到第一页、收起文件面板并按新日期重新查询"""
         self._page_no = 1
         panel = getattr(self, "_file_panel", None)
         if panel:
@@ -2153,7 +2140,6 @@ class DevicePage(QWidget):
         self._update_pager(date, keyword)
 
     def _search_from_api(self):
-        """按当前日期从服务器拉取设备数据（kd 数据源携带搜索词减少传输量）"""
         date = self._current_date()
         if not date:
             return
@@ -2269,7 +2255,6 @@ class DevicePage(QWidget):
                         self._table.setItem(r, c, cell)
                         continue
                     if isinstance(val, list):
-                        # 文件分类列：单元格显示数量，tooltip 预览前 30 个文件名
                         display = str(len(val))
                         tip = "\n".join(val[:30]) + ("..." if len(val) > 30 else "")
                     else:
@@ -2278,7 +2263,6 @@ class DevicePage(QWidget):
                     cell = QTableWidgetItem(display)
                     cell.setToolTip(tip if tip else "(空)")
                     if key in self._FILE_VIEW_FIELDS:
-                        # 可点击列：链接色提示，点击滑出右侧文件面板
                         cell.setForeground(_LINK_COLOR)
                         cell.setToolTip("点击查看文件列表")
                     self._table.setItem(r, c, cell)
@@ -2373,7 +2357,6 @@ class DevicePage(QWidget):
         return table_db.get_kd_row_full(row_id) or row
 
     def _show_context_menu(self, pos):
-        """右键菜单：查看文件列表 / 复制文件列表 / 复制单元格 / 远程连接 / 清除映射"""
         idx = self._table.indexAt(pos)
         if not idx.isValid():
             return
@@ -2500,13 +2483,11 @@ class DevicePage(QWidget):
         bridge.open_session(kind, snk, table_id, notifier=self, source="设备状态")
 
     def _show_files_dialog(self, row_idx):
-        """弹出该行全部文件分类的详情弹窗（kd 数据按 id 懒加载完整行）"""
         row = self._get_full_row_at(row_idx)
         if row:
             DeviceFilesDialog(row, self).exec()
 
     def _copy_file_field(self, row_idx, field):
-        """复制指定文件字段的全部文件名到剪贴板（每行一个）"""
         row = self._get_full_row_at(row_idx)
         files = row.get(field) or []
         QApplication.clipboard().setText("\n".join(files))
@@ -2526,7 +2507,6 @@ class DevicePage(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_cell_clicked(self, row, col):
-        """点击文件统计列：滑出右侧文件面板展示对应分类（仅可点击列响应）"""
         key = DEVICE_COLUMNS[col][0]
         cfg = self._FILE_VIEW_FIELDS.get(key)
         if not cfg:
@@ -3004,7 +2984,6 @@ class DevicePage(QWidget):
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
     def resizeEvent(self, e):
-        """窗口尺寸变化时同步滑出面板的高度与位置（面板贴右缘）"""
         super().resizeEvent(e)
         panel = getattr(self, "_file_panel", None)
         if panel and panel.isVisible():
@@ -3335,7 +3314,6 @@ class _TrendChart(QWidget):
         self.setMouseTracking(True)
 
     def set_data(self, rows):
-        """设置趋势数据并重绘（同时清空悬停高亮）"""
         self._rows = list(rows or [])
         self._hover = -1
         self.update()
@@ -3428,11 +3406,9 @@ class _TrendChart(QWidget):
                                      rad * 2, rad * 2))
 
     def mouseMoveEvent(self, event):
-        """悬停取最近的 X 数据点：更新高亮并显示该日期的三指标 tooltip"""
         if not self._rows or not self._pts_x:
             return
         x = event.position().x()
-        # 按 x 坐标绝对差取最近的数据点索引
         idx = min(range(len(self._pts_x)),
                   key=lambda i: abs(self._pts_x[i] - x))
         if idx != self._hover:
@@ -3726,7 +3702,6 @@ class TrendPage(QWidget):
         self._search_timer.start()
 
     def _do_search_candidates(self):
-        """防抖后按关键词查候选设备并填充下拉（空关键词直接清空）"""
         kw = self._search_edit.text().strip()
         if not kw:
             self._candidates = []
@@ -3763,7 +3738,6 @@ class TrendPage(QWidget):
             self._lbl_trend_title.setText("未匹配到设备")
 
     def _on_device_chosen(self, _=None):
-        """下拉选择设备 → 加载该设备近 30 天趋势"""
         code = self._device_combo.currentData()
         if code:
             self._load_trend(str(code))
@@ -3925,7 +3899,6 @@ class HealthPage(QWidget):
         self._table.setRowCount(0)
         for r in rows:
             h = float(r.get("health") or 0)
-            # 阈值分级：>5000 严重异常（红），4000~5000 健康度异常（橙）
             severe = h > table_db.HEALTH_SEVERE
             color = QColor("#ff5252") if severe else QColor("#f0a020")
             level = "严重异常" if severe else "健康度异常"
