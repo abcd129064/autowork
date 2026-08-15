@@ -11,7 +11,7 @@
     win.show()
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QVBoxLayout
 from qfluentwidgets import TabWidget
 from qfluentwidgets.window.fluent_window import FluentTitleBar
@@ -83,6 +83,15 @@ class RemoteSessionWindow(FramelessWindow):
         self._panels.append(panel)
         idx = self._tab_widget.addTab(panel, title, icon)
         self._tab_widget.setCurrentIndex(idx)
+        # 新会话添加后延迟一帧置顶：标签页插入/重绘完成后窗口回到最前。
+        # 覆盖异步打开（frp 隧道就绪回调）等时序下窗口被主窗口压住的场景
+        QTimer.singleShot(0, self._bring_to_front)
+
+    def _bring_to_front(self):
+        """置顶并激活窗口（show + raise + activate，多入口统一）"""
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def session_count(self) -> int:
         """当前打开的会话数量"""

@@ -837,6 +837,11 @@ class RemoteMixin:
             try:
                 # 检查 C++ 对象是否已被销毁
                 win.isVisible()
+                # 已有窗口：重新显示并置顶。新建会话后用户应立即看到会话窗口，
+                # 否则窗口留在主窗口下层，用户会误以为点击新建无效
+                win.show()
+                win.raise_()
+                win.activateWindow()
                 return win
             except RuntimeError:
                 self._remote_session_window = None
@@ -886,6 +891,7 @@ class RemoteMixin:
         panel = SSHTerminalPanel(
             host, port, username, password,
             log_callback=lambda msg: self._append_log(msg),
+            server_name=server_name,
         )
         self._ensure_session_window().add_session(panel)
 
@@ -989,6 +995,7 @@ class RemoteMixin:
                     panel = SSHTerminalPanel(
                         host, port, username, password,
                         log_callback=lambda msg: self._append_log(msg),
+                        server_name=server_name,
                     )
                     self._ensure_session_window().add_session(panel)
                     restored += 1
