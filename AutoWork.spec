@@ -3,6 +3,55 @@
 import os
 from PyInstaller.utils.hooks import collect_submodules
 
+# ---- 沙箱环境兼容：禁用 PyInstaller 隔离子进程 ----
+# 当前终端沙箱禁止 CreatePipe（WinError 5），isolated 子进程无法启动；
+# 将 isolated.Python 替换为进程内直接执行版本（call() 已有 _already_isolated
+# 分支支持进程内调用，语义等价，仅失去子进程隔离性，不影响收集结果）
+from PyInstaller import isolated as _pyi_isolated
+from PyInstaller.isolated import _parent as _pyi_parent
+
+
+class _InProcIsolatedPython(_pyi_isolated.Python):
+    def __init__(self, strict_mode=None):
+        self._child = None
+        self._already_isolated = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+# 必须同时覆盖两个命名空间：isolated.Python 供 with 语句解析；
+# _parent.Python 是模块级 call()/isolated_call 函数体内部的静态引用
+_pyi_isolated.Python = _InProcIsolatedPython
+_pyi_parent.Python = _InProcIsolatedPython
+
+# ---- Qt 应用单例幂等化（配合禁隔离） ----
+# isolated 子进程被禁用后，hook 的探测代码与打包主进程共享运行环境；
+# Qt 应用类单例（QCoreApplication 等）创建后 shiboken 禁止再次创建，
+# 导致后续 hook（如 QtNetwork 的 OpenSSL 探测）构造 QCoreApplication
+# 抛 RuntimeError。将构造 patch 为幂等：已有实例则跳过初始化（此类
+# 构造仅用于抑制警告，实例闲置，见 PyInstaller hook 的 noqa: F841）
+from PySide6.QtCore import QCoreApplication as _QCA
+from PySide6.QtGui import QGuiApplication as _QGA
+from PySide6.QtWidgets import QApplication as _QWA
+
+
+def _make_idempotent_app_init(_orig):
+    def _patched(self, *args, **kwargs):
+        _inst = _QCA.instance()
+        if _inst is not None and _inst is not self:
+            return
+        _orig(self, *args, **kwargs)
+    return _patched
+
+
+_QCA.__init__ = _make_idempotent_app_init(_QCA.__init__)
+_QGA.__init__ = _make_idempotent_app_init(_QGA.__init__)
+_QWA.__init__ = _make_idempotent_app_init(_QWA.__init__)
+
 # 自动收集 qfluentwidgets 全部子模块（含 _rc.resource 图标/QSS 资源）
 # 排除 multimedia（需要 PySide6.QtMultimedia，本项目未使用）
 qfw_hiddenimports = [
@@ -35,10 +84,19 @@ if _qt_prefix and os.path.basename(os.path.normpath(_qt_prefix)) == 'Library':
         'libbz2.dll', 'bz2.dll', 'bzip2.dll',
         'shiboken6.cp313-win_amd64.dll', 'pyside6.cp313-win_amd64.dll',
     }
+    # Qt6 DLL 黑名单：项目零引用 WebEngine/QML/Quick/Designer/Pdf 等模块，
+    # conda 的 Library/bin 含全套 Qt DLL，无差别收集会引入 ~250MB 无用二进制，
+    # 只收集运行时必需的 Core/Gui/Widgets/Svg/Network/OpenGL 等
+    _skip_qt_dlls = ('qt6webengine', 'qt6webchannel', 'qt6websockets',
+                     'qt6quick', 'qt6qml', 'qt6labs', 'qt6designer',
+                     'qt6pdf', 'qt6uitools', 'qt6help', 'qt6test',
+                     'qt6shadertools')
     for _f in sorted(os.listdir(_lib_bin)):
         _low = _f.lower()
-        if (_low.startswith('qt6') and _low.endswith('.dll')) \
-                or _low in _support_dlls:
+        if _low in _support_dlls:
+            _conda_binaries.append((os.path.join(_lib_bin, _f), '.'))
+        elif _low.startswith('qt6') and _low.endswith('.dll') \
+                and not _low.startswith(_skip_qt_dlls):
             _conda_binaries.append((os.path.join(_lib_bin, _f), '.'))
     # Qt 插件：放入 PySide6/plugins/<子目录>，PyInstaller 的
     # PySide6 hook 会据此自动设置 QT_PLUGIN_PATH
@@ -100,6 +158,43 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# ---- 体积精简（Analysis 后过滤，减小 _internal 体积） ----
+# babel 语言数据裁剪：trafilatura 链（摸鱼中心小说阅读器）仅需中英及常用语言，
+# 全量 1084 个 locale 数据约 28MB，白名单外全部剔除
+_babel_keep = {
+    'en.dat', 'zh.dat', 'zh_Hans.dat', 'zh_Hant.dat',
+    'ja.dat', 'ko.dat', 'fr.dat', 'de.dat', 'es.dat', 'it.dat',
+    'pt.dat', 'pt_BR.dat', 'ru.dat', 'ar.dat', 'hi.dat',
+    'vi.dat', 'th.dat', 'id.dat', 'ms.dat', 'tr.dat',
+}
+a.datas = [
+    _d for _d in a.datas
+    if not (_d[0].replace('\\', '/').startswith('babel/locale-data/')
+            and os.path.basename(_d[0]) not in _babel_keep)
+]
+# qpdf.dll 插件依赖已排除的 Qt6Pdf.dll，剔除避免运行时插件加载警告；
+# qsqlpsql.dll 依赖未收集的 libpq.dll（项目用 Python sqlite3，不用 QtSql 驱动）
+# 注意：.dll 经 reclassification 后同时存在于 a.datas 与 a.binaries，须双重过滤
+_skip_plugins_dll = ('imageformats/qpdf.dll', 'sqldrivers/qsqlpsql.dll')
+a.datas = [
+    _d for _d in a.datas
+    if not _d[0].replace('\\', '/').endswith(_skip_plugins_dll)
+]
+a.binaries = [
+    _b for _b in a.binaries
+    if not _b[0].replace('\\', '/').endswith(_skip_plugins_dll)
+]
+# MKL/LLVM 全量剔除（方案 D 核心）：环境中的 numpy 实为 PyPI openblas 版
+# （numpy.libs 内 libscipy_openblas64 dll），但 hook-numpy 因 conda-meta 残留
+# numpy 记录误判为 conda 版，collect_dynamic_libs 收进整套 MKL + omptarget
+# 依赖（~420MB）。已实测：28 个 mkl/omptarget/sycl dll 全部排除后 numpy
+# 全功能与 cv2 FFmpeg 视频读写均正常；mkl_fft/mkl_random 未被收集，无运行时依赖
+_mkl_drop = ('mkl', 'omptarget', 'sycl')
+a.binaries = [
+    _b for _b in a.binaries
+    if not os.path.basename(_b[0]).lower().startswith(_mkl_drop)
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(
