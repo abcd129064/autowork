@@ -34,7 +34,7 @@ _COLORS = [
     '#ffffff',  # 15 bright white
 ]
 
-_DEFAULT_FG = '#00ff00'
+_DEFAULT_FG = '#e5e5e5'
 _DEFAULT_BG = '#1e1e1e'
 
 # attrs 元组: (fg, bg, bold, underline) — 不可变，避免 dict 拷贝开销
