@@ -275,6 +275,30 @@ _HF_THRESHOLD = 3
 _HF_COLOR = QColor("#e81123")
 
 
+def _query_kd_page_with_stats(page_no, page_size, keyword, date,
+                              sort_key, sort_desc, hf_days):
+    """kd 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）"""
+    total, rows = table_db.query_kd_page(
+        page_no, page_size, keyword, date, sort_key, sort_desc)
+    try:
+        hf = table_db.get_submission_stats(days=hf_days)
+    except Exception:
+        hf = {"by_device": {}, "by_table": {}}
+    return total, rows, hf
+
+
+def _query_xqzg_page_with_stats(page_no, page_size, keyword,
+                                sort_key, sort_desc, hf_days):
+    """xqzg 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）"""
+    total, rows = table_db.query_xqzg_page(
+        page_no, page_size, keyword, sort_key, sort_desc)
+    try:
+        hf = table_db.get_submission_stats(days=hf_days)
+    except Exception:
+        hf = {"by_device": {}, "by_table": {}}
+    return total, rows, hf
+
+
 def _confirm_offline_connect(parent, last_report: str) -> bool:
     """A2 离线确认：设备下线时弹醒目确认框，返回是否仍要继续连接"""
     box = MessageBox(
@@ -1895,8 +1919,10 @@ class DevicePage(QWidget):
         self._date_picker.blockSignals(False)
         # 根据数据源调整日期选择器可用状态（xqzg 不按日期区分）
         self._apply_source_date_state()
-        # 复用缓存日历：替换 DatePicker._showCalendarView，避免每次点击重建（0.5s+ 延迟）
-        self._apply_calendar_cache()
+        # 复用缓存日历：替换 DatePicker._showCalendarView，避免每次点击重建（0.5s+ 延迟）。
+        # 缓存构建较重（日视图生成数万日期项），延后到事件循环空闲执行，
+        # 避免首次切页卡顿；构建完成前点击日历走默认路径（功能不受影响）
+        QTimer.singleShot(0, self._apply_calendar_cache)
         # 每小时定时拉取当天设备状态（仅 kd 数据源），保持状态字段时效性
         self._hourly_timer = QTimer(self)
         self._hourly_timer.setInterval(3600 * 1000)
@@ -2042,11 +2068,31 @@ class DevicePage(QWidget):
         self._file_panel = FileListPanel(self)
 
     def _apply_calendar_cache(self):
-        """复用缓存 CalendarView：替换 DatePicker._showCalendarView 为快速显示，避免每次点击重建"""
+        """复用缓存 CalendarView：替换 DatePicker._showCalendarView 为快速显示，避免每次点击重建
+
+        日视图默认生成 ±100 年约 7.3 万个日期项（约 0.5s），构建缓存期间临时把范围
+        缩到今年 ±10 年（约 40ms），构建后立即还原；缓存实例仅用于本页日期筛选，
+        数据窗口近十年足够，且不影响其他日历组件。
+        """
         try:
+            from qfluentwidgets.components.date_time import calendar_view as _cv_mod
             from qfluentwidgets.components.date_time.calendar_view import CalendarView
             picker = self._date_picker
-            cached_view = CalendarView(self.window())
+            _span = 10
+            _now_year = QDate.currentDate().year()
+            _orig_init_items = _cv_mod.DayScrollView._initItems
+
+            def _narrow_init_items(self):
+                # 缩小年份范围后再走原逻辑：_initItems 按 self.minYear/maxYear 逐日生成
+                self.minYear = _now_year - _span
+                self.maxYear = _now_year + _span
+                _orig_init_items(self)
+
+            _cv_mod.DayScrollView._initItems = _narrow_init_items
+            try:
+                cached_view = CalendarView(self.window())
+            finally:
+                _cv_mod.DayScrollView._initItems = _orig_init_items
             cached_view.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
             cached_view.hide()
 
@@ -2143,26 +2189,27 @@ class DevicePage(QWidget):
         keyword = self._search_edit.text().strip()
         if self._active_source() == "xqzg":
             self._query_worker = _DBQueryWorker(
-                table_db.query_xqzg_page,
+                _query_xqzg_page_with_stats,
                 self._page_no, self._page_size, keyword,
-                self._sort_key, self._sort_desc)
+                self._sort_key, self._sort_desc, _HF_DAYS)
             date = ""  # xqzg 不按日期筛选
         else:
             date = self._current_date()
-            # include_files=False：列表页只查轻量字段，文件 JSON 点开行时按 id 懒加载
+            # include_files=False：列表页只查轻量字段，文件 JSON 点开行时按 id 懒加载；
+            # 高频问题统计与分页查询同批在 Worker 线程完成，界面零同步查询
             self._query_worker = _DBQueryWorker(
-                table_db.query_kd_page,
+                _query_kd_page_with_stats,
                 self._page_no, self._page_size, keyword, date,
-                self._sort_key, self._sort_desc)
+                self._sort_key, self._sort_desc, _HF_DAYS)
         self._query_worker.finished.connect(
             lambda result, d=date, kw=keyword: self._on_query_finished(result, d, kw))
         self._query_worker.start()
 
     def _on_query_finished(self, result, date="", keyword=""):
-        """查询完成回调：更新表格与分页"""
-        total, rows = result
+        """查询完成回调：更新表格与分页（统计已随分页同批返回）"""
+        total, rows, hf_stats = result
         self._total = total
-        self._populate(rows)
+        self._populate(rows, hf_stats)
         self._update_pager(date, keyword)
 
     def _search_from_api(self):
@@ -2245,14 +2292,12 @@ class DevicePage(QWidget):
         self._lbl_info.setText(f"搜索失败: {msg}")
         show_info_bar(msg, "error", title="搜索失败", parent=self, duration=4000)
 
-    def _populate(self, rows):
+    def _populate(self, rows, hf_stats=None):
         # 缓存当前页数据，供 _get_row_at 直接按行号取用，避免每次点击都重查数据库
         self._current_rows = rows
-        # 高频问题标记：一次聚合查询（无 N+1），失败静默不标记
-        try:
-            _hf_stats = table_db.get_submission_stats(days=_HF_DAYS)
-        except Exception:
-            _hf_stats = {"by_device": {}, "by_table": {}}
+        # 高频问题标记：统计随分页查询在 Worker 线程完成（界面零同步查询），
+        # 传入为空时降级为不标记（防御，正常链路不会发生）
+        hf_stats = hf_stats or {"by_device": {}, "by_table": {}}
         # 填充期间关闭界面更新与信号，完成后一次性恢复
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
@@ -2261,8 +2306,8 @@ class DevicePage(QWidget):
             for r, item in enumerate(rows):
                 # 优先按 device_code 匹配，无则回退 table_id（两者指向同一批记录）
                 _dev = str(item.get("device_code") or "").strip()
-                hf = (_hf_stats["by_device"].get(_dev, 0) if _dev else
-                      _hf_stats["by_table"].get(
+                hf = (hf_stats["by_device"].get(_dev, 0) if _dev else
+                      hf_stats["by_table"].get(
                           str(item.get("table_id") or "").strip(), 0))
                 for c, (key, _, _) in enumerate(DEVICE_COLUMNS):
                     val = item.get(key)
