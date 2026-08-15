@@ -1439,6 +1439,7 @@ class FileListPanel(QWidget):
         self._entries = []      # [(文件名, 源分类), ...]
         self._anim = None
         self._query_worker = None  # 异步刷新 Worker
+        self._preview_dlg = None   # 图片查看器（非模态，保持引用防 GC）
         self._init_ui()
         self.hide()
 
@@ -1617,11 +1618,19 @@ class FileListPanel(QWidget):
         self._btn_preview.setEnabled(preview_ok)
 
     def _open_image_preview(self):
-        """打开图片查看对话框：卡片式展示当前选中图片，支持左右翻页与迁移"""
+        """打开图片查看对话框（非模态，不阻塞面板操作）：卡片式展示当前选中
+        图片，支持左右翻页与迁移；已打开时复用窗口跳转到新选中图片"""
         rows = sorted({it.row() for it in self._list.selectedItems()})
         if not rows or not (0 <= rows[0] < len(self._entries)):
             return
         from windows.image_viewer import ImageViewerDialog
+        dlg = self._preview_dlg
+        if dlg is not None and dlg.isVisible():
+            # 复用打开中的查看器：同步最新条目快照并跳转，避免窗口堆叠
+            dlg.set_entries(self._entries, rows[0])
+            dlg.raise_()
+            dlg.activateWindow()
+            return
         dlg = ImageViewerDialog(
             self._entries, rows[0],
             file_path=self._device_page._current_date(),
@@ -1631,7 +1640,11 @@ class FileListPanel(QWidget):
             dest_options=MIGRATE_DEST_OPTIONS,
             btn_qss=_MIGRATE_BTN_QSS,
             parent=self.window())
-        dlg.exec()
+        self._preview_dlg = dlg
+        # 关闭即销毁（含迁移成功 accept）：销毁时清引用，避免残留隐藏窗口
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.destroyed.connect(lambda: setattr(self, '_preview_dlg', None))
+        dlg.show()
 
     def _on_migrate_btn(self, dest_cat):
         """底部迁移按钮：将当前选中的文件直接迁移到 dest_cat"""

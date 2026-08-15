@@ -15,10 +15,11 @@ import re
 import requests
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QSizePolicy, QApplication)
 from qfluentwidgets import (
     PushButton, ToolButton, FluentIcon, BodyLabel, CaptionLabel,
-    setCustomStyleSheet)
+    setCustomStyleSheet, RoundMenu, Action)
 
 from workers.table_worker import API2_BASE, CATEGORY_DIRS
 
@@ -45,6 +46,32 @@ def _name_variants(fname: str) -> list:
 
 def is_image_file(fname: str) -> bool:
     return str(fname).lower().endswith(_IMAGE_EXTS)
+
+
+def _clip_kd(fname):
+    """复制时截取文件名 'kd' 之前的字符（与右侧滑出列表的复制语义一致）。
+
+    设备照片文件名形如 20260802_125112kd-200055-20046-100835.jpg，
+    复制时通常只需要时间戳部分（kd 前）。不含 'kd' 的文件名原样返回。
+    """
+    fname = str(fname)
+    idx = fname.find("kd")
+    return fname[:idx] if idx > 0 else fname
+
+
+class _SelectableLabel(BodyLabel):
+    """可选中复制的文件名标签。
+
+    QLabel 的 TextSelectableByMouse 只保证拖选能力，悬停不会自动切换
+    I 型文本光标（Qt 固有行为），此处用 enter/leave 事件手动补上，
+    向用户暗示文本可选中；不参与文本交互时离开即恢复默认光标。"""
+    def enterEvent(self, e):
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.unsetCursor()
+        super().leaveEvent(e)
 
 
 class _ImageFetchWorker(QThread):
@@ -120,9 +147,19 @@ class ImageViewerDialog(QDialog):
         layout.setSpacing(8)
 
         # 标题行：文件名（左对齐，与图片左边缘对齐）
-        self._lbl_name = BodyLabel("", self)
+        self._lbl_name = _SelectableLabel("", self)
         self._lbl_name.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # 文件名可选中复制：悬停自动切换为 I 型文本光标，
+        # 鼠标拖选 + Ctrl+C 复制，右键菜单复制完整文件名
+        self._lbl_name.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        # qfluentwidgets Label 构造时会覆盖焦点策略，此处显式恢复 StrongFocus：
+        # 点击/拖选后持有键盘焦点，Ctrl+C 与 Shift+方向键选择才稳定生效
+        self._lbl_name.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._lbl_name.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lbl_name.customContextMenuRequested.connect(self._on_name_context_menu)
         layout.addWidget(self._lbl_name)
 
         # 图片区：左右箭头 + 居中图片标签
@@ -179,6 +216,14 @@ class ImageViewerDialog(QDialog):
 
     # ---------- 展示与翻页 ----------
 
+    def set_entries(self, entries, index):
+        """非模态复用：更新文件列表快照并跳转到指定条目。
+
+        面板在查看器打开期间可能已切换设备/日期/分类，复用窗口时需
+        同步最新条目，避免展示已失效的旧快照。"""
+        self._entries = list(entries)
+        self._show_index(index)
+
     def _show_index(self, idx):
         if not (0 <= idx < len(self._entries)):
             return
@@ -186,6 +231,8 @@ class ImageViewerDialog(QDialog):
         self._fetch_gen += 1  # 递增代际号，使未完成的旧下载响应失效
         fname, _src = self._entries[idx]
         self._lbl_name.setText(fname)
+        # 长文件名悬停显示全名（tooltip 不影响文本拖选与复制）
+        self._lbl_name.setToolTip(fname)
         self._lbl_status.setText(f"{idx + 1} / {len(self._entries)} · 加载中...")
         self._lbl_img.setText("")
         self._btn_prev.setEnabled(idx > 0)
@@ -197,6 +244,18 @@ class ImageViewerDialog(QDialog):
 
     def _next(self):
         self._show_index(self._idx + 1)
+
+    def _on_name_context_menu(self, pos):
+        """文件名右键菜单：复制文件名（截取 kd 前缀，与右侧滑出列表一致）"""
+        fname = self._lbl_name.text()
+        if not fname:
+            return
+        menu = RoundMenu(parent=self)
+        act = Action(FluentIcon.COPY, "复制文件名", self)
+        act.triggered.connect(
+            lambda: QApplication.clipboard().setText(_clip_kd(fname)))
+        menu.addAction(act)
+        menu.exec(self._lbl_name.mapToGlobal(pos))
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Left:
