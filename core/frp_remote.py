@@ -44,6 +44,9 @@ from p2p import generate_random_port
 _PANEL_TOML_NAME = "frpc_xtcp_panel.toml"
 # 手工 visitor 持久化 TOML（启动恢复 / 配置查看用），由 manager 同步维护
 _MAIN_TOML_NAME = "frpc_xtcp.toml"
+# 注册表元数据快照（全部 visitor 含 tableId/source/lastUsed），启动恢复用；
+# frpc_xtcp.toml 只能存 serverName/端口/密钥，关联球桌等元数据靠该文件补齐
+_META_NAME = "frpc_xtcp_meta.json"
 
 # frpc 服务器默认配置（auth_token 由 settings.json 提供）
 _FRPC_SERVER_DEFAULTS = {
@@ -60,6 +63,10 @@ _REUSE_TUNNEL_DELAY_MS = 300
 # visitor 注册来源标识（展示用，可透传自定义文案）
 SOURCE_MANUAL = "手工添加"
 SOURCE_SNK = "snk 快捷"
+SOURCE_TABLE = "球桌库"  # 远程面板「从球桌库选择」添加
+
+# 面板 visitor 列表（手工 + 球桌库）：连接时整组重建、写入 frpc_xtcp.toml 供恢复
+_PANEL_SOURCES = (SOURCE_MANUAL, SOURCE_TABLE)
 
 
 def _load_settings() -> dict:
@@ -113,13 +120,47 @@ class RemoteSessionManager(QObject):
         #                "tableId", "source", "lastUsed"}
         self._visitors: dict = {}
         self._session_window = None
-        self._load_manual_toml()
+        self._load_registry()
 
     # ---------- visitor 注册表 ----------
 
-    def _load_manual_toml(self):
-        """启动时从 frpc_xtcp.toml 恢复手工 visitor（不自动启动 frpc）"""
+    def _load_registry(self):
+        """启动恢复 visitor 注册表（不自动启动 frpc）
+
+        优先读 frpc_xtcp_meta.json 全量快照（含 snk 快捷隧道及关联球桌/
+        来源/最近使用），缺失或损坏时回退解析 frpc_xtcp.toml 仅恢复
+        手工 visitor。断开后「当前隧道」面板仍能看到已知隧道即靠此恢复。
+        """
         app_dir = get_app_dir()
+        try:
+            with open(os.path.join(app_dir, _META_NAME), "r",
+                      encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, list):
+            for v in data:
+                if not isinstance(v, dict):
+                    continue
+                name = str(v.get("serverName") or "").strip()
+                try:
+                    port = int(v.get("bindPort") or 0)
+                except (TypeError, ValueError):
+                    port = 0
+                if not name or not port:
+                    continue
+                self._visitors[name] = {
+                    "serverName": name,
+                    "bindPort": port,
+                    "secretKey": str(v.get("secretKey") or "")
+                    or self._default_secret_key(),
+                    "tableId": str(v.get("tableId") or ""),
+                    "source": str(v.get("source") or SOURCE_MANUAL),
+                    "lastUsed": str(v.get("lastUsed") or ""),
+                }
+            if self._visitors:
+                return
+        # 回退：元数据缺失（旧版本升级）时按 TOML 恢复手工 visitor
         for v in _parse_visitors_toml(os.path.join(app_dir, _MAIN_TOML_NAME)):
             self._visitors[v["serverName"]] = {
                 "serverName": v["serverName"],
@@ -129,6 +170,15 @@ class RemoteSessionManager(QObject):
                 "source": SOURCE_MANUAL,
                 "lastUsed": "",
             }
+
+    def _write_registry_meta(self, path: str):
+        """写出注册表元数据快照（apply 时调用，供下次启动完整恢复）"""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(list(self._visitors.values()), f,
+                          ensure_ascii=False, indent=2)
+        except OSError:
+            pass
 
     def register_visitor(self, server_name: str, bind_port: int | None = None,
                          secret_key: str | None = None, source: str = SOURCE_MANUAL,
@@ -182,23 +232,34 @@ class RemoteSessionManager(QObject):
 
     def ensure_visitor(self, snk: str, table_id: str = "",
                        source: str = SOURCE_SNK) -> tuple:
-        """确保 snk 对应 visitor 已注册且 frpc 正在运行，返回 (bindPort, 是否新启动)"""
+        """确保 snk 对应 visitor 已注册且 frpc 正在运行，返回 (bindPort, 是否新启动)
+
+        复用/新建后统一经 mark_used 刷新最近使用时间并发 visitors_changed，
+        保证隧道面板能立刻看到「最近使用/关联球桌」数据。
+        """
         snk = str(snk or "").strip()
         if not snk:
             raise ValueError("snk 不能为空")
         info = self._visitors.get(snk)
         # 已注册且 frpc 在运行：直接复用现有隧道（不重启），只刷新使用时间
         if info is not None and self.is_running():
-            info["lastUsed"] = _now_str()
-            if table_id:
-                info["tableId"] = str(table_id)
+            self.mark_used(snk, table_id)
             return info["bindPort"], False
         # 否则注册并重启 frpc 应用新配置（新隧道或 frpc 已退出）
         self.register_visitor(snk, source=source, table_id=table_id)
         self.apply()
-        info = self._visitors[snk]
+        self.mark_used(snk, table_id)
+        return self._visitors[snk]["bindPort"], True
+
+    def mark_used(self, server_name: str, table_id: str = ""):
+        """刷新 visitor 最近使用时间（可顺带补关联球桌）并通知 UI 刷新"""
+        info = self._visitors.get(str(server_name or "").strip())
+        if info is None:
+            return
         info["lastUsed"] = _now_str()
-        return info["bindPort"], True
+        if table_id:
+            info["tableId"] = str(table_id)
+        self.visitors_changed.emit()
 
     def remove_visitor(self, server_name: str) -> bool:
         """移除指定 visitor（不触发 frpc 重启，需调用方 apply）"""
@@ -232,12 +293,14 @@ class RemoteSessionManager(QObject):
         return [dict(v) for v in self._visitors.values()]
 
     def manual_visitors(self) -> list:
-        """手工来源的 visitor（供主窗口远程面板表单恢复）"""
+        """手工/球桌库来源的 visitor（供主窗口远程面板表单恢复）"""
         return [{
             "serverName": v["serverName"],
             "bindPort": v["bindPort"],
             "secretKey": v["secretKey"],
-        } for v in self._visitors.values() if v["source"] == SOURCE_MANUAL]
+            "tableId": v["tableId"],
+            "source": v["source"],
+        } for v in self._visitors.values() if v["source"] in _PANEL_SOURCES]
 
     def used_ports(self) -> set:
         return {v["bindPort"] for v in self._visitors.values()}
@@ -262,6 +325,8 @@ class RemoteSessionManager(QObject):
         app_dir = get_app_dir()
         # 先持久化手工 visitor 到独立文件：程序重启后能恢复手工隧道配置
         self._write_manual_toml(os.path.join(app_dir, _MAIN_TOML_NAME))
+        # 同步全量注册表元数据（含 snk 快捷），断开/重启后面板仍可展示
+        self._write_registry_meta(os.path.join(app_dir, _META_NAME))
         if not self._visitors:
             # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
             self._stop_frpc()
@@ -350,16 +415,16 @@ class RemoteSessionManager(QObject):
             self._write_visitor_blocks(f)
 
     def _write_manual_toml(self, path: str):
-        """同步维护 frpc_xtcp.toml（仅手工 visitor，启动恢复/配置查看用）"""
+        """同步维护 frpc_xtcp.toml（手工 + 球桌库 visitor，启动恢复/配置查看用）"""
         try:
             with open(path, "w", encoding="utf-8") as f:
-                self._write_visitor_blocks(f, source=SOURCE_MANUAL)
+                self._write_visitor_blocks(f, sources=_PANEL_SOURCES)
         except OSError:
             pass
 
-    def _write_visitor_blocks(self, f, source: str | None = None):
+    def _write_visitor_blocks(self, f, sources=None):
         for sn, v in self._visitors.items():
-            if source is not None and v["source"] != source:
+            if sources is not None and v["source"] not in sources:
                 continue
             f.write("[[visitors]]\n")
             f.write(f'name = "{sn}"\n')

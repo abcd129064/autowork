@@ -70,7 +70,6 @@ class SettingsDialog(MessageBoxBase):
         ("paths", "路径配置"),
         ("remote", "远程连接"),
         ("upload", "收集与上传"),
-        ("frpc", "FRPC 服务器"),
         ("ai", "API Key"),
         ("log_rules", "日志高亮"),
         ("appearance", "外观"),
@@ -106,7 +105,7 @@ class SettingsDialog(MessageBoxBase):
                 lambda cfg, k=key, d=default: str(cfg.get(k, "") or d),
             ))
 
-        # 远程连接（4项）
+        # 远程连接（5项）
         items.append(("ssh_user", "remote",
                        lambda s: getattr(s, '_edit_ssh_user', None),
                        lambda w: w.text().strip(),
@@ -123,6 +122,11 @@ class SettingsDialog(MessageBoxBase):
                        lambda s: getattr(s, '_edit_tcp_servers', None),
                        lambda w: [x.strip() for x in w.text().strip().split(",") if x.strip()],
                        lambda cfg: list(cfg.get("tcp_servers", []) or [])))
+        # 启动时恢复远程会话（默认开启；关闭后重启不再自动恢复未退出的会话）
+        items.append(("restore_remote_sessions", "remote",
+                       lambda s: getattr(s, '_switch_restore_sessions', None),
+                       lambda w: bool(w.isChecked()),
+                       lambda cfg: bool(cfg.get("restore_remote_sessions", True))))
 
         # 收集与上传（5项）
         items.append(("upload_host", "upload",
@@ -146,8 +150,8 @@ class SettingsDialog(MessageBoxBase):
                        lambda w: w.text(),
                        lambda cfg: str(cfg.get("upload_pass", "") or "")))
 
-        # FRPC 服务器（1项，嵌套字典）
-        items.append(("frpc_server", "frpc",
+        # FRPC 服务器（1项，嵌套字典）——已合并到「远程连接」分区
+        items.append(("frpc_server", "remote",
                        lambda s: getattr(s, '_frpc_built', False) and s or None,
                        lambda s: {
                            "serverAddr": s._edit_frpc_addr.text().strip(),
@@ -282,11 +286,21 @@ class SettingsDialog(MessageBoxBase):
             self._path_edits[key] = edit
             self.main_layout.addLayout(row)
 
-    # ---------- 远程连接 ----------
+    # ---------- 远程连接（含 FRPC 服务器，原独立分区已合并至此） ----------
     def _build_remote_section(self, cfg):
        # self._add_section_header("🌐 远程连接")
         form = QFormLayout()
         form.setSpacing(8)
+
+        # 会话恢复开关：关闭后重启程序不再自动恢复上次未退出的远程会话
+        self._switch_restore_sessions = SwitchButton(self)
+        self._switch_restore_sessions.setChecked(
+            bool(cfg.get("restore_remote_sessions", True)))
+        self._switch_restore_sessions.setOnText("开")
+        self._switch_restore_sessions.setOffText("关")
+        self._switch_restore_sessions.setToolTip(
+            "关闭后重启程序不会自动恢复上次未退出的 SSH/SFTP/远程桌面会话")
+        form.addRow("启动时恢复远程会话:", self._switch_restore_sessions)
 
         self._edit_ssh_user = LineEdit(self)
         self._edit_ssh_user.setText(cfg.get("ssh_user", ""))
@@ -311,6 +325,31 @@ class SettingsDialog(MessageBoxBase):
         # form.addRow("TCP服务器:", self._edit_tcp_servers)
 
         self.main_layout.addLayout(form)
+
+        # ---- FRPC 服务器（穿透配置与远程连接同属一条链路，合并展示） ----
+        self._add_section_header("FRPC 服务器")
+        frpc_form = QFormLayout()
+        frpc_form.setSpacing(8)
+        frpc = cfg.get("frpc_server", {})
+
+        self._edit_frpc_addr = LineEdit(self)
+        self._edit_frpc_addr.setText(frpc.get("serverAddr", ""))
+        self._edit_frpc_addr.setPlaceholderText("服务器 IP")
+        frpc_form.addRow("服务器地址:", self._edit_frpc_addr)
+
+        self._edit_frpc_port = LineEdit(self)
+        self._edit_frpc_port.setText(str(frpc.get("serverPort", 7000)))
+        self._edit_frpc_port.setPlaceholderText("端口号")
+        frpc_form.addRow("服务器端口:", self._edit_frpc_port)
+
+        self._edit_frpc_token = LineEdit(self)
+        self._edit_frpc_token.setText(frpc.get("auth_token", ""))
+        self._edit_frpc_token.setEchoMode(LineEdit.EchoMode.Password)
+        self._edit_frpc_token.setPlaceholderText("认证 Token")
+        frpc_form.addRow("认证 Token:", self._edit_frpc_token)
+
+        self.main_layout.addLayout(frpc_form)
+        self._frpc_built = True
 
     # ---------- 收集与上传 ----------
     def _build_upload_section(self, cfg):
@@ -346,31 +385,6 @@ class SettingsDialog(MessageBoxBase):
         form.addRow("上传密码:", self._edit_upload_pass)
 
         self.main_layout.addLayout(form)
-
-    # ---------- FRPC 服务器 ----------
-    def _build_frpc_section(self, cfg):
-       # self._add_section_header("🔗 FRPC 穿透")
-        frpc = cfg.get("frpc_server", {})
-        form = QFormLayout()
-        form.setSpacing(8)
-
-        self._edit_frpc_addr = LineEdit(self)
-        self._edit_frpc_addr.setText(frpc.get("serverAddr", ""))
-        self._edit_frpc_addr.setPlaceholderText("服务器 IP")
-        form.addRow("服务器地址:", self._edit_frpc_addr)
-
-        self._edit_frpc_port = LineEdit(self)
-        self._edit_frpc_port.setText(str(frpc.get("serverPort", 7000)))
-        self._edit_frpc_port.setPlaceholderText("端口号")
-        form.addRow("服务器端口:", self._edit_frpc_port)
-
-        self._edit_frpc_token = LineEdit(self)
-        self._edit_frpc_token.setText(frpc.get("auth_token", ""))
-        self._edit_frpc_token.setPlaceholderText("认证 Token")
-        form.addRow("认证 Token:", self._edit_frpc_token)
-
-        self.main_layout.addLayout(form)
-        self._frpc_built = True
 
     # ---------- AI 分析 ----------
     def _build_ai_section(self, cfg):

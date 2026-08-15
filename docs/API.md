@@ -112,7 +112,7 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 | 函数/常量 | 签名 | 说明 |
 |-----------|------|------|
 | `get_session_manager()` | `() -> RemoteSessionManager` | 获取全局会话管理器单例 |
-| `SOURCE_MANUAL` / `SOURCE_SNK` | `str` | visitor 来源标记（手工添加 / snk 快捷） |
+| `SOURCE_MANUAL` / `SOURCE_SNK` / `SOURCE_TABLE` | `str` | visitor 来源标记（手工添加 / snk 快捷 / 球桌库选择） |
 
 #### 类 `RemoteSessionManager(QObject)`
 

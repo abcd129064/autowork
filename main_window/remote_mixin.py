@@ -28,7 +28,7 @@ from windows.ssh_terminal import SSHTerminalPanel
 from windows.rdp_window import RDPPanel
 from windows.remote_session_window import RemoteSessionWindow
 from p2p import generate_random_port
-from core.frp_remote import get_session_manager, SOURCE_MANUAL
+from core.frp_remote import get_session_manager, SOURCE_MANUAL, SOURCE_TABLE
 from database import table_db
 
 
@@ -183,8 +183,10 @@ class RemoteMixin:
         win.activateWindow()
 
     def _get_new_random_port(self):
-        """生成不冲突的随机端口（排除会话中心已注册 visitor 的端口）"""
-        return generate_random_port(exclude_ports=self._session_mgr.used_ports())
+        """生成不冲突的随机端口（排除会话中心与本地 visitor 列表已用端口）"""
+        taken = set(self._session_mgr.used_ports())
+        taken |= {int(v.get("bindPort") or 0) for v in self._p2p_visitors}
+        return generate_random_port(exclude_ports=taken)
 
     def _on_p2p_toggled(self, checked):
         """切换远程面板显示/隐藏"""
@@ -219,6 +221,12 @@ class RemoteMixin:
         self._p2p_current_index = len(self._p2p_visitors) - 1
         self.ui.p2p_visitor_list.setCurrentRow(self._p2p_current_index)
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
+        # frpc 运行中新增的隧道不会立即生效：visitor 仅进入待连接列表，
+        # 需断开重连（重新 register_visitor + apply 重启 frpc）才被加载
+        if self._session_mgr.is_running():
+            self._show_info_bar(
+                f"隧道「{server_name}」已添加，请断开后重新连接以生效",
+                "warning", title="提示", duration=4000)
 
     def _on_p2p_delete(self):
         """删除按钮：XTCP 模式删除 visitor，TCP 模式删除选中的服务器"""
@@ -493,9 +501,18 @@ class RemoteMixin:
             self._append_log(f"[球桌库] {snk} 已在 visitor 列表中，跳过重复添加")
             return
         # 复用添加按钮槽函数（表单已回填，内部完成端口校验/列表刷新/选中新行）
+        # 先重新分配空闲端口：连接状态下表单残留的旧端口可能已被现有隧道
+        # 占用，直接走 _on_p2p_add 会被端口校验拒绝导致添加静默失败
+        self.ui.p2p_form_port.setValue(self._get_new_random_port())
         self._on_p2p_add()
         if self._p2p_visitors \
                 and self._p2p_visitors[-1].get("serverName") == snk:
+            # 打标来源与关联球桌：隧道面板展示「球桌库」而非「手工添加」
+            added = self._p2p_visitors[-1]
+            added["source"] = SOURCE_TABLE
+            added["tableId"] = str(
+                self._p2p_selected_table.get("name") or "").strip() \
+                if self._p2p_selected_table else ""
             self._show_info_bar(f"已添加 {snk}", "success")
 
     # ------------------------------------------------------------------ TCP 保存的服务器
@@ -635,21 +652,41 @@ class RemoteMixin:
             return
         mgr = self._session_mgr
         try:
-            # 先清除旧的手工注册，再按表单逐项注册（同名 serverName 复用隧道）
-            mgr.remove_visitors_by_source(SOURCE_MANUAL)
+            # 先清除旧的面板注册（手工 + 球桌库），再按表单逐项注册（同名 serverName 复用隧道）
+            for src in (SOURCE_MANUAL, SOURCE_TABLE):
+                mgr.remove_visitors_by_source(src)
             for v in self._p2p_visitors:
+                server_name = v.get("serverName", "")
+                # 关联球桌：球桌库选择时已带 tableId，手工添加的按 snk 反查补全
+                table_id = str(v.get("tableId") or "").strip() \
+                    or self._lookup_table_name_by_snk(server_name)
+                if table_id:
+                    v["tableId"] = table_id
                 mgr.register_visitor(
-                    v.get("serverName", ""),
+                    server_name,
                     bind_port=v.get("bindPort"),
                     secret_key=v.get("secretKey") or "abc123",
-                    source=SOURCE_MANUAL)
+                    source=v.get("source") or SOURCE_MANUAL,
+                    table_id=table_id)
             mgr.apply()
+            # 连接即使用：刷新最近使用时间，隧道面板立即显示数据
+            for v in self._p2p_visitors:
+                mgr.mark_used(v.get("serverName", ""), str(v.get("tableId") or ""))
         except (OSError, RuntimeError, ValueError) as e:
             self._append_log(f"[远程] 启动失败: {e}")
             return
         total = len(mgr.records())
         self._append_log(f"[远程] frpc 已启动，共 {total} 条隧道（含 snk 快捷连接）")
         self._update_p2p_buttons()
+
+    @staticmethod
+    def _lookup_table_name_by_snk(snk: str) -> str:
+        """按 snk 反查球桌库中的球桌号（手工添加 visitor 的关联球桌补全），
+        查不到或库异常时返回空串不影响连接"""
+        try:
+            return table_db.get_table_name_by_snk(snk)
+        except Exception:
+            return ""
 
     def _on_xtcp_disconnect(self):
         """断开：注销手工 visitor；仍有其他隧道时 frpc 保持运行，否则停止"""
@@ -917,6 +954,10 @@ class RemoteMixin:
 
     def _save_remote_sessions(self):
         """关闭前保存当前远程会话信息到 settings.json，下次启动可自动恢复"""
+        # 会话恢复开关关闭时写入空列表：避免旧数据残留导致意外恢复
+        if not bool(self._load_settings().get("restore_remote_sessions", True)):
+            self._save_settings({"remote_sessions": []})
+            return
         win = getattr(self, '_remote_session_window', None)
         sessions = []
         if win is not None:
@@ -962,6 +1003,9 @@ class RemoteMixin:
     def _restore_remote_sessions(self):
         """启动时从 settings.json 恢复上次的远程会话（延迟 1s 执行，等待主窗口就绪）"""
         from PySide6.QtCore import QTimer
+        # 会话恢复开关：默认开启，关闭时不自动恢复
+        if not bool(self._load_settings().get("restore_remote_sessions", True)):
+            return
         sessions = self._load_settings().get("remote_sessions", [])
         if not sessions or not isinstance(sessions, list):
             return

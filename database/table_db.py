@@ -512,6 +512,22 @@ def get_snk_by_name(name: str) -> str:
     return str(row[0] or "") if row else ""
 
 
+def get_table_name_by_snk(snk: str) -> str:
+    """按 snk 标识反查球桌号（隧道面板「关联球桌」展示用）
+
+    未匹配时返回空串。
+    """
+    snk = str(snk or "").strip()
+    if not snk:
+        return ""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT name FROM billiard_tables "
+        "WHERE TRIM(snk_code) = ? COLLATE NOCASE LIMIT 1",
+        (snk,)).fetchone()
+    return str(row[0] or "").strip() if row else ""
+
+
 # ==================== 健康度异常告警（设备健康度管理页） ====================
 
 # 阈值（基准 4000）：4000 是接口默认值视为空值不算异常；
