@@ -82,6 +82,45 @@ def _popup_ani_type():
     return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
             else MenuAnimationType.NONE)
 
+
+class _SortableTreeItem(QTreeWidgetItem):
+    """可排序树节点（表头点击排序）：
+
+    - 目录恒排在文件前（与排序列无关，符合资源管理器习惯）
+    - 大小列（第 1 列）按 UserRole 中的数值比较，避免 "9.5 MB" 与 "10 MB" 文本序错乱
+    - 文件名列忽略大小写；修改时间列文本即 "YYYY-MM-DD HH:MM"，字典序等同时间序"""
+    def __lt__(self, other):
+        tree = self.treeWidget()
+        col = tree.sortColumn() if tree is not None else 0
+        if tree is not None:
+            _hdr = tree.header()
+            ascending = (_hdr is None or
+                         _hdr.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder)
+        else:
+            ascending = True
+        sd = self.data(0, Qt.ItemDataRole.UserRole)
+        od = other.data(0, Qt.ItemDataRole.UserRole)
+        if sd and od and sd.get('is_dir') != od.get('is_dir'):
+            # 目录恒排在文件前，与排序方向无关：Qt 降序是反转参数调用 __lt__，
+            # 此处按当前方向显式修正，避免降序时目录掉到列表末尾
+            return sd['is_dir'] if ascending else not sd['is_dir']
+        if col == 1 and sd and od:
+            a = sd.get('size', 0)
+            b = od.get('size', 0)
+            if a != b:
+                return a < b
+            # 大小相同回退按文件名（忽略大小写），避免比较格式化文本（恒相等）
+            a = self.text(0).lower()
+            b = other.text(0).lower()
+            if a != b:
+                return a < b
+        if col == 0:
+            a = self.text(0).lower()
+            b = other.text(0).lower()
+            if a != b:
+                return a < b
+        return self.text(col) < other.text(col)
+
 # ------------------------------------------------------------------ 文件类型图标映射
 _ICON_CACHE: dict = {}
 
@@ -347,6 +386,10 @@ class SFTPPanel(QWidget):
         lh.resizeSection(1, 80)    # 大小
         lh.resizeSection(2, 60)    # 类型
         lh.resizeSection(3, 100)   # 修改时间
+        # 表头点击排序：默认按文件名升序（目录在前），点击表头可切换列/方向
+        lh.setSortIndicatorShown(True)
+        lh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self._local_tree.setSortingEnabled(True)
         self._local_tree.itemDoubleClicked.connect(self._on_local_item_double_clicked)
         self._local_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._local_tree.customContextMenuRequested.connect(self._on_local_context_menu)
@@ -397,6 +440,10 @@ class SFTPPanel(QWidget):
         rh.resizeSection(2, 60)    # 类型
         rh.resizeSection(3, 80)    # 权限
         rh.resizeSection(4, 130)   # 修改时间
+        # 表头点击排序：默认按文件名升序（目录在前），点击表头可切换列/方向
+        rh.setSortIndicatorShown(True)
+        rh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self._tree.setSortingEnabled(True)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_remote_context_menu)
@@ -683,11 +730,12 @@ class SFTPPanel(QWidget):
     def _populate_remote(self, entries):
         self._tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘，避免大列表卡顿
         try:
+            self._tree.setSortingEnabled(False)  # 插入期间禁排序，避免逐条重排（O(n²)）
             self._tree.clear()
             dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'])
             files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'])
             for entry in dirs + files:
-                item = QTreeWidgetItem()
+                item = _SortableTreeItem()
                 item.setIcon(0, _file_icon(entry['name'], entry['is_dir']))
                 item.setText(0, entry['name'])
                 item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
@@ -697,6 +745,10 @@ class SFTPPanel(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, entry)
                 self._tree.addTopLevelItem(item)
         finally:
+            # 恢复排序并按当前表头指示器（列/方向）重排，用户点击的表头选择得以保留
+            self._tree.setSortingEnabled(True)
+            _h = self._tree.header()
+            self._tree.sortItems(_h.sortIndicatorSection(), _h.sortIndicatorOrder())
             self._tree.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------ 搜索
@@ -746,11 +798,12 @@ class SFTPPanel(QWidget):
     def _populate_local(self, entries):
         self._local_tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘
         try:
+            self._local_tree.setSortingEnabled(False)  # 插入期间禁排序，避免逐条重排（O(n²)）
             self._local_tree.clear()
             dirs = sorted([e for e in entries if e['is_dir']], key=lambda x: x['name'].lower())
             files = sorted([e for e in entries if not e['is_dir']], key=lambda x: x['name'].lower())
             for entry in dirs + files:
-                item = QTreeWidgetItem()
+                item = _SortableTreeItem()
                 item.setIcon(0, _file_icon(entry['name'], entry['is_dir']))
                 item.setText(0, entry['name'])
                 item.setText(1, self._format_size(entry['size']) if not entry['is_dir'] else '')
@@ -759,6 +812,10 @@ class SFTPPanel(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, entry)
                 self._local_tree.addTopLevelItem(item)
         finally:
+            # 恢复排序并按当前表头指示器（列/方向）重排，用户点击的表头选择得以保留
+            self._local_tree.setSortingEnabled(True)
+            _h = self._local_tree.header()
+            self._local_tree.sortItems(_h.sortIndicatorSection(), _h.sortIndicatorOrder())
             self._local_tree.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------ 路径输入跳转
@@ -1156,11 +1213,13 @@ class SFTPPanel(QWidget):
 
         # ---- 本地面板菜单（item 相关 + 新建子菜单）
         self._ctx_local_data = None
+        self._ctx_local_items = []  # 右键时的传输目标列表（Ctrl 多选时含全部选中项）
         self._ctx_local_menu_full = RoundMenu(parent=self)  # 右键点击文件时
         self._ctx_local_menu_empty = RoundMenu(parent=self)  # 右键点击空白时
         act = Action(FluentIcon.UP, '传输（上传）', self)
-        act.triggered.connect(lambda: self._upload_file(self._ctx_local_data))
+        act.triggered.connect(lambda: self._upload_items(self._ctx_local_items))
         self._ctx_local_menu_full.addAction(act)
+        self._act_ctx_upload = act  # 右键时按选中数量动态更新文案
         act = Action(FluentIcon.LIBRARY, '打开', self)
         act.triggered.connect(lambda: self._ctx_local_open(self._ctx_local_data))
         self._ctx_local_menu_full.addAction(act)
@@ -1189,11 +1248,13 @@ class SFTPPanel(QWidget):
 
         # ---- 远程面板菜单（item 相关 + 新建子菜单）
         self._ctx_remote_entry = None
+        self._ctx_remote_items = []  # 右键时的传输目标列表（Ctrl 多选时含全部选中项）
         self._ctx_remote_menu_full = RoundMenu(parent=self)
         self._ctx_remote_menu_empty = RoundMenu(parent=self)
         act = Action(FluentIcon.DOWN, '传输（下载）', self)
-        act.triggered.connect(lambda: self._download_file(self._ctx_remote_entry))
+        act.triggered.connect(lambda: self._download_items(self._ctx_remote_items))
         self._ctx_remote_menu_full.addAction(act)
+        self._act_ctx_download = act  # 右键时按选中数量动态更新文案
         act = Action(FluentIcon.LIBRARY, '打开', self)
         act.triggered.connect(lambda: self._ctx_remote_open(self._ctx_remote_entry))
         self._ctx_remote_menu_full.addAction(act)
@@ -1537,6 +1598,10 @@ class SFTPPanel(QWidget):
             if not data:
                 return
             self._ctx_local_data = data
+            # Ctrl 多选传输：右键项在选中集内时，目标扩展为整个选中集（资源管理器惯例）
+            self._ctx_local_items = self._collect_selected(self._local_tree, item, data)
+            n = len(self._ctx_local_items)
+            self._act_ctx_upload.setText(f'传输（上传{n} 项）' if n > 1 else '传输（上传）')
             self._ctx_local_menu_full.exec(
                 self._local_tree.viewport().mapToGlobal(pos),
                 aniType=_popup_ani_type())
@@ -1553,6 +1618,10 @@ class SFTPPanel(QWidget):
             if not entry:
                 return
             self._ctx_remote_entry = entry
+            # Ctrl 多选传输：右键项在选中集内时，目标扩展为整个选中集（资源管理器惯例）
+            self._ctx_remote_items = self._collect_selected(self._tree, item, entry)
+            n = len(self._ctx_remote_items)
+            self._act_ctx_download.setText(f'传输（下载{n} 项）' if n > 1 else '传输（下载）')
             self._ctx_remote_menu_full.exec(
                 self._tree.viewport().mapToGlobal(pos),
                 aniType=_popup_ani_type())
@@ -1560,6 +1629,33 @@ class SFTPPanel(QWidget):
             self._ctx_remote_menu_empty.exec(
                 self._tree.viewport().mapToGlobal(pos),
                 aniType=_popup_ani_type())
+
+    def _collect_selected(self, tree, clicked_item, fallback):
+        """收集右键操作的目标列表：
+
+        右键项已在选中集内 → 返回整个选中集（支持 Ctrl 多选批量传输）；
+        否则（右键未选中的项）→ 仅返回右键项本身，符合资源管理器惯例。"""
+        items = tree.selectedItems()
+        if any(it is clicked_item for it in items):
+            return [it.data(0, Qt.ItemDataRole.UserRole) for it in items
+                    if it.data(0, Qt.ItemDataRole.UserRole)]
+        return [fallback]
+
+    def _upload_items(self, items):
+        """批量上传（右键多选传输入口）：逐项调用单文件上传逻辑，目录走目录传输"""
+        if not items:
+            self._log('[SFTP] 请先选择一个文件或目录')
+            return
+        for d in items:
+            self._upload_file(d)
+
+    def _download_items(self, items):
+        """批量下载（右键多选传输入口）：逐项调用单文件下载逻辑，目录走目录传输"""
+        if not items:
+            self._log('[SFTP] 请先选择一个文件或目录')
+            return
+        for e in items:
+            self._download_file(e)
 
     # ---- 右键菜单操作实现 ----
     def _get_temp_dir(self):

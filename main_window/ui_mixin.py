@@ -823,6 +823,10 @@ class UIMixin:
         act_hc.triggered.connect(lambda: QTimer.singleShot(0, self._on_theme_color))
         func_menu.addAction(act_sc)
         func_menu.addAction(act_hc)
+        act_hc_reset = Action(FluentIcon.ROTATE, "还原默认主题色", self)
+        act_hc_reset.setToolTip("恢复默认强调色（即时生效并持久化）")
+        act_hc_reset.triggered.connect(lambda: QTimer.singleShot(0, self._on_theme_color_reset))
+        func_menu.addAction(act_hc_reset)
         func_btn = TransparentDropDownPushButton("功能", self._menubar_widget)
         func_btn.setMenu(func_menu)
         _mb_layout.addWidget(func_btn)
@@ -990,13 +994,25 @@ class UIMixin:
         current = QColor(self._theme_color)
         dlg = ColorDialog(current, "选择主题强调色", self)
         if dlg.exec():
-            color = dlg.color
-            self._theme_color = color.name()
-            self._save_settings({"theme_color": color.name()})
-            setThemeColor(color.name(), lazy=True)
-            self._append_log(
-                f"[配置] 已更新主题强调色: {color.name()}")
-            self._show_info_bar(f"[配置] 已更新主题强调色: {color.name()}")
+            self._apply_theme_color_set(dlg.color.name())
+
+    def _on_theme_color_reset(self):
+        """还原默认主题强调色：立即应用并持久化"""
+        from main_window.settings_mixin import SettingsMixin
+        default = SettingsMixin.DEFAULT_THEME_COLOR
+        if self._theme_color.lower() == default.lower():
+            self._append_log("[配置] 主题强调色已是默认色，无需还原")
+            self._show_info_bar("当前已是默认主题强调色", "info")
+            return
+        self._apply_theme_color_set(default)
+
+    def _apply_theme_color_set(self, color):
+        """应用主题强调色：持久化 + 全局即时生效 + 日志/通知（选色与还原默认共用）"""
+        self._theme_color = color
+        self._save_settings({"theme_color": color})
+        setThemeColor(color, lazy=True)
+        self._append_log(f"[配置] 已更新主题强调色: {color}")
+        self._show_info_bar(f"[配置] 已更新主题强调色: {color}")
 
     def _on_font_size(self):
         """弹出字号选择对话框（Fluent SpinBox）"""

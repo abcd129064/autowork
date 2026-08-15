@@ -865,6 +865,9 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_parse_theme_color(settings)` | [静态] 解析主题强调色：优先 `theme_color`（HEX），兼容旧 `highlight_color`（RGB 列表） |
 | `_apply_theme_color()` | 从 settings.json 加载主题强调色到内存（`_apply_theme` 时应用） |
+| `_on_theme_color()` | 弹出主题强调色选择对话框（功能菜单「主题颜色设置」），选色后经 `_apply_theme_color_set` 生效 |
+| `_on_theme_color_reset()` | 还原默认主题强调色（功能菜单「还原默认主题色」），已是默认色时提示不重复执行 |
+| `_apply_theme_color_set(color)` | 应用主题强调色：持久化 `theme_color` + `setThemeColor` 全局即时生效 + 日志/InfoBar |
 | `_apply_font_size()` | 应用字号设置 |
 | `_apply_font_family()` | 应用字体设置 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
@@ -953,7 +956,7 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `dark_theme` | bool | false | 深色主题开关（旧字段） |
 | `theme_mode` | str | "auto" | 主题模式：auto/light/dark |
 | `classic_layout` | bool | false | 经典布局模式 |
-| `theme_color` | str | "#00BCD4" | 主题强调色（功能菜单「主题颜色设置」修改，即时生效） |
+| `theme_color` | str | "#00BCD4" | 主题强调色（功能菜单「主题颜色设置」修改、「还原默认主题色」恢复，即时生效） |
 | `highlight_color` | [r,g,b] | [220,80,20] | 日志高亮颜色（旧字段，已废弃，仅作 theme_color 兼容回退） |
 | `log_highlight_rules` | [object] | 见默认 | 日志高亮规则列表 `[{name, pattern, color, notify}]` |
 | `ssh_user` | str | — | SSH 默认用户名 |
