@@ -45,3 +45,9 @@ moyu_state.json
 frpc_xtcp.toml
 frpc_xtcp_panel.toml
 frpc.exe
+
+# 打包体积优化回滚备份资产（方案 D 临时保险，验证后删除）
+_cv2_backup/
+AutoWork.spec.bak
+*.whl
+frp-source-integration.md
