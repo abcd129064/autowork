@@ -44,6 +44,7 @@ FORENSIC_COMMANDS = (
 )
 
 FORENSIC_CMD_TIMEOUT = 5      # 单条命令超时（秒）
+# 单条限 5 秒：某条命令挂死会拖住整个取证进度，超时即标记失败跳到下一条
 SESSION_TAIL_LINES = 200      # 会话日志截取行数
 CONN_LOG_ENTRIES = 30         # 连接日志截取条数
 
@@ -131,6 +132,7 @@ def lookup_table_info(snk: str, host: str) -> dict:
                 row = conn.execute(
                     sql + "remark LIKE ? LIMIT 1", (f"%{snk}%",)).fetchone()
         if row is None and host:
+            # 最后兜底按 host 匹配：会话别名不一定带 snk 标识，连接 IP 是最后的线索
             row = conn.execute(
                 sql + "remark LIKE ? LIMIT 1", (f"%{host}%",)).fetchone()
         if row is None:
@@ -488,6 +490,7 @@ class ForensicWorker(QThread):
             try:
                 ai_analysis = analyze_with_ai(build_ai_evidence(cmd_results))
             except Exception as e:
+                # 只取异常首行：AI SDK 的报错常带多行堆栈细节，全文塞进报告会淹没结论
                 ai_error = (str(e).splitlines()[0] if str(e)
                             else type(e).__name__)
                 conn_logger.error('FORENSIC', f'AI 分析未完成: {ai_error}',

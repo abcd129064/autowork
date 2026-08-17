@@ -39,6 +39,8 @@ def extract_break(log_text, start_frame, end_frame, player):
         p = int(m.group(2))
         s = int(m.group(3))
 
+        # 帧窗口过滤：只累计本杆区间内的进球，区间外的帧属于其他回合，
+        # 不滤掉会把别人的分混进本杆总分
         if not (start_frame <= frame_id <= end_frame):
             continue
         if p != player:
@@ -46,6 +48,8 @@ def extract_break(log_text, start_frame, end_frame, player):
 
         total += s
 
+        # score_0/score_1 对应甲/乙两个槽位：只在杆选手一侧填累计分，
+        # 对手侧保持 0，比分条才能按左右位置对齐渲染
         scores.append({
             "score_0": 0 if player == 1 else total,
             "score_1": total if player == 1 else 0,
@@ -104,6 +108,8 @@ def generate_json(
     # 计算生成的视频文件名和路径
     generated_video_name = f"player{player}_single{total}.mp4"
     # 从session_code中提取前10位作为日期目录名（例如：20260322230533_HF75QY2CNPE10097102W1 -> 2026032223）
+    # 这两条切分规则必须与 single_shot_video.single_shot_video 里的输出目录保持一致，
+    # 否则实际生成的视频落不到下面的预期路径，后续上传会找不到文件
     video_dir_date = session_code[:10] if len(session_code) >= 10 else session_date
     # session_code去掉最后2位作为子目录名（例如：20260322230533_HF75QY2CNPE10097102W1 -> 20260322230533_HF75QY2CNPE10097102）
     video_dir_code = session_code[:-2] if len(session_code) > 2 else session_code

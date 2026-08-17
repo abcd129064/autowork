@@ -65,6 +65,8 @@ if _IS_WINDOWS:
                 try:
                     return ctypes.string_at(blob_out.pbData, blob_out.cbData)
                 finally:
+                    # DPAPI 返回的缓冲区由系统分配，调用方必须 LocalFree，
+                    # 否则每次加解密都漏一块内存，长期运行会累积放大
                     ctypes.windll.kernel32.LocalFree(blob_out.pbData)
         except Exception:
             pass
@@ -101,6 +103,8 @@ def encrypt_secret(value):
     if not isinstance(value, str) or not value:
         return value
     if value.startswith(ENC_PREFIX):
+        # 已带前缀直接返回，保证重复加密幂等：否则密文会层层嵌套，
+        # 解密一次后仍残留 "enc:" 前缀，用户看到的密码就是脏数据
         return value
     raw = _dpapi_encrypt(value.encode("utf-8"))
     if raw is None:
@@ -242,6 +246,8 @@ def migrate_settings_file(path: str | None = None) -> bool:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return False
     if not isinstance(settings, dict) or not has_plaintext_secret(settings):
+        # 用「是否还有明文敏感字段」当迁移标记：首次加密回写后此检查不再命中，
+        # 天然防止每次启动重复迁移，不需要额外落盘标记文件
         return False
     try:
         encrypted = encrypt_settings(settings)

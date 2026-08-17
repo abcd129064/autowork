@@ -115,6 +115,9 @@ class TunnelPanelWindow(FramelessWindow):
 
         self._table.setRowCount(0)
         for rec in records:
+            # 行内 lambda 必须用默认参数捕获当前 sn：闭包是延迟求值，
+            # 直接引用循环变量的话所有行的回调都绑到最后一行的 sn，
+            # 点哪行的断开/删除都操作同一个隧道
             row = self._table.rowCount()
             self._table.insertRow(row)
             values = [
@@ -204,15 +207,21 @@ class TunnelPanelWindow(FramelessWindow):
         mgr = get_session_manager()
         rec = self._find_record(server_name)
         if not rec:
+            # 注册表才是准绳：列表可能已滞后（别处刚断开），查不到就刷新对齐后退出
             self.refresh()
             return
+        # 1. 门控先看 frpc 状态：没启动时隧道压根没建立，只提示不动注册表，
+        #    否则顺手 apply 会把 frpc 带着剩余隧道拉起来，断开变连接
         if not mgr.is_running():
             show_info_bar("当前 frpc 未启动，隧道未建立，无需断开",
                           "warning", title="无法断开", parent=self, duration=3500)
             return
+        # 2. 通过状态门控后再查传输：有 SFTP 在传就先警告会中断传输，
+        #    用户确认才继续，取消则什么都不动
         if mgr.is_transferring_on_port(rec.get("bindPort", 0)) \
                 and not self._confirm_interrupt_transfer(server_name):
             return
+        # 3. 关会话/移除/apply 全委托 manager，保证「先关会话再释放端口」的顺序
         result = mgr.disconnect_visitor(server_name)
         if result == "ok":
             self.refresh()  # 显式即时刷新兜底（信号刷新外的双保险）
@@ -235,6 +244,7 @@ class TunnelPanelWindow(FramelessWindow):
         if not rec:
             self.refresh()
             return
+        # frpc 未运行时不存在活动会话与传输，传输中警告只针对运行中的情况
         transferring = mgr.is_running() and \
             mgr.is_transferring_on_port(rec.get("bindPort", 0))
         msg = (f"确定删除 snk 隧道「{server_name}」吗？\n"
@@ -246,6 +256,8 @@ class TunnelPanelWindow(FramelessWindow):
         dlg.cancelButton.setText("取消")
         if not dlg.exec():
             return
+        # 删除不受 frpc 状态门控：未运行也执行（仅落盘），
+        # manager 内部保证这条路径绝不拉起 frpc
         result = mgr.delete_visitor(server_name)
         if result == "ok":
             self.refresh()  # 显式即时刷新兜底，确保已删除的 snk 不残留
@@ -269,6 +281,8 @@ class TunnelPanelWindow(FramelessWindow):
                for r in records) \
                 and not self._confirm_interrupt_transfer("全部隧道"):
             return
+        # 顺序固定：先趁端口还活着关掉全部会话，再清空注册表，最后 apply——
+        # 注册表空了 apply 会自动停掉 frpc，一次性释放全部端口
         mgr.close_all_sessions("全部隧道")
         for rec in records:
             mgr.remove_visitor(rec.get("serverName", ""))

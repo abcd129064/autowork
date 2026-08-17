@@ -339,8 +339,13 @@ def _get_conn() -> sqlite3.Connection:
     global _conn
     os.makedirs(_DB_DIR, exist_ok=True)
     if _conn is None:
+        # check_same_thread=False：查询/保存分散在多个 QThread worker 里跑，
+        # 共用这一个连接省掉多连接各自建表迁移的开销；并发安全交给下面
+        # 的 WAL + busy_timeout，否则默认校验会直接抛 ProgrammingError
         _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        # WAL 读写分离：worker 批量写入时 UI 线程的分页查询不被阻塞
         _conn.execute("PRAGMA journal_mode=WAL")
+        # 抢锁失败时最多等 3 秒而不是立刻报 database is locked
         _conn.execute("PRAGMA busy_timeout=3000")
         _ensure_initialized(_conn)
     return _conn
@@ -612,6 +617,8 @@ def sync_health_alerts(rows: list) -> int:
                 (str(item.get("roomName") or ""),
                  str(item.get("onlineStatusName") or ""), now, name))
     if seen:
+        # seen 为空说明本轮没有有效告警，跳过 DELETE——否则 NOT IN () 拼出
+        # 非法 SQL，而且也不该把历史告警一次清空
         conn.execute(
             f"DELETE FROM health_alerts WHERE name NOT IN "
             f"({','.join('?' * len(seen))})", tuple(seen))

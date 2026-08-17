@@ -195,10 +195,12 @@ def _get_window_title(hwnd, max_len=128):
 def get_process_name(pid):
     """按 PID 获取进程名（小写，失败返回空字符串）"""
     try:
+        # 快照句柄用完必须 CloseHandle，否则每次查询都漏一个句柄，长跑必泄漏
         snap = _CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
         if not snap or snap == ctypes.c_void_p(-1).value:
             return ''
         pe = _PROCESSENTRY32W()
+        # dwSize 必须先填结构体大小，否则 Process32FirstW 直接返回 FALSE 查不到任何进程
         pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
         name = ''
         if _Process32FirstW(snap, ctypes.byref(pe)):
@@ -208,6 +210,7 @@ def get_process_name(pid):
                     break
                 if not _Process32NextW(snap, ctypes.byref(pe)):
                     break
+        # 注意：中途异常会跳过这里，快照句柄会漏关，好在单次泄漏量小
         _CloseHandle(snap)
         return name
     except Exception:
@@ -312,6 +315,8 @@ def find_rdp_session_window(log=None):
     mstsc 子进程。此函数枚举所有可见顶层窗口，仅保留
     属于 mstsc.exe 进程的窗口，按评分返回最佳候选。
     """
+    # 先拿到所有 mstsc 进程的 PID：Win11 24H2+ 会话可能被委托给子进程，
+    # 只认启动进程 PID 会漏掉真正的会话窗口
     mstsc_pids = set(find_mstsc_pids())
     if not mstsc_pids:
         return None
@@ -371,17 +376,23 @@ def win_set_process_threads(pid, thread_action):
             ("dwFlags", ctypes.c_ulong),
         ]
 
+    # 只需要挂起/恢复权限，实际操作都落在逐个线程句柄上
     h_process = _OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
     if not h_process:
         return False
     try:
+        # Windows 没有进程级挂起 API，只能枚举线程快照逐个 SuspendThread/ResumeThread
         snap = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+        # 坑：c_void_p 返回时 NULL 是 None、INVALID_HANDLE_VALUE 是正整数，
+        # 这里 == -1 两者都匹配不到（见 get_process_name 的 c_void_p(-1).value 写法），
+        # 快照创建失败时后续 Thread32First/Next 调用也得容错
         if snap == -1:
             return False
         te = THREADENTRY32()
         te.dwSize = ctypes.sizeof(THREADENTRY32)
         if _Thread32First(snap, ctypes.byref(te)):
             while True:
+                # 线程快照含全系统所有线程，必须按属主 PID 过滤，否则会挂起别的进程
                 if te.th32OwnerProcessID == pid:
                     h_thread = _OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
                     if h_thread:
@@ -389,6 +400,7 @@ def win_set_process_threads(pid, thread_action):
                         _CloseHandle(h_thread)
                 if not _Thread32Next(snap, ctypes.byref(te)):
                     break
+        # 快照句柄遍历完必须关，否则每挂起/恢复一次就漏一个句柄
         _CloseHandle(snap)
         return True
     finally:

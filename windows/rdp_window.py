@@ -129,6 +129,8 @@ class RDPPanel(QWidget):
         if self._rdp_started or self._session_ended or self._closing:
             return
         w, h = self._container.width(), self._container.height()
+        # 布局没完成时容器宽高可能是 0 或极小值，用 200 阈值挡掉，
+        # 否则拿无效分辨率启动 mstsc 会得到畸形会话画面
         if w < 200 or h < 200:
             return  # 尺寸无效，等下一次 resizeEvent/showEvent 再试
         self._rdp_started = True
@@ -138,6 +140,7 @@ class RDPPanel(QWidget):
         """兑底启动：容器尺寸迟迟未就绪时，用屏幕工作区 80% 作为分辨率"""
         if self._rdp_started or self._session_ended or self._closing:
             return
+        # 拿不到屏幕工作区时的保底分辨率，防止永远不启动
         w, h = 1280, 800
         try:
             screen = QGuiApplication.primaryScreen()
@@ -170,6 +173,7 @@ class RDPPanel(QWidget):
         """cmdkey 注册完成回调：启动 mstsc 并开启看门狗"""
         if exit_code != 0:
             self._log(f'[RDP] 注册凭据失败 (exit={exit_code}): {stderr.strip()}')
+        # 凭据没写进去 mstsc 会弹密码框破坏免交互，但仍继续尝试直连，避免面板卡死
         # 2. 凭据已注册，命令行直连 + /w /h 指定远程分辨率
         w, h = getattr(self, '_pending_size', (1280, 800))
         cmd = ['mstsc', f'/v:{self._host}:{self._port}', f'/w:{w}', f'/h:{h}']
@@ -219,6 +223,7 @@ class RDPPanel(QWidget):
                             self._embedded_hwnd = None
                             self._embed_window(better)
                             return
+                    # 嵌入窗口还活着就把死亡计数清零，防误判会话结束
                     self._dead_count = 0
                     return
                 # 嵌入窗口已经失效（mstsc 重建了窗口）
@@ -236,6 +241,7 @@ class RDPPanel(QWidget):
                              self._mstsc_proc.poll() is not None)
                 if proc_dead:
                     self._dead_count += 1
+                    # 连续 8 轮（约 6.4 秒）都找不到窗口才判死，防 mstsc 重建窗口的空窗期被误判
                     if self._dead_count >= self._DEAD_ROUNDS:
                         self._end_session('远程桌面已断开')
                 else:
@@ -260,6 +266,8 @@ class RDPPanel(QWidget):
         # 缓存检查：句柄有效 + PID 未变 → 直接复用
         if (self._cached_hwnd and self._cached_pid is not None
                 and _user32.IsWindow(self._cached_hwnd)):
+            # 坑：ctypes.wintypes 不会随 import ctypes 自动导入，这里若抛
+            # AttributeError 会被看门狗外层 except 吞掉，缓存机制直接废掉
             current_pid = ctypes.wintypes.DWORD()
             _user32.GetWindowThreadProcessId(self._cached_hwnd, ctypes.byref(current_pid))
             if current_pid.value == self._cached_pid:
@@ -309,6 +317,7 @@ class RDPPanel(QWidget):
 
     def _update_cache(self, hwnd):
         """更新看门狗窗口查找缓存"""
+        # 同样依赖 ctypes.wintypes，缺导入时这里抛异常会让缓存永不生效
         pid = ctypes.wintypes.DWORD()
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         self._cached_hwnd = hwnd
@@ -329,6 +338,7 @@ class RDPPanel(QWidget):
 
             # 跨进程嵌入关键步骤：附加目标窗口线程的输入队列到当前线程，
             # 否则 SetParent 可能被 Windows 拒绝或嵌入后不渲染
+            # 不附加就 SetParent 还会丢键盘焦点：远程画面收不到按键，必须先附加
             remote_tid = _user32.GetWindowThreadProcessId(hwnd, None)
             local_tid = _k32.GetCurrentThreadId()
             attached = False
@@ -337,9 +347,11 @@ class RDPPanel(QWidget):
 
             # SetParent 返回旧父窗口句柄，失败返回 NULL
             old_parent = _SetParent_err(hwnd, container_hwnd)
+            # 紧跟着取错误码：user32_err 实例开了 use_last_error，晚了会被后续调用冲掉
             err = ctypes.get_last_error()
 
             if attached:
+                # 一直附加输入队列会让两边焦点纠缠，键盘输入异常，所以嵌入完必须解除
                 # 嵌入完成后解除线程附加（保持窗口独立性）
                 _user32.AttachThreadInput(local_tid, remote_tid, False)
 
@@ -356,6 +368,7 @@ class RDPPanel(QWidget):
             self._status_label.setText(f'已连接: {self._host}:{self._port}')
             self._log(f"[RDP] 远程桌面已嵌入: {self._host}:{self._port} "
                       f"(class={get_window_class_name(hwnd)})")
+            # 嵌入成功说明凭据已用完，立刻删掉防明文密码长期驻留 Windows 凭据管理器
             # 删除临时凭据（安全：不在凭据库中留存密码）
             if not self._cred_removed:
                 self._remove_cred()

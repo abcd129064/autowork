@@ -210,6 +210,8 @@ class RemoteMixin:
 
     def _get_new_random_port(self):
         """生成不冲突的随机端口（排除会话中心与本地 visitor 列表已用端口）"""
+        # 两处已用端口都要排除：注册表与本地列表可能短暂不同步，
+        # 只查一边会把另一边的已用端口分配出去造成冲突
         taken = set(self._session_mgr.used_ports())
         taken |= {int(v.get("bindPort") or 0) for v in self._p2p_visitors}
         return generate_random_port(exclude_ports=taken)
@@ -231,6 +233,8 @@ class RemoteMixin:
         taken = set(self._session_mgr.used_ports())
         taken |= {v["bindPort"] for v in self._p2p_visitors}
         if 0 <= self._p2p_current_index < len(self._p2p_visitors):
+            # 编辑已有项时先把它自己的端口从占用集合里剔除，
+            # 否则校验会自己和自己冲突，原端口永远保存不了
             taken.discard(self._p2p_visitors[self._p2p_current_index].get("bindPort"))
         if port in taken:
             self._append_log(f"[远程] 端口 {port} 已被其他隧道使用，请更换端口")
@@ -358,6 +362,7 @@ class RemoteMixin:
 
         self._p2p_table_search.textChanged.connect(self._schedule_table_search)
         self._p2p_table_search.returnPressed.connect(self._on_table_search_return)
+        # 输入防抖：每敲一个字符就查库弹候选太伤性能，停顿 150ms 才真正查询
         self._p2p_search_timer = QTimer(self)
         self._p2p_search_timer.setSingleShot(True)
         self._p2p_search_timer.setInterval(self._TABLE_PICKER_DEBOUNCE_MS)
@@ -376,6 +381,9 @@ class RemoteMixin:
         # 动态查库更新 model（UnfilteredPopupCompletion 全量展示 model）。
         self._p2p_match_model = QStringListModel([], self)
         completer = QCompleter(self._p2p_match_model, self)
+        # 用 UnfilteredPopupCompletion 让 Qt 不做二次过滤：候选已是按关键字
+        # 查库的结果，标签前缀是球桌名而非关键字，默认过滤模式会按前缀
+        # 再筛一遍把命中项全筛没
         completer.setCompletionMode(
             QCompleter.CompletionMode.UnfilteredPopupCompletion)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -713,6 +721,7 @@ class RemoteMixin:
 
     def _on_xtcp_connect(self):
         """将手工 visitor 注册到统一会话中心并启动 frpc（共享单一进程/TOML）"""
+        # 连接前先把正在编辑的表单写回列表，否则最后改的那条 visitor 用的还是旧值
         self._save_current_form()
         if not self._p2p_visitors:
             self._append_log("[远程] 请先添加 visitor 配置")
@@ -720,6 +729,7 @@ class RemoteMixin:
         mgr = self._session_mgr
         try:
             # 先清除旧的面板注册（手工 + 球桌库），再按表单逐项注册（同名 serverName 复用隧道）
+            # 不清干净会残留：表单里删掉/改过端口的旧 visitor 会继续占着注册表和端口
             for src in (SOURCE_MANUAL, SOURCE_TABLE):
                 mgr.remove_visitors_by_source(src)
             for v in self._p2p_visitors:
@@ -821,6 +831,8 @@ class RemoteMixin:
         worker = self._tcp_worker
         self._tcp_worker = None
         if worker.isRunning():
+            # 线程还在跑时不能直接销毁：挂 finished 回调等它自然退出再 deleteLater，
+            # 否则 QThread 运行中被析构会直接崩
             # lambda 包装必须：PySide6 C++ 直连不持有 Python 引用，worker 会被 GC
             worker.finished.connect(lambda w=worker: w.deleteLater())
         else:

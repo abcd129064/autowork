@@ -70,15 +70,19 @@ def _dir_similarity(name: str, candidates: list) -> int:
     """
     n = str(name or "").strip()
     best = 0
+    # 遍历全部候选码取最高分：任一码（table_id 或 device_code）对上目录就算命中
     for cand in candidates:
         c = str(cand or "").strip()
+        # 两边都得有内容才谈得上结构化比较，空串直接跳过防误加分
         if not c or not n:
             continue
+        # 一字不差直接满分返回，后面不用再比，省得被字符级相似度拉低
         if n == c:
             return 100
         score = 0
         np, _, ns = n.rpartition("-")
         cp, _, cs = c.rpartition("-")
+        # 没有"-"时 rpartition 给空串，不进前缀档，防止无分隔符目录硬套结构化规则
         if np and cp:
             nps, cps = norm_device_suffix(np), norm_device_suffix(cp)
             # 前缀完全相同时基础 55 分；后缀归一化相等再 +40（结构化最高档）
@@ -86,12 +90,16 @@ def _dir_similarity(name: str, candidates: list) -> int:
                 score += 55
                 if ns and norm_device_suffix(ns) and norm_device_suffix(ns) == norm_device_suffix(cs):
                     score += 40
+                # 封顶 95 不给满：前缀同只说明同一家店，店里可能有多台相似命名的机器
             # 仅前缀归一化相同（如 281 与 281-08 的店号部分）：+30，后缀相同再 +60
             elif nps and nps == cps:
                 score += 30
                 if ns and ns == cs:
                     score += 60
         # 字符级相似度兑底：最高 60 分，与结构化得分取较大值
+        # 取 max 而不是累加：两套规则在衡量同一个名字，叠加会虚高误判；
+        # 注意字符级上限 60 高于「仅前缀相同」档（55）与归一化前缀档（30），
+        # 只有 90/95 两档能稳赢字符级兜底
         ratio = difflib.SequenceMatcher(None, n.lower(), c.lower()).ratio()
         score = max(score, int(round(ratio * 60)))
         best = max(best, score)
@@ -156,6 +164,8 @@ DEVICE_COLUMNS = [
 ]
 
 # 文件字段 → 中文分类名
+# 数据驱动的单一事实源：收集/展示/迁移全靠这张映射表，新增分类只加一行，
+# 下面的反查字典与详情面板自动跟上，不用改任何业务代码；顺序即展示顺序
 FILE_FIELD_CATEGORIES = [
     ("normal_files", "正常"),
     ("except_files", "操作"),
@@ -169,6 +179,7 @@ FILE_FIELD_CATEGORIES = [
 
 # 中文分类 → 文件字段（迁移用，不含版本）
 CATEGORY_FILE_FIELDS = {cn: field for field, cn in FILE_FIELD_CATEGORIES if cn != "版本"}
+# 版本没有对应的服务器迁移目录，不是迁移目标，这里剔除防止误发起迁移
 
 # 迁移可选分类（与 CATEGORY_DIRS 一致）
 MIGRATE_CATEGORIES = list(CATEGORY_DIRS.keys())
@@ -531,6 +542,7 @@ class DeviceDirHealDialog(MessageBoxBase):
         """scored: [(相似度分, 目录名), ...] 已按分数降序"""
         super().__init__(parent)
         self.videos_dir = videos_dir
+        # 默认空串代表"没选"：用户取消时调用方靠它走原失败提示，不误触自愈落库
         self.chosen_dir = ""
         self.titleLabel = BodyLabel("设备目录自愈向导", self)
         self.viewLayout.addWidget(self.titleLabel)
@@ -546,8 +558,10 @@ class DeviceDirHealDialog(MessageBoxBase):
         self.listWidget.setMinimumHeight(220)
         self.listWidget.setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        # scored 已按分数降序：最可能的排最上，多数情况直接点第一项就行
         for score, name in scored:
             it = QListWidgetItem(f"{name}　·　相似度 {score}%", self.listWidget)
+            # 目录名存 UserRole 而非解析显示文本，分数格式以后改了也不影响取值
             it.setData(Qt.ItemDataRole.UserRole, name)
             it.setToolTip(os.path.join(videos_dir, name))
         self.viewLayout.addWidget(self.listWidget)
@@ -563,6 +577,7 @@ class DeviceDirHealDialog(MessageBoxBase):
     def validate(self) -> bool:
         """点击确认：必须选中一个候选目录才放行"""
         row = self.listWidget.currentRow()
+        # 没选中就拦下：空选择落库会写入空映射，下次收集照样找不到目录
         if row is None:
             show_info_bar("请先在列表中选择一个目录，或使用「手动浏览...」", "warning",
                           title="提示", parent=self, duration=2500)
@@ -582,11 +597,13 @@ class DeviceDirHealDialog(MessageBoxBase):
             inside = (picked != root and
                       os.path.commonpath([picked, root]) == root)
         except ValueError:
+            # 跨盘符路径 commonpath 会抛 ValueError，直接视为不在 videos_dir 内
             inside = False
         if not inside:
             show_info_bar("所选目录必须位于视频目录（videos_dir）内", "warning",
                           title="提示", parent=self, duration=2500)
             return
+        # 存相对 videos_dir 的目录名：映射只记相对路径，videos_dir 变更后依然有效
         self.chosen_dir = os.path.relpath(picked, root)
         self.accept()
 
@@ -2213,6 +2230,8 @@ class DevicePage(QWidget):
                 _query_kd_page_with_stats,
                 self._page_no, self._page_size, keyword, date,
                 self._sort_key, self._sort_desc, _HF_DAYS)
+        # 用默认参数 d/kw 快照本次查询的日期与关键词：lambda 闭包捕获的是变量引用，
+        # 不快照的话，等回调触发时用户已切日期/改关键词，会拿新值误判本次查询已过期
         self._query_worker.finished.connect(
             lambda result, d=date, kw=keyword: self._on_query_finished(result, d, kw))
         self._query_worker.start()
@@ -2234,6 +2253,7 @@ class DevicePage(QWidget):
         self._sync_btn.setEnabled(False)
         src = self._active_source()
         # 搜索状态（kd 数据源）：携带 keyword 只拉取匹配设备，减少数据传输
+        # 只有 kd 接口支持服务端按关键词过滤，xqzg 只能全量拉再本地筛
         keyword = self._search_edit.text().strip() if src == "kd" else ""
         self._fetch_keyword = keyword
         self._last_fetch_silent = False
@@ -2278,9 +2298,13 @@ class DevicePage(QWidget):
             date_desc = "全部日期"
         else:
             date = self._current_date()
+            # 落库函数按有无关键词二选一，是搜索态数据安全的命门：
+            # 带 keyword 拉到的是部分数据，误走 save_kd 会按日期全量替换，
+            # 把同日其他设备的本地数据一并删掉，所以只能走 upsert_kd 增量
             save_func = table_db.upsert_kd if keyword else table_db.save_kd
             self._save_worker = _DBQueryWorker(save_func, rows, date)
             date_desc = date
+        # 默认参数 dd 快照本次日期描述，理由同 _load_local 里的 lambda 快照
         self._save_worker.finished.connect(
             lambda count, dd=date_desc: self._on_save_finished(count, dd))
         self._save_worker.start()
@@ -2294,6 +2318,8 @@ class DevicePage(QWidget):
             show_info_bar(f"{date_desc} 共 {count} 台设备", "success",
                           title="搜索完成", parent=self, duration=2500)
         # 请求在途期间关键词已变化：用最新关键词补拉一次（防抖合并后只补最新值）
+        # 不补的话表里停着上一个关键词的结果，用户看到的和搜的对不上；
+        # 补拉同样走 upsert_kd 增量，不会破坏本地全量数据
         current_kw = self._search_edit.text().strip()
         if (current_kw and current_kw != getattr(self, "_fetch_keyword", "")
                 and self._active_source() == "kd"):
@@ -2646,9 +2672,11 @@ class DevicePage(QWidget):
         self._silent_refresh()
         # 迁移到精度/问题后自动收集对应视频/日志到 upload 目录
         # （无需再点精度/问题单元格；数据尚未刷回，先把 fname 并入字段列表）
+        # 分类→收集字段由这张映射表驱动，与 CATEGORY_DIRS 的字段→服务器目录一脉相承
         field = {"精度": "accuracy_files", "问题": "already_files"}.get(dest_cat)
         if field:
             row = dict(getattr(self._file_panel, "_row", None) or {})
+            # 数据库还没刷回新字段，先在本地副本里把 fname 并进去，否则收集会漏掉刚迁的这张
             row[field] = list(row.get(field) or []) + [fname]
             # C1 台账：精度/问题迁移成功写一条（collect_ok 待收集结果回填）
             self._log_submission(row, dest_cat, fname)
@@ -2705,6 +2733,8 @@ class DevicePage(QWidget):
         candidates = [str(row.get("table_id") or "").strip(),
                       str(row.get("device_code") or "").strip()]
         device_id, fuzzy_note, _src = resolve_device_dir(videos_dir, candidates)
+        # 三级匹配（映射/精确/模糊）全失败才走到自愈向导；向导选中会落库 manual 映射，
+        # 下次同一设备直接从第①级映射命中，不再弹窗
         if not device_id:
             device_id = self._heal_device_dir(videos_dir, candidates)
             if not device_id:
@@ -2714,6 +2744,7 @@ class DevicePage(QWidget):
                 return
             fuzzy_note = f"已手动映射 → {device_id}"
         bases = sorted({b for b in (clip_base_name(f) for f in (row.get(field) or [])) if b})
+        # 文件列表为空说明没东西可收集，静默返回，避免弹个"收集 0 个"的无意义任务
         if not bases:
             return
         worker = CollectFilesWorker(videos_dir, device_id, bases)
@@ -2750,28 +2781,36 @@ class DevicePage(QWidget):
         返回所选目录名；取消返回空串走原失败提示。
         """
         cands = [c for c in candidates if c]
+        # 空串候选码先剔掉：相似度算法遇空串直接跳过，留着只会白跑一轮
         scored = []
         try:
             entries = os.listdir(videos_dir)
         except OSError:
+            # 列目录失败就给空候选，让向导弹窗兜底提示，别在这里抛异常打断收集
             entries = []
         for name in entries:
+            # upload 是收集工作区、videos 是媒体子目录，都不是设备码目录，混进候选会误导选择
             if name in ("upload", "videos"):
                 continue
             if not os.path.isdir(os.path.join(videos_dir, name)):
                 continue
             score = _dir_similarity(name, cands)
+            # 0 分说明完全搭不上边，直接丢弃，避免无关目录稀释候选列表
             if score > 0:
                 scored.append((score, name))
+        # 双键排序：分数取负实现降序，同分时按目录名升序，保证每次弹出顺序稳定
         scored.sort(key=lambda t: (-t[0], t[1].lower()))
+        # 只取前 12：候选再多弹窗也装不下，头部已经是相似度最高的
         dlg = DeviceDirHealDialog(self, videos_dir, cands, scored[:12])
         if not dlg.exec() or not dlg.chosen_dir:
             return ""
         chosen = dlg.chosen_dir
         try:
+            # fromkeys 去重：table_id 和 device_code 可能相同，避免同一映射重复落库
             for cand in dict.fromkeys(cands):
                 table_db.set_device_mapping(cand, chosen, source="manual")
         except Exception:
+            # 落库失败只记日志不阻断本次收集，代价是下次还会再弹一次向导
             logger.warning("自愈向导映射落库失败: %s -> %s", cands, chosen,
                            exc_info=True)
         return chosen
@@ -3054,10 +3093,12 @@ class DevicePage(QWidget):
         busy = any(getattr(self, a) is not None and getattr(self, a).isRunning()
                    for a in ("_worker", "_refresh_worker", "_hourly_worker"))
         if busy:
+            # 只延后不跳过：3 秒后重试，否则用户长时间操作会让补漏链永久停摆
             QTimer.singleShot(3000, self._backfill_next)
             return
         date = self._backfill_queue.pop(0)
         worker = DevicesFetchWorker(file_path=date)
+        # lambda 用默认参数快照当前日期：补漏链逐天换日期，不快照会把结果存错日期
         worker.result_ready.connect(
             lambda data, dt=date: self._on_backfill_done(data, dt))
         worker.error.connect(
@@ -3078,17 +3119,20 @@ class DevicePage(QWidget):
     def _on_backfill_saved(self, count, date):
         """补漏落库完成：正查看该日期则顺带刷新，间隔后继续下一天"""
         logger.info("历史补漏 %s 完成：%d 台设备", date, count)
+        # 只有用户正盯着这个日期才刷新表格，否则后台补漏会不停打断浏览
         if self._current_date() == date:
             self._load_local()  # 用户正查看该日期 → 顺带刷新
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
     def _on_backfill_save_error(self, msg, date):
         """补漏落库失败：记日志后继续下一天（不阻断补漏链）"""
+        # 单点失败不阻断链：这天的缺口还在库里，下次启动补漏会再轮到它
         logger.warning("历史补漏保存失败 %s: %s", date, str(msg).split(chr(10))[0])
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
     def _on_backfill_error(self, msg, date):
         """补漏拉取失败：记日志后继续下一天"""
+        # 同理不因单天拉取失败停链：缺失日期没落库，下次补漏还会重试
         logger.warning("历史补漏拉取失败 %s: %s", date, str(msg).split(chr(10))[0])
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 

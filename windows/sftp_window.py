@@ -44,6 +44,7 @@ def _videos_top_dir(local_path):
         videos_dir = os.path.join(get_app_dir(), 'videos')
         norm = os.path.normpath(local_path)
         vbase = os.path.normpath(videos_dir)
+        # 用 commonpath 判定包含关系而不是 startswith，因为 "videos2" 这类同级目录前缀也能通过 startswith 造成误判
         if os.path.commonpath([norm, vbase]) != vbase:
             return ''
         rel = os.path.relpath(norm, vbase)
@@ -55,6 +56,7 @@ def _videos_top_dir(local_path):
 
 def _cleanup_sftp_temp():
     """清理 _sftp_temp 临时目录中 mtime 超过 7 天的文件，异常静默"""
+    # 清理是顺带的卫生任务，内外两层 try 都吞异常：单个文件删不掉不能中断后续清理，更不能阻断窗口启动
     try:
         from core.app_paths import get_app_dir
         temp_dir = os.path.join(get_app_dir(), '_sftp_temp')
@@ -212,6 +214,8 @@ class _HealthCheckWorker(QThread):
         try:
             import time as _time
             start = _time.time()
+            # 绝不能复用业务侧的 SFTP 通道：SFTP 通道是严格单线程一问一答，
+            # 两个线程同时发请求会导致响应错配对不上，互相把对方踢乱
             session = self.transport.open_session()
             session.close()
             latency_ms = int((_time.time() - start) * 1000)
@@ -223,6 +227,8 @@ class _HealthCheckWorker(QThread):
 def _safe_release_worker(w):
     """将 worker 放入 pending 集合，线程结束后自动移除并 deleteLater"""
     _pending_workers.add(w)
+    # lambda 闭包捕获 w 是为了持强引用：PySide6 连接不保留 Python worker 引用，
+    # 否则线程还在跑时 w 被 GC 回收，触发 "Destroyed while thread is still running" qFatal
     w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
 
 
@@ -682,6 +688,8 @@ class SFTPPanel(QWidget):
         worker.result.connect(self._on_list_result)
         worker.error.connect(self._on_list_error)
         worker.finished.connect(self._on_list_worker_finished)
+        # 把代际号挂到 worker 上，回调时靠 sender() 认出是哪一批，
+        # 和当前代际对不上就丢弃，防快速连续点目录时旧结果覆盖新目录内容
         worker._list_gen = gen
         self._list_worker = worker
         worker.start()
@@ -961,6 +969,7 @@ class SFTPPanel(QWidget):
         if from_row == to_row:
             return
 
+        # Qt 的 moveRow 不会带着 cellWidget（进度条）一起搬，只能存数据→删行→插行重建
         # 1. 保存源行所有数据
         col_count = table.columnCount()
         items_data = []
@@ -994,6 +1003,8 @@ class SFTPPanel(QWidget):
 
     def _rebuild_transfer_row_map(self):
         """根据文件名重建 _transfer_workers 中的 row 映射"""
+        # row 是进度回调定位进度条的坐标，拖拽调序后所有行号整体位移，
+        # 必须重建映射，否则进度/状态会写串到别的行
         # 构建“文件名 -> tid”的映射
         name_to_tid = {}
         for tid, info in self._transfer_workers.items():
@@ -1882,6 +1893,7 @@ class SFTPPanel(QWidget):
             self._health_worker.wait(1000)
         transport = self._transport
         self._transport = None
+        # 先置空引用掐断后续回调能看到的 transport，防止下面清理 worker 期间又被拿去操作
         self._cleanup_connect_worker()
         for tid in list(self._transfer_workers.keys()):
             info = self._transfer_workers.get(tid)
@@ -1889,6 +1901,8 @@ class SFTPPanel(QWidget):
                 info['worker'].stop()
             self._safe_delete_transfer_worker(tid)
         self._cleanup_list_worker()
+        # transport 放最后关：等所有传输 worker 都收到 stop 后再断，
+        # 否则在途传输往已关闭的通道写数据会连环抛 paramiko 异常
         safe_close_transport(transport)
         if transport:
             self._log('[SFTP] 已断开连接')

@@ -60,10 +60,12 @@ def fuzzy_match_device_dir(videos_dir: str, candidates: list) -> tuple:
     for cand in candidates:
         cand = str(cand or "").strip()
         if "-" not in cand:
+            # 目录命名约定是「店号-机号」，拆不出前后缀就没法参与匹配
             continue
         prefix, suffix = cand.rsplit("-", 1)
         target = norm_device_suffix(suffix)
         if not target:
+            # 后缀没数字时归一化结果是空串，空串互等会误匹配，直接跳过
             continue
         hits = []
         for name in entries:
@@ -97,6 +99,7 @@ def resolve_device_dir(videos_dir: str, candidates: list) -> tuple:
         (device_id, note, source): 目录名 / 匹配说明（命中映射表时标注
         来源）/ 命中方式 ('mapping'|'exact'|'fuzzy'，失败为空串)
     """
+    # 候选去重但保留顺序（dict.fromkeys），避免同一球桌号重复匹配、重复落库
     cands = list(dict.fromkeys(str(c or "").strip() for c in candidates if str(c or "").strip()))
     if not videos_dir or not cands:
         return "", "", ""
@@ -107,6 +110,8 @@ def resolve_device_dir(videos_dir: str, candidates: list) -> tuple:
             info = table_db.get_device_mapping(cand)
             local_dir = str(info.get("local_dir") or "").strip()
             if local_dir and os.path.isdir(os.path.join(videos_dir, local_dir)):
+                # 映射可能过期（目录被删/改名），所以必须确认目录还在，
+                # 失效映射穿透到后面两级重新匹配，而不是拿着死路径硬用
                 src = str(info.get("source") or "auto")
                 return local_dir, f"{cand} → 已存映射 {local_dir}（{src}）", "mapping"
     except Exception:
@@ -303,6 +308,7 @@ class ZipUploadWorker(QThread):
         if self.isInterruptionRequested():
             raise _UploadCancelled()
         if not total:
+            # 服务端没给文件总长时 total=0，算不了百分比，防除零直接 return
             return
         p = int(transferred * 100 / total)
         if p != self._last_percent:

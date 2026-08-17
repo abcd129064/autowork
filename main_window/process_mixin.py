@@ -206,11 +206,14 @@ class ProcessMixin:
 
     def _on_three_process_finished(self, name, attr_name, exit_code, exit_status):
         """三端进程退出回调：主动关闭时静默处理，异常退出时记录日志并更新按钮状态"""
+        # 区分主动关闭与意外退出：_stop_three_programs 会先把 _three_running 置 False
+        # 再 kill，所以这里仍为 True 说明进程是自己退出的，属于意外退出
         if not self._three_running:
             return  # 用户主动关闭，_stop_three_programs 已处理
         # 仍在“运行中”状态 → 属于意外退出
         status_text = "正常退出" if exit_status == QProcess.NormalExit else "异常崩溃"
         self._append_log(f"[警告] {name} 已退出（{status_text}，退出码: {exit_code}）")
+        # 用 is 比对确认退出的就是当前持有的那个进程对象，防止用户已重新启动后误清引用
         if getattr(self, attr_name, None) is self.sender():
             setattr(self, attr_name, None)
         self._show_info_bar(f"{name} 已退出（退出码: {exit_code}）", "warning", duration=4000)
@@ -253,6 +256,8 @@ class ProcessMixin:
 
         优先使用原始 snapshot 精确恢复；若失败则枚举支持模式寻找最佳匹配；
         最终回退到仅设置宽高 + 系统默认刷新率。"""
+        # 为什么需要多级回退：三端程序可能改过显示模式，驱动不一定接受原样回写，
+        # 逐级降级保证至少能恢复到相近分辨率，不至于留在错误分辨率上
         if sys.platform != 'win32' or not mode:
             return
         try:
@@ -274,6 +279,7 @@ class ProcessMixin:
                                      f"@ {best.dmDisplayFrequency}Hz（最佳匹配）")
                     return
                 self._append_log(f"[分辨率] 最佳匹配模式恢复返回 {ret}")
+            # 前两级失败多为刷新率不被驱动接受，最后只设宽高让驱动自选刷新率
             dm2 = DEVMODE()
             dm2.dmSize = ctypes.sizeof(DEVMODE)
             dm2.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL
@@ -307,6 +313,7 @@ class ProcessMixin:
                     continue
                 if bits and dm.dmBitsPerPel != bits:
                     continue
+                # 按刷新率差值最小优先，同差值时取更高刷新率，元组比较直接定胜负
                 score = (abs(dm.dmDisplayFrequency - freq), -dm.dmDisplayFrequency)
                 if best_score is None or score < best_score:
                     best_score = score
@@ -325,6 +332,7 @@ class ProcessMixin:
         try:
             with open(cfg_path, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
+            # 三端启动依赖识别端跳过硬件就绪检查，置 False 避免卡在等待；关闭时恢复 True
             cfg.setdefault("sys", {})["skip_ready_check"] = value
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -364,6 +372,7 @@ class ProcessMixin:
             bin_mtime = os.path.getmtime(detect_bin_path)
             json_mtime = os.path.getmtime(detect_json_path)
             if bin_mtime > json_mtime:
+                # json 比 bin 旧说明配置已过期，必须重新解码，否则识别端拿过期配置跑偏
                 self._append_log("[detect] detect.bin 比 detect.json 更新，重新解码")
                 need_decode = True
             else:
@@ -373,6 +382,7 @@ class ProcessMixin:
             if not os.path.exists(cipher_tool):
                 self._append_log(f"[detect] 警告: 解码工具不存在: {cipher_tool}")
                 return False
+            # 记下解码输出的 detect.json 路径，等异步解码/复制完成后由回调接力启动
             self._pending_detect_json = detect_json_path
             cmd = [cipher_tool, detect_bin_path, detect_json_path]
             self._append_log(f"[detect] 正在异步解码: {' '.join(cmd)}")
@@ -424,17 +434,20 @@ class ProcessMixin:
         detect_json_path = self._pending_detect_json
         if exit_code != 0:
             self._append_log(f"[detect] 解码失败，退出码: {exit_code}")
+            # 失败必须清挂起路径并复位状态栏，否则下次点击会误以为还有挂起启动，直接卡死
             self._pending_exe_path = None
             self._pending_detect_json = None
             self._update_status_idle()
             return
         if not os.path.exists(detect_json_path):
             self._append_log(f"[detect] 警告: 解码后未生成 detect.json")
+            # 同样复位挂起状态，防后续启动流程卡在等待回调
             self._pending_exe_path = None
             self._pending_detect_json = None
             self._update_status_idle()
             return
         target_path = os.path.join(self.exe_dir, "detect.json")
+        # 解码成功后再开一路异步复制，程序要等 copy_finished 回调才真正启动
         worker = FileCopyWorker(detect_json_path, target_path)
         worker.copy_finished.connect(self._on_detect_copy_finished)
         worker.error.connect(lambda err: self._on_detect_copy_error(err))
@@ -481,6 +494,7 @@ class ProcessMixin:
             if 'cap' in cfg and 'file' in cfg['cap']:
                 cfg['cap']['file']['path'] = video_path
                 cfg['cap']['file']['video_start_frame'] = frame
+            # 旧版本把这两个字段写在顶层，残留会被三端程序误读覆盖新配置，必须删掉
             if 'path' in cfg:
                 del cfg['path']
             if 'video_start_frame' in cfg:

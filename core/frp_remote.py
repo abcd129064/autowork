@@ -140,6 +140,8 @@ class RemoteSessionManager(QObject):
         except (OSError, ValueError):
             data = None
         if isinstance(data, list):
+            # meta 允许部分损坏：逐条校验，字段不全的条目跳过，
+            # 不因为一条坏数据就放弃整个快照的恢复
             for v in data:
                 if not isinstance(v, dict):
                     continue
@@ -159,6 +161,8 @@ class RemoteSessionManager(QObject):
                     "source": str(v.get("source") or SOURCE_MANUAL),
                     "lastUsed": str(v.get("lastUsed") or ""),
                 }
+            # meta 恢复出内容就到此为止：TOML 回退只在 meta 完全不可用时兜底，
+            # 两源混读反而会让旧的 TOML 数据覆盖新的 meta 快照
             if self._visitors:
                 return
         # 回退：元数据缺失（旧版本升级）时按 TOML 恢复手工 visitor
@@ -358,6 +362,7 @@ class RemoteSessionManager(QObject):
         return {v["bindPort"] for v in self._visitors.values()}
 
     def _port_owner(self, port: int):
+        # 反查端口归属：冲突报错时能明确告诉用户端口被哪个隧道占了
         for sn, v in self._visitors.items():
             if v["bindPort"] == int(port):
                 return sn
@@ -569,6 +574,9 @@ class RemoteSessionManager(QObject):
         win = self._session_window
         if win is None:
             return None
+        # Python 包装对象还在不代表 C++ 侧活着：会话窗口带 WA_DeleteOnClose，
+        # 用户关掉后 C++ 对象即销毁，此时任何 Qt 方法调用都抛 RuntimeError，
+        # 正好拿 isVisible() 当探针，比拿着悬挂引用继续操作安全
         try:
             win.isVisible()  # 探测 C++ 对象是否已销毁
             return win

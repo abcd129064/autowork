@@ -298,6 +298,7 @@ class ANSITerminalWidget(QTextEdit):
     def _parse(self, data: str):
         i = 0
         n = len(data)
+        # 1. 普通态遇到 ESC 进转义态；2. 转义态按首字节分 CSI/OSC/单字节三路；3. 凑齐一条就执行并回到普通态
         while i < n:
             if self._in_esc:
                 self._esc_buf += data[i]
@@ -321,6 +322,7 @@ class ANSITerminalWidget(QTextEdit):
                         self._in_esc = False
                         self._esc_buf = ''
                     elif len(self._esc_buf) > 64:
+                        # 缓冲超 64 字节还没等到终止符，多半是畸形或未结束的序列，直接丢弃防无限吃内存
                         self._in_esc = False
                         self._esc_buf = ''
                     continue
@@ -330,6 +332,7 @@ class ANSITerminalWidget(QTextEdit):
                         self._in_esc = False
                         self._esc_buf = ''
                     elif len(self._esc_buf) > 256:
+                        # OSC 同理，256 字节兜底截断，防止未终止的 OSC 一直累积内存
                         self._in_esc = False
                         self._esc_buf = ''
                     continue
@@ -343,6 +346,7 @@ class ANSITerminalWidget(QTextEdit):
                     self._esc_buf = ''
                     i += 1
                 elif ch == '\n':
+                    # 换行让光标离开旧行又进入新行，两行都要标脏重绘，否则光标残影留在旧行
                     self._dirty_rows.add(self._cursor_row)  # 旧行光标消失
                     self._cursor_row += 1
                     self._cursor_col = 0
@@ -360,6 +364,7 @@ class ANSITerminalWidget(QTextEdit):
                     i += 1
                 elif ch == '\t':
                     # Tab 展开到下一个 8 列制表位
+                    # 向下取整到 8 的倍数再进位：cursor_col=3 时 Tab 跳到 cursor_col=8（即 1 基的第 4 列跳到第 9 列），和 xterm 一致
                     next_tab = ((self._cursor_col // 8) + 1) * 8
                     self._cursor_col = next_tab
                     i += 1
@@ -377,15 +382,18 @@ class ANSITerminalWidget(QTextEdit):
         params_str = seq[:-1]
         params = []
         if params_str:
+            # CSI 参数以 ; 分隔，空槽位一律按 0 处理，ANSI 规范里 0 等价于缺省值
             for p in params_str.split(';'):
                 try:
                     params.append(int(p))
                 except ValueError:
+                    # 混入非法字符就按 0 兜底，避免带病参数把后续逻辑搞崩
                     params.append(0)
 
         if final == 'm':
             self._handle_sgr(params or [0])
         elif final == 'H' or final == 'f':
+            # H/f 的前两个参数是行/列，ANSI 坐标从 1 起算，这里减 1 转内部 0 基并夹住下界
             self._dirty_rows.add(self._cursor_row)
             row = (params[0] if params else 1) - 1
             col = (params[1] if len(params) > 1 else 1) - 1
@@ -417,6 +425,7 @@ class ANSITerminalWidget(QTextEdit):
             col = (params[0] if params else 1) - 1
             self._cursor_col = max(0, col)
         elif final == 'J':
+            # 不带参数时 ED/EL 默认按模式 0 处理（擦光标到末尾），不能当清除全屏
             mode = params[0] if params else 0
             self._handle_ed(mode)
         elif final == 'K':
@@ -438,6 +447,7 @@ class ANSITerminalWidget(QTextEdit):
         """处理 SGR (Select Graphic Rendition) — attrs 为不可变 tuple"""
         fg, bg, bold, underline = self._attrs
         i = 0
+        # SGR 允许一条序列带多组参数（如 1;31;42），必须逐个消费，索引 i 按每个参数的占位数推进
         while i < len(params):
             p = params[i]
             if p == 0:
@@ -457,11 +467,13 @@ class ANSITerminalWidget(QTextEdit):
                 if i + 1 < len(params) and params[i + 1] == 5:
                     if i + 2 < len(params):
                         fg = self._color_256(params[i + 2])
+                        # 38;5;N 共 3 个参数，这里额外跳过 5 和 N，否则 N 会被当成下一个独立 SGR 码误执行
                         i += 2
                 elif i + 1 < len(params) and params[i + 1] == 2:
                     if i + 4 < len(params):
                         r, g, b = params[i + 2], params[i + 3], params[i + 4]
                         fg = f'#{r:02x}{g:02x}{b:02x}'
+                        # 38;2;r;g;b 共 5 个参数，跳过 2;r;g;b 四个，防 r/g/b 被误读成后续 SGR 码
                         i += 4
             elif p == 39:
                 fg = 'default'
@@ -494,23 +506,27 @@ class ANSITerminalWidget(QTextEdit):
         elif n < 232:
             # 6x6x6 色块
             n -= 16
+            # 减 16 后按 6 进制拆：n%6 是蓝分量、(n//6)%6 是绿、n//36 是红，每级乘 51 把 0~5 拉到 0~255
             b = (n % 6) * 51
             g = ((n // 6) % 6) * 51
             r = (n // 36) * 51
             return f'#{r:02x}{g:02x}{b:02x}'
         else:
             # 灰度
+            # 232-255 共 24 级线性灰阶，从 8 起步长 10，避免起点纯黑和前景默认黑混淆
             v = 8 + (n - 232) * 10
             return f'#{v:02x}{v:02x}{v:02x}'
 
     def _handle_ed(self, mode: int):
         """ED - 屏幕擦除"""
         if mode == 2:
+            # 模式 2 全屏擦除：重建至少 24 行空屏并把光标归位到左上角
             self._lines = [[] for _ in range(max(self._cursor_row + 1, 24))]
             self._cursor_row = 0
             self._cursor_col = 0
             self._dirty_rows.clear()
         elif mode == 0:
+            # 模式 0 擦光标到屏尾：当前行只截留光标前的列，光标之后的行整体丢弃
             # 光标到屏幕末尾
             if self._cursor_row < len(self._lines):
                 self._lines[self._cursor_row] = \
@@ -521,6 +537,7 @@ class ANSITerminalWidget(QTextEdit):
             if len(self._lines) < old_count:
                 self._dirty_rows.clear()  # 行数变了，缓存失效
         elif mode == 1:
+            # 模式 1 擦屏首到光标：光标之前的行整行清空，当前行只删光标前的列
             # 屏幕开头到光标
             for r in range(self._cursor_row):
                 if self._lines[r]:
@@ -530,6 +547,7 @@ class ANSITerminalWidget(QTextEdit):
                 self._lines[self._cursor_row] = \
                     self._lines[self._cursor_row][self._cursor_col:]
                 self._cursor_col = 0
+                # 当前行前段被删，列号必须归零，否则后续输出位置整体错位
                 self._dirty_rows.add(self._cursor_row)
 
     def _handle_el(self, mode: int):
@@ -538,8 +556,10 @@ class ANSITerminalWidget(QTextEdit):
         if row >= len(self._lines):
             return
         if mode == 0:
+            # EL 模式 0 只擦光标右侧，光标本身位置不动
             self._lines[row] = self._lines[row][:self._cursor_col]
         elif mode == 1:
+            # 模式 1 擦光标左侧（不含光标下字符，该字符随切片保留并左移到行首），列号必须跟着归零
             self._lines[row] = self._lines[row][self._cursor_col:]
             self._cursor_col = 0
         elif mode == 2:
@@ -580,6 +600,7 @@ class ANSITerminalWidget(QTextEdit):
         if len(self._lines) > self._max_lines:
             excess = len(self._lines) - self._max_lines
             self._lines = self._lines[excess:]
+            # 裁掉头部 excess 行后，光标行号要同步下移，否则指着已被丢弃的行，后续输出全部错位
             self._cursor_row -= excess
             self._dirty_rows.clear()  # 行裁剪后缓存失效
 
@@ -600,6 +621,7 @@ class ANSITerminalWidget(QTextEdit):
     def _render(self):
         # 增量渲染：无脏行且行数未变时跳过
         if _ENABLE_INCREMENTAL_RENDER:
+            # setHtml 会全量重排文档，滚动时一次全绘比只画脏行慢一个量级，所以先靠脏行集合挡掉无谓重绘
             if not self._dirty_rows and self._prev_line_count == len(self._lines):
                 return
             # 有脏行或行数变化 → 重建 HTML（setHtml 是全量的，但跳过无变化场景）
@@ -629,6 +651,7 @@ class ANSITerminalWidget(QTextEdit):
         ]
         for row_idx, line in enumerate(self._lines):
             is_cursor_row = (row_idx == self._cursor_row and self._input_enabled)
+            # 只有光标行传光标列用于注入光标方块，其余行传 -1，避免每行都被注入光标
             parts.append(self._row_html(line, self._cursor_col if is_cursor_row else -1))
             parts.append('<br>')
         parts.append('</pre>')

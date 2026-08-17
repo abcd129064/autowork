@@ -18,6 +18,7 @@ def generate_random_port(exclude_ports=None):
         7400  # frpc admin端口
     }
     exclude_ports = exclude_ports | common_ports
+    # 7400 是 frpc 的 admin 端口必须排除：随机端口撞上它会与 frpc admin 端口冲突，导致 admin 接口或该隧道不可用
 
     while True:
         port = random.randint(10000, 65535)
@@ -45,6 +46,8 @@ def open_xshell_and_xftp(host, port, username, password, log=None):
         create_new_console = 0x00000010
 
         xshell_url = f'ssh://{username}:{password}@{host}:{port}'
+        # 凭据只能内嵌在 -url 里传给 Xshell/Xftp，它们没有别的命令行传参通道，
+        # 否则启动后会弹交互框等用户手动输密码，达不到「免交互双开」的目的
         subprocess.Popen(
             f'xshell -url "{xshell_url}"',
             shell=True,

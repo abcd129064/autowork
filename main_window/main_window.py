@@ -769,6 +769,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 self.ui.input_frame.setText(str(int(saved)))
         except (TypeError, ValueError):
             pass
+        # 单次防抖 500ms：输入停止后才落盘一次，因为 _save_settings 每次都要走
+        # DPAPI 解密旧文件→合并→再加密的全流程，每敲一键就写盘开销太大
         self._frame_offset_save_timer = QTimer(self)
         self._frame_offset_save_timer.setInterval(500)
         self._frame_offset_save_timer.setSingleShot(True)
@@ -807,6 +809,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         if self.ui.input_frame_before.isChecked():
             offset = self._get_frame_input_value()
             result = log_frame_id - offset
+            # 起始帧不允许为负：负值会直接写进 video_start_frame，
+            # 三端程序按负帧定位会失败，钳到 0 保底
             if result < 0:
                 self._append_log(
                     f"  [警告] 帧前偏移后起始帧为负值({result})，已修正为 0。"
@@ -824,6 +828,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._append_log(f"  [模式] 自定义: {custom}")
             return custom
         else:
+            # 兜底分支：三个单选全未选中（如选择被程序性清除）时的防御性默认，
+            # 按「帧前」语义处理，这是刻意兜底而不是复制粘贴的疏忽
             offset = self._get_frame_input_value()
             result = log_frame_id - offset
             if result < 0:
@@ -1272,6 +1278,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         if not file_path:
             return None
         if device_code:
+            # relpath 跨盘符会抛 ValueError，降级成只解析文件名，
+            # 避免下载目标落在别的磁盘时丢掉日期对齐能力
             try:
                 rel = os.path.relpath(
                     file_path, os.path.join(self.videos_dir, device_code))
@@ -1345,6 +1353,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             pass
 
         # 2. 保存远程会话信息（在关闭窗口之前）
+        # 必须先落盘再走第 3 步：_save_remote_sessions 是从 win._panels 提取会话的，
+        # 而 win.close() 触发的 shutdown_all 会清空面板列表，顺序反了就存不到任何会话
         self._save_remote_sessions()
 
         # 3. 关闭远程会话标签容器（触发各面板 shutdown：SFTP/SSH/RDP）

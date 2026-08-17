@@ -89,6 +89,7 @@ class SFTPListWorker(QThread):
                 pass
             sftp = paramiko.SFTPClient.from_transport(self.transport)
             entries = []
+            # from_transport 每次新开独立 session 通道，和别的 worker 共享同一条 transport 也不会互踢
             # 【性能关键】使用 listdir_attr 一次性获取所有文件属性（单次网络往返），
             # 避免逐文件 stat()（N 个文件 = N 次网络往返，大目录极慢）
             for attr in sftp.listdir_attr(self.remote_path):
@@ -147,6 +148,8 @@ class SFTPOperationWorker(QThread):
         self._pause_event.set()
 
     def _progress_cb(self, transferred, total):
+        # paramiko 的 put/get 传输循环没有取消接口，只能靠进度回调里抛异常打断，
+        # 否则 stop 后还得等整个文件传完才能停下来
         # 检查停止
         if self._stop_flag:
             raise InterruptedError('传输已取消')

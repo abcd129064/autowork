@@ -146,6 +146,8 @@ class SingleShotVideoServer:
             session_code = task['session_code']
 
             # 逐段视频：末尾补一条 +25 帧的同分记录，让最后一段比分条渲染到片段结束
+            # 与下方 start_frame - 25 配对，首尾各延伸一截，
+            # 否则尾段区间覆盖不完整，比分条会在片段结束前消失
             for video in videos:
                 scores = video["scores"]
                 if scores:
@@ -234,6 +236,8 @@ class SingleShotVideoServer:
                 font_path = resource_path("SourceHanSansCN-Regular.ttf")
                 font_size = 25
                 for index, value in enumerate(item['scores']):
+                    # 首段比分条起点前移 25 帧（与末尾 +25 对称）；算出负值也安全：
+                    # 下方区间判断里 frame_count 从 1 起算，条件天然成立，比分条从第一帧就出现
                     if item['scores'][index]['frame_id'] == item['start_frame']:
                         item['scores'][index]['frame_id'] = item['start_frame'] - 25
                     # 底图按选手方向选（image_0/image_1），转 RGBA 供绘制
@@ -302,6 +306,7 @@ class SingleShotVideoServer:
                     opencv_image = np.array(image)
 
                     # Pillow 输出是 RGBA，转 BGRA 供 OpenCV 叠加
+                    # 因为 OpenCV 是 BGR 通道序，不转换直接叠加会红蓝互换
                     main_img = cv2.cvtColor(opencv_image, cv2.COLOR_RGBA2BGRA)
 
                     if main_img is None:
@@ -320,6 +325,9 @@ class SingleShotVideoServer:
                         frame_count += 1
                         frame_with_text = frame.copy()
 
+                        # 已越过本段结束帧：跳出让外层换下一张比分条。
+                        # 注意：越界时刚读入的这一帧（boundary+1）已被 cap 消费但不会写出，
+                        # 每个段位切换点会丢 1 帧；若要求无损输出需改为把这帧留给下一段处理
                         if frame_count > (
                                 item['end_frame'] if index + 1 == len(item['scores']) else item['scores'][index + 1][
                                     'frame_id']):
@@ -338,6 +346,9 @@ class SingleShotVideoServer:
                             y1, y2 = main_y_offset, main_y_offset + main_h
                             x1, x2 = main_x_offset, main_x_offset + main_w
                             if main_channels == 4:  # 带 alpha 通道按透明度混合
+                                # alpha 混合三步（下方两个头像/logo 同一套算法）：
+                                # 1. 前景 alpha 归一到 0~1；2. 背景权重 = 1 - 前景 alpha
+                                # 3. 逐通道加权和：alpha=1 完全盖住原帧，=0 完全透出
                                 alpha_main = main_img[:, :, 3] / 255.0
                                 alpha_frame = 1.0 - alpha_main
                                 for c in range(0, 3):
