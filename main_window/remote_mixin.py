@@ -238,14 +238,17 @@ class RemoteMixin:
             removed = self._p2p_visitors.pop(row)
             self._p2p_current_index = -1
             self._refresh_p2p_list()
-            # frpc 运行中时同步移除会话中心注册并重写配置，避免残留隧道
+            # frpc 运行中时同步移除会话中心注册并重写配置，避免残留隧道；
+            # 先关闭该端口上的会话，避免隧道移除后窗口假死
             name = removed.get("serverName", "")
-            if name and self._session_mgr.is_running() \
-                    and self._session_mgr.remove_visitor(name):
-                try:
-                    self._session_mgr.apply()
-                except (OSError, RuntimeError) as e:
-                    self._append_log(f"[远程] 应用变更失败: {e}")
+            if name and self._session_mgr.is_running():
+                self._session_mgr.close_sessions_on_port(
+                    removed.get("bindPort"), reason=name)
+                if self._session_mgr.remove_visitor(name):
+                    try:
+                        self._session_mgr.apply()
+                    except (OSError, RuntimeError) as e:
+                        self._append_log(f"[远程] 应用变更失败: {e}")
 
     def _on_p2p_visitor_selected(self, row):
         """列表选择：XTCP 模式加载 visitor 到表单，TCP 模式填充 host/port"""
@@ -691,6 +694,12 @@ class RemoteMixin:
     def _on_xtcp_disconnect(self):
         """断开：注销手工 visitor；仍有其他隧道时 frpc 保持运行，否则停止"""
         mgr = self._session_mgr
+        # 先优雅关闭这些隧道端口上的会话（含统一会话中心窗口里的 snk 会话），
+        # 避免隧道移除后 SSH/SFTP 窗口假死
+        for v in self._p2p_visitors:
+            port = v.get("bindPort")
+            if port:
+                mgr.close_sessions_on_port(port, reason=v.get("serverName", ""))
         removed = 0
         for v in self._p2p_visitors:
             name = v.get("serverName", "")

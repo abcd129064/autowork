@@ -124,6 +124,10 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 | 方法 | 说明 |
 |------|------|
 | `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪 |
+| `disconnect_visitor(server_name)` | 隧道面板「断开连接」：仅 frpc 运行中生效（返回 ok/not_running/not_found/error），先关相关会话再移除 visitor 释放端口，绝不自动启动 frpc |
+| `delete_visitor(server_name)` | 隧道面板「删除 snk」：从注册表与持久化文件彻底移除，frpc 未运行时也可执行且不启动 frpc |
+| `sessions_on_port(port)` / `is_transferring_on_port(port)` | 查指定本地端口上的会话面板 / 是否有 SFTP 传输进行中 |
+| `close_sessions_on_port(port, reason)` / `close_all_sessions(reason)` | 优雅关闭指定端口/全部会话面板（panel.shutdown()），返回关闭数量 |
 | `shutdown()` | 停止 frpc 并关闭全局会话窗口（主窗口 closeEvent 调用） |
 
 #### 类 `FrpRemoteBridge(QObject)`

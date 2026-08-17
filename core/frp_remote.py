@@ -180,6 +180,12 @@ class RemoteSessionManager(QObject):
         except OSError:
             pass
 
+    def _persist_registry(self):
+        """落盘持久化文件（不触碰 frpc 进程）：手工/球桌库 TOML + 全量 meta 快照"""
+        app_dir = get_app_dir()
+        self._write_manual_toml(os.path.join(app_dir, _MAIN_TOML_NAME))
+        self._write_registry_meta(os.path.join(app_dir, _META_NAME))
+
     def register_visitor(self, server_name: str, bind_port: int | None = None,
                          secret_key: str | None = None, source: str = SOURCE_MANUAL,
                          table_id: str = "") -> tuple:
@@ -278,15 +284,58 @@ class RemoteSessionManager(QObject):
             self.visitors_changed.emit()
         return len(names)
 
-    def disconnect_visitor(self, server_name: str) -> bool:
-        """移除 visitor 并立即应用（隧道面板"断开"按钮用）"""
-        if not self.remove_visitor(server_name):
-            return False
+    def disconnect_visitor(self, server_name: str) -> str:
+        """隧道面板「断开连接」：仅在 frpc 运行中生效，绝不自动启动 frpc
+
+        完整断开流程：先优雅关闭该隧道端口上的 SSH/SFTP/RDP 会话
+        （panel.shutdown()，避免隧道丢失后窗口假死），再移除 visitor 并
+        apply（frpc 按新配置重启释放端口，注册表清空则停止 frpc）。
+
+        Returns:
+            "ok" 断开成功；"not_running" frpc 未启动（未做任何改动）；
+            "not_found" visitor 不存在；"error" 应用变更失败。
+        """
+        name = str(server_name or "").strip()
+        info = self._visitors.get(name)
+        if info is None:
+            return "not_found"
+        if not self.is_running():
+            # frpc 未启动时隧道本未建立，无断开可做；
+            # 千万不能在此 apply()，否则会带着剩余 visitor 自动拉起 frpc
+            return "not_running"
+        self.close_sessions_on_port(info["bindPort"], reason=name)
+        self.remove_visitor(name)
         try:
             self.apply()
         except (OSError, RuntimeError) as e:
             self.log_message.emit(f"[远程会话] 应用变更失败: {e}")
-        return True
+            return "error"
+        return "ok"
+
+    def delete_visitor(self, server_name: str) -> str:
+        """隧道面板「删除 snk」：从注册表与持久化文件中彻底移除 visitor
+
+        与「断开连接」的区别：frpc 未运行时也执行（仅移除并重写持久化
+        文件，绝不启动 frpc）；frpc 运行中则先关闭相关会话再移除并 apply。
+        Returns 含义同 disconnect_visitor。
+        """
+        name = str(server_name or "").strip()
+        info = self._visitors.get(name)
+        if info is None:
+            return "not_found"
+        if self.is_running():
+            self.close_sessions_on_port(info["bindPort"], reason=name)
+            self.remove_visitor(name)
+            try:
+                self.apply()
+            except (OSError, RuntimeError) as e:
+                self.log_message.emit(f"[远程会话] 应用变更失败: {e}")
+                return "error"
+            return "ok"
+        # frpc 未启动：仅移除并重写持久化文件（下次启动不再恢复），不启动 frpc
+        self.remove_visitor(name)
+        self._persist_registry()
+        return "ok"
 
     def records(self) -> list:
         """全部 visitor 记录（浅拷贝，供隧道面板展示）"""
@@ -322,11 +371,8 @@ class RemoteSessionManager(QObject):
 
     def apply(self):
         """按当前注册表重写 TOML 并（重新）启动 frpc；注册表为空时停止 frpc"""
-        app_dir = get_app_dir()
-        # 先持久化手工 visitor 到独立文件：程序重启后能恢复手工隧道配置
-        self._write_manual_toml(os.path.join(app_dir, _MAIN_TOML_NAME))
-        # 同步全量注册表元数据（含 snk 快捷），断开/重启后面板仍可展示
-        self._write_registry_meta(os.path.join(app_dir, _META_NAME))
+        # 先落盘持久化（frpc_xtcp.toml + 全量 meta），再处理 frpc 进程
+        self._persist_registry()
         if not self._visitors:
             # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
             self._stop_frpc()
@@ -511,6 +557,90 @@ class RemoteSessionManager(QObject):
             self._notify("打开会话失败", str(e), error=True, notifier=notifier)
             return
         self.ensure_session_window().add_session(panel)
+
+    # ---------- 会话联动（隧道断开时同步处理已打开的 SSH/SFTP/RDP 会话） ----------
+
+    def _live_session_window(self):
+        """获取全局会话窗口（未创建或 C++ 对象已销毁时返回 None）"""
+        win = self._session_window
+        if win is None:
+            return None
+        try:
+            win.isVisible()  # 探测 C++ 对象是否已销毁
+            return win
+        except RuntimeError:
+            self._session_window = None
+            return None
+
+    def sessions_on_port(self, port) -> list:
+        """指定本地端口上已打开的全部会话面板（SSH/SFTP/RDP，无则空列表）"""
+        win = self._live_session_window()
+        if win is None:
+            return []
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return []
+        panels = []
+        for p in list(getattr(win, "_panels", [])):
+            try:
+                if int(getattr(p, "_port", 0) or 0) == port:
+                    panels.append(p)
+            except (TypeError, ValueError):
+                continue
+        return panels
+
+    def is_transferring_on_port(self, port) -> bool:
+        """指定端口上的 SFTP 会话是否有文件传输进行中（含暂停未结束的任务）"""
+        for p in self.sessions_on_port(port):
+            if type(p).__name__ != "SFTPPanel":
+                continue
+            for info in getattr(p, "_transfer_workers", {}).values():
+                worker = info.get("worker") if isinstance(info, dict) else None
+                if worker is not None and worker.isRunning():
+                    return True
+        return False
+
+    def close_sessions_on_port(self, port, reason: str = "") -> int:
+        """优雅关闭指定本地端口上的全部会话面板（panel.shutdown() 释放资源），
+        返回关闭数量。隧道断开前调用，避免端口失效后会话窗口假死。
+        """
+        panels = self.sessions_on_port(port)
+        if not panels:
+            return 0
+        win = self._live_session_window()
+        closed = 0
+        kinds = []
+        for p in panels:
+            kinds.append(type(p).__name__.replace("Panel", ""))
+            try:
+                win.remove_session(p)
+                closed += 1
+            except (RuntimeError, OSError):
+                pass
+        if closed:
+            self.log_message.emit(
+                f"[远程会话] 隧道 {reason or port} 已断开，"
+                f"同步关闭 {closed} 个相关会话（{' / '.join(kinds)}）")
+        return closed
+
+    def close_all_sessions(self, reason: str = "") -> int:
+        """关闭全局会话窗口中的全部会话面板（「全部断开」用），返回关闭数量"""
+        win = self._live_session_window()
+        if win is None:
+            return 0
+        panels = list(getattr(win, "_panels", []))
+        closed = 0
+        for p in panels:
+            try:
+                win.remove_session(p)
+                closed += 1
+            except (RuntimeError, OSError):
+                pass
+        if closed:
+            self.log_message.emit(
+                f"[远程会话] {reason or '全部隧道'}已断开，同步关闭 {closed} 个相关会话")
+        return closed
 
     # ---------- 全局会话窗口 ----------
 
