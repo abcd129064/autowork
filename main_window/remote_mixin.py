@@ -2,6 +2,7 @@
 """MainWindow 远程连接 Mixin：P2P 面板、XTCP/TCP 连接、frpc 管理、SFTP/SSH/RDP 窗口启动"""
 from __future__ import annotations
 
+import re
 import sys
 from typing import TYPE_CHECKING
 
@@ -69,11 +70,13 @@ class RemoteMixin:
             self.ui.p2p_ssh_user.setText(ssh_user)
         if ssh_pass:
             self.ui.p2p_ssh_pass.setText(ssh_pass)
-        # 接入统一远程会话中心：frpc 日志转发到日志区，状态变化刷新按钮
+        # 接入统一远程会话中心：frpc 日志转发到日志区，状态变化刷新按钮；
+        # 「删除 snk」彻底移除 visitor 时同步清理本地列表，避免残留
         self._session_mgr = get_session_manager()
         self._session_mgr.log_message.connect(self._append_log)
         self._session_mgr.frpc_state_changed.connect(
             lambda _running: self._update_p2p_buttons())
+        self._session_mgr.visitor_removed.connect(self._on_visitor_removed_external)
         self._load_visitors_from_manager()
         self._refresh_p2p_list()
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
@@ -164,6 +167,29 @@ class RemoteMixin:
         self._p2p_visitors.extend(restored)
         if restored:
             self._append_log(f"[远程] 从会话中心恢复了 {len(restored)} 个 visitor")
+
+    def _on_visitor_removed_external(self, server_name: str):
+        """隧道面板「删除 snk」彻底移除 visitor 后，立即同步清理本地列表并刷新，
+        避免已删除的 snk 残留在远程面板 visitor 列表中。
+
+        仅 delete_visitor 发此信号；主面板自己的断开/删除流程不经此路径，
+        断开（非删除）后列表保留可重连的语义不受影响。
+        """
+        name = str(server_name or "").strip()
+        if not name:
+            return
+        hit = [v for v in self._p2p_visitors if v.get("serverName", "") == name]
+        if not hit:
+            return
+        for v in hit:
+            self._p2p_visitors.remove(v)
+        if self._p2p_current_index >= len(self._p2p_visitors):
+            self._p2p_current_index = len(self._p2p_visitors) - 1
+        self._append_log(f"[远程] 列表已同步移除: {name}")
+        # TCP 模式下列表展示的是保存的服务器，无需刷新显示
+        if self.ui.p2p_mode_combo.currentText() != "XTCP":
+            return
+        self._refresh_p2p_list()
 
     def _open_tunnel_panel(self):
         """打开全局「当前隧道」面板（单例复用，展示所有入口的活跃隧道）"""
@@ -311,7 +337,10 @@ class RemoteMixin:
 
         self._p2p_table_selected_label = CaptionLabel("", picker)
         self._p2p_table_selected_label.setObjectName(u"p2p_table_selected_label")
-        self._p2p_table_selected_label.setWordWrap(True)
+        # 单行不换行：防止标签撑高 picker 行引起表单布局上下漂移——候选弹层
+        # 是顶层窗口，显示后不跟随锚点移动，布局漂移会让弹层与控件错位，
+        # 点击落在空处表现为「选了不生效」（布局稳定后才恢复正常）
+        self._p2p_table_selected_label.setWordWrap(False)
         self._p2p_table_selected_label.hide()
 
         lay = QHBoxLayout(picker)
@@ -379,6 +408,11 @@ class RemoteMixin:
         不足最小字符数时立即收起弹层（防 QLineEdit 用旧候选自动弹出）"""
         if self._p2p_picking:
             return
+        # 再次输入时立即收起上一次「已选」标签：在候选弹层出现前先稳定布局，
+        # 避免标签隐藏时行高变化导致已显示的弹层错位、点击落空
+        if text and not self._p2p_table_selected_label.isHidden():
+            self._p2p_selected_label_timer.stop()
+            self._p2p_table_selected_label.hide()
         if len(text.strip()) < self._TABLE_PICKER_MIN_CHARS:
             self._p2p_search_timer.stop()
             self._hide_table_matches()
@@ -459,10 +493,22 @@ class RemoteMixin:
         self._p2p_table_completer.complete()
 
     def _on_table_match_activated(self, text: str):
-        """候选选中（鼠标点击/回车）：由显示文本反查球桌行并回填表单"""
+        """候选选中（鼠标点击/回车）：由显示文本反查球桌行并回填表单
+
+        弹层与候选表不同步（残留旧弹层等）时，兜底从显示文本尾部解析 snk
+        重新查库，保证连续选择不静默失败。
+        """
         row = self._p2p_table_map.get(text)
         if row is None:
-            return
+            m = re.search(r"\(([^()]+)\)\s*$", str(text or ""))
+            snk = m.group(1).strip() if m else str(text or "").strip()
+            row = next((r for r in self._query_snk_tables(snk)
+                        if r.get("snk_code") == snk), None)
+            self._append_log(
+                f"[球桌库] 弹层文本未命中候选表({text!r})，"
+                f"按 snk={snk!r} 兜底查询{'命中' if row else '无结果'}")
+            if row is None:
+                return
         self._on_table_picked(row)
 
     def _on_table_picked(self, row: dict):
@@ -480,13 +526,28 @@ class RemoteMixin:
             self.ui.p2p_form_key.setText(secret)
             self._p2p_selected_table = row
             shown = f"已选：{name} / {room} ({snk})" if room else f"已选：{name} ({snk})"
-            self._p2p_table_selected_label.setText(shown)
+            # 单行标签限长截断：避免挤压搜索框宽度（高度已由单行固定）
+            display = shown if len(shown) <= 34 else shown[:33] + "…"
+            self._p2p_table_selected_label.setText(display)
             self._p2p_table_selected_label.show()
             self._p2p_selected_label_timer.start()  # 重启 3s 自动消失计时
             self._append_log(f"[球桌库] 已选择 {shown[3:]}，自动添加到 visitor 列表")
             self._add_picked_table(snk)
         finally:
-            self._p2p_picking = False
+            # QCompleter 在本调用栈返回后才把候选标签写回输入框（textChanged
+            # 在 picking 标志仍有效时被忽略），随后清空输入框防残留长文本
+            # 触发延时重弹旧候选——连续选择时误点已添加项即由此产生；
+            # 已选结果由右侧「已选」标签展示，清空后直接可输下一个关键词
+            QTimer.singleShot(0, self._finish_table_pick)
+
+    def _finish_table_pick(self):
+        """选中流程收尾：解除输入抑制并清空搜索框（写回已在此前发生）"""
+        self._p2p_picking = False
+        self._p2p_search_timer.stop()
+        self._p2p_table_search.blockSignals(True)
+        self._p2p_table_search.clear()
+        self._p2p_table_search.blockSignals(False)
+        self._hide_table_matches()
 
     def _add_picked_table(self, snk: str):
         """把选中的球桌按表单注册为 XTCP visitor（复用「添加」按钮完整路径）
@@ -517,6 +578,9 @@ class RemoteMixin:
                 self._p2p_selected_table.get("name") or "").strip() \
                 if self._p2p_selected_table else ""
             self._show_info_bar(f"已添加 {snk}", "success")
+        else:
+            # 添加未生效（如端口校验拒绝）：明确记日志，避免静默失败无迹可查
+            self._append_log(f"[球桌库] 添加 {snk} 失败，请查看上方日志中的拒绝原因")
 
     # ------------------------------------------------------------------ TCP 保存的服务器
     def _load_tcp_servers(self):

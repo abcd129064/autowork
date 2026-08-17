@@ -112,6 +112,7 @@ class RemoteSessionManager(QObject):
     visitors_changed = Signal()       # visitor 注册表变化（增删改）
     frpc_state_changed = Signal(bool)  # frpc 运行状态变化（True=运行中）
     log_message = Signal(str)          # 运行日志（主窗口接入日志区）
+    visitor_removed = Signal(str)      # visitor 被「删除 snk」彻底移除（主窗口列表同步清理用）
 
     def __init__(self):
         super().__init__()
@@ -317,6 +318,7 @@ class RemoteSessionManager(QObject):
 
         与「断开连接」的区别：frpc 未运行时也执行（仅移除并重写持久化
         文件，绝不启动 frpc）；frpc 运行中则先关闭相关会话再移除并 apply。
+        移除成功后发 visitor_removed 信号，主窗口远程面板据此同步清理列表。
         Returns 含义同 disconnect_visitor。
         """
         name = str(server_name or "").strip()
@@ -325,7 +327,9 @@ class RemoteSessionManager(QObject):
             return "not_found"
         if self.is_running():
             self.close_sessions_on_port(info["bindPort"], reason=name)
-            self.remove_visitor(name)
+        self.remove_visitor(name)
+        self.visitor_removed.emit(name)
+        if self.is_running():
             try:
                 self.apply()
             except (OSError, RuntimeError) as e:
@@ -333,7 +337,6 @@ class RemoteSessionManager(QObject):
                 return "error"
             return "ok"
         # frpc 未启动：仅移除并重写持久化文件（下次启动不再恢复），不启动 frpc
-        self.remove_visitor(name)
         self._persist_registry()
         return "ok"
 
@@ -377,6 +380,7 @@ class RemoteSessionManager(QObject):
             # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
             self._stop_frpc()
             return
+        app_dir = get_app_dir()
         frpc_exe = os.path.join(app_dir, "frpc.exe")
         if not os.path.exists(frpc_exe):
             raise OSError(f"frpc.exe 不存在: {frpc_exe}")

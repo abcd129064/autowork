@@ -215,6 +215,7 @@ class TunnelPanelWindow(FramelessWindow):
             return
         result = mgr.disconnect_visitor(server_name)
         if result == "ok":
+            self.refresh()  # 显式即时刷新兜底（信号刷新外的双保险）
             show_info_bar(f"已断开隧道 {server_name}，相关会话已关闭、本地端口已释放",
                           "success", title="断开成功", parent=self, duration=3000)
         elif result == "not_running":
@@ -247,6 +248,7 @@ class TunnelPanelWindow(FramelessWindow):
             return
         result = mgr.delete_visitor(server_name)
         if result == "ok":
+            self.refresh()  # 显式即时刷新兜底，确保已删除的 snk 不残留
             show_info_bar(f"已删除 snk 隧道 {server_name}",
                           "success", title="删除成功", parent=self, duration=3000)
         else:
@@ -274,5 +276,6 @@ class TunnelPanelWindow(FramelessWindow):
             mgr.apply()
         except (OSError, RuntimeError):
             pass
+        self.refresh()  # 显式即时刷新兜底
         show_info_bar("已断开全部隧道", "success", title="全部断开",
                       parent=self, duration=3000)
