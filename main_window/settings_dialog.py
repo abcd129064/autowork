@@ -83,6 +83,7 @@ class SettingsDialog(MessageBoxBase):
 
     @staticmethod
     def _build_config_items():
+        """汇总全部配置项描述（key/分区/控件获取/读取/回退），供保存时统一 collect"""
         items = []
 
         # 路径配置（5项）—— 控件存在 _path_edits 字典中
@@ -257,6 +258,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 路径配置 ----------
     def _build_paths_section(self, cfg):
+        """路径分区：程序/视频/工具等目录文件选择行"""
       #  self._add_section_header("📂 路径配置")
         path_items = [
             ("exe_dir", "程序目录", cfg.get("exe_dir", ""), "dir"),
@@ -288,6 +290,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 远程连接（含 FRPC 服务器，原独立分区已合并至此） ----------
     def _build_remote_section(self, cfg):
+        """远程连接分区：会话恢复开关 + SSH 凭据 + FRPC 服务器配置"""
        # self._add_section_header("🌐 远程连接")
         form = QFormLayout()
         form.setSpacing(8)
@@ -353,6 +356,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 收集与上传 ----------
     def _build_upload_section(self, cfg):
+        """收集与上传分区：上传服务器/端口/目录/凭据（密码落盘 DPAPI 加密）"""
        # self._add_section_header("📦 收集与上传")
         form = QFormLayout()
         form.setSpacing(8)
@@ -388,6 +392,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- AI 分析 ----------
     def _build_ai_section(self, cfg):
+        """AI 分析分区：总开关 + 厂商/模型/各厂商 API Key"""
        # self._add_section_header("🤖 AI SSH日志分析")
         form = QFormLayout()
         form.setSpacing(8)
@@ -456,6 +461,7 @@ class SettingsDialog(MessageBoxBase):
             f"{provider['base_url']}（环境变量：{provider['env_key']}）")
 
     def _on_ai_vendor_changed(self):
+        """切换 AI 厂商：同步默认模型/base_url/已存 Key"""
         vendor_id = self._combo_ai_vendor.currentData() or "deepseek"
         self._apply_ai_vendor(vendor_id)
 
@@ -513,6 +519,7 @@ class SettingsDialog(MessageBoxBase):
         return item.data(1) if item is not None else None
 
     def _add_log_rule(self):
+        """弹窗新建规则并追加到列表"""
         rule = self._edit_rule_dialog({"name": "", "pattern": "",
                                         "color": "#ff5252", "notify": True})
         if rule:
@@ -520,6 +527,7 @@ class SettingsDialog(MessageBoxBase):
             self._refresh_log_rules_list()
 
     def _edit_log_rule(self):
+        """编辑选中规则（未选中忽略）"""
         rule = self._current_log_rule()
         if rule is None:
             return
@@ -529,6 +537,7 @@ class SettingsDialog(MessageBoxBase):
             self._refresh_log_rules_list()
 
     def _del_log_rule(self):
+        """删除选中规则"""
         rule = self._current_log_rule()
         if rule is None:
             return
@@ -610,6 +619,7 @@ class SettingsDialog(MessageBoxBase):
 
     # ---------- 外观 ----------
     def _build_appearance_section(self, cfg):
+        """外观分区：字号/界面缩放/字体"""
        # self._add_section_header("🎨 外观")
         form = QFormLayout()
         form.setSpacing(8)
@@ -698,6 +708,7 @@ def _collect_ai_keys(dialog):
     return keys
 
 def _web_port():
+    """Web 服务端口：环境变量 WEB_PORT 优先，缺省 8080"""
     if os.environ.get("WEB_PORT") is not None:
         return int(os.environ.get("WEB_PORT"))
     else:

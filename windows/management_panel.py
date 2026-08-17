@@ -1118,6 +1118,7 @@ class TablePage(QWidget):
         root.addLayout(pager)
 
     def _build_col_menu(self):
+        """筛选列下拉菜单：逐列勾选显隐 + 公司测试/手动版本数据开关"""
         menu = RoundMenu("筛选列", self)
         for i, (_, title, _) in enumerate(TABLE_COLUMNS):
             cb = CheckBox(title, self)
@@ -1179,6 +1180,7 @@ class TablePage(QWidget):
         self._time_worker.start()
 
     def _on_time_meta(self, result):
+        """同步时间元数据到手：状态栏展示数据时间"""
         _, sync_time = result
         self._lbl_time.setText(f"数据时间: {sync_time}" if sync_time else "未同步")
 
@@ -1207,10 +1209,12 @@ class TablePage(QWidget):
         self._lbl_info.setText(f"同步完成，共 {count} 条")
 
     def _on_sync_error(self, msg):
+        """API 同步失败：恢复刷新按钮并展示错误"""
         self._refresh_btn.setEnabled(True)
         self._lbl_info.setText(f"同步失败: {msg}")
 
     def _populate(self, rows):
+        """行数据 → 表格：高频问题设备状态列标红，填充期关更新防闪烁"""
         # 高频问题标记：一次聚合查询（无 N+1），失败静默不标记
         try:
             hf_map = table_db.get_submission_stats(days=_HF_DAYS)["by_table"]
@@ -1247,6 +1251,7 @@ class TablePage(QWidget):
         _fit_table_rows(self._table)
 
     def _update_pager(self, keyword=""):
+        """按总数/页大小重算页码并同步分页控件与状态文本"""
         total_pages = max(1, math.ceil(self._total / self._page_size))
         self._page_no = min(self._page_no, total_pages)
         self._lbl_page.setText(f"{self._page_no}/{total_pages}")
@@ -1267,16 +1272,19 @@ class TablePage(QWidget):
         self._load_local()
 
     def _on_prev_page(self):
+        """上一页"""
         if self._page_no > 1:
             self._page_no -= 1
             self._load_local()
 
     def _on_next_page(self):
+        """下一页（末页保护）"""
         if self._page_no < max(1, math.ceil(self._total / self._page_size)):
             self._page_no += 1
             self._load_local()
 
     def _on_page_size_changed(self, text):
+        """每页条数变更：回第一页重查"""
         try:
             size = int(text)
         except ValueError:
@@ -1307,6 +1315,7 @@ class TablePage(QWidget):
         self._load_local()
 
     def _show_copy_menu(self, pos):
+        """右键菜单：复制单元格；SNK 列额外提供修改入口与远程连接入口"""
         idx = self._table.indexAt(pos)
         if not self._table.selectedItems():
             if not idx.isValid():
@@ -1414,6 +1423,7 @@ class TablePage(QWidget):
         self._export_worker.start()
 
     def _on_export_query(self, result, path):
+        """导出查询完成：全量记录写 CSV（utf-8-sig），成功后提示并可定位文件"""
         _total, rows = result
         header = [c[1] for c in TABLE_COLUMNS]
         keys = [c[0] for c in TABLE_COLUMNS]
@@ -1798,6 +1808,7 @@ class FileListPanel(QWidget):
     # ---------- 滑入 / 滑出动画 ----------
 
     def slide_in(self):
+        """从右侧滑入（动画关闭时直接定位，跳过过渡）"""
         parent = self.parent()
         pw, ph = parent.width(), parent.height()
         self.setFixedSize(self._PANEL_WIDTH, ph)
@@ -1817,6 +1828,7 @@ class FileListPanel(QWidget):
         anim.start()
 
     def slide_out(self):
+        """滑出并隐藏（动画关闭时直接移出可视区）"""
         parent = self.parent()
         pw = parent.width()
         # 动画开关关闭：直接移出可视区并隐藏，跳过过渡动画
@@ -2288,11 +2300,13 @@ class DevicePage(QWidget):
             self._fetch_api_keyword(current_kw)
 
     def _on_search_error(self, msg):
+        """设备搜索失败：恢复同步按钮并提示"""
         self._sync_btn.setEnabled(True)
         self._lbl_info.setText(f"搜索失败: {msg}")
         show_info_bar(msg, "error", title="搜索失败", parent=self, duration=4000)
 
     def _populate(self, rows, hf_stats=None):
+        """行数据 → 表格：状态码转中文着色、高频设备标红、文件列数量+预览 tooltip"""
         # 缓存当前页数据，供 _get_row_at 直接按行号取用，避免每次点击都重查数据库
         self._current_rows = rows
         # 高频问题标记：统计随分页查询在 Worker 线程完成（界面零同步查询），
@@ -2365,6 +2379,7 @@ class DevicePage(QWidget):
         self._load_local()
 
     def _update_pager(self, date="", keyword=""):
+        """重算页码并同步分页控件/状态文本/数据时间"""
         total_pages = max(1, math.ceil(self._total / self._page_size))
         self._page_no = min(self._page_no, total_pages)
         self._lbl_page.setText(f"{self._page_no}/{total_pages}")
@@ -2381,6 +2396,7 @@ class DevicePage(QWidget):
         self._search_timer.start()
 
     def _do_search(self):
+        """搜索防抖到期：回第一页重查，kd 数据源额外向服务端拉匹配设备"""
         self._page_no = 1
         self._load_local()
         # 搜索状态（kd 数据源）：同步向服务端发起带 keyword 的请求，
@@ -2390,16 +2406,19 @@ class DevicePage(QWidget):
             self._fetch_api_keyword(keyword)
 
     def _on_prev_page(self):
+        """上一页"""
         if self._page_no > 1:
             self._page_no -= 1
             self._load_local()
 
     def _on_next_page(self):
+        """下一页（末页保护）"""
         if self._page_no < max(1, math.ceil(self._total / self._page_size)):
             self._page_no += 1
             self._load_local()
 
     def _on_page_size_changed(self, text):
+        """每页条数变更：回第一页重查"""
         try:
             size = int(text)
         except ValueError:
@@ -2621,6 +2640,7 @@ class DevicePage(QWidget):
                       title="迁移中", parent=self, duration=1500)
 
     def _on_migrate_ok(self, fname, dest_cat):
+        """迁移成功：提示并静默刷新；迁到精度/问题时自动写台账并收集文件"""
         show_info_bar(f"{fname} 已移动到「{dest_cat}」", "success",
                       title="迁移成功", parent=self, duration=2500)
         self._silent_refresh()
@@ -2648,6 +2668,7 @@ class DevicePage(QWidget):
             self._last_submission_id = None
 
     def _on_migrate_fail(self, msg):
+        """迁移失败：提示错误首行并静默刷新"""
         show_info_bar(msg.split("\n")[0], "error",
                       title="迁移失败", parent=self, duration=4000)
         self._silent_refresh()
@@ -2756,6 +2777,7 @@ class DevicePage(QWidget):
         return chosen
 
     def _on_collect_done(self, device_id, copied, missing, worker, sub_id=None):
+        """收集完成：回填台账收集结果并按缺失情况提示"""
         if worker in self._collect_workers:
             self._collect_workers.remove(worker)
         # C1 台账：回填收集结果（全部就位才算成功，失败静默）
@@ -2773,6 +2795,7 @@ class DevicePage(QWidget):
                           "success", title="收集完成", parent=self, duration=3000)
 
     def _show_upload_list(self):
+        """弹窗预览 upload 目录待上传文件清单（空目录提示先收集）"""
         root = self._upload_root()
         if not root:
             return
@@ -2834,6 +2857,7 @@ class DevicePage(QWidget):
         self._upload_worker.start()
 
     def _on_upload_done(self, info):
+        """打包上传成功：回填台账上传结果并提示（本地目录已清空）"""
         self._btn_package.setEnabled(True)
         self._lbl_time.setText("")
         # C1 台账：回填上传结果（匹配近期已收集未上传记录，失败静默）
@@ -2845,6 +2869,7 @@ class DevicePage(QWidget):
                       title="上传成功", parent=self, duration=5000)
 
     def _on_upload_fail(self, msg):
+        """打包上传失败：恢复按钮并提示错误首行"""
         self._btn_package.setEnabled(True)
         self._lbl_time.setText("")
         show_info_bar(msg.split(chr(10))[0], "error",
@@ -2882,6 +2907,7 @@ class DevicePage(QWidget):
         self._file_panel.refresh_if_visible()
 
     def _on_refresh_error(self, msg):
+        """静默刷新失败：仅警告提示，不阻断当前操作"""
         show_info_bar(msg, "warning", title="刷新失败", parent=self, duration=3000)
 
     # ---------- 每小时定时拉取 ----------
@@ -2918,6 +2944,7 @@ class DevicePage(QWidget):
         self._lbl_time.setText(f"自动更新: {datetime.now().strftime('%H:%M:%S')}（{count} 台）")
 
     def _on_hourly_error(self, msg):
+        """定时拉取失败：不打断用户，仅状态栏静默提示"""
         # 定时拉取失败不打断用户，仅在状态栏静默提示
         self._lbl_time.setText(f"自动更新失败: {msg.split(chr(10))[0]}")
 
@@ -2956,6 +2983,7 @@ class DevicePage(QWidget):
         self._export_worker.start()
 
     def _on_export_query(self, result, path, src):
+        """导出查询完成：按数据源拼表头写 CSV（utf-8-sig）"""
         _total, rows = result
         if src == "kd":
             header = ["设备编码"] + [c[1] for c in DEVICE_COLUMNS]
@@ -3048,16 +3076,19 @@ class DevicePage(QWidget):
         self._backfill_save_worker.start()
 
     def _on_backfill_saved(self, count, date):
+        """补漏落库完成：正查看该日期则顺带刷新，间隔后继续下一天"""
         logger.info("历史补漏 %s 完成：%d 台设备", date, count)
         if self._current_date() == date:
             self._load_local()  # 用户正查看该日期 → 顺带刷新
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
     def _on_backfill_save_error(self, msg, date):
+        """补漏落库失败：记日志后继续下一天（不阻断补漏链）"""
         logger.warning("历史补漏保存失败 %s: %s", date, str(msg).split(chr(10))[0])
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
     def _on_backfill_error(self, msg, date):
+        """补漏拉取失败：记日志后继续下一天"""
         logger.warning("历史补漏拉取失败 %s: %s", date, str(msg).split(chr(10))[0])
         QTimer.singleShot(self._BACKFILL_INTERVAL, self._backfill_next)
 
@@ -3091,6 +3122,7 @@ class AdminSettingsPage(QWidget):
         self._lazy_built = False
 
     def _lazy_init(self):
+        """首次进入才构建 UI 并读配置（懒加载，加快管理面板打开）"""
         self._test_worker = None
         self._user_edits = {}
         self._pass_edits = {}
@@ -3105,6 +3137,7 @@ class AdminSettingsPage(QWidget):
             self._lazy_init()
 
     def _init_ui(self):
+        """构建滚动区 + 数据源/接口/上传/添加四张卡片 + 保存按钮"""
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
@@ -3240,6 +3273,7 @@ class AdminSettingsPage(QWidget):
         return card
 
     def _build_source_card(self, parent):
+        """数据源选择卡片（kd / xqzg 切换）"""
         card = CardWidget(parent)
         vbox = QVBoxLayout(card)
         vbox.setContentsMargins(16, 14, 16, 14)
@@ -3254,6 +3288,7 @@ class AdminSettingsPage(QWidget):
         return card
 
     def _build_api_card(self, parent, api_key, title, desc):
+        """单个接口账号卡片：账号/密码表单 + 测试连接按钮"""
         card = CardWidget(parent)
         vbox = QVBoxLayout(card)
         vbox.setContentsMargins(16, 14, 16, 14)
@@ -3307,6 +3342,7 @@ class AdminSettingsPage(QWidget):
         self._edit_upload_pass.setText(str(settings.get("upload_pass", "")))
 
     def _on_save(self):
+        """保存设置：合并接口凭据/数据源/上传配置写 settings.json，即时生效"""
         api_credentials = {
             "api1": {
                 "username": self._user_edits["api1"].text().strip(),
@@ -3340,6 +3376,7 @@ class AdminSettingsPage(QWidget):
     # ---------- 测试连接 ----------
 
     def _on_test(self, api_key):
+        """测试连接：用当前表单凭据异步登录（进行中不重复发起）"""
         if self._test_worker and self._test_worker.isRunning():
             show_info_bar("已有测试进行中，请稍候", "warning",
                           title="提示", parent=self, duration=2000)
@@ -3356,6 +3393,7 @@ class AdminSettingsPage(QWidget):
         self._test_worker.start()
 
     def _on_test_done(self, api_key, ok, msg):
+        """测试完成：恢复按钮并按成败提示"""
         self._test_btns[api_key].setEnabled(True)
         label = self._API_LABELS.get(api_key, api_key)
         if ok:
@@ -3399,6 +3437,7 @@ class _TrendChart(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        """绘制网格/Y 刻度/X 日期/图例/三条折线（None 断点分段）与悬停参考线"""
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         dark = isDarkTheme()
@@ -3503,6 +3542,7 @@ class _TrendChart(QWidget):
         QToolTip.showText(event.globalPosition().toPoint(), tip, self)
 
     def leaveEvent(self, event):
+        """离开画布：清悬停高亮并隐藏 tooltip"""
         self._hover = -1
         self.update()
         QToolTip.hideText()
@@ -3539,6 +3579,7 @@ class _AlertRow(CardWidget):
         lay.addWidget(jump)
 
     def mouseReleaseEvent(self, event):
+        """整行左键点击 → 跳转设备页搜索该设备"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._on_jump(self._info)
         super().mouseReleaseEvent(event)
@@ -3572,6 +3613,7 @@ class TrendPage(QWidget):
         self._lazy_built = False
 
     def _lazy_init(self):
+        """首次进入才构建 UI（懒加载）并初始化各查询 worker 引用"""
         self._alerts_worker = None   # 预警查询
         self._cand_worker = None     # 设备候选搜索
         self._trend_worker = None    # 趋势序列查询
@@ -3588,6 +3630,7 @@ class TrendPage(QWidget):
         self._load_ranking()
 
     def _init_ui(self):
+        """搭建预警区 + 趋势折线 + 排行三张卡片"""
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
         root.setSpacing(10)
@@ -3712,6 +3755,7 @@ class TrendPage(QWidget):
     # ---------- 通用 ----------
 
     def _active_source(self) -> str:
+        """当前启用的设备数据源（kd/xqzg）"""
         return get_active_api_source()
 
     def _run_query(self, attr, func, args, on_ok):
@@ -3732,12 +3776,14 @@ class TrendPage(QWidget):
         worker.start()
 
     def _refresh_all(self):
+        """手动刷新：预警 + 排行一起重查"""
         self._load_alerts()
         self._load_ranking()
 
     # ---------- 预警区 ----------
 
     def _load_alerts(self):
+        """异步查错误率突增预警（仅 kd 数据源）"""
         if self._active_source() != "kd":
             self._lbl_alert_empty.setText("趋势看板仅支持 kd 数据源（当前为 xqzg）")
             self._lbl_alert_empty.show()
@@ -3747,6 +3793,7 @@ class TrendPage(QWidget):
                         self._on_alerts)
 
     def _on_alerts(self, alerts):
+        """预警结果回写：无预警显示平稳提示，有则逐条插入可点击条目"""
         self._last_refresh = datetime.now()
         self._clear_alert_rows()
         if not alerts:
@@ -3760,6 +3807,7 @@ class TrendPage(QWidget):
                              _AlertRow(info, self._jump_to_device, self._alert_body))
 
     def _clear_alert_rows(self):
+        """清空预警条目（末尾 stretch 保留）"""
         lay = self._alert_body.layout()
         while lay.count() > 1:  # 末尾 stretch 保留
             item = lay.takeAt(0)
@@ -3804,6 +3852,7 @@ class TrendPage(QWidget):
         return [r for r in rows if str(r.get("device_code") or "")]
 
     def _on_candidates(self, rows):
+        """候选设备回写：填充下拉并默认加载首个设备的趋势"""
         self._candidates = rows
         combo = self._device_combo
         combo.blockSignals(True)
@@ -3827,6 +3876,7 @@ class TrendPage(QWidget):
             self._load_trend(str(code))
 
     def _load_trend(self, device_code):
+        """异步查指定设备近 30 天趋势并绘到折线图"""
         if not device_code:
             return
         self._lbl_trend_title.setText(f"{device_code} · 近 30 天趋势")
@@ -3836,6 +3886,7 @@ class TrendPage(QWidget):
     # ---------- TOP N 排行 ----------
 
     def _load_ranking(self):
+        """按 TOP 数与排序字段异步查排行（仅 kd）"""
         if self._active_source() != "kd":
             return
         by = self._RANK_FIELD_MAP.get(self._sort_combo.currentText(), "error_rate")
@@ -3847,6 +3898,7 @@ class TrendPage(QWidget):
                         ("", top, by), self._on_ranking)
 
     def _on_ranking(self, result):
+        """排行结果 → 表格：状态/错误率着色，设备码存 itemData 供双击跳转"""
         rows = result.get("rows", [])
         self._lbl_rank_date.setText(f"数据日期 {result.get('date') or '无'}")
         t = self._rank_table
@@ -3882,6 +3934,7 @@ class TrendPage(QWidget):
                               str(r.get("device_code") or ""))
 
     def _on_rank_double_clicked(self, row, _col):
+        """排行双击 → 跳转设备页查看该设备"""
         item = self._rank_table.item(row, 0)
         code = item.data(Qt.ItemDataRole.UserRole) if item else ""
         if code:
@@ -3921,6 +3974,7 @@ class HealthPage(QWidget):
         self._fetch_health_data()
 
     def _init_ui(self):
+        """搭建标题/阈值提示 + 告警表格（首列勾选框）+ 已处理按钮"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
@@ -4007,6 +4061,7 @@ class HealthPage(QWidget):
         self._lbl_sync.setText(f"{len(rows)} 条异常 · 展示刷新于 {now}")
 
     def _iter_checkboxes(self):
+        """逐行产出首列勾选框（跳过被其他控件占用的行）"""
         for row in range(self._table.rowCount()):
             cb = self._table.cellWidget(row, 0)
             if isinstance(cb, CheckBox):
@@ -4029,6 +4084,7 @@ class HealthPage(QWidget):
         self._fetch_worker.start()
 
     def _on_fetch_ok(self, rows):
+        """拉取完成：同步告警表后刷新展示（失败仅提示不弹窗）"""
         try:
             count = table_db.sync_health_alerts(rows)
         except Exception as e:
@@ -4039,6 +4095,7 @@ class HealthPage(QWidget):
         self._refresh_display()
 
     def _on_fetch_fail(self, msg):
+        """拉取失败：状态栏提示错误首行"""
         self._lbl_sync.setText(f"获取失败: {str(msg).split(chr(10))[0]}")
 
     # ---------- 处理交互 ----------
@@ -4056,7 +4113,7 @@ class HealthPage(QWidget):
 
 
 class GamePage(QWidget):
-    """摸鱼中心"""
+    """摸鱼中心：小说/2048 页签容器（贪吃蛇入口暂隐藏）"""
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)

@@ -33,6 +33,7 @@ class TCPWorker(QThread):
         self._client = None
 
     def run(self):
+        """连接并执行 hostname/whoami 验证，结果经 result_ready 回传"""
         try:
             conn_logger.info('SSH', '开始连接', host=self.host, port=self.port, user=self.username)
             self._client = paramiko.SSHClient()
@@ -53,6 +54,7 @@ class TCPWorker(QThread):
             self.close()
 
     def close(self):
+        """安全关闭 transport/client（幂等，可重复调用）"""
         if self._client:
             try:
                 transport = self._client.get_transport()
@@ -132,14 +134,17 @@ class SFTPOperationWorker(QThread):
         self._stop_flag = False
 
     def pause(self):
+        """暂停传输（在下次进度回调处阻塞生效）"""
         self._pause_event.clear()
 
     def resume(self):
+        """恢复已暂停的传输"""
         self._pause_event.set()
 
     def stop(self):
+        """取消传输：置停止标志并解除暂停阻塞，让线程尽快退出"""
         self._stop_flag = True
-        self._pause_event.set()  # 解除暂停阻塞以便线程退出
+        self._pause_event.set()
 
     def _progress_cb(self, transferred, total):
         # 检查停止
@@ -223,12 +228,15 @@ class SFTPDirTransferWorker(QThread):
         self._stop_flag = False
 
     def pause(self):
+        """暂停传输（在下一个文件开始前的检查点生效）"""
         self._pause_event.clear()
 
     def resume(self):
+        """恢复已暂停的传输"""
         self._pause_event.set()
 
     def stop(self):
+        """取消传输：置停止标志并解除暂停阻塞"""
         self._stop_flag = True
         self._pause_event.set()
 

@@ -45,6 +45,7 @@ class _LogLoadWorker(QThread):
         self.tail_bytes = tail_bytes
 
     def run(self):
+        """读日志尾部 → 逐行匹配高亮规则 → loaded 信号回传（异常走 error）"""
         try:
             file_size = os.path.getsize(self.path)
             truncated = False
@@ -537,6 +538,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._search_debounce_timer.start()
 
     def _search_debounce_fire(self):
+        """防抖到期：执行最近一次注册的搜索回调（只跑一次）"""
         if self._search_debounce_callback:
             self._search_debounce_callback()
             self._search_debounce_callback = None

@@ -86,9 +86,11 @@ class ConnLogger:
                 pass  # 日志写入失败绝不影响主流程
 
     def info(self, op, msg, **kw):
+        """记录 INFO 级日志（op 为操作类型，如 SSH/SFTP）"""
         self._write('INFO', op, msg, **kw)
 
     def error(self, op, msg, **kw):
+        """记录 ERROR 级日志（不落调用栈，需要堆栈时用 exception）"""
         self._write('ERROR', op, msg, **kw)
 
     def exception(self, op, msg, exc=None, **kw):

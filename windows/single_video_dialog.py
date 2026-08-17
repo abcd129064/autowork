@@ -211,10 +211,12 @@ class SingleVideoDialog(MessageBoxBase):
         self.btn_browse.setEnabled(True)
 
     def _on_yes_clicked(self):
+        """yesButton 分发：仅空闲态且已注入 on_start 时发起生成"""
         if self._phase == "idle" and self.on_start:
             self.on_start()
 
     def _on_open_out(self):
+        """资源管理器打开生成视频所在目录"""
         if self._out_path and os.path.isdir(self._out_path):
             try:
                 os.startfile(self._out_path)
@@ -228,7 +230,6 @@ class SingleVideoDialog(MessageBoxBase):
         log_path = self.log_path_edit.text().strip()
         if not log_path or not os.path.isfile(log_path):
             self.append_line("✘ 请先选择有效的日志文件")
-            self
             return None
         try:
             with open(log_path, "r", encoding="utf-8") as f:
@@ -269,9 +270,11 @@ class SingleVideoDialog(MessageBoxBase):
     # ---------- 状态机 ----------
 
     def append_line(self, text):
+        """向运行输出区追加一行日志"""
         self.log_view.append(text)
 
     def enter_running(self):
+        """进入生成中：禁用全部按钮防重复发起/中途关闭"""
         self._phase = "running"
         self.yesButton.setEnabled(False)
         self.yesButton.setText("生成中...")
@@ -291,6 +294,7 @@ class SingleVideoDialog(MessageBoxBase):
             self.btn_open_out.show()
 
     def enter_failed(self):
+        """生成失败：回到空闲态可重新发起"""
         self._phase = "idle"
         self.yesButton.setEnabled(True)
         self.yesButton.setText("开始生成")

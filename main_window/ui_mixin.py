@@ -199,6 +199,7 @@ class _VisibleAcrylicView(AcrylicMenuActionListWidget):
         self.acrylicBrush.noiseOpacity = 0.03
 
     def paintEvent(self, e):
+        """亚克力关时改绘纯色背景（不手动填充会整体不可见），开则走截屏模糊"""
         if not is_acrylic_enabled():
             # 亚克力关闭：绘制纯色背景替代截屏模糊（transparent 属性使
             # QSS 背景透明，不手动填充会导致菜单整体不可见）
@@ -212,6 +213,7 @@ class _VisibleAcrylicView(AcrylicMenuActionListWidget):
         super().paintEvent(e)
 
     def _updateAcrylicColor(self):
+        """按主题调着色层不透明度：深色 35%/浅色 27%，让模糊细节不被洗白"""
         if isDarkTheme():
             # 深色模式：着色层 90/255≈35%，让模糊内容透出更多
             self.acrylicBrush.tintColor = QColor(32, 32, 32, 90)
@@ -244,6 +246,7 @@ class _ShortcutKeyEdit(LineEdit):
         self.setText(self._sequence.toString())
 
     def keySequence(self):
+        """当前录入的快捷键序列"""
         return self._sequence
 
     def keyPressEvent(self, e):
@@ -330,6 +333,7 @@ class NewLogDialog(MessageBoxBase):
         self.yesButton.clicked.connect(self._on_yes_clicked)
 
     def _on_yes_clicked(self):
+        """yesButton 状态分发：上传中=取消上传，整理完=打包上传，空闲=开始整理"""
         if self._phase == "uploading":
             if self.on_cancel_upload:
                 self.on_cancel_upload()
@@ -342,6 +346,7 @@ class NewLogDialog(MessageBoxBase):
             self.on_start()
 
     def _on_open_out(self):
+        """资源管理器打开整理结果目录"""
         if self._out_path:
             try:
                 os.startfile(self._out_path)
@@ -349,9 +354,11 @@ class NewLogDialog(MessageBoxBase):
                 pass
 
     def append_line(self, text):
+        """向运行输出区追加一行（Worker 日志直写）"""
         self.log_view.append(text)
 
     def enter_running(self):
+        """进入整理中：禁用输入与全部按钮防中途关闭"""
         self._phase = "organizing"
         self.target_edit.setEnabled(False)
         self.yesButton.setEnabled(False)
@@ -373,6 +380,7 @@ class NewLogDialog(MessageBoxBase):
         self.progress_bar.setValue(0)
 
     def enter_uploading(self):
+        """进入上传中：主按钮变取消上传，启用最小化与进度条"""
         self._phase = "uploading"
         self.target_edit.setEnabled(False)
         self.yesButton.setEnabled(True)
@@ -384,11 +392,13 @@ class NewLogDialog(MessageBoxBase):
         self.progress_bar.show()
 
     def set_upload_percent(self, p):
+        """更新上传字节进度（首次自动显示进度条）"""
         if self.progress_bar.isHidden():
             self.progress_bar.show()
         self.progress_bar.setValue(p)
 
     def enter_failed(self):
+        """整理失败：回到空闲态可重新发起"""
         self._phase = "idle"
         self.target_edit.setEnabled(True)
         self.yesButton.setEnabled(True)
@@ -485,6 +495,7 @@ class UIMixin:
         self._show_status_message("就绪", 3000)
 
     def _show_status_message(self, msg, timeout=0):
+        """状态栏临时消息：到时自清（仅当未被新消息覆盖）"""
         self._status_message.setText(msg)
         if timeout > 0:
             QTimer.singleShot(timeout, lambda: (
@@ -492,19 +503,24 @@ class UIMixin:
                 if self._status_message.text() == msg else None))
 
     def _update_status_device(self, device_code):
+        """同步状态栏与日志面板头的当前设备"""
         self.status_device.setText(f"设备: {device_code}")
         self.ui.log_status_device.setText(f"设备: {device_code}")
 
     def _update_status_running(self, exe_name):
+        """状态栏置运行中（带程序名）"""
         self.status_state.setText(f"状态: 运行中 - {exe_name}")
 
     def _update_status_idle(self):
+        """状态栏置空闲"""
         self.status_state.setText("状态: 空闲")
 
     def _update_status_paused(self, exe_name):
+        """状态栏置已暂停"""
         self.status_state.setText(f"状态: 已暂停 - {exe_name}")
 
     def _update_status_logs(self, count):
+        """同步日志行数到状态栏与日志面板头"""
         self.status_logs.setText(f"日志: {count} 行")
         self.ui.log_status_count.setText(f"日志: {count} 条")
 
@@ -1435,11 +1451,13 @@ class UIMixin:
         dlg.activateWindow()
 
     def _on_newlog_upload_progress(self, msg):
+        """上传阶段提示 → 对话框输出区（对话框已销毁则丢弃）"""
         dlg = getattr(self, "_newlog_dlg", None)
         if dlg is not None:
             dlg.append_line(msg)
 
     def _on_newlog_upload_percent(self, p):
+        """上传字节进度 → 对话框进度条（对话框已销毁则丢弃）"""
         dlg = getattr(self, "_newlog_dlg", None)
         if dlg is not None:
             dlg.set_upload_percent(p)
@@ -1602,9 +1620,11 @@ class UIMixin:
         self._theme_color = self._parse_theme_color(self._load_settings())
 
     def _apply_font_size(self):
+        """字号变更入口（统一走全局字体应用）"""
         self._apply_global_font()
 
     def _apply_font_family(self):
+        """字体变更入口（统一走全局字体应用）"""
         self._apply_global_font()
 
     def _apply_global_font(self):
@@ -1635,6 +1655,7 @@ class UIMixin:
             window.update()
 
     def _set_widget_font_recursive(self, widget, app_font):
+        """递归给顶层窗口及其全部子控件套字体并刷新"""
         widget.setFont(app_font)
         for child in widget.findChildren(QWidget):
             child.setFont(app_font)
@@ -1722,6 +1743,7 @@ class UIMixin:
         self._sync_theme_polling()
 
     def _sync_theme_polling(self):
+        """按主题模式启停系统主题轮询：auto 才轮询，手动模式停表"""
         settings = self._load_settings()
         if self._get_theme_mode(settings) == "auto":
             self._last_applied_dark = self._effective_is_dark(settings)
@@ -1731,6 +1753,7 @@ class UIMixin:
             self._theme_poll_timer.stop()
 
     def _poll_system_theme(self):
+        """轮询系统深浅色：变化时自动重应用主题并记日志"""
         try:
             sys_dark = self._system_is_dark()
             if sys_dark != self._last_applied_dark:

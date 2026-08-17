@@ -137,6 +137,7 @@ class AddRecordDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _on_ok(self):
+        """校验球桌号必填后接受对话框"""
         if not self._edit_name.text().strip():
             self._edit_name.setPlaceholderText("球桌号不能为空")
             self._edit_name.setFocus()
@@ -346,12 +347,14 @@ class TablePanelWindow(QDialog):
         self._lbl_info.setText(f"同步完成，共 {count} 条")
 
     def _on_sync_error(self, msg):
+        """API 同步失败：恢复刷新按钮并展示错误"""
         self._refresh_btn.setEnabled(True)
         self._lbl_info.setText(f"同步失败: {msg}")
 
     # ==================== 表格填充 ====================
 
     def _populate(self, rows):
+        """行数据 → 表格（换行压平、tooltip 存原文、在线状态着色）"""
         self._rows = list(rows)
         self._table.setRowCount(len(rows))
         for r, item in enumerate(rows):
@@ -371,6 +374,7 @@ class TablePanelWindow(QDialog):
         self._fit_row_heights()
 
     def _update_pager(self, keyword=""):
+        """按总数/页大小重算页码并同步分页控件与状态文本"""
         total_pages = max(1, math.ceil(self._total / self._page_size))
         self._page_no = min(self._page_no, total_pages)
         self._lbl_page.setText(f"{self._page_no}/{total_pages}")
@@ -405,6 +409,7 @@ class TablePanelWindow(QDialog):
             self._load_local()
 
     def _on_page_size_changed(self, text):
+        """每页条数变更：回第一页重查"""
         try:
             size = int(text)
         except ValueError:

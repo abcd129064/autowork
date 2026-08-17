@@ -144,6 +144,7 @@ class FileCopyWorker(QThread):
         self.dst = dst
 
     def run(self):
+        """执行 copy2，成功发 copy_finished，异常发 error"""
         try:
             shutil.copy2(self.src, self.dst)
             self.copy_finished.emit()
@@ -178,12 +179,14 @@ class CollectFilesWorker(QThread):
         return 1
 
     def _find_first(self, candidates) -> str:
+        """返回候选路径中第一个存在的文件，都没有则空串"""
         for path in candidates:
             if os.path.isfile(path):
                 return path
         return ""
 
     def run(self):
+        """按 base_names 逐项收集视频/日志，另收 detect.bin 与按日期的 daily 日志"""
         try:
             device_dir = os.path.join(self.videos_dir, self.device_id)
             upload_dir = os.path.join(self.videos_dir, "upload", self.device_id)

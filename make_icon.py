@@ -74,6 +74,7 @@ def draw_bolt(layer, cx, cy, h, fill):
 
 
 def build_icon(size=SIZE):
+    """合成完整图标：渐变底 + 圆角遮罩 + 投影齿轮 + 白色齿轮闪电"""
     img = make_gradient(size, COLOR_TOP, COLOR_BOTTOM).convert('RGBA')
 
     # 圆角遮罩
@@ -99,6 +100,7 @@ def build_icon(size=SIZE):
 
 
 def main():
+    """生成并落盘 app_icon.png（512）与 app_icon.ico（多尺寸）"""
     icon = build_icon()
 
     png_path = os.path.join(ROOT, 'app_icon.png')

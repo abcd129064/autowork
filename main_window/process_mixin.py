@@ -83,18 +83,21 @@ class ProcessMixin:
             self._launch_program(exe_path, exe_name, exe_dir)
 
     def _on_program_output(self):
+        """识别端 stdout → 日志区（gb2312 解码容错）"""
         if self.running_process:
             output = self.running_process.readAllStandardOutput().data().decode('gb2312', errors='ignore')
             if output.strip():
                 self._append_log(output.strip())
 
     def _on_program_error(self):
+        """识别端 stderr → 日志区（带 [程序错误] 前缀）"""
         if self.running_process:
             error = self.running_process.readAllStandardError().data().decode('gb2312', errors='ignore')
             if error.strip():
                 self._append_log(f"[程序错误] {error.strip()}")
 
     def _on_program_finished(self, exit_code, exit_status):
+        """程序自然退出：复位暂停态/按钮/状态栏"""
         self._append_log(f"\n[程序结束] 退出码: {exit_code}")
         self.running_process = None
         self._process_suspended = False
@@ -123,12 +126,14 @@ class ProcessMixin:
 
     @Slot()
     def on_start_three_clicked(self):
+        """启动三端/关闭三端 切换入口"""
         if self._three_running:
             self._stop_three_programs()
         else:
             self._start_three_programs()
 
     def _start_three_programs(self):
+        """依次启动识别端/后端/前端（间隔 3 秒），启动前捕获分辨率供关闭时恢复"""
         exe_name = self.ui.choose_exe.currentText()
         if not exe_name:
             self._show_info_bar('请先在工具栏“程序”下拉框中选择识别端程序！', "warning")
@@ -163,6 +168,7 @@ class ProcessMixin:
         self._show_info_bar("三端程序将依次启动（间隔 3 秒）", "success")
 
     def _stop_three_programs(self):
+        """逐个结束三端进程，恢复启动前分辨率并还原 skip_ready_check"""
         self._three_running = False
         self.ui.start_three_btn.setText("启动三端")
         self._append_log("\n[关闭三端] 正在结束三端程序...")
@@ -186,6 +192,7 @@ class ProcessMixin:
         self._show_info_bar("三端程序已关闭", "success")
 
     def _start_one_program(self, name, path, attr_name):
+        """启动单个三端进程（已取消则跳过），进程引用挂到对应属性"""
         if not self._three_running:
             return
         process = QProcess(self)
@@ -310,6 +317,7 @@ class ProcessMixin:
             return None
 
     def _set_skip_ready_check(self, value):
+        """改写识别端 cfg.json 的 sys.skip_ready_check（三端启动前置位）"""
         cfg_path = os.path.join(self.exe_dir, "cfg.json")
         if not os.path.exists(cfg_path):
             self._append_log(f"[警告] cfg.json 不存在: {cfg_path}")
@@ -384,12 +392,14 @@ class ProcessMixin:
         return 'copy'
 
     def _on_decode_output(self):
+        """解码工具 stdout → 日志区"""
         if self._decode_process:
             output = self._decode_process.readAllStandardOutput().data().decode('gb2312', errors='ignore')
             if output.strip():
                 self._append_log(f"[detect] {output.strip()}")
 
     def _on_decode_error(self):
+        """解码工具 stderr → 日志区"""
         if self._decode_process:
             error = self._decode_process.readAllStandardError().data().decode('gb2312', errors='ignore')
             if error.strip():
@@ -409,6 +419,7 @@ class ProcessMixin:
         self._do_launch_after_detect()
 
     def _on_decode_finished(self, exit_code, exit_status):
+        """解码完成：失败复位待启动状态；成功则把 detect.json 复制到程序目录后启动"""
         self._decode_process = None
         detect_json_path = self._pending_detect_json
         if exit_code != 0:
@@ -490,6 +501,7 @@ class ProcessMixin:
 
     @Slot()
     def _on_pause_clicked(self):
+        """暂停/恢复按钮：切换识别端进程挂起态"""
         self._toggle_process_suspend()
 
     def _toggle_process_suspend(self):

@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
+"""端口/外部客户端小工具：随机端口生成、端口占用检测、Xshell/Xftp 双开"""
 import socket
 import random
 import subprocess
 
 def generate_random_port(exclude_ports=None):
-    """生成随机端口号，排除常用端口和已使用的端口"""
+    """随机生成 10000-65535 内不与 exclude_ports（及常用端口）冲突的端口"""
     if exclude_ports is None:
         exclude_ports = set()
 
@@ -35,17 +37,7 @@ def is_port_in_use(port, host='127.0.0.1'):
         return False
 
 def open_xshell_and_xftp(host, port, username, password, log=None):
-    """使用 Xshell 和 Xftp 双开连接
-
-    Args:
-        host: 主机地址
-        port: 端口
-        username: SSH 用户名（必传，禁止交互式 input）
-        password: SSH 密码（必传）
-        log: 可选日志回调 log(msg)，默认静默
-    Returns:
-        True 成功启动 / False 失败
-    """
+    """凭据写进 URL 直接双开 Xshell/Xftp（免交互式 input），返回是否启动成功"""
     _log = log or (lambda msg: None)
     _log(f'[Xshell/Xftp] 正在连接到: {username}@{host}:{port}')
 

@@ -94,6 +94,7 @@ class TableFetchWorker(QThread):
         return payload.get("data") or {}
 
     def run(self):
+        """首页拿 total 后循环翻页拉全（空页/超最大页数即停）"""
         try:
             # 首页：拿到 total 与首批数据（接口返回字段名为 count）
             inner = self._fetch_page(1)
@@ -169,6 +170,7 @@ class SnookerOmFetchWorker(QThread):
         return None
 
     def run(self):
+        """登录 → 拉数据，401/403 自动重登重试一次"""
         try:
             if not self.username or not self.password:
                 self.error.emit("接口1账号密码未配置，请在 settings.json 的 api_credentials.api1 中填写")
@@ -227,6 +229,7 @@ DIR_CATEGORIES = {v: k for k, v in CATEGORY_DIRS.items()}
 
 
 class DevicesFetchWorker(QThread):
+    """异步拉取接口2设备状态（JWT 认证，Token 过期自动重登，支持关键词搜索）"""
     result_ready = Signal(dict)
     error = Signal(str)
 
@@ -261,6 +264,7 @@ class DevicesFetchWorker(QThread):
         return None
 
     def run(self):
+        """登录拿 token → 拉设备状态，401 自动重登重试一次"""
         try:
             if not self.username or not self.password:
                 self.error.emit("接口2账号密码未配置，请在 settings.json 的 api_credentials.api2 中填写")
@@ -309,16 +313,7 @@ class DevicesFetchWorker(QThread):
 # ==================== 图像迁移 Worker ====================
 
 def build_image_path(file_path: str, device_code: str, category: str) -> str:
-    """构造迁移路径: media/{日期}/{设备码}/{分类}/
-
-    Args:
-        file_path: 日期路径，如 "2026/08/02"
-        device_code: 设备编码
-        category: 分类名（正常/操作/待处理/使用/精度/问题/废弃）
-
-    Returns:
-        完整远程目录路径，如 media/2026/08/02/1M2WJ13CNPE1009A50167/except/
-    """
+    """拼迁移路径 media/{日期}/{设备码}/{分类目录}/，分类中文按 CATEGORY_DIRS 映射"""
     dir_name = CATEGORY_DIRS.get(category, category)
     return f"media/{file_path}/{device_code}/{dir_name}/"
 
@@ -341,15 +336,8 @@ class MigrateImageWorker(QThread):
     def __init__(self, file_path: str, device_code: str,
                  file_names: list, src_category: str, dest_category: str,
                  username=None, password=None, parent=None):
-        """
-        Args:
-            file_path: 日期路径，"2026/08/02"
-            device_code: 设备编码
-            file_names: 要迁移的文件名列表
-            src_category: 源分类（ "操作"）
-            dest_category: 目标分类（"待处理"）
-            username/password: 可选，优先使用传入值，否则从配置读取
-        """
+        """file_path 形如 "2026/08/02"；分类传中文（如 "操作"→"待处理"）；
+        账号密码缺省时从 settings.json 读取"""
         super().__init__(parent)
         self.file_path = file_path
         self.device_code = device_code
@@ -460,10 +448,7 @@ class LoginTestWorker(QThread):
     error = Signal(str)
 
     def __init__(self, api_name, username=None, password=None, parent=None):
-        """
-        Args:
-            api_name: "api1"（xqzg）或 "api2"（kd）
-        """
+        """api_name: "api1"（xqzg Session）或 "api2"（kd JWT）"""
         super().__init__(parent)
         self.api_name = api_name
         creds = _load_api_credentials()
@@ -472,6 +457,7 @@ class LoginTestWorker(QThread):
         self.password = password or cfg.get("password", "")
 
     def run(self):
+        """按 api_name 走对应登录接口，仅验证认证是否通过"""
         if not self.username or not self.password:
             self.error.emit("账号或密码为空，请先填写")
             return

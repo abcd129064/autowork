@@ -29,6 +29,7 @@ _pending_workers: set = set()
 
 
 class _GlobalSignals(QObject):
+    """跨面板全局信号载体（下载完成联动主窗口视频列表）"""
     # (设备目录名, 下载文件绝对路径, 本批文件数)
     file_downloaded = Signal(str, str, int)
 
@@ -207,6 +208,7 @@ class _HealthCheckWorker(QThread):
         self.transport = transport
 
     def run(self):
+        """在共享 transport 上开 session 测延迟，异常发 -1"""
         try:
             import time as _time
             start = _time.time()
@@ -335,6 +337,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ UI 构建
     def _init_ui(self):
+        """搭建双栏文件面板 + 传输队列 + 按钮栏，预构建右键菜单"""
         root = QVBoxLayout(self)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
     
@@ -553,6 +556,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 连接
     def _connect_and_list(self):
+        """发起 SFTP 连接（异步 worker），成功后列远程目录，同时先刷本地"""
         self._lbl_status.setText('正在连接...')
         self._list_local(self._local_path)
         worker = SFTPConnectWorker(self._host, self._port, self._username, self._password)
@@ -562,6 +566,7 @@ class SFTPPanel(QWidget):
         worker.start()
 
     def _on_sftp_connect_success(self, transport):
+        """连接成功：保存 transport 并首次列远程目录"""
         self._transport = transport
         self._log(f'[SFTP] 已连接到 {self._host}:{self._port}')
         self._lbl_status.setText('已连接')
@@ -569,11 +574,13 @@ class SFTPPanel(QWidget):
         self._cleanup_connect_worker()
 
     def _on_sftp_connect_error(self, error):
+        """连接失败：状态栏展示原因（重连需重新打开会话）"""
         self._log(f'[SFTP] 连接失败: {error}')
         self._lbl_status.setText(f'连接失败: {error}')
         self._cleanup_connect_worker()
 
     def _cleanup_connect_worker(self):
+        """非阻塞释放连接 worker：运行中先 abort 再挂强引用防 GC 崩溃"""
         if self._connect_worker is not None:
             w = self._connect_worker
             self._connect_worker = None
@@ -621,6 +628,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ Worker 管理
     def _cleanup_list_worker(self):
+        """释放列目录 worker：先摘信号再按运行状态强引用/销毁，防旧响应回写"""
         if self._list_worker is not None:
             w = self._list_worker
             self._list_worker = None
@@ -643,6 +651,7 @@ class SFTPPanel(QWidget):
                 w.deleteLater()
 
     def _safe_delete_transfer_worker(self, tid):
+        """从传输表移除指定任务：运行中挂强引用等自行结束，否则直接销毁"""
         info = self._transfer_workers.pop(tid, None)
         if info:
             w = info['worker']
@@ -653,6 +662,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 远程列目录
     def _list_remote(self, path):
+        """列远程目录：transport 失效直接置断连态；串行互斥（进行中记待办）"""
         if self._transport is None or not self._transport.is_active():
             if self._transport is not None:
                 self._lbl_status.setText('连接已断开')
@@ -677,11 +687,13 @@ class SFTPPanel(QWidget):
         worker.start()
 
     def _on_list_worker_finished(self):
+        """列目录线程结束后清理 worker 引用（未结束则等 finished 信号）"""
         if self._list_worker is not None and not self._list_worker.isRunning():
             self._list_worker.deleteLater()
             self._list_worker = None
 
     def _on_list_result(self, path, entries):
+        """列目录结果回写：代际号不匹配（已翻走）则丢弃，否则刷表格并处理待办路径"""
         worker = self.sender()
         if worker and hasattr(worker, '_list_gen') and worker._list_gen != self._list_generation:
             return
@@ -703,6 +715,7 @@ class SFTPPanel(QWidget):
         self._process_pending_remote_path()
 
     def _on_list_error(self, error):
+        """列目录失败：路径不存在时自动回根目录重试一次（保底不卡死）"""
         worker = self.sender()
         if worker and hasattr(worker, '_list_gen') and worker._list_gen != self._list_generation:
             return
@@ -722,12 +735,14 @@ class SFTPPanel(QWidget):
         self._process_pending_remote_path()
 
     def _process_pending_remote_path(self):
+        """上次列目录进行中时被压住的目录请求，此处补跳"""
         pending = self._pending_remote_path
         if pending is not None:
             self._pending_remote_path = None
             self._list_remote(pending)
 
     def _populate_remote(self, entries):
+        """远程条目 → 树控件：批量插入禁重绘禁排序，完成后恢复并按表头重排"""
         self._tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘，避免大列表卡顿
         try:
             self._tree.setSortingEnabled(False)  # 插入期间禁排序，避免逐条重排（O(n²)）
@@ -753,6 +768,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 搜索
     def _on_search_shortcut(self):
+        """Ctrl+F：按焦点所在侧弹出对应的搜索框（默认远程侧）"""
         focus_right = self._right_panel and self._right_panel.isAncestorOf(self.focusWidget())
         focus_left = self._left_panel and self._left_panel.isAncestorOf(self.focusWidget())
         if focus_right or (not focus_left and self._right_panel is not None):
@@ -763,6 +779,7 @@ class SFTPPanel(QWidget):
             self._local_search_edit.setFocus()
 
     def _hide_search_boxes(self):
+        """Esc：收起两侧搜索框并清空关键词恢复完整列表"""
         self._local_search_frame.hide()
         self._remote_search_frame.hide()
         # 清空搜索文本，恢复完整列表
@@ -772,6 +789,7 @@ class SFTPPanel(QWidget):
             self._remote_search_edit.clear()
 
     def _on_remote_search(self, text=''):
+        """远程侧即时过滤：子串包含匹配，只在内存条目上过滤不重新列目录"""
         keyword = text.strip()
         if not keyword:
             # 清空搜索：恢复完整列表
@@ -784,6 +802,7 @@ class SFTPPanel(QWidget):
         self._lbl_status.setText(f'找到 {len(matched)} 个匹配项')
 
     def _on_local_search(self, text=''):
+        """本地侧即时过滤（同远程侧，仅内存过滤）"""
         keyword = text.strip()
         if not keyword:
             # 清空搜索：恢复完整列表
@@ -796,6 +815,7 @@ class SFTPPanel(QWidget):
         self._lbl_status.setText(f'找到 {len(matched)} 个匹配项')
 
     def _populate_local(self, entries):
+        """本地条目 → 树控件（与远程侧同策略：批量插入后恢复排序）"""
         self._local_tree.setUpdatesEnabled(False)  # 批量插入时禁止重绘
         try:
             self._local_tree.setSortingEnabled(False)  # 插入期间禁排序，避免逐条重排（O(n²)）
@@ -835,6 +855,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 本地列目录
     def _list_local(self, path):
+        """列本地目录：路径无效提示，条目按目录/文件分组排序后填充"""
         if not os.path.isdir(path):
             self._lbl_status.setText(f'本地路径无效: {path}')
             return
@@ -890,15 +911,18 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 远程导航
     def _refresh(self):
+        """重新列当前远程目录"""
         self._list_remote(self._remote_path)
 
     def _go_up(self):
+        """远程目录上跳一级（到根为止）"""
         parent = '/'.join(self._remote_path.rstrip('/').split('/')[:-1])
         if not parent:
             parent = '/'
         self._list_remote(parent)
 
     def _on_item_double_clicked(self, item, column):
+        """远程条目双击：目录进入，文件直接下载（列目录中不响应）"""
         if self._listing:
             return
         entry = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1014,6 +1038,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 上传 / 下载
     def _upload_file(self, data=None):
+        """上传入口：带参传单条，无参按钮点击批量上传选中项；目录转 _upload_dir"""
         if not isinstance(data, dict):
             data = None
         # 无参点击按钮：对所有选中项批量上传（无选中则回退 currentItem 单选流程）
@@ -1045,6 +1070,7 @@ class SFTPPanel(QWidget):
                                 op='upload', local_path=local_path, remote_path=remote_path)
 
     def _upload_dir(self, data):
+        """整目录上传（递归 worker）"""
         local_dir = data['path']
         dir_name = data['name']
         remote_dir = self._remote_path.rstrip('/') + '/' + dir_name
@@ -1055,6 +1081,7 @@ class SFTPPanel(QWidget):
                                 op='upload_dir', local_path=local_dir, remote_path=remote_dir)
 
     def _download_file(self, entry=None):
+        """下载入口：带参传单条，无参按钮点击批量下载选中项；目录转 _download_dir"""
         if not isinstance(entry, dict):
             entry = None
         # 无参点击按钮：对所有选中项批量下载（无选中则回退 currentItem 单选流程）
@@ -1086,6 +1113,7 @@ class SFTPPanel(QWidget):
                                 op='download', local_path=local_path, remote_path=remote_path)
 
     def _download_dir(self, entry):
+        """整目录下载（递归 worker）"""
         dir_name = entry['name']
         remote_dir = self._remote_path.rstrip('/') + '/' + dir_name
         local_dir = os.path.join(self._local_path, dir_name)
@@ -1097,6 +1125,8 @@ class SFTPPanel(QWidget):
 
     def _start_transfer_op(self, worker, filename, op_label, file_size,
                            op=None, local_path='', remote_path=''):
+        """传输任务入队：建表格行/进度条，接 progress/success/error 信号后启动；
+        params 快照留存供右键重试/打开文件夹使用"""
         tid = self._next_transfer_id
         self._next_transfer_id += 1
         row = self._transfer_table.rowCount()
@@ -1120,6 +1150,7 @@ class SFTPPanel(QWidget):
         worker.start()
 
     def _on_transfer_progress(self, tid, transferred, total):
+        """字节进度 → 进度条百分比 + 限速显示（≥ 0.5s 采样一次）"""
         info = self._transfer_workers.get(tid)
         if not info:
             return
@@ -1140,6 +1171,7 @@ class SFTPPanel(QWidget):
             speed_item.setText(f'{self._format_size(info["speed"])}/s')
 
     def _on_transfer_success(self, tid, msg):
+        """传输完成：置 100%/完成态；下载额外发全局信号联动主窗口刷视频列表"""
         info = self._transfer_workers.get(tid)
         if info:
             row = info['row']
@@ -1164,6 +1196,7 @@ class SFTPPanel(QWidget):
         self._list_local(self._local_path)
 
     def _on_transfer_error(self, tid, error):
+        """传输失败：行内置失败原因；info 保留供右键重试"""
         info = self._transfer_workers.get(tid)
         if info:
             row = info['row']
@@ -1296,6 +1329,7 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 传输队列右键菜单
     def _on_transfer_context_menu(self, pos):
+        """传输队列右键：按行状态（传输中/已暂停/失败/完成）启用对应菜单项"""
         row = self._transfer_table.rowAt(pos.y())
         has_selection = row >= 0
         has_tasks = self._transfer_table.rowCount() > 0
@@ -1320,12 +1354,14 @@ class SFTPPanel(QWidget):
             aniType=_popup_ani_type())
 
     def _find_tid_by_row(self, row):
+        """表格行号反查任务 tid（行号在增删后由调用方维护）"""
         for tid, info in self._transfer_workers.items():
             if info['row'] == row:
                 return tid
         return None
 
     def _transfer_pause_row(self, row):
+        """暂停指定行任务（下次进度回调处阻塞生效）"""
         tid = self._find_tid_by_row(row)
         if tid is None:
             return
@@ -1341,6 +1377,7 @@ class SFTPPanel(QWidget):
         self._log(f'[SFTP] 已暂停传输: {name}')
 
     def _transfer_resume_row(self, row):
+        """恢复指定行任务并重置速度采样基准"""
         tid = self._find_tid_by_row(row)
         if tid is None:
             return
@@ -1358,6 +1395,7 @@ class SFTPPanel(QWidget):
         self._log(f'[SFTP] 已继续传输: {name}')
 
     def _transfer_pause_all(self):
+        """暂停全部传输中任务"""
         count = 0
         for tid, info in list(self._transfer_workers.items()):
             row = info['row']
@@ -1374,6 +1412,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 已暂停全部传输 ({count} 个任务)')
 
     def _transfer_resume_all(self):
+        """恢复全部已暂停任务"""
         count = 0
         for tid, info in list(self._transfer_workers.items()):
             row = info['row']
@@ -1392,6 +1431,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 已继续全部传输 ({count} 个任务)')
 
     def _transfer_delete_row(self, row):
+        """删除指定行任务：运行中先 stop，删行后修正后续行的行号映射"""
         tid = self._find_tid_by_row(row)
         name_item = self._transfer_table.item(row, 0)
         name = name_item.text() if name_item else f'任务{row}'
@@ -1409,6 +1449,7 @@ class SFTPPanel(QWidget):
         self._log(f'[SFTP] 已删除传输: {name}')
 
     def _transfer_delete_all(self):
+        """清空传输队列（逐个 stop 后释放 worker）"""
         for tid in list(self._transfer_workers.keys()):
             info = self._transfer_workers.get(tid)
             if info:
@@ -1522,6 +1563,7 @@ class SFTPPanel(QWidget):
         worker.start()
 
     def _delete_selected(self):
+        """删除远程当前选中项（目录走 rmdir，仅能删空目录）"""
         item = self._tree.currentItem()
         if not item:
             self._log('[SFTP] 请先在右侧远程面板选择要删除的文件或目录')
@@ -1534,6 +1576,7 @@ class SFTPPanel(QWidget):
         self._run_quick_op(op, remote_path, f'[SFTP] 删除: {remote_path}')
 
     def _create_directory(self):
+        """在当前远程目录新建目录（输入名后走 mkdir 任务）"""
         name = self._ask_name('新建目录', '目录名:')
         if not name:
             return
@@ -1541,6 +1584,7 @@ class SFTPPanel(QWidget):
         self._run_quick_op('mkdir', remote_path, f'[SFTP] 创建目录: {remote_path}')
 
     def _open_in_xftp(self):
+        """用系统 Xftp 打开当前连接（凭据写入 URL，未安装时提示）"""
         if not shutil.which('xftp'):
             msg = "[提示] 未找到 Xftp，请确认已安装并加入系统 PATH"
             self._log(msg)
@@ -1563,11 +1607,13 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 回调
     def _on_quick_op_success(self, msg):
+        """快速操作（删除/新建/重命名）成功：状态栏提示并重列当前目录"""
         self._lbl_status.setText(msg)
         self._log(f'[SFTP] {msg}')
         self._list_remote(self._remote_path)
 
     def _on_quick_op_error(self, error):
+        """快速操作失败：仅状态栏与日志提示"""
         self._lbl_status.setText(f'操作失败: {error}')
         self._log(f'[SFTP] 操作失败: {error}')
 
@@ -1583,6 +1629,7 @@ class SFTPPanel(QWidget):
 
     @staticmethod
     def _format_size(size):
+        """字节数 → 人类可读（B/KB/MB/GB/TB）"""
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size < 1024:
                 return f'{size:.1f} {unit}' if unit != 'B' else f'{size} {unit}'
@@ -1659,6 +1706,7 @@ class SFTPPanel(QWidget):
 
     # ---- 右键菜单操作实现 ----
     def _get_temp_dir(self):
+        """打开下载用的 _sftp_temp 临时目录（不存在则建）"""
         from core.app_paths import get_app_dir
         base = get_app_dir()
         temp_dir = os.path.join(base, '_sftp_temp')
@@ -1666,6 +1714,7 @@ class SFTPPanel(QWidget):
         return temp_dir
 
     def _ctx_local_open(self, data):
+        """本地文件右键打开（系统默认程序）"""
         path = data['path']
         try:
             os.startfile(path)
@@ -1674,6 +1723,8 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 打开失败: {e}')
 
     def _ctx_remote_open(self, entry):
+        """远程文件右键打开：先下载到 _sftp_temp 再启系统程序；
+        目录整体下载后打开"""
         _cleanup_sftp_temp()  # 打开前清理超过 7 天的旧临时文件
         temp_dir = self._get_temp_dir()
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
@@ -1695,6 +1746,7 @@ class SFTPPanel(QWidget):
                                     op='download', local_path=local_path, remote_path=remote_path)
 
     def _open_after_download(self, path):
+        """临时目录下载完成后的打开回调"""
         try:
             os.startfile(path)
             self._log(f'[SFTP] 已打开: {path}')
@@ -1702,6 +1754,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 打开失败: {e}')
 
     def _ctx_rename_local(self, data):
+        """本地文件重命名（同目录内，权限不足单独提示）"""
         new_name = self._ask_name('重命名', '新名称:', data['name'])
         if not new_name or new_name == data['name']:
             return
@@ -1717,6 +1770,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 重命名失败: {e}')
 
     def _ctx_rename_remote(self, entry):
+        """远程文件重命名（走 rename 任务）"""
         new_name = self._ask_name('重命名', '新名称:', entry['name'])
         if not new_name or new_name == entry['name']:
             return
@@ -1727,6 +1781,7 @@ class SFTPPanel(QWidget):
                            local_path=old_path)
 
     def _ctx_delete_local(self, data):
+        """本地文件/目录删除（二次确认，目录整树删除）"""
         if data['is_dir']:
             msg = f'确定要删除本地目录 "{data["name"]}" 及其所有内容吗？'
         else:
@@ -1750,6 +1805,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 删除失败: {e}')
 
     def _ctx_delete_remote(self, entry):
+        """远程文件删除（二次确认；目录仅能删空目录）"""
         if entry['is_dir']:
             msg = f'确定要删除远程目录 "{entry["name"]}" 吗？\n注意：仅能删除空目录。'
         else:
@@ -1764,6 +1820,7 @@ class SFTPPanel(QWidget):
         self._run_quick_op(op, remote_path, f'[SFTP] 删除: {remote_path}')
 
     def _ctx_new_file_local(self):
+        """本地新建空文件"""
         name = self._ask_name('新建文件', '文件名:')
         if not name:
             return
@@ -1778,6 +1835,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 创建文件失败: {e}')
 
     def _ctx_new_dir_local(self):
+        """本地新建目录"""
         name = self._ask_name('新建文件夹', '文件夹名:')
         if not name:
             return
@@ -1792,6 +1850,7 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 创建目录失败: {e}')
 
     def _ctx_new_file_remote(self):
+        """远程新建空文件（走 create_file 任务）"""
         name = self._ask_name('新建文件', '文件名:')
         if not name:
             return
@@ -1799,6 +1858,7 @@ class SFTPPanel(QWidget):
         self._run_quick_op('create_file', remote_path, f'[SFTP] 创建远程文件: {remote_path}')
 
     def _ctx_new_dir_remote(self):
+        """远程新建目录（走 mkdir 任务）"""
         name = self._ask_name('新建文件夹', '文件夹名:')
         if not name:
             return

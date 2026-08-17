@@ -1,8 +1,11 @@
-# ==============================================
-# 工具名称：斯诺克视频日志全自动整理工具（Excel驱动版）
-# 版本：终极稳定防崩溃版
-# 功能：根据Excel中的署名筛选，自动整理视频、日志、配置文件
-# ==============================================
+# -*- coding: utf-8 -*-
+"""斯诺克视频日志全自动整理工具（Excel 驱动）
+
+按当天 Excel（问题/未复现/精度 三个 sheet）中的署名筛选记录，逐条把
+视频、同名 log、daily 日志、detect.bin、日期文件夹从 videos/{球房}
+归档到输出目录下的「球房 and 球房」总文件夹。可独立 CLI 运行，
+也被 NewLogWorker 后台线程收编调用（传 target_name）。
+"""
 import os
 import sys
 import json
@@ -35,7 +38,7 @@ def _load_settings() -> dict:
 
 
 def parse_time_from_line(line):
-
+    """解析日志行 [时间戳] 前缀；无括号或格式不对返回 None"""
     try:
         left = line.find('[')
         right = line.find(']')
@@ -48,7 +51,7 @@ def parse_time_from_line(line):
 
 
 def get_log_start_end_time(log_path):
-
+    """取日志首/末行时间戳作为时间范围（GBK 编码，容错返回 None）"""
     try:
         with open(log_path, "r", encoding="gbk", errors="ignore") as f:
             lines = [line.strip() for line in f if line.strip()]
@@ -62,7 +65,7 @@ def get_log_start_end_time(log_path):
 
 
 def filter_daily_log(daily_path, expand_start, expand_end, save_path):
-
+    """按时间窗口截取 daily 日志行另存为 UTF-8（带 BOM 供 Excel 直开）"""
     try:
         result = []
         with open(daily_path, "r", encoding="gbk", errors="ignore") as f:
@@ -84,7 +87,7 @@ def filter_daily_log(daily_path, expand_start, expand_end, save_path):
 
 
 def read_excel_data(excel_path, target_name=DEFAULT_TARGET_NAME):
-
+    """按署名从三个 sheet 提取 (球房, 视频名) 列表，缺必要列的 sheet 跳过"""
     result = []
     all_rooms = set()
     try:
@@ -140,6 +143,7 @@ def read_excel_data(excel_path, target_name=DEFAULT_TARGET_NAME):
 
 
 def get_video_date_from_name(video_name):
+    """视频名前 8 位数字（如 20260729_xxx）转成 YYYY-MM-DD，不合法返回 None"""
     try:
         date_part = video_name.split('_')[0]
         if len(date_part) == 8 and date_part.isdigit():
@@ -153,7 +157,7 @@ def get_video_date_from_name(video_name):
 
 
 def find_daily_log(table_path, date_str):
-
+    """在球桌目录找含指定日期的 daily 开头的日志文件"""
     try:
         for f in os.listdir(table_path):
             if f.lower().startswith("daily") and date_str in f:
@@ -164,7 +168,7 @@ def find_daily_log(table_path, date_str):
 
 
 def find_log_file(table_path, video_name):
-
+    """找与视频同名的 .log 文件（不存在返回 None）"""
     try:
         log_file = f"{video_name}.log"
         log_path = os.path.join(table_path, log_file)
@@ -176,9 +180,9 @@ def find_log_file(table_path, video_name):
 
 
 def get_today_excel_path():
-
+    """当天 Excel 路径：{excel_dir}/{YYYY MM DD}.xlsx"""
     today = datetime.now()
-    # 格式化为 "2026 07 29" 这样的格式
+    # 文件名用空格分隔（"2026 07 29.xlsx"），与台账模板约定一致
     date_str = today.strftime("%Y %m %d")
     excel_filename = f"{date_str}.xlsx"
     # Excel 目录来自 settings.json 的 newlog_excel_dir，缺失时回退桌面默认值
@@ -187,6 +191,7 @@ def get_today_excel_path():
 
 
 def main(target_name=None, interactive=False):
+    """整理主流程：读 Excel → 逐条归档 → 汇总打印，返回输出总目录"""
     print("==================================================")
     print("     斯诺克视频日志自动整理工具（Excel驱动版）")
     print("        根据Excel署名筛选，自动归档")

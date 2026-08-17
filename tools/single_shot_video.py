@@ -33,6 +33,7 @@ def resource_path(name):
 
 
 class SingleShotVideoServer:
+    """单杆视频渲染器：按 json 任务把比分条/头像/logo 逐帧叠加到原始视频上"""
 
     def __init__(self, source_dir, single_video_path, processed_dir, abnormal_dir):
         self.source_dir = source_dir  # 监控目录
@@ -41,9 +42,10 @@ class SingleShotVideoServer:
         self.single_video_path = single_video_path  # 单杆路径
 
     def move_to_processed(self, file_path, type):
+        """把已处理文件移到 processed_dir，同名自动加 _1/_2 后缀"""
         try:
             if type == 1:
-                # 如果目标路径已存在，自动添加 `_1`, `_2` 后缀
+                # 目标路径已存在时自动添加 `_1`, `_2` 后缀
                 base_name = os.path.basename(file_path)
                 counter = 1
                 new_dst_path = os.path.join(self.processed_dir, base_name)
@@ -56,8 +58,8 @@ class SingleShotVideoServer:
         except Exception as e:
             logger.error("迁移文件失败：{}".format(e))
 
-    # 处理指定文件夹中的所有 json 任务（读取 json -> 生成视频 -> 删除 json）
     def process_folder(self, folder_path):
+        """处理文件夹中全部 json 任务：读 json → 生成视频 → 删 json"""
         if not os.path.isdir(folder_path):
             logger.error("文件夹不存在: {}".format(folder_path))
             return False
@@ -79,15 +81,15 @@ class SingleShotVideoServer:
                 logger.error("文件不存在，请检查路径")
         return True
 
-    # 单次处理模式：只制作当前生成的文件夹，处理完即退出（不再轮询）
-    # target_folder 指定时只处理该文件夹；否则扫描 source_dir 下含 json 的文件夹（兼容 日期/代码 两级结构）
     def monitor_directory(self, target_folder=None):
+        """单次处理模式：只制作目标文件夹（缺省扫 source_dir 下含 json 的
+        二级子目录，兼容 日期/代码 两级结构），处理完即退出不轮询"""
         if target_folder is not None:
             # 只制作指定文件夹
             self.process_folder(target_folder)
             return
 
-        # 单次扫描：只处理含 json 的文件夹，处理完退出
+        # 单次扫描：只处理含 json 的文件夹
         for file_path in os.listdir(self.source_dir):
             first_src = os.path.join(self.source_dir, file_path)
             if not os.path.isdir(first_src):
@@ -99,16 +101,14 @@ class SingleShotVideoServer:
                     self.process_folder(second_src)
 
     def load_image_from_url(self, image_url, user):
-        # 获取图像内容
+        """加载头像/logo：http 地址下载解码，失败回退内置头像；
+        本地路径不存在且非绝对路径时先试 resource 目录，避免 imread 盲读告警"""
         import requests
         if image_url[:4] == "http":
             response = requests.get(image_url)
 
-            # 确保请求成功
             if response.status_code == 200:
-                # 将响应内容转换为 numpy 数组
                 img_array = np.frombuffer(response.content, np.uint8)
-                # 使用 cv2 解码图像
                 img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
                 return img
             else:
@@ -124,7 +124,7 @@ class SingleShotVideoServer:
                     return None
                 return avatar
         else:
-            # 非 http 路径：优先使用存在的文件路径，找不到相对文件时回退到资源目录，避免 imread 盲读触发警告
+            # 非 http 路径：优先用存在的文件，相对路径找不到时回退 resource 目录
             image_path = image_url
             if not os.path.exists(image_path) and not os.path.isabs(image_path):
                 fallback = resource_path(image_url)
@@ -137,6 +137,7 @@ class SingleShotVideoServer:
             return avatar
 
     def single_shot_video(self, task):
+        """按单个 json 任务渲染视频：每段 scores 区间叠比分条，返回是否成功"""
         import os
         try:
             frame_count = 0
@@ -144,20 +145,13 @@ class SingleShotVideoServer:
             file_name = task['file_name']
             session_code = task['session_code']
 
-            # 遍历所有的视频
+            # 逐段视频：末尾补一条 +25 帧的同分记录，让最后一段比分条渲染到片段结束
             for video in videos:
-                # 获取当前视频的 scores 数组
                 scores = video["scores"]
-
-                # 获取最后一条分数记录
-                if scores:  # 确保 scores 不为空
+                if scores:
                     last_score = scores[-1]
-
-                    # 创建新的分数记录
-                    new_score = last_score.copy()  # 复制最后一条记录
-                    new_score["frame_id"] += 25  # 增加 frame_id
-
-                    # 将新记录添加到 scores 数组
+                    new_score = last_score.copy()
+                    new_score["frame_id"] += 25
                     scores.append(new_score)
 
             # 读取视频
@@ -188,10 +182,10 @@ class SingleShotVideoServer:
                     logger.error("无法logo文件")
                     return False
 
-                # 确保图像是 3 通道（RGB），否则转换
-                if len(left_avatar.shape) == 2:  # 灰度图，转换为 RGB
+                # 头像/logo 统一转 4 通道（灰度先转 RGB），后续按 alpha 叠加
+                if len(left_avatar.shape) == 2:
                     left_avatar = cv2.cvtColor(left_avatar, cv2.COLOR_GRAY2RGB)
-                if left_avatar.shape[2] == 3:  # 如果是 RGB，则添加 Alpha 通道
+                if left_avatar.shape[2] == 3:
                     left_avatar = cv2.cvtColor(left_avatar, cv2.COLOR_RGB2RGBA)
 
                 if len(right_avatar.shape) == 2:
@@ -217,15 +211,11 @@ class SingleShotVideoServer:
                 avatar_h, avatar_w, avatar_channels = left_avatar.shape
                 logo_h, logo_w, logo_channels = logo.shape
 
-                # 左侧头像位置
-                left_x_offset = 154  # 距离左边框 10 像素
-                left_y_offset = 0  # 距离顶部 10 像素
-
-                # 右侧头像位置
-                right_x_offset = 774  # 距离右边框 10 像素
-                right_y_offset = 0  # 距离顶部 10 像素
-
-                # logo 位置
+                # 头像/logo 叠放坐标（比分条底图上的固定位）
+                left_x_offset = 154
+                left_y_offset = 0
+                right_x_offset = 774
+                right_y_offset = 0
                 logo_x_offset = 750
                 logo_y_offset = 480
 
@@ -240,35 +230,32 @@ class SingleShotVideoServer:
                 out = cv2.VideoWriter(
                     output_video_path, fourcc, fps, (frame_width, frame_height))
 
-                # 使用 Pillow 渲染中文文本
-                font_path = resource_path("SourceHanSansCN-Regular.ttf")  # 你需要提供一个支持中文的字体文件路径
+                # Pillow 渲染中文比分条（cv2.putText 不支持中文），字体随包分发
+                font_path = resource_path("SourceHanSansCN-Regular.ttf")
                 font_size = 25
                 for index, value in enumerate(item['scores']):
                     if item['scores'][index]['frame_id'] == item['start_frame']:
                         item['scores'][index]['frame_id'] = item['start_frame'] - 25
+                    # 底图按选手方向选（image_0/image_1），转 RGBA 供绘制
                     if item['player'] == 0:
-                        image = Image.open(resource_path("image_0.png")).convert(
-                            "RGBA")  # 打开图片并转换为 RGBA 模式（包括 alpha 通道）
+                        image = Image.open(resource_path("image_0.png")).convert("RGBA")
                     else:
-                        image = Image.open(resource_path("image_1.png")).convert(
-                            "RGBA")  # 打开图片并转换为 RGBA 模式（包括 alpha 通道）
-                    # 创建一个 ImageDraw 对象
+                        image = Image.open(resource_path("image_1.png")).convert("RGBA")
                     draw_ = ImageDraw.Draw(image)
 
-                    # 加载字体
                     font_0 = ImageFont.truetype(
                         resource_path("SourceHanSansCN-Regular.ttf"), 16)
                     font_1 = ImageFont.truetype(
                         resource_path("PreferredTitleBlack.ttf"), 28)
 
-                    # 在图像上绘制中文文本
+                    # 用户名/赛制文字（坐标为底图模板上的固定位）
                     draw_.text((190, 5), user_0, font=font_0, fill=(46, 107, 229))    # 蓝色-甲用户名
                     draw_.text((275 + 190, 5), task['format'], font=font_0, fill="white")   # 白色
                     draw_.text((510 + 215, 5), user_1, font=font_0, fill=(46, 107, 229))   # 蓝色-乙用户名
-                    # 将 Pillow 图像转换为 OpenCV 格式
                     current_score = item['scores'][index]
                     total_score = str(current_score['score'])
                     score_length = len(total_score)
+                    # 总比分按位数微调 x 坐标，保证居中于底图记分槽
                     if score_length == 1:
                         draw_.text((388 + 190, -1), str(current_score['score_1']), font=font_1, fill=(46, 107, 229))  # 乙得分
                         draw_.text((174 + 190, -1), str(current_score['score_0']), font=font_1, fill=(46, 107, 229))  # 甲得分
@@ -279,15 +266,11 @@ class SingleShotVideoServer:
                         draw_.text((372 + 190, -1), str(current_score['score_1']), font=font_1, fill=(46, 107, 229))  # 乙得分
                         draw_.text((164 + 190, -1), str(current_score['score_0']), font=font_1, fill=(46, 107, 229))  # 甲得分
 
+                    # 「单杆N分」拆成 中文/数字/单位 三段分别上色，数字位数决定偏移
                     result = re.findall(r'[\u4e00-\u9fa5]+|\d+|\w+', text)
                     if item['player'] == 0:
-                        # 在图像上绘制文本
                         draw_.text((5, -1), result[0], font=font_1, fill="#1f4ca3")  # 蓝色--'单杆'
-
-                        # 在图像上绘制文本
                         draw_.text((63, -1), result[1], font=font_1, fill="#f50d19")   # 红色
-
-                        # 在图像上绘制文本
                         if len(result[1]) == 1:    # '分'
                             draw_.text((90, -1), result[2], font=font_1, fill="#1f4ca3")
                         elif len(result[1]) == 2:
@@ -296,13 +279,8 @@ class SingleShotVideoServer:
                             draw_.text((128, -1), result[2], font=font_1, fill="#1f4ca3")
 
                     else:
-                        # 在图像上绘制文本
                         draw_.text((820, -1), result[0], font=font_1, fill="#1f4ca3")  # 蓝色--'单杆'
-
-                        # 在图像上绘制文本
                         draw_.text((875, -1), result[1], font=font_1, fill="#f50d19")  # 红色
-
-                        # 在图像上绘制文本
                         if len(result[1]) == 1:  # '分'
                             draw_.text((897, -1), result[2], font=font_1, fill="#1f4ca3")
                         elif len(result[1]) == 2:
@@ -310,7 +288,8 @@ class SingleShotVideoServer:
                         else:
                             draw_.text((935, -1), result[2], font=font_1, fill="#1f4ca3")
 
-                    if item['player'] == 1:   # 单杆得分
+                    # 本杆得分（小字号，位置同样按位数微调）
+                    if item['player'] == 1:
                         draw_.text((461 + 180, 3), str(item['scores'][index]['score']), font=font_0, fill="#f50d19")
                     else:
                         if score_length == 1:
@@ -322,18 +301,18 @@ class SingleShotVideoServer:
 
                     opencv_image = np.array(image)
 
-                    # 转换为 BGR 格式（OpenCV 默认使用 BGR）
+                    # Pillow 输出是 RGBA，转 BGRA 供 OpenCV 叠加
                     main_img = cv2.cvtColor(opencv_image, cv2.COLOR_RGBA2BGRA)
 
                     if main_img is None:
                         logger.error("无法打开主图片文件")
                         return False
-                    # 调整主图片大小
                     main_h, main_w, main_channels = main_img.shape
-                    # 计算主图片顶部位置
-                    main_x_offset = (frame_width - main_w) // 2  # 横向居中
-                    main_y_offset = 0  # 顶部对齐
+                    main_x_offset = (frame_width - main_w) // 2  # 比分条横向居中、顶部对齐
+                    main_y_offset = 0
 
+                    # 逐帧输出：当前分数区间内的帧叠加比分条/头像/logo，
+                    # 越过本段结束帧（下一段 frame_id 或 end_frame）即换下一张比分条
                     while True:
                         ret, frame = cap.read()
                         if not ret:
@@ -349,17 +328,16 @@ class SingleShotVideoServer:
                         if value['frame_id'] < frame_count <= (
                                 item['end_frame'] if index + 1 == len(item['scores']) else item['scores'][index + 1][
                                     'frame_id']):
-                            # 将 OpenCV 图像转换为 PIL 图像
+                            # 帧转 PIL 再转回（历史保留路径，保持与模板渲染管线一致）
                             pil_image = Image.fromarray(
                                 cv2.cvtColor(frame_with_text, cv2.COLOR_BGR2RGB))
-                            # 将 PIL 图像转换回 OpenCV 图像
                             frame_with_text = cv2.cvtColor(
                                 np.array(pil_image), cv2.COLOR_RGB2BGR)
 
-                            # 叠加主图片（顶部居中）
+                            # 叠加比分条（顶部居中）
                             y1, y2 = main_y_offset, main_y_offset + main_h
                             x1, x2 = main_x_offset, main_x_offset + main_w
-                            if main_channels == 4:  # 主图片有 alpha 通道
+                            if main_channels == 4:  # 带 alpha 通道按透明度混合
                                 alpha_main = main_img[:, :, 3] / 255.0
                                 alpha_frame = 1.0 - alpha_main
                                 for c in range(0, 3):
@@ -373,7 +351,7 @@ class SingleShotVideoServer:
                             # 叠加左侧头像
                             y1, y2 = left_y_offset, left_y_offset + avatar_h
                             x1, x2 = left_x_offset, left_x_offset + avatar_w
-                            if avatar_channels == 4:  # 左侧头像有 alpha 通道
+                            if avatar_channels == 4:
                                 alpha_left = left_avatar[:, :, 3] / 255.0
                                 alpha_frame = 1.0 - alpha_left
                                 for c in range(0, 3):
@@ -387,7 +365,7 @@ class SingleShotVideoServer:
                             # 叠加右侧头像
                             y1, y2 = right_y_offset, right_y_offset + avatar_h
                             x1, x2 = right_x_offset, right_x_offset + avatar_w
-                            if avatar_channels == 4:  # 右侧头像有 alpha 通道
+                            if avatar_channels == 4:
                                 alpha_right = right_avatar[:, :, 3] / 255.0
                                 alpha_frame = 1.0 - alpha_right
                                 for c in range(0, 3):
@@ -398,11 +376,11 @@ class SingleShotVideoServer:
                             else:
                                 frame_with_text[y1:y2, x1:x2] = right_avatar
 
-                            # 叠加logo
+                            # 叠加 logo
                             y1, y2 = logo_y_offset, logo_y_offset + logo_h
                             x1, x2 = logo_x_offset, logo_x_offset + logo_w
 
-                            if logo_channels == 4:  # 右侧头像有 alpha 通道
+                            if logo_channels == 4:
                                 logo_right = logo[:, :, 3] / 255.0
                                 logo_frame = 1.0 - logo_right
                                 for c in range(0, 3):

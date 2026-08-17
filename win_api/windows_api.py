@@ -142,6 +142,7 @@ RDP_HELPER_CLASSES = frozenset({
 })
 
 class _RECT(ctypes.Structure):
+    """Windows RECT 结构（GetWindowRect 用）"""
     _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long),
                 ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
 
@@ -158,6 +159,7 @@ _Process32NextW = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_vo
 TH32CS_SNAPPROCESS = 0x00000002
 
 class _PROCESSENTRY32W(ctypes.Structure):
+    """进程快照条目结构（Toolhelp32，szExeFile 为进程名）"""
     _fields_ = [
         ('dwSize', ctypes.c_ulong),
         ('cntUsage', ctypes.c_ulong),
@@ -352,14 +354,8 @@ def find_rdp_session_window(log=None):
     return wins[0]['hwnd'] if wins[0]['score'] > 0 else None
 
 def win_set_process_threads(pid, thread_action):
-    """Windows API: 对指定进程的所有线程执行操作（挂起/恢复）
-
-    参数:
-        pid: 目标进程 ID
-        thread_action: 对每个线程句柄调用的函数（_SuspendThread 或 _ResumeThread）
-    返回:
-        bool: 操作是否成功
-    """
+    """枚举指定进程的全部线程并逐个执行 thread_action（挂起/恢复句柄函数），
+    返回是否成功"""
     PROCESS_SUSPEND_RESUME = 0x0800
     THREAD_SUSPEND_RESUME = 0x0002
     TH32CS_SNAPTHREAD = 0x00000004
@@ -399,9 +395,9 @@ def win_set_process_threads(pid, thread_action):
         _CloseHandle(h_process)
 
 def win_suspend_process(pid):
-    """Windows API: 挂起指定进程的所有线程"""
+    """挂起指定进程的所有线程"""
     return win_set_process_threads(pid, _SuspendThread)
 
 def win_resume_process(pid):
-    """Windows API: 恢复指定进程的所有线程"""
+    """恢复指定进程的所有线程"""
     return win_set_process_threads(pid, _ResumeThread)

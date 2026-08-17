@@ -28,7 +28,7 @@ from main_window import MainWindow
 
 
 def main():
-    """主函数"""
+    """启动入口：装异常钩子/敏感配置迁移/主题字体，再创建主窗口进事件循环"""
     # 全局异常钩子：主线程/后台线程未捕获异常先落盘日志，确保崩溃可追踪
     def _global_exception_hook(exc_type, exc_value, exc_tb):
         try:
@@ -116,7 +116,6 @@ def main():
     window = MainWindow()
     window.show()
 
-    # 运行应用程序
     sys.exit(app.exec())
 
 

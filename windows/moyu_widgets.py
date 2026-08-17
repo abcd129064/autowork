@@ -39,10 +39,12 @@ logger = logging.getLogger(__name__)
 # ==================== 摸鱼状态持久化 ====================
 
 def _state_path():
+    """摸鱼状态文件路径（独立于 settings.json，防配置缓存全量回写覆盖）"""
     return os.path.join(get_app_dir(), "moyu_state.json")
 
 
 def load_moyu_state() -> dict:
+    """读摸鱼状态，文件缺失/损坏返回空字典"""
     try:
         with open(_state_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -102,6 +104,7 @@ class _Board2048(QWidget):
     # ---------- 游戏逻辑 ----------
 
     def reset(self):
+        """重开一局：清盘并预置两个方块"""
         self._grid = [[0] * self.SIZE for _ in range(self.SIZE)]
         self._over = False
         self._won = False
@@ -111,6 +114,7 @@ class _Board2048(QWidget):
         self.update()
 
     def _spawn(self):
+        """随机空格生成新方块（90% 出 2，10% 出 4）"""
         empty = [(r, c) for r in range(self.SIZE) for c in range(self.SIZE)
                  if self._grid[r][c] == 0]
         if not empty:
@@ -135,6 +139,7 @@ class _Board2048(QWidget):
         return out + [0] * (4 - len(out))
 
     def _move(self, direction):
+        """四方向移动：行/列归一为向左压缩合并，返回是否发生移动"""
         g = self._grid
         moved = False
         box = [0]
@@ -164,6 +169,7 @@ class _Board2048(QWidget):
         return moved
 
     def _moves_available(self):
+        """是否还能移动：有空格或任意相邻同值即未终局"""
         g = self._grid
         for r in range(self.SIZE):
             for c in range(self.SIZE):
@@ -309,6 +315,7 @@ class Game2048Widget(QWidget):
         self._board.setFocus(reason)
 
     def _on_score(self, gained):
+        """累加得分，刷新最高分并落盘"""
         self._score += gained
         self._lbl_score.setText(f"得分：{self._score}")
         if self._score > self._best:
@@ -317,6 +324,7 @@ class Game2048Widget(QWidget):
             save_moyu_state({"best_2048": self._best})
 
     def _restart(self):
+        """重新开始：重开棋盘并清零得分"""
         self._board.reset()
         self._score = 0
         self._lbl_score.setText("得分：0")
@@ -347,6 +355,7 @@ class _SnakeBoard(QWidget):
     # ---------- 状态机 ----------
 
     def _reset(self):
+        """重置蛇身/方向/食物，回到待开始态"""
         cy = self.ROWS // 2
         self._snake = deque([(8, cy), (7, cy), (6, cy)])  # 头在前
         self._dir = (1, 0)
@@ -355,15 +364,18 @@ class _SnakeBoard(QWidget):
         self._food = self._spawn_food()
 
     def _spawn_food(self):
+        """在非蛇身格随机放食物；占满全场返回 None"""
         occupied = set(self._snake)
         free = [(x, y) for x in range(self.COLS) for y in range(self.ROWS)
                 if (x, y) not in occupied]
         return random.choice(free) if free else None
 
     def state(self):
+        """当前状态机状态（idle/running/paused/over）"""
         return self._state
 
     def start(self):
+        """开始/重开游戏并启动走格定时器"""
         if self._state in ("idle", "over"):
             self._reset()
         self._state = "running"
@@ -372,6 +384,7 @@ class _SnakeBoard(QWidget):
         self.update()
 
     def pause(self):
+        """运行中暂停（停表保状态）"""
         if self._state == "running":
             self._state = "paused"
             self._timer.stop()
@@ -379,6 +392,7 @@ class _SnakeBoard(QWidget):
             self.update()
 
     def resume(self):
+        """从暂停恢复走格"""
         if self._state == "paused":
             self._state = "running"
             self._timer.start()
@@ -388,6 +402,7 @@ class _SnakeBoard(QWidget):
     # ---------- 游戏逻辑 ----------
 
     def _tick(self):
+        """单步走格：消费方向队列，撞墙/撞自己判死；吃到食物加分并换食物"""
         if self._queue:
             self._dir = self._queue.popleft()
         hx, hy = self._snake[0]
@@ -414,12 +429,14 @@ class _SnakeBoard(QWidget):
         self.update()
 
     def _die(self):
+        """判死：停表并切 over 态"""
         self._state = "over"
         self._timer.stop()
         self.state_changed.emit(self._state)
         self.update()
 
     def _push_dir(self, d):
+        """方向入队：忽略重复与 180° 反向，队列最深 2（兼顾手感与可预测性）"""
         last = self._queue[-1] if self._queue else self._dir
         if d == last:
             return
@@ -555,6 +572,7 @@ class SnakeWidget(QWidget):
         self._board.setFocus(reason)
 
     def _toggle(self):
+        """开始/暂停/继续三态切换按钮"""
         s = self._board.state()
         if s == "running":
             self._board.pause()
@@ -564,12 +582,14 @@ class SnakeWidget(QWidget):
             self._board.start()
 
     def _restart(self):
+        """重开：清零得分并直接开局"""
         self._score = 0
         self._lbl_score.setText("得分：0")
         self._board.start()
         self._board.setFocus()
 
     def _on_score(self, gained):
+        """吃食物加分，刷新最高分并落盘"""
         self._score += gained
         self._lbl_score.setText(f"得分：{self._score}")
         if self._score > self._best:
@@ -578,6 +598,7 @@ class SnakeWidget(QWidget):
             save_moyu_state({"best_snake": self._best})
 
     def _on_state(self, state):
+        """状态机变化 → 切换按钮文案（开始/暂停/继续）"""
         self._btn_toggle.setText(
             {"running": "暂停", "paused": "继续"}.get(state, "开始"))
 
@@ -590,6 +611,7 @@ class SnakeWidget(QWidget):
             self._board.pause()
 
     def auto_resume(self):
+        """页签切回：自动恢复被 auto_pause 暂停的局"""
         if self._auto_paused:
             self._auto_paused = False
             self._board.resume()
@@ -629,6 +651,7 @@ class _TextExtractor(HTMLParser):
             self._parts.append(data)
 
     def text(self):
+        """提取结果：拼接各片段后压缩空行"""
         return _compress_lines("".join(self._parts))
 
 
@@ -732,6 +755,7 @@ class _HtmlText:
 
     @classmethod
     def extract(cls, node) -> str:
+        """lxml 子树 → 压缩后的段落纯文本"""
         parts = []
         cls._walk(node, parts)
         return _compress_lines("".join(parts))
@@ -1004,6 +1028,7 @@ class _FetchWorker(QThread):
         return resp.text, resp.url or url
 
     def run(self):
+        """拉取页面 → 解析正文/导航；章节不足自动补目录页，上下章缺失按目录推导"""
         try:
             html, final_url = self._fetch_text(self._url)
             result = _parse_web_page(html, final_url)
@@ -1196,6 +1221,7 @@ class MoyuReaderWidget(QWidget):
     # ---------- 字号 ----------
 
     def _apply_font(self):
+        """把当前字号套到正文样式并同步按钮可用态"""
         self._browser.document().setDefaultStyleSheet(
             f"body {{ font-size: {self._font_size}pt; line-height: 1.6; }}")
         self._lbl_font.setText(f"{self._font_size}pt")
@@ -1203,6 +1229,7 @@ class MoyuReaderWidget(QWidget):
         self._btn_font_plus.setEnabled(self._font_size < self._FONT_MAX)
 
     def _adjust_font(self, delta):
+        """字号增减（限制在 MIN~MAX），变更后落盘"""
         new = min(max(self._font_size + delta, self._FONT_MIN),
                   self._FONT_MAX)
         if new == self._font_size:
@@ -1214,6 +1241,7 @@ class MoyuReaderWidget(QWidget):
     # ---------- 正文载入 ----------
 
     def _set_text(self, text, source):
+        """正文载入浏览器并更新来源标签"""
         self._browser.setPlainText(text)
         self._apply_font()  # setPlainText 重建 document 后需重新套用字号
         self._lbl_source.setText(source)
@@ -1231,6 +1259,7 @@ class MoyuReaderWidget(QWidget):
         return data.decode("utf-8", errors="replace")
 
     def _load_txt(self, path, restore_scroll=False):
+        """载入 txt：成功后记为最近文件，恢复场景按进度比例回滚"""
         try:
             text = self._read_text_file(path)
         except OSError as e:
@@ -1244,6 +1273,7 @@ class MoyuReaderWidget(QWidget):
             self._restore_scroll(self._current_ratio)
 
     def _open_txt(self):
+        """文件对话框选 txt（起点为上次打开位置）"""
         start = self._last_txt if os.path.isfile(self._last_txt) \
             else get_app_dir()
         path, _ = QFileDialog.getOpenFileName(
@@ -1253,6 +1283,7 @@ class MoyuReaderWidget(QWidget):
             self._load_txt(path)
 
     def _paste_read(self):
+        """粘贴阅读：弹窗贴文本后直接载入"""
         dlg = QDialog(self)
         dlg.setWindowTitle("粘贴阅读")
         dlg.resize(560, 420)
@@ -1315,6 +1346,7 @@ class MoyuReaderWidget(QWidget):
         self._load_url(self._last_url, quiet=True)
 
     def _finish_fetch(self, w):
+        """抓取线程结束：恢复输入框/按钮并销毁 worker"""
         self._fetch_worker = None
         self._url_edit.setEnabled(True)
         self._btn_fetch.setEnabled(True)
@@ -1322,6 +1354,7 @@ class MoyuReaderWidget(QWidget):
         w.deleteLater()
 
     def _on_fetch_ok(self, data):
+        """抓取成功：载入正文、更新导航按钮、记最近 URL 并提示字数"""
         url = data.get("url") or ""
         text = data.get("text") or ""
         self._current_ratio = 0.0
@@ -1343,10 +1376,12 @@ class MoyuReaderWidget(QWidget):
         self._btn_toc.setEnabled(bool(self._chapters))
 
     def _go_prev(self):
+        """跳转上一章（解析出的链接）"""
         if self._prev_url:
             self._load_url(self._prev_url)
 
     def _go_next(self):
+        """跳转下一章"""
         if self._next_url:
             self._load_url(self._next_url)
 
@@ -1378,12 +1413,14 @@ class MoyuReaderWidget(QWidget):
         dlg.exec()
 
     def _jump_from_toc(self, item, dlg):
+        """目录双击：关弹窗并加载选中章节"""
         url = item.data(Qt.ItemDataRole.UserRole) or ""
         dlg.accept()
         if url:
             self._load_url(url)
 
     def _on_fetch_failed(self, url, msg):
+        """抓取失败：错误首行提示 + 「浏览器打开」动作兜底"""
         first = str(msg).splitlines()[0][:120] if msg else "未知错误"
         bar = show_info_bar(first, "error", title="抓取失败", parent=self, duration=0)
         btn = PushButton("浏览器打开", bar)
@@ -1394,6 +1431,7 @@ class MoyuReaderWidget(QWidget):
     # ---------- 老板键 ----------
 
     def toggle_boss(self):
+        """老板键：正文 ⇄ 假日志伪装视图切换（切走前先存进度）"""
         if self._stack.currentIndex() == 0:
             self._flush_save()  # 切走前保存阅读进度
             self._stack.setCurrentIndex(1)
@@ -1406,11 +1444,13 @@ class MoyuReaderWidget(QWidget):
     # ---------- 滚动进度 ----------
 
     def _scroll_ratio(self):
+        """当前滚动位置比例（0~1，用于跨会话续读）"""
         bar = self._browser.verticalScrollBar()
         span = bar.maximum() - bar.minimum()
         return (bar.value() - bar.minimum()) / span if span > 0 else 0.0
 
     def _restore_scroll(self, ratio):
+        """延迟到布局完成后按比例恢复滚动位置"""
         def _do():
             bar = self._browser.verticalScrollBar()
             span = bar.maximum() - bar.minimum()
@@ -1426,6 +1466,7 @@ class MoyuReaderWidget(QWidget):
         QTimer.singleShot(1200, self._flush_save)
 
     def _flush_save(self):
+        """落盘阅读进度（滚动比例 + 字号）"""
         self._save_pending = False
         self._current_ratio = round(self._scroll_ratio(), 4)
         save_moyu_state({
