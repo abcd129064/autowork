@@ -15,7 +15,7 @@ import subprocess
 from core.app_paths import get_app_dir
 
 # 主.次版本：手工维护（新增功能集 → 次版本 +1）
-BASE_VERSION = "2.8"
+BASE_VERSION = "2.9"
 
 # 视为"主分支"的名称：主分支版本号不带分支后缀
 _MAIN_BRANCHES = {"main", "master"}

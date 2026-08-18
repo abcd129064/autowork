@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     remark          TEXT,
     cameraPassExt   VARCHAR(512) DEFAULT '',
     snk_code        VARCHAR(128) DEFAULT '',
-    code            VARCHAR(255) DEFAULT ''
+    code            VARCHAR(255) DEFAULT '',
+    city            VARCHAR(255) DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
@@ -160,6 +161,33 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
+# aftersale_records：售后记录（多用户共享，推送走业务键 upsert 不覆盖）
+_DDL_AFTERSALE_RECORDS = """
+CREATE TABLE IF NOT EXISTS aftersale_records (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    created_at    VARCHAR(32) DEFAULT '',
+    occurred_at   VARCHAR(32) DEFAULT '',
+    creator       VARCHAR(255) DEFAULT '',
+    issue_type    VARCHAR(255) DEFAULT '',
+    table_no      VARCHAR(255) DEFAULT '',
+    room_name     VARCHAR(255) DEFAULT '',
+    region        VARCHAR(255) DEFAULT '',
+    problem       TEXT,
+    cause         TEXT,
+    resolved      VARCHAR(255) DEFAULT '否',
+    is_initiative VARCHAR(255) DEFAULT '否',
+    is_our_problem VARCHAR(255) DEFAULT '是',
+    solution      TEXT,
+    resolver      VARCHAR(255) DEFAULT '',
+    response_time VARCHAR(255) DEFAULT '',
+    snk_code      VARCHAR(255) DEFAULT '',
+    device_code   VARCHAR(255) DEFAULT '',
+    cycle_start   VARCHAR(32) DEFAULT '',
+    INDEX idx_aftersale_cycle (cycle_start),
+    INDEX idx_aftersale_table_no (table_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
 _ALL_DDL = [
     _DDL_BILLIARD_TABLES,
     _DDL_XQZG_STATUS,
@@ -167,6 +195,7 @@ _ALL_DDL = [
     _DDL_SUBMISSION_LOG,
     _DDL_DEVICE_MAPPING,
     _DDL_SYNC_META,
+    _DDL_AFTERSALE_RECORDS,
 ]
 
 
@@ -219,6 +248,24 @@ def _ensure_schema(cfg: dict):
             for ddl in _ALL_DDL:
                 cur.execute(ddl)
         conn.commit()
+        # 迁移：旧 billiard_tables 库缺 city 列（接口 roomCity）时补列
+        with conn.cursor() as cur:
+            cur.execute("SHOW COLUMNS FROM billiard_tables")
+            exist = {r["Field"] for r in cur.fetchall()}
+            if "city" not in exist:
+                cur.execute(
+                    "ALTER TABLE billiard_tables "
+                    "ADD COLUMN city VARCHAR(255) DEFAULT ''")
+                conn.commit()
+        # 迁移：旧 aftersale_records 库缺 occurred_at 列时补列
+        with conn.cursor() as cur:
+            cur.execute("SHOW COLUMNS FROM aftersale_records")
+            exist = {r["Field"] for r in cur.fetchall()}
+            if "occurred_at" not in exist:
+                cur.execute(
+                    "ALTER TABLE aftersale_records "
+                    "ADD COLUMN occurred_at VARCHAR(32) DEFAULT ''")
+                conn.commit()
     finally:
         conn.close()
 
@@ -226,20 +273,36 @@ def _ensure_schema(cfg: dict):
 # ==================== 数据推送 ====================
 
 def _read_sqlite(table_name: str, columns: tuple) -> list:
-    """从本地 SQLite 读取指定表的全部数据，返回 list[tuple]"""
+    """从本地 SQLite 读取指定表的全部数据，返回 list[tuple]
+
+    按实际列与目标元组取交集读取，本地老库缺失的列补空串占位，
+    避免 MySQL 模式下跳过 SQLite 迁移导致 no such column 推送失败。
+    """
     from database.table_db import DB_PATH
     conn = sqlite3.connect(DB_PATH)
     try:
-        cols = ", ".join(columns)
-        rows = conn.execute(f"SELECT {cols} FROM {table_name}").fetchall()
+        exist = [r[1] for r in conn.execute(
+            f"PRAGMA table_info({table_name})").fetchall()]
+        if not exist:
+            return []  # 表不存在：无数据可推
+        cols = [c for c in columns if c in exist]
+        rows = conn.execute(
+            f"SELECT {', '.join(cols)} FROM {table_name}").fetchall()
     finally:
         conn.close()
-    return rows
+    if len(cols) == len(columns):
+        return rows
+    # 缺列补空串，按列名映射保持与 columns 顺序对齐
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        out.append(tuple(d.get(c, "") for c in columns))
+    return out
 
 
 # billiard_tables 字段
 _BT_COLS = ("id", "name", "roomName", "onlineStatusName",
-            "remark", "cameraPassExt", "snk_code", "code")
+            "remark", "cameraPassExt", "snk_code", "code", "city")
 _BT_MYSQL_COLS = _BT_COLS  # 同名
 
 # xqzg_status 字段
@@ -464,6 +527,69 @@ def push_table(table_name: str, progress_cb=None) -> tuple:
 
         conn.close()
         return True, f"{table_name}: {count} 条已推送", count
+    except Exception as e:
+        return False, f"推送失败: {type(e).__name__}: {e}", 0
+
+
+# 售后记录业务键：SQLite 与 MySQL 两侧 id 各自增长会撞车，
+# 按 (created_at, creator, table_no, problem) 判定同一条记录
+_AFTERSALE_KEY_COLS = ("created_at", "creator", "table_no", "problem")
+
+
+def push_aftersale(cfg: dict = None, progress_cb=None) -> tuple:
+    """售后记录安全推送：业务键去重 upsert（不 TRUNCATE 不按 id 去重）
+
+    售后库是多用户共享，全量 replace 会清掉他人数据；SQLite 与 MySQL
+    两侧 id 各自增长会撞车。按业务键判断：
+    - 不存在 → INSERT（MySQL 侧 AUTO_INCREMENT 生成新 id）
+    - 存在 → UPDATE 本地最新值（保留 MySQL 侧 id）
+    本地删除不反向删除远程（单向推送语义）。
+
+    Returns:
+        (ok: bool, message: str, count: int)
+    """
+    try:
+        if cfg is None:
+            cfg = _load_mysql_config()
+        if not cfg:
+            return False, "MySQL 同步未启用或配置缺失", 0
+        from database import aftersale_db
+        _ensure_schema(cfg)
+        conn = _connect(cfg)
+        columns = aftersale_db.RECORD_FIELDS  # 不含 id（两侧 id 不通用）
+        rows = _read_sqlite("aftersale_records", columns)
+        cols_str = ", ".join(f"`{c}`" for c in columns)
+        ph = ", ".join(["%s"] * len(columns))
+        insert_sql = (f"INSERT INTO `aftersale_records` ({cols_str}) "
+                      f"VALUES ({ph})")
+        set_str = ", ".join(
+            f"`{c}` = %s" for c in columns if c not in _AFTERSALE_KEY_COLS)
+        update_sql = (f"UPDATE `aftersale_records` SET {set_str} WHERE "
+                      + " AND ".join(f"`{c}` = %s" for c in _AFTERSALE_KEY_COLS))
+        key_ph = " AND ".join(f"`{c}` = %s" for c in _AFTERSALE_KEY_COLS)
+        sel_sql = (f"SELECT id FROM `aftersale_records` WHERE {key_ph} "
+                   f"LIMIT 1")
+        inserted = updated = 0
+        with conn.cursor() as cur:
+            for r in rows:
+                d = dict(zip(columns, r))
+                keys = [d[c] for c in _AFTERSALE_KEY_COLS]
+                cur.execute(sel_sql, keys)
+                exist = cur.fetchone()
+                if exist:
+                    vals = [d[c] for c in columns
+                            if c not in _AFTERSALE_KEY_COLS] + keys
+                    cur.execute(update_sql, vals)
+                    updated += 1
+                else:
+                    cur.execute(insert_sql, [d[c] for c in columns])
+                    inserted += 1
+        conn.commit()
+        conn.close()
+        if progress_cb:
+            progress_cb(f"aftersale_records: 新增 {inserted}，更新 {updated}")
+        return True, f"售后记录已推送：新增 {inserted}，更新 {updated}", \
+            inserted + updated
     except Exception as e:
         return False, f"推送失败: {type(e).__name__}: {e}", 0
 

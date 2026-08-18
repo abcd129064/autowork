@@ -20,15 +20,23 @@ class MysqlSyncWorker(QThread):
     success = Signal(int, str)
     error = Signal(str)
 
-    def __init__(self, table_name: str = None, parent=None):
-        """table_name 为空时推送全部表，否则只推指定表"""
+    def __init__(self, table_name: str = None, parent=None, cfg: dict = None):
+        """table_name 为空时推送全部表，否则只推指定表
+
+        cfg: 显式连接配置（「立即同步」用表单最新值，避免读旧配置）；
+        table_name="aftersale_records" 时走售后业务键 upsert 推送。
+        """
         super().__init__(parent)
         self._table_name = table_name
+        self._cfg = cfg
 
     def run(self):
         try:
             t0 = time.time()
-            if self._table_name:
+            if self._table_name == "aftersale_records":
+                ok, msg, count = mysql_sync.push_aftersale(
+                    self._cfg, progress_cb=self.progress.emit)
+            elif self._table_name:
                 ok, msg, count = mysql_sync.push_table(
                     self._table_name, progress_cb=self.progress.emit)
             else:
