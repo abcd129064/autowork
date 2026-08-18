@@ -39,6 +39,15 @@ def parse_snk_code(remark: str) -> str:
     return m.group(0) if m else ""
 
 
+def parse_city(item: dict) -> str:
+    """从接口记录解析城市（接口字段名 roomCity，容错小写/别名）"""
+    for k in ("roomCity", "roomcity", "city"):
+        v = item.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS billiard_tables (
     id      INTEGER PRIMARY KEY,
@@ -48,7 +57,8 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     remark  TEXT DEFAULT '',
     cameraPassExt TEXT DEFAULT '',
     snk_code TEXT DEFAULT '',
-    code    TEXT DEFAULT ''
+    code    TEXT DEFAULT '',
+    city    TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
@@ -274,6 +284,35 @@ CREATE TABLE IF NOT EXISTS device_mapping (
 );
 """
 
+# ==================== 售后记录表（售后面板，双后端） ====================
+
+_CREATE_AFTERSALE_SQL = """
+CREATE TABLE IF NOT EXISTS aftersale_records (
+    id            INTEGER PRIMARY KEY,
+    created_at    TEXT DEFAULT '',
+    creator       TEXT DEFAULT '',
+    issue_type    TEXT DEFAULT '',
+    table_no      TEXT DEFAULT '',
+    room_name     TEXT DEFAULT '',
+    region        TEXT DEFAULT '',
+    problem       TEXT DEFAULT '',
+    cause         TEXT DEFAULT '',
+    resolved      TEXT DEFAULT '否',
+    is_initiative TEXT DEFAULT '否',
+    is_our_problem TEXT DEFAULT '是',
+    solution      TEXT DEFAULT '',
+    resolver      TEXT DEFAULT '',
+    response_time TEXT DEFAULT '',
+    snk_code      TEXT DEFAULT '',
+    device_code   TEXT DEFAULT '',
+    cycle_start   TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
+    ON aftersale_records(cycle_start, id);
+CREATE INDEX IF NOT EXISTS idx_aftersale_table_no
+    ON aftersale_records(table_no);
+"""
+
 # 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
 # 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
 # 反序列化大量 JSON 带来的 CPU/内存开销
@@ -300,6 +339,18 @@ def _ensure_initialized(conn):
     conn.executescript(_CREATE_SUBMISSION_SQL)
     conn.executescript(_CREATE_MAPPING_SQL)
     conn.executescript(_CREATE_HEALTH_ALERT_SQL)
+    conn.executescript(_CREATE_AFTERSALE_SQL)
+    # 迁移：旧 aftersale_records 表缺 is_initiative/is_our_problem 列时补列
+    as_cols = [r[1] for r in conn.execute(
+        "PRAGMA table_info(aftersale_records)").fetchall()]
+    if as_cols:
+        if "is_initiative" not in as_cols:
+            conn.execute(
+                "ALTER TABLE aftersale_records ADD COLUMN is_initiative TEXT DEFAULT '否'")
+        if "is_our_problem" not in as_cols:
+            conn.execute(
+                "ALTER TABLE aftersale_records ADD COLUMN is_our_problem TEXT DEFAULT '是'")
+        conn.commit()
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
     cols = [r[1] for r in conn.execute("PRAGMA table_info(billiard_tables)").fetchall()]
     if cols and "name" not in cols:
@@ -324,6 +375,11 @@ def _ensure_initialized(conn):
         conn.execute("DROP TRIGGER IF EXISTS tables_fts_au")
         conn.execute("DROP TABLE IF EXISTS tables_fts")
         conn.execute("DELETE FROM sync_meta WHERE key='fts_built'")
+        conn.commit()
+    # 迁移：旧表无 city 列（接口 roomCity 字段）时自动补列；
+    # city 不参与 FTS 搜索，无需重建索引
+    if cols and "city" not in cols:
+        conn.execute("ALTER TABLE billiard_tables ADD COLUMN city TEXT DEFAULT ''")
         conn.commit()
     # 迁移：kd_status 旧表可能缺少扩展字段，自动 ALTER ADD
     kd_cols = [r[1] for r in conn.execute("PRAGMA table_info(kd_status)").fetchall()]
@@ -392,6 +448,31 @@ def _ensure_mysql_tables(conn):
     for ddl in backend.MYSQL_DDL.values():
         conn.execute(ddl)
     conn.commit()
+    # 迁移：旧 billiard_tables 库缺 city 列（接口 roomCity）时补列
+    try:
+        exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM billiard_tables")}
+        if "city" not in exist:
+            conn.execute(
+                "ALTER TABLE billiard_tables ADD COLUMN city VARCHAR(255) DEFAULT ''")
+            conn.commit()
+    except Exception:
+        pass  # 表可能尚未创建，DDL 兜底
+    # 迁移：旧 aftersale_records 库缺 is_initiative/is_our_problem 列时补列
+    try:
+        exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM aftersale_records")}
+        if "is_initiative" not in exist:
+            conn.execute("ALTER TABLE aftersale_records "
+                         "ADD COLUMN is_initiative VARCHAR(255) DEFAULT '否'")
+        if "is_our_problem" not in exist:
+            conn.execute("ALTER TABLE aftersale_records "
+                         "ADD COLUMN is_our_problem VARCHAR(255) DEFAULT '是'")
+        conn.commit()
+    except Exception:
+        pass  # 表可能尚未创建，DDL 兜底
+
+
+# 公开别名：aftersale_db 等同包模块复用双后端连接路由（私有名保留不破坏存量调用）
+get_conn = _get_conn
 
 
 def close():
@@ -442,14 +523,21 @@ def save_all(rows: list) -> int:
             str(item.get("cameraPassExt") or ""),
             snk,
             str(item.get("code") or ""),
+            parse_city(item),
         ))
     conn.executemany(
         "INSERT OR REPLACE INTO billiard_tables "
-        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
+        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
+    # 同步时间戳：先 INSERT 后 UPDATE（双后端兼容的 upsert；
+    # MySQL 下 INSERT OR REPLACE 被转换为普通 INSERT，直接 INSERT 会 1062）
+    try:
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
+    except Exception:
+        conn.execute(
+            "UPDATE sync_meta SET value = ? WHERE key = 'last_sync'", (now,))
     conn.commit()
     return len(data)
 
@@ -510,6 +598,33 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
     return total, rows
 
 
+def query_tables_by_room(room_kw: str, limit: int = 30) -> list:
+    """按球房名模糊查询球桌列表（售后面板：球房带出桌号）
+
+    与 query_page 的全字段搜索不同：只匹配 roomName，排除「公司测试」
+    与手动版本设备，结果按桌号升序，返回 list[dict]（name/roomName/snk_code/city）。
+    """
+    kw = str(room_kw or "").strip()
+    if not kw:
+        return []
+    conn = _get_conn()
+    like = f"%{kw}%"
+    conds = [
+        "TRIM(roomName) != ?",
+        "(name NOT LIKE ? AND roomName NOT LIKE ?)",
+        "roomName LIKE ?",
+    ]
+    params = [TEST_ROOM_NAME,
+              f"%{MANUAL_DEVICE_FLAG}%", f"%{MANUAL_DEVICE_FLAG}%",
+              like]
+    cursor = conn.execute(
+        f"SELECT id, name, roomName, snk_code, city FROM billiard_tables"
+        f" WHERE {' AND '.join(conds)} ORDER BY name LIMIT ?",
+        params + [limit])
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+
 def insert_one(record: dict) -> int:
     """手动插入单条记录（API 失效时的兜底入口），返回新记录 id
 
@@ -521,8 +636,8 @@ def insert_one(record: dict) -> int:
     snk = str(record.get("snk_code") or "").strip() or parse_snk_code(remark)
     cur = conn.execute(
         "INSERT INTO billiard_tables "
-        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(record.get("name") or ""),
             str(record.get("roomName") or ""),
@@ -531,6 +646,7 @@ def insert_one(record: dict) -> int:
             str(record.get("cameraPassExt") or ""),
             snk,
             str(record.get("code") or ""),
+            parse_city(record),
         ))
     conn.commit()
     return cur.lastrowid

@@ -312,7 +312,8 @@ MYSQL_DDL = {
             remark           TEXT,
             cameraPassExt    VARCHAR(512) DEFAULT '',
             snk_code         VARCHAR(128) DEFAULT '',
-            code             VARCHAR(255) DEFAULT ''
+            code             VARCHAR(255) DEFAULT '',
+            city             VARCHAR(255) DEFAULT ''
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     "sync_meta": """
@@ -404,6 +405,30 @@ MYSQL_DDL = {
             health           DOUBLE DEFAULT 0,
             resolved_health  DOUBLE,
             updated_at       VARCHAR(32) DEFAULT ''
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    "aftersale_records": """
+        CREATE TABLE IF NOT EXISTS aftersale_records (
+            id            INT AUTO_INCREMENT PRIMARY KEY,
+            created_at    VARCHAR(32) DEFAULT '',
+            creator       VARCHAR(255) DEFAULT '',
+            issue_type    VARCHAR(255) DEFAULT '',
+            table_no      VARCHAR(255) DEFAULT '',
+            room_name     VARCHAR(255) DEFAULT '',
+            region        VARCHAR(255) DEFAULT '',
+            problem       TEXT,
+            cause         TEXT,
+            resolved      VARCHAR(255) DEFAULT '否',
+            is_initiative VARCHAR(255) DEFAULT '否',
+            is_our_problem VARCHAR(255) DEFAULT '是',
+            solution      TEXT,
+            resolver      VARCHAR(255) DEFAULT '',
+            response_time VARCHAR(255) DEFAULT '',
+            snk_code      VARCHAR(255) DEFAULT '',
+            device_code   VARCHAR(255) DEFAULT '',
+            cycle_start   VARCHAR(32) DEFAULT '',
+            INDEX idx_aftersale_cycle (cycle_start),
+            INDEX idx_aftersale_table_no (table_no)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 }
