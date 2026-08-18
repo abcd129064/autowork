@@ -37,7 +37,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     FluentWindow, NavigationItemPosition, ProgressBar, TitleLabel,
     BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
     CardWidget, setCustomStyleSheet, qconfig, isDarkTheme, MessageBox, TreeWidget,
-    MessageBoxBase, MenuAnimationType)
+    MessageBoxBase, MenuAnimationType, SwitchButton)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
@@ -53,6 +53,7 @@ from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     clip_base_name, date_from_base,
                                     resolve_device_dir,
                                     fuzzy_match_device_dir, norm_device_suffix)
+from workers.mysql_sync_worker import MysqlSyncWorker, MysqlTestWorker
 from database import table_db
 from windows.moyu_widgets import Game2048Widget, SnakeWidget, MoyuReaderWidget
 from windows.image_viewer import is_image_file
@@ -263,6 +264,27 @@ def _save_settings(data: dict):
         json.dump(encrypt_settings(settings), f, ensure_ascii=False, indent=2)
     _settings_cache = settings
     _settings_mtime = os.path.getmtime(path)
+
+
+# ==================== MySQL 自动推送（API 同步后静默触发） ====================
+
+_mysql_auto_worker = None
+
+
+def _trigger_auto_mysql_sync():
+    """检查 auto_sync 配置，若开启则静默推送本地数据到 MySQL
+
+    全局单 worker：新触发时若上一个还在跑则忽略，避免并发推送。
+    """
+    global _mysql_auto_worker
+    settings = _load_settings()
+    mysql_cfg = settings.get("mysql_sync", {})
+    if not mysql_cfg.get("enabled") or not mysql_cfg.get("auto_sync"):
+        return
+    if _mysql_auto_worker and _mysql_auto_worker.isRunning():
+        return
+    _mysql_auto_worker = MysqlSyncWorker()
+    _mysql_auto_worker.start()
 
 
 def _fmt_size(n: float) -> str:
@@ -1224,6 +1246,7 @@ class TablePage(QWidget):
         self._load_local()
         self._refresh_btn.setEnabled(True)
         self._lbl_info.setText(f"同步完成，共 {count} 条")
+        _trigger_auto_mysql_sync()
 
     def _on_sync_error(self, msg):
         """API 同步失败：恢复刷新按钮并展示错误"""
@@ -2317,6 +2340,7 @@ class DevicePage(QWidget):
         if not getattr(self, "_last_fetch_silent", False):
             show_info_bar(f"{date_desc} 共 {count} 台设备", "success",
                           title="搜索完成", parent=self, duration=2500)
+        _trigger_auto_mysql_sync()
         # 请求在途期间关键词已变化：用最新关键词补拉一次（防抖合并后只补最新值）
         # 不补的话表里停着上一个关键词的结果，用户看到的和搜的对不上；
         # 补拉同样走 upsert_kd 增量，不会破坏本地全量数据
@@ -3168,6 +3192,8 @@ class AdminSettingsPage(QWidget):
     def _lazy_init(self):
         """首次进入才构建 UI 并读配置（懒加载，加快管理面板打开）"""
         self._test_worker = None
+        self._mysql_sync_worker = None
+        self._mysql_test_worker = None
         self._user_edits = {}
         self._pass_edits = {}
         self._test_btns = {}
@@ -3209,6 +3235,7 @@ class AdminSettingsPage(QWidget):
             view, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
         layout.addWidget(self._build_upload_card(view))
         layout.addWidget(self._build_add_card(view))
+        layout.addWidget(self._build_mysql_card(view))
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -3384,6 +3411,15 @@ class AdminSettingsPage(QWidget):
             str(settings.get("upload_remote_dir", "/lhcos-data/videos")))
         self._edit_upload_user.setText(str(settings.get("upload_user", "root")))
         self._edit_upload_pass.setText(str(settings.get("upload_pass", "")))
+        # MySQL 同步配置
+        mysql_cfg = settings.get("mysql_sync", {})
+        self._edit_mysql_host.setText(str(mysql_cfg.get("host", "")))
+        self._edit_mysql_port.setText(str(mysql_cfg.get("port", 3306)))
+        self._edit_mysql_user.setText(str(mysql_cfg.get("user", "root")))
+        self._edit_mysql_pass.setText(str(mysql_cfg.get("password", "")))
+        self._edit_mysql_db.setText(str(mysql_cfg.get("database", "autowork")))
+        self._switch_mysql_enabled.setChecked(bool(mysql_cfg.get("enabled", False)))
+        self._switch_mysql_auto.setChecked(bool(mysql_cfg.get("auto_sync", False)))
 
     def _on_save(self):
         """保存设置：合并接口凭据/数据源/上传配置写 settings.json，即时生效"""
@@ -3403,6 +3439,10 @@ class AdminSettingsPage(QWidget):
         except ValueError:
             upload_port = 22
         try:
+            mysql_port = int(self._edit_mysql_port.text().strip() or 3306)
+        except ValueError:
+            mysql_port = 3306
+        try:
             _save_settings({
                 "api_credentials": api_credentials,
                 "upload_host": self._edit_upload_host.text().strip(),
@@ -3410,6 +3450,15 @@ class AdminSettingsPage(QWidget):
                 "upload_remote_dir": self._edit_upload_dir.text().strip(),
                 "upload_user": self._edit_upload_user.text().strip() or "root",
                 "upload_pass": self._edit_upload_pass.text(),
+                "mysql_sync": {
+                    "enabled": self._switch_mysql_enabled.isChecked(),
+                    "host": self._edit_mysql_host.text().strip(),
+                    "port": mysql_port,
+                    "user": self._edit_mysql_user.text().strip() or "root",
+                    "password": self._edit_mysql_pass.text(),
+                    "database": self._edit_mysql_db.text().strip() or "autowork",
+                    "auto_sync": self._switch_mysql_auto.isChecked(),
+                },
             })
             show_info_bar("配置已写入 settings.json，即时生效", "success",
                           title="已保存", parent=self, duration=2500)
@@ -3446,6 +3495,131 @@ class AdminSettingsPage(QWidget):
         else:
             show_info_bar(msg, "error", title=f"{label} 连接失败",
                           parent=self, duration=4000)
+
+    # ---------- MySQL 同步 ----------
+
+    def _build_mysql_card(self, parent):
+        """MySQL 远程同步配置卡片：连接信息 + 开关 + 测试/同步按钮"""
+        card = CardWidget(parent)
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(8)
+        vbox.addWidget(BodyLabel("MySQL 远程同步（测试）", card))
+        vbox.addWidget(CaptionLabel(
+            "开启后 MySQL 完全替代本地 SQLite，应用直接读写远程数据库；关闭则回到本地 SQLite", card))
+
+        # 开关行
+        sw_row = QHBoxLayout()
+        sw_row.setSpacing(16)
+        sw_row.addWidget(QLabel("启用（测试）:", card))
+        self._switch_mysql_enabled = SwitchButton(card)
+        self._switch_mysql_enabled.setOnText("开")
+        self._switch_mysql_enabled.setOffText("关")
+        sw_row.addWidget(self._switch_mysql_enabled)
+        sw_row.addSpacing(20)
+        sw_row.addWidget(QLabel("自动同步:", card))
+        self._switch_mysql_auto = SwitchButton(card)
+        self._switch_mysql_auto.setOnText("开")
+        self._switch_mysql_auto.setOffText("关")
+        self._switch_mysql_auto.setToolTip("每次 API 同步后自动推送到 MySQL")
+        sw_row.addWidget(self._switch_mysql_auto)
+        sw_row.addStretch(1)
+        vbox.addLayout(sw_row)
+
+        # 连接表单
+        form = QFormLayout()
+        form.setSpacing(8)
+        self._edit_mysql_host = LineEdit(card)
+        self._edit_mysql_host.setPlaceholderText("MySQL 服务器 IP")
+        form.addRow("服务器地址:", self._edit_mysql_host)
+        self._edit_mysql_port = LineEdit(card)
+        self._edit_mysql_port.setPlaceholderText("端口号（默认 3306）")
+        form.addRow("端口:", self._edit_mysql_port)
+        self._edit_mysql_user = LineEdit(card)
+        self._edit_mysql_user.setPlaceholderText("用户名（默认 root）")
+        form.addRow("用户名:", self._edit_mysql_user)
+        self._edit_mysql_pass = PasswordLineEdit(card)
+        self._edit_mysql_pass.setPlaceholderText("密码")
+        form.addRow("密码:", self._edit_mysql_pass)
+        self._edit_mysql_db = LineEdit(card)
+        self._edit_mysql_db.setPlaceholderText("数据库名（默认 autowork）")
+        form.addRow("数据库:", self._edit_mysql_db)
+        vbox.addLayout(form)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self._btn_mysql_test = PushButton(FluentIcon.LINK, "测试连接", card)
+        self._btn_mysql_test.setToolTip("用当前配置尝试连接 MySQL")
+        self._btn_mysql_test.clicked.connect(self._on_mysql_test)
+        btn_row.addWidget(self._btn_mysql_test)
+        self._btn_mysql_sync = PrimaryPushButton(FluentIcon.SYNC, "立即同步", card)
+        self._btn_mysql_sync.setToolTip("将本地 SQLite 数据推送到远程 MySQL")
+        self._btn_mysql_sync.clicked.connect(self._on_mysql_sync)
+        btn_row.addWidget(self._btn_mysql_sync)
+        vbox.addLayout(btn_row)
+        return card
+
+    def _on_mysql_test(self):
+        """测试 MySQL 连接：读取表单配置异步测试"""
+        if self._mysql_test_worker and self._mysql_test_worker.isRunning():
+            show_info_bar("已有测试进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
+            return
+        self._btn_mysql_test.setEnabled(False)
+        try:
+            port = int(self._edit_mysql_port.text().strip() or 3306)
+        except ValueError:
+            port = 3306
+        cfg = {
+            "enabled": True,
+            "host": self._edit_mysql_host.text().strip(),
+            "port": port,
+            "user": self._edit_mysql_user.text().strip() or "root",
+            "password": self._edit_mysql_pass.text(),
+            "database": self._edit_mysql_db.text().strip() or "autowork",
+        }
+        self._mysql_test_worker = MysqlTestWorker(cfg, self)
+        self._mysql_test_worker.finished.connect(self._on_mysql_test_done)
+        self._mysql_test_worker.start()
+
+    def _on_mysql_test_done(self, ok, msg):
+        """MySQL 测试完成：恢复按钮并按成败提示"""
+        self._btn_mysql_test.setEnabled(True)
+        if ok:
+            show_info_bar(msg, "success", title="MySQL 连接成功",
+                          parent=self, duration=2500)
+        else:
+            show_info_bar(msg, "error", title="MySQL 连接失败",
+                          parent=self, duration=4000)
+
+    def _on_mysql_sync(self):
+        """手动触发全量推送：异步执行，进行中禁用按钮"""
+        if self._mysql_sync_worker and self._mysql_sync_worker.isRunning():
+            show_info_bar("同步进行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2000)
+            return
+        self._btn_mysql_sync.setEnabled(False)
+        self._mysql_sync_worker = MysqlSyncWorker(parent=self)
+        self._mysql_sync_worker.progress.connect(
+            lambda msg: self._btn_mysql_sync.setToolTip(msg))
+        self._mysql_sync_worker.success.connect(self._on_mysql_sync_done_ok)
+        self._mysql_sync_worker.error.connect(self._on_mysql_sync_done_err)
+        self._mysql_sync_worker.start()
+
+    def _on_mysql_sync_done_ok(self, count, msg):
+        """MySQL 同步成功：恢复按钮并提示"""
+        self._btn_mysql_sync.setEnabled(True)
+        self._btn_mysql_sync.setToolTip("将本地 SQLite 数据推送到远程 MySQL")
+        show_info_bar(msg, "success", title="MySQL 同步完成",
+                      parent=self, duration=3000)
+
+    def _on_mysql_sync_done_err(self, msg):
+        """MySQL 同步失败：恢复按钮并提示"""
+        self._btn_mysql_sync.setEnabled(True)
+        self._btn_mysql_sync.setToolTip("将本地 SQLite 数据推送到远程 MySQL")
+        show_info_bar(msg, "error", title="MySQL 同步失败",
+                      parent=self, duration=4000)
 
 
 # ==================== 健康度趋势看板（C3） ====================
@@ -4027,6 +4201,11 @@ class HealthPage(QWidget):
         title = TitleLabel("健康度异常告警", self)
         header.addWidget(title)
         header.addStretch(1)
+        self._btn_sync = PushButton(FluentIcon.SYNC, "手动同步", self)
+        self._btn_sync.setToolTip(
+            "立即拉取最新健康度数据；MySQL 模式下可见其他用户标记的「已处理」状态")
+        self._btn_sync.clicked.connect(self._on_manual_sync)
+        header.addWidget(self._btn_sync)
         self._lbl_sync = CaptionLabel("正在获取数据", self)
         header.addWidget(self._lbl_sync)
         layout.addLayout(header)
@@ -4034,7 +4213,8 @@ class HealthPage(QWidget):
         hint = CaptionLabel(
             "基准 4000；>4000~5000 为健康度异常；"
             ">5000 为严重异常。"
-            "勾选条目后点「已处理」，health 未变化则不再展示", self)
+            "勾选条目后点「已处理」，health 未变化则不再展示；"
+            "多人共用 MySQL 时，他人标记的已处理在同步后自动对齐", self)
         layout.addWidget(hint)
 
         self._table = TableWidget(self)
@@ -4118,6 +4298,15 @@ class HealthPage(QWidget):
 
     # ---------- 数据获取 ----------
 
+    def _on_manual_sync(self):
+        """手动同步：立即拉取最新数据（进行中不重复发起）"""
+        if self._fetch_worker is not None and self._fetch_worker.isRunning():
+            self._lbl_sync.setText("同步进行中…")
+            return
+        self._btn_sync.setEnabled(False)
+        self._lbl_sync.setText("正在手动同步…")
+        self._fetch_health_data()
+
     def _fetch_health_data(self):
         """全量拉取球桌数据（含 health 字段）并同步告警表"""
         if self._fetch_worker is not None and self._fetch_worker.isRunning():
@@ -4129,6 +4318,7 @@ class HealthPage(QWidget):
 
     def _on_fetch_ok(self, rows):
         """拉取完成：同步告警表后刷新展示（失败仅提示不弹窗）"""
+        self._btn_sync.setEnabled(True)
         try:
             count = table_db.sync_health_alerts(rows)
         except Exception as e:
@@ -4140,6 +4330,7 @@ class HealthPage(QWidget):
 
     def _on_fetch_fail(self, msg):
         """拉取失败：状态栏提示错误首行"""
+        self._btn_sync.setEnabled(True)
         self._lbl_sync.setText(f"获取失败: {str(msg).split(chr(10))[0]}")
 
     # ---------- 处理交互 ----------

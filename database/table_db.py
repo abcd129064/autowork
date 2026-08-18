@@ -17,6 +17,8 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta
 
+from database import backend
+
 # 数据库文件路径：database/tables.db（随项目目录）
 _DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database")
 DB_PATH = os.path.join(_DB_DIR, "tables.db")
@@ -108,14 +110,20 @@ _FTS_MAP = {
 _fts_available = False
 
 
-def _setup_fts(conn: sqlite3.Connection):
+def _setup_fts(conn):
     """创建 FTS5 索引表与同步触发器；存量库首次初始化执行一次 rebuild
 
     触发器自动维护增量（AFTER INSERT/DELETE/UPDATE），旧库通过
     sync_meta.fts_built 标记只 rebuild 一次，避免每次启动重建。
     任何异常（SQLite 编译选项缺 FTS5 等）置 _fts_available=False 静默回退 LIKE。
+    MySQL 模式直接跳过（不支持 FTS5，回退 LIKE 搜索）。
     """
     global _fts_available
+    if not backend.is_mysql_test_mode():
+        pass  # SQLite 路径，继续
+    else:
+        _fts_available = False
+        return  # MySQL 无 FTS5，回退 LIKE
     if sqlite3.sqlite_version_info < (3, 34):  # trigram 分词器最低版本
         return
     try:
@@ -277,10 +285,15 @@ _KD_LIGHT_FIELDS = ("file_path",) + STATUS_FIELDS + ("device_code", "target_dire
 _initialized = False
 
 
-def _ensure_initialized(conn: sqlite3.Connection):
+def _ensure_initialized(conn):
     """首次连接时执行建表与迁移检查（整个进程生命周期只跑一次）"""
     global _initialized
     if _initialized:
+        return
+    if backend.is_mysql_test_mode():
+        # MySQL：DDL 已在建库时就绪（IF NOT EXISTS），无需执行建表脚本
+        # 迁移检查直接跳过（MySQL DDL 中已包含全部列）
+        _initialized = True
         return
     conn.executescript(_CREATE_SQL)
     conn.executescript(_CREATE_STATUS_SQL)
@@ -330,25 +343,55 @@ def _ensure_initialized(conn: sqlite3.Connection):
     _initialized = True
 
 
-_conn: sqlite3.Connection | None = None
+_conn = None
 _lock = threading.Lock()
+_mysql_local = threading.local()  # MySQL 模式：每线程独立连接，避免并发协议序列号错乱
+_mysql_tables_ready = False       # 建表只执行一次（全局标志，跨线程共享）
 
 
-def _get_conn() -> sqlite3.Connection:
-    """获取模块级单连接（惰性创建，WAL 模式）"""
-    global _conn
-    os.makedirs(_DB_DIR, exist_ok=True)
-    if _conn is None:
-        # check_same_thread=False：查询/保存分散在多个 QThread worker 里跑，
-        # 共用这一个连接省掉多连接各自建表迁移的开销；并发安全交给下面
-        # 的 WAL + busy_timeout，否则默认校验会直接抛 ProgrammingError
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        # WAL 读写分离：worker 批量写入时 UI 线程的分页查询不被阻塞
-        _conn.execute("PRAGMA journal_mode=WAL")
-        # 抢锁失败时最多等 3 秒而不是立刻报 database is locked
-        _conn.execute("PRAGMA busy_timeout=3000")
-        _ensure_initialized(_conn)
-    return _conn
+def _get_conn():
+    """获取数据库连接（惰性创建）
+
+    MySQL 测试模式：每线程独立连接（thread-local），避免 pymysql
+    单连接多线程并发导致 Packet sequence number wrong。
+    SQLite 模式：模块级单连接（WAL 模式，支持多线程读）。
+    """
+    global _conn, _mysql_tables_ready
+    if backend.is_mysql_test_mode():
+        # thread-local 连接：每个 QThread worker 独立连接，彻底避免并发冲突
+        conn = getattr(_mysql_local, 'conn', None)
+        if conn is not None:
+            try:
+                conn._conn.ping(reconnect=True)
+                return conn
+            except Exception:
+                pass  # 连接已断开，重建
+        conn = backend.create_mysql_connection()
+        if not _mysql_tables_ready:
+            _ensure_mysql_tables(conn)
+            _mysql_tables_ready = True
+        _mysql_local.conn = conn
+        return conn
+    else:
+        if _conn is None:
+            os.makedirs(_DB_DIR, exist_ok=True)
+            # check_same_thread=False：查询/保存分散在多个 QThread worker 里跑，
+            # 共用这一个连接省掉多连接各自建表迁移的开销；并发安全交给下面
+            # 的 WAL + busy_timeout，否则默认校验会直接抛 ProgrammingError
+            _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            # WAL 读写分离：worker 批量写入时 UI 线程的分页查询不被阻塞
+            _conn.execute("PRAGMA journal_mode=WAL")
+            # 抢锁失败时最多等 3 秒而不是立刻报 database is locked
+            _conn.execute("PRAGMA busy_timeout=3000")
+            _ensure_initialized(_conn)
+        return _conn
+
+
+def _ensure_mysql_tables(conn):
+    """MySQL 模式首次连接时确保全部表存在（幂等）"""
+    for ddl in backend.MYSQL_DDL.values():
+        conn.execute(ddl)
+    conn.commit()
 
 
 def close():
@@ -357,6 +400,14 @@ def close():
     if _conn is not None:
         _conn.close()
         _conn = None
+    # MySQL thread-local 连接也尝试关闭当前线程的
+    conn = getattr(_mysql_local, 'conn', None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _mysql_local.conn = None
 
 
 # ==================== 原有球桌表操作 ====================
@@ -564,9 +615,14 @@ def sync_health_alerts(rows: list) -> int:
         health 与处理时一致 → 保持已处理不展示；
         health 变化但仍异常 → 清除已处理标记重新展示；
     - 接口中消失的设备一并清理。
+
+    MySQL 多用户模式：单条 upsert 原子写入，他人已提交的处理标记
+    （resolved_health）在同步时会被读到并保留；SQLite 单机模式走逐行分支。
     """
     conn = _get_conn()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if backend.is_mysql_test_mode():
+        return _sync_health_alerts_mysql(conn, rows, now)
     seen = set()
     for item in rows or []:
         name = str(item.get("name") or "").strip()
@@ -619,6 +675,60 @@ def sync_health_alerts(rows: list) -> int:
     if seen:
         # seen 为空说明本轮没有有效告警，跳过 DELETE——否则 NOT IN () 拼出
         # 非法 SQL，而且也不该把历史告警一次清空
+        conn.execute(
+            f"DELETE FROM health_alerts WHERE name NOT IN "
+            f"({','.join('?' * len(seen))})", tuple(seen))
+    conn.commit()
+    return conn.execute(
+        "SELECT COUNT(*) FROM health_alerts WHERE resolved_health IS NULL"
+    ).fetchone()[0]
+
+
+def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
+    """MySQL 多用户同步：原子 upsert，保留他人已处理标记
+
+    与 SQLite 逐行 SELECT+INSERT/UPDATE 不同，多用户并发写同一张表时
+    先查后写会竞态（两端都查到无记录同时 INSERT → 主键冲突报错），
+    改用单条 ON DUPLICATE KEY UPDATE 原子完成：
+    - 新设备：插入，resolved_health 为 NULL（未处理）；
+    - 已存在未处理：刷新基础字段；
+    - 已处理且 health 未变：保留 resolved_health（他人/自己的处理标记不丢）；
+    - 已处理但 health 变化：置 NULL 重新展示。
+    其他端已提交的标记在本端同步时自然可见，实现多端状态对齐。
+    """
+    upsert_sql = (
+        "INSERT INTO health_alerts "
+        "(name, roomName, onlineStatusName, health, resolved_health, updated_at) "
+        "VALUES (?, ?, ?, ?, NULL, ?) "
+        "ON DUPLICATE KEY UPDATE "
+        "roomName = VALUES(roomName), "
+        "onlineStatusName = VALUES(onlineStatusName), "
+        "health = VALUES(health), "
+        "resolved_health = IF(resolved_health IS NOT NULL AND "
+        "ABS(VALUES(health) - resolved_health) < 0.000000001, "
+        "resolved_health, NULL), "
+        "updated_at = VALUES(updated_at)"
+    )
+    seen = set()
+    for item in rows or []:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            h = float(item.get("health") or 0)
+        except (TypeError, ValueError):
+            continue
+        if h <= HEALTH_WARN or h > HEALTH_INVALID_MAX:
+            continue
+        if str(item.get("roomName") or "").strip() == TEST_ROOM_NAME:
+            continue
+        seen.add(name)
+        conn.execute(upsert_sql, (
+            name,
+            str(item.get("roomName") or ""),
+            str(item.get("onlineStatusName") or ""),
+            h, now))
+    if seen:
         conn.execute(
             f"DELETE FROM health_alerts WHERE name NOT IN "
             f"({','.join('?' * len(seen))})", tuple(seen))

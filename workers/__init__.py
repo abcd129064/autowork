@@ -15,3 +15,7 @@ from .table_worker import (
     SnookerOmFetchWorker,
     DevicesFetchWorker,
 )
+from .mysql_sync_worker import (
+    MysqlSyncWorker,
+    MysqlTestWorker,
+)
