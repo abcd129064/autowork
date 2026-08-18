@@ -1381,7 +1381,31 @@ class TablePage(QWidget):
         # 远程连接入口（SSH / SFTP），与设备状态页交互一致
         if idx.isValid():
             self._add_remote_actions(menu, idx.row())
+        # 售后记录入口：按桌号反查售后面板（单例窗口缓存于管理面板实例）
+        if idx.isValid():
+            row = idx.row()
+            name_item = self._table.item(row, 0)
+            table_name = name_item.text().strip() if name_item else ""
+            if table_name:
+                act_as = Action(FluentIcon.PEOPLE, "查看售后记录", self._table)
+                act_as.triggered.connect(
+                    lambda _=False, n=table_name: self._open_aftersale_for_table(n))
+                menu.addAction(act_as)
         menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
+
+    def _open_aftersale_for_table(self, table_name):
+        """打开售后面板并按桌号预筛选（球桌 → 售后记录反查）"""
+        from windows.aftersale_panel import AftersalePanelWindow
+        win = self.window()
+        panel = getattr(win, "_aftersale_panel_ref", None)
+        if panel is None:
+            panel = AftersalePanelWindow()
+            panel.destroyed.connect(
+                lambda: setattr(win, "_aftersale_panel_ref", None))
+            win._aftersale_panel_ref = panel
+        panel.open_records_for_table(table_name)
+        panel.show()
+        panel.raise_()
 
     def _add_remote_actions(self, menu, row_idx):
         """右键菜单追加远程连接入口（SSH 终端 / SFTP 文件管理）

@@ -831,6 +831,10 @@ class UIMixin:
         act_conn_diag.setToolTip("查看 SSH/SFTP 连接日志与失败记录（含归档）")
         act_conn_diag.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_conn_diag))
         func_menu.addAction(act_conn_diag)
+        act_aftersale = Action(FluentIcon.PEOPLE, "售后面板", self)
+        act_aftersale.setToolTip("售后问题登记与记录统计（多人协作，双后端存储）")
+        act_aftersale.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_aftersale))
+        func_menu.addAction(act_aftersale)
         func_menu.addSeparator()
         act_sc = Action(FluentIcon.EDIT, "修改快捷键", self)
         act_sc.triggered.connect(lambda: QTimer.singleShot(0, self._on_modify_shortcuts))
@@ -1146,6 +1150,17 @@ class UIMixin:
         self._table_panel.show()
         self._table_panel.raise_()
         self._table_panel.activateWindow()
+
+    def _on_open_aftersale(self):
+        """打开售后面板（非模态独立窗口，单例复用）"""
+        from windows.aftersale_panel import AftersalePanelWindow
+        if not hasattr(self, '_aftersale_panel') or self._aftersale_panel is None:
+            self._aftersale_panel = AftersalePanelWindow()
+            self._aftersale_panel.destroyed.connect(
+                lambda: setattr(self, '_aftersale_panel', None))
+        self._aftersale_panel.show()
+        self._aftersale_panel.raise_()
+        self._aftersale_panel.activateWindow()
 
     def _on_open_conn_diag(self):
         """打开连接诊断面板（非模态独立窗口，单例：已打开则激活）"""

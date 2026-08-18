@@ -274,6 +274,33 @@ CREATE TABLE IF NOT EXISTS device_mapping (
 );
 """
 
+# ==================== 售后记录表（售后面板，双后端） ====================
+
+_CREATE_AFTERSALE_SQL = """
+CREATE TABLE IF NOT EXISTS aftersale_records (
+    id            INTEGER PRIMARY KEY,
+    created_at    TEXT DEFAULT '',
+    creator       TEXT DEFAULT '',
+    issue_type    TEXT DEFAULT '',
+    table_no      TEXT DEFAULT '',
+    room_name     TEXT DEFAULT '',
+    region        TEXT DEFAULT '',
+    problem       TEXT DEFAULT '',
+    cause         TEXT DEFAULT '',
+    resolved      TEXT DEFAULT '否',
+    solution      TEXT DEFAULT '',
+    resolver      TEXT DEFAULT '',
+    response_time TEXT DEFAULT '',
+    snk_code      TEXT DEFAULT '',
+    device_code   TEXT DEFAULT '',
+    cycle_start   TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
+    ON aftersale_records(cycle_start, id);
+CREATE INDEX IF NOT EXISTS idx_aftersale_table_no
+    ON aftersale_records(table_no);
+"""
+
 # 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
 # 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
 # 反序列化大量 JSON 带来的 CPU/内存开销
@@ -300,6 +327,7 @@ def _ensure_initialized(conn):
     conn.executescript(_CREATE_SUBMISSION_SQL)
     conn.executescript(_CREATE_MAPPING_SQL)
     conn.executescript(_CREATE_HEALTH_ALERT_SQL)
+    conn.executescript(_CREATE_AFTERSALE_SQL)
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
     cols = [r[1] for r in conn.execute("PRAGMA table_info(billiard_tables)").fetchall()]
     if cols and "name" not in cols:
@@ -392,6 +420,10 @@ def _ensure_mysql_tables(conn):
     for ddl in backend.MYSQL_DDL.values():
         conn.execute(ddl)
     conn.commit()
+
+
+# 公开别名：aftersale_db 等同包模块复用双后端连接路由（私有名保留不破坏存量调用）
+get_conn = _get_conn
 
 
 def close():
