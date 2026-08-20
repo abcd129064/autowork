@@ -293,7 +293,9 @@ CREATE TABLE IF NOT EXISTS aftersale_records (
     response_time TEXT DEFAULT '',
     snk_code      TEXT DEFAULT '',
     device_code   TEXT DEFAULT '',
-    cycle_start   TEXT DEFAULT ''
+    cycle_start   TEXT DEFAULT '',
+    is_initiative TEXT DEFAULT '否',
+    is_our_problem TEXT DEFAULT '否'
 );
 CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
     ON aftersale_records(cycle_start, id);
@@ -366,6 +368,19 @@ def _ensure_initialized(conn):
     if kd_cols and "status" not in kd_cols:
         conn.execute("ALTER TABLE kd_status ADD COLUMN status TEXT DEFAULT ''")
         conn.commit()
+    # 迁移：aftersale_records 旧库可能缺少新列，自动 ALTER ADD（默认「否」）
+    as_cols = [r[1] for r in conn.execute(
+        "PRAGMA table_info(aftersale_records)").fetchall()]
+    if as_cols and "is_initiative" not in as_cols:
+        conn.execute(
+            "ALTER TABLE aftersale_records "
+            "ADD COLUMN is_initiative TEXT DEFAULT '否'")
+        conn.commit()
+    if as_cols and "is_our_problem" not in as_cols:
+        conn.execute(
+            "ALTER TABLE aftersale_records "
+            "ADD COLUMN is_our_problem TEXT DEFAULT '否'")
+        conn.commit()
     # FTS5 全文索引（放在迁移补列之后，确保 kd 全部列就绪）
     _setup_fts(conn)
     _initialized = True
@@ -415,10 +430,32 @@ def _get_conn():
         return _conn
 
 
+def _migrate_mysql_aftersale(conn):
+    """MySQL 模式：给已存在的 aftersale_records 旧库补齐本次新增字段
+
+    _ensure_mysql_tables 用 CREATE TABLE IF NOT EXISTS 只会建新表，不会给
+    已存在的旧表加列；这里按列存在性检查后 ALTER ADD，缺列才补、重复执行安全。
+    """
+    new_cols = (
+        ("is_initiative", "VARCHAR(255) DEFAULT '否'"),
+        ("is_our_problem", "VARCHAR(255) DEFAULT '否'"),
+    )
+    for col, ddl in new_cols:
+        try:
+            if not conn.column_exists("aftersale_records", col):
+                conn.execute(
+                    f"ALTER TABLE aftersale_records ADD COLUMN {col} {ddl}")
+        except Exception:
+            # 列已存在 / 瞬时错误静默忽略，避免阻断启动与首条提交
+            pass
+
+
 def _ensure_mysql_tables(conn):
     """MySQL 模式首次连接时确保全部表存在（幂等）"""
     for ddl in backend.MYSQL_DDL.values():
         conn.execute(ddl)
+    # 迁移：已存在的旧 aftersale_records 库缺新增字段时 ALTER ADD 补列
+    _migrate_mysql_aftersale(conn)
     conn.commit()
 
 

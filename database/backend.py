@@ -424,6 +424,8 @@ MYSQL_DDL = {
             snk_code      VARCHAR(255) DEFAULT '',
             device_code   VARCHAR(255) DEFAULT '',
             cycle_start   VARCHAR(32) DEFAULT '',
+            is_initiative VARCHAR(255) DEFAULT '否',
+            is_our_problem VARCHAR(255) DEFAULT '否',
             INDEX idx_aftersale_cycle (cycle_start),
             INDEX idx_aftersale_table_no (table_no)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4

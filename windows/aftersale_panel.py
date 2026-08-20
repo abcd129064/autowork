@@ -14,6 +14,7 @@
 import os
 from datetime import datetime
 
+from PySide6 import sip
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
     QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication)
@@ -286,11 +287,31 @@ class AftersaleForm(QWidget):
         self.cause_edit.setPlaceholderText("选填")
         form.addRow("发生原因:", self.cause_edit)
 
-        # 是否解决（默认「否」）
+        # 是否解决 / 是否我们主动发起 / 是否是我们的问题（同一行，后两者在右侧）
         self.resolved_combo = FluentCombo(self)
         self.resolved_combo.addItems(["否", "是"])
         self.resolved_combo.setFixedWidth(120)
-        form.addRow("是否解决 *:", self.resolved_combo)
+
+        self.is_initiative_combo = FluentCombo(self)
+        self.is_initiative_combo.addItems(["否", "是"])
+        self.is_initiative_combo.setFixedWidth(120)
+
+        self.is_our_problem_combo = FluentCombo(self)
+        self.is_our_problem_combo.addItems(["否", "是"])
+        self.is_our_problem_combo.setFixedWidth(120)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(12)
+        status_row.addWidget(QLabel("是否解决 *:", self))
+        status_row.addWidget(self.resolved_combo)
+        status_row.addSpacing(10)
+        status_row.addWidget(QLabel("是否我们主动发起:", self))
+        status_row.addWidget(self.is_initiative_combo)
+        status_row.addSpacing(10)
+        status_row.addWidget(QLabel("是否是我们的问题:", self))
+        status_row.addWidget(self.is_our_problem_combo)
+        status_row.addStretch(1)
+        form.addRow(status_row)
 
         # 解决方案（选填，多行）
         self.solution_edit = PlainTextEdit(self)
@@ -427,6 +448,10 @@ class AftersaleForm(QWidget):
         self.problem_combo.setEditText(str(rec.get("problem") or ""))
         self.cause_edit.setPlainText(str(rec.get("cause") or ""))
         self.resolved_combo.setCurrentText(str(rec.get("resolved") or "否"))
+        self.is_initiative_combo.setCurrentText(
+            str(rec.get("is_initiative") or "否"))
+        self.is_our_problem_combo.setCurrentText(
+            str(rec.get("is_our_problem") or "否"))
         self.solution_edit.setPlainText(str(rec.get("solution") or ""))
         self.resolver_combo.setEditText(str(rec.get("resolver") or ""))
         self.response_combo.setEditText(str(rec.get("response_time") or ""))
@@ -443,6 +468,8 @@ class AftersaleForm(QWidget):
             "problem": self.problem_combo.currentText().strip(),
             "cause": self.cause_edit.toPlainText().strip(),
             "resolved": self.resolved_combo.currentText().strip() or "否",
+            "is_initiative": self.is_initiative_combo.currentText().strip() or "否",
+            "is_our_problem": self.is_our_problem_combo.currentText().strip() or "否",
             "solution": self.solution_edit.toPlainText().strip(),
             "resolver": self.resolver_combo.currentText().strip(),
             "response_time": self.response_combo.currentText().strip(),
@@ -475,6 +502,8 @@ class AftersaleForm(QWidget):
         self.resolver_combo.setEditText("")
         self.response_combo.setEditText("")
         self.resolved_combo.setCurrentIndex(0)
+        self.is_initiative_combo.setCurrentIndex(0)
+        self.is_our_problem_combo.setCurrentIndex(0)
         self.type_combo.setCurrentIndex(-1)
         self.region_combo.setEditText("")
         self._snk_code = ""
@@ -542,6 +571,9 @@ class EntryPage(QWidget):
 
     def _refresh_candidates(self):
         """进入页面刷新动态候选（问题/解决人/地区）"""
+        # 上一个候选查询仍在跑时不要覆盖（否则旧 worker 被 GC 析构会崩）
+        if self._cand_worker and self._cand_worker.isRunning():
+            return
         self._cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
         self._cand_worker.finished.connect(self.form.load_candidates)
         self._cand_worker.error.connect(lambda _m: None)
@@ -627,6 +659,8 @@ RECORD_COLUMNS = (
     ("region", "地区", 60),
     ("problem", "问题", 190),
     ("resolved", "是否解决", 72),
+    ("is_initiative", "是否我们主动发起", 110),
+    ("is_our_problem", "是否是我们的问题", 120),
     ("resolver", "解决人", 76),
     ("response_time", "响应时间", 84),
     ("creator", "填写人", 76),
@@ -646,6 +680,10 @@ class RecordsPage(QWidget):
         self._export_worker = None
         self._import_worker = None
         self._cycles_loaded = False
+        # 保活集合：仍在运行的旧 worker 转入此处，等其线程结束后自动
+        # deleteLater，避免最后一个 Python 引用被 GC 回收时 C++ 线程仍在跑
+        # 触发 "QThread: Destroyed while thread is still running" 崩溃
+        self._retired_workers = set()
         self._init_ui()
 
     def _init_ui(self):
@@ -801,8 +839,31 @@ class RecordsPage(QWidget):
         if not self._cycles_loaded:
             self._load_cycles_then_data()
 
+    def _retire_worker(self, worker):
+        """安全下线仍在运行的旧 worker：切断其指向本对象的旧信号回调，
+        保留 Python 强引用直到线程结束，再 deleteLater。否则旧 worker 在
+        查询中途被 GC 析构会触发 qFatal 崩溃。"""
+        if worker is None or worker in self._retired_workers:
+            return
+        try:
+            worker.finished.disconnect()
+            worker.error.disconnect()
+        except Exception:
+            pass
+        if worker.isRunning():
+            worker.requestInterruption()
+            self._retired_workers.add(worker)
+            # lambda 闭包捕获 worker 持强引用，线程结束即弃集 + 延迟删除
+            worker.finished.connect(
+                lambda _=None, w=worker: self._retired_workers.discard(w))
+            worker.error.connect(
+                lambda _m="", w=worker: self._retired_workers.discard(w))
+        else:
+            worker.deleteLater()
+
     def _load_cycles_then_data(self):
         """先异步拉周期选项填充下拉，再加载数据"""
+        self._retire_worker(self._worker)
         self._worker = AftersaleDBWorker(aftersale_db.get_cycle_options)
         self._worker.finished.connect(self._on_cycles_loaded)
         self._worker.error.connect(lambda _m: self._load())
@@ -829,9 +890,7 @@ class RecordsPage(QWidget):
 
     def _load(self):
         """按当前筛选异步查询（分页数据 + 统计一次返回）"""
-        if self._worker and self._worker.isRunning():
-            self._worker.requestInterruption()
-            self._worker.disconnect(self)
+        self._retire_worker(self._worker)
         f = self._current_filters()
         self._worker = AftersaleDBWorker(
             aftersale_db.query_with_stats,
@@ -872,7 +931,7 @@ class RecordsPage(QWidget):
                     cell = QTableWidgetItem(val)
                     cell.setToolTip(val)
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    if key == "resolved":
+                    if key in ("resolved", "is_initiative", "is_our_problem"):
                         color = (QColor("#52c41a") if val == "是"
                                  else QColor("#ff5252"))
                         cell.setForeground(QBrush(color))
@@ -927,9 +986,13 @@ class RecordsPage(QWidget):
             return
         rec = dict(self._rows[r])
         dlg = EditRecordDialog(rec, self)
-        # 编辑弹窗也需动态候选
+        # 编辑弹窗也需动态候选：退役上一个仍在跑的候选 worker（避免被覆盖后
+        # GC 崩溃），并守卫回调打到已销毁表单
+        self._retire_worker(getattr(self, "_edit_cand_worker", None))
         cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
-        cand_worker.finished.connect(dlg.form.load_candidates)
+        cand_worker.finished.connect(
+            lambda res: (dlg.form.load_candidates(res)
+                         if not sip.isdeleted(dlg) else None))
         cand_worker.start()
         self._edit_cand_worker = cand_worker  # 保活引用
         if dlg.exec() and getattr(dlg, "collected", None):
@@ -950,6 +1013,7 @@ class RecordsPage(QWidget):
             self._run_update(collected)
 
     def _run_update(self, record):
+        self._retire_worker(self._worker)
         self._worker = AftersaleDBWorker(aftersale_db.update_record, record)
         self._worker.finished.connect(
             lambda _n: (show_info_bar("记录已更新", "success",
@@ -968,6 +1032,7 @@ class RecordsPage(QWidget):
         desc = f"{rec.get('table_no') or ''} · {rec.get('problem') or ''}"
         if not MessageBox("确认删除", f"确定删除该售后记录？\n{desc}", self.window()).exec():
             return
+        self._retire_worker(self._worker)
         self._worker = AftersaleDBWorker(aftersale_db.delete_record, rec.get("id"))
         self._worker.finished.connect(
             lambda _n: (show_info_bar("记录已删除", "success",

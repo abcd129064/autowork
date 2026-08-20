@@ -36,7 +36,8 @@ RESPONSE_TIME_PRESET = ("1分钟内", "5分钟内", "30分钟内", "1小时内",
 # 记录字段（与建表 DDL 一致）
 RECORD_FIELDS = (
     "created_at", "creator", "issue_type", "table_no", "room_name",
-    "region", "problem", "cause", "resolved", "solution", "resolver",
+    "region", "problem", "cause", "resolved", "is_initiative",
+    "is_our_problem", "solution", "resolver",
     "response_time", "snk_code", "device_code", "cycle_start",
 )
 
@@ -50,7 +51,9 @@ _SEARCH_FIELDS = (
 _EXPORT_HEADERS = (
     ("issue_type", "类型"), ("room_name", "球房"), ("table_no", "桌号"),
     ("region", "地区"), ("problem", "问题"), ("cause", "发生原因"),
-    ("resolved", "是否解决"), ("solution", "解决方案"), ("resolver", "解决人"),
+    ("resolved", "是否解决"), ("is_initiative", "是否我们主动发起"),
+    ("is_our_problem", "是否是我们的问题"), ("solution", "解决方案"),
+    ("resolver", "解决人"),
     ("response_time", "响应时间"), ("created_at", "填写时间"),
     ("creator", "填写人"), ("cycle_start", "周期"),
 )
@@ -131,9 +134,10 @@ def insert_record(record: dict) -> int:
     cur = conn.execute(
         "INSERT INTO aftersale_records "
         "(created_at, creator, issue_type, table_no, room_name, region, "
-        "problem, cause, resolved, solution, resolver, response_time, "
+        "problem, cause, resolved, is_initiative, is_our_problem, "
+        "solution, resolver, response_time, "
         "snk_code, device_code, cycle_start) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (created_at,
          str(record.get("creator") or ""),
          str(record.get("issue_type") or ""),
@@ -143,6 +147,8 @@ def insert_record(record: dict) -> int:
          str(record.get("problem") or ""),
          str(record.get("cause") or ""),
          str(record.get("resolved") or "否"),
+         str(record.get("is_initiative") or "否"),
+         str(record.get("is_our_problem") or "否"),
          str(record.get("solution") or ""),
          str(record.get("resolver") or ""),
          str(record.get("response_time") or ""),
@@ -175,7 +181,8 @@ def update_record(record: dict) -> int:
     conn = _conn()
     cur = conn.execute(
         "UPDATE aftersale_records SET creator=?, issue_type=?, table_no=?, "
-        "room_name=?, region=?, problem=?, cause=?, resolved=?, solution=?, "
+        "room_name=?, region=?, problem=?, cause=?, resolved=?, "
+        "is_initiative=?, is_our_problem=?, solution=?, "
         "resolver=?, response_time=?, snk_code=?, device_code=?, cycle_start=? "
         "WHERE id=?",
         (str(record.get("creator") or ""),
@@ -186,6 +193,8 @@ def update_record(record: dict) -> int:
          str(record.get("problem") or ""),
          str(record.get("cause") or ""),
          str(record.get("resolved") or "否"),
+         str(record.get("is_initiative") or "否"),
+         str(record.get("is_our_problem") or "否"),
          str(record.get("solution") or ""),
          str(record.get("resolver") or ""),
          str(record.get("response_time") or ""),
@@ -343,7 +352,7 @@ def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
                 val = cycle_label(val)
             ws.cell(row=r, column=c, value=str(val))
     # 列宽与冻结首行
-    widths = (12, 24, 10, 8, 28, 30, 10, 30, 10, 12, 18, 10, 16)
+    widths = (12, 24, 10, 8, 28, 30, 10, 14, 14, 30, 10, 12, 18, 10, 16)
     for c, w in enumerate(widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=c).column_letter].width = w
     ws.freeze_panes = "A2"
@@ -405,6 +414,7 @@ def import_excel_rows(xlsx_path: str) -> int:
         data.append((
             created_at, "Excel导入", issue_type, table_no, room,
             _val(r, "地区"), problem, _val(r, "发生原因"), resolved,
+            "否", "否",
             _val(r, "解决方案"), _val(r, "解决人"), _val(r, "响应时间"),
             "", "", cycle))
     if not data:
@@ -413,8 +423,9 @@ def import_excel_rows(xlsx_path: str) -> int:
     conn.executemany(
         "INSERT INTO aftersale_records "
         "(created_at, creator, issue_type, table_no, room_name, region, "
-        "problem, cause, resolved, solution, resolver, response_time, "
+        "problem, cause, resolved, is_initiative, is_our_problem, "
+        "solution, resolver, response_time, "
         "snk_code, device_code, cycle_start) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
     conn.commit()
     return len(data)
