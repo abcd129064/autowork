@@ -14,7 +14,10 @@
 import os
 from datetime import datetime
 
-from PySide6 import sip
+try:
+    from PySide6 import sip
+except ImportError:
+    sip = None  # PySide6 >= 6.7 removed sip module
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
     QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication)
@@ -990,9 +993,12 @@ class RecordsPage(QWidget):
         # GC 崩溃），并守卫回调打到已销毁表单
         self._retire_worker(getattr(self, "_edit_cand_worker", None))
         cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
-        cand_worker.finished.connect(
-            lambda res: (dlg.form.load_candidates(res)
-                         if not sip.isdeleted(dlg) else None))
+        def _load_edit_candidates(res):
+            try:
+                dlg.form.load_candidates(res)
+            except RuntimeError:
+                pass  # dialog closed/destroyed
+        cand_worker.finished.connect(_load_edit_candidates)
         cand_worker.start()
         self._edit_cand_worker = cand_worker  # 保活引用
         if dlg.exec() and getattr(dlg, "collected", None):
@@ -1108,9 +1114,8 @@ class AftersalePanelWindow(FluentWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("售后面板")
-        self.resize(1150, 680)
+        self.resize(1920, 1080)
         self.setMinimumSize(900, 520)
-
         self.entry_page = EntryPage(self)
         self.entry_page.setObjectName("aftersaleEntryPage")
         self.records_page = RecordsPage(self)
