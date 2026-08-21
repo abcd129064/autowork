@@ -2733,7 +2733,8 @@ class DevicePage(QWidget):
             return
         self._migrate_worker = MigrateImageWorker(
             file_path=date, device_code=device_code, file_names=[fname],
-            src_category=src_cat, dest_category=dest_cat)
+            src_category=src_cat, dest_category=dest_cat,
+            source=self._active_source())
         self._migrate_worker.success.connect(
             lambda count: self._on_migrate_ok(fname, dest_cat))
         self._migrate_worker.error.connect(self._on_migrate_fail)

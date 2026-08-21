@@ -18,6 +18,7 @@ from qfluentwidgets import (CardWidget, BodyLabel, CaptionLabel, LineEdit,
 from core.app_paths import get_app_dir
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import show_info_bar
+from database.mysql_sync_card_logic import should_attempt_test
 from workers.mysql_sync_worker import MysqlSyncWorker, MysqlTestWorker
 
 
@@ -58,6 +59,7 @@ class MysqlSyncCard(CardWidget):
         self.sync_scope = sync_scope
         self._test_worker = None
         self._sync_worker = None
+        self._last_enabled = False  # 上次磁盘配置的启用状态（保存时对比是否发生切换）
         self._init_ui()
 
     # ---------- UI ----------
@@ -70,8 +72,9 @@ class MysqlSyncCard(CardWidget):
         card_title = "数据库设置（MySQL）" if self.sync_scope == "aftersale" else "MySQL 远程同步"
         vbox.addWidget(BodyLabel(card_title, self))
         vbox.addWidget(CaptionLabel(
-            f"开启后 MySQL 完全替代本地 SQLite，应用直接读写远程数据库；"
-            f"关闭则回到本地 SQLite。同步范围：{scope_name}", self))
+            f"开启后 MySQL 完全替代本地 SQLite，应用实时读写远程数据库；"
+            f"关闭则回到本地 SQLite。保存启用时自动将本地历史数据同步到远程。"
+            f"同步范围：{scope_name}", self))
 
         # 开关行
         sw_row = QHBoxLayout()
@@ -118,13 +121,8 @@ class MysqlSyncCard(CardWidget):
         self._btn_test.setToolTip("用当前表单配置尝试连接 MySQL")
         self._btn_test.clicked.connect(self._on_test)
         btn_row.addWidget(self._btn_test)
-        self._btn_sync = PrimaryPushButton(FluentIcon.SYNC, "立即同步", self)
-        self._btn_sync.setToolTip(
-            "将本地数据推送到远程 MySQL（自动先保存当前表单配置）")
-        self._btn_sync.clicked.connect(self._on_sync)
-        btn_row.addWidget(self._btn_sync)
         self._btn_save = PushButton(FluentIcon.SAVE, "保存配置", self)
-        self._btn_save.setToolTip("写入 settings.json 即时生效")
+        self._btn_save.setToolTip("写入 settings.json 即时生效；启用时会自动同步本地历史数据")
         self._btn_save.clicked.connect(self._on_save)
         btn_row.addWidget(self._btn_save)
         vbox.addLayout(btn_row)
@@ -141,6 +139,7 @@ class MysqlSyncCard(CardWidget):
         self._edit_db.setText(str(cfg.get("database", "autowork")))
         self._switch_enabled.setChecked(bool(cfg.get("enabled", False)))
         self._switch_auto.setChecked(bool(cfg.get("auto_sync", False)))
+        self._last_enabled = bool(cfg.get("enabled", False))
 
     def _collect_cfg(self, enabled: bool = None) -> dict:
         """收集表单配置为 dict（端口非法时兜底 3306）"""
@@ -160,11 +159,27 @@ class MysqlSyncCard(CardWidget):
         }
 
     def _on_save(self):
-        """保存配置：合并写 settings.json 并提示"""
+        """保存配置：合并写 settings.json 并提示；从本地切到 MySQL 时自动同步历史数据
+
+        实时主库模式下写入直接进 MySQL，本地无新增，「立即同步」无意义，
+        已移除；但本地模式期间录入/导入的历史数据需要推送，故仅在
+        启用开关从关变开时自动后台同步一次（防重入）。
+        """
         try:
-            _save_settings({"mysql_sync": self._collect_cfg()})
-            show_info_bar("配置已写入 settings.json，即时生效", "success",
-                          title="已保存", parent=self, duration=2500)
+            cfg = self._collect_cfg()
+            was_enabled = self._last_enabled
+            _save_settings({"mysql_sync": cfg})
+            self._last_enabled = cfg["enabled"]
+            if cfg["enabled"] and not was_enabled:
+                self._auto_sync_history(cfg)
+                hint = "已启用 MySQL，正在后台同步本地历史数据到远程"
+            elif cfg["enabled"]:
+                hint = "已启用 MySQL，应用将直接读写远程数据库"
+            else:
+                hint = "已关闭 MySQL，应用将使用本地 SQLite"
+            show_info_bar(f"配置已写入 settings.json，即时生效；{hint}",
+                          "success",
+                          title="已保存", parent=self, duration=3000)
         except Exception as e:
             show_info_bar(str(e), "error",
                           title="保存失败", parent=self, duration=4000)
@@ -177,8 +192,17 @@ class MysqlSyncCard(CardWidget):
             show_info_bar("已有测试进行中，请稍候", "warning",
                           title="提示", parent=self, duration=2000)
             return
+        # 入口防御：未启用 MySQL 或密码为空时直接提示当前为本地 SQLite，
+        # 避免调用 MysqlTestWorker 产生误导性"MySQL 连接成功/失败"提示
+        form_cfg = self._collect_cfg()
+        can, hint = should_attempt_test(form_cfg)
+        if not can:
+            msg_type = "info" if "本地 SQLite" in hint else "warning"
+            show_info_bar(hint, msg_type, title="提示",
+                          parent=self, duration=2500)
+            return
         self._btn_test.setEnabled(False)
-        cfg = self._collect_cfg()
+        cfg = form_cfg
         cfg.pop("auto_sync", None)
         self._test_worker = MysqlTestWorker(cfg, self)
         self._test_worker.finished.connect(self._on_test_done)
@@ -193,43 +217,31 @@ class MysqlSyncCard(CardWidget):
             show_info_bar(msg, "error", title="MySQL 连接失败",
                           parent=self, duration=4000)
 
-    # ---------- 立即同步 ----------
+    # ---------- 自动同步本地历史 ----------
 
-    def _on_sync(self):
-        """立即同步：先用表单配置落盘（enabled 隐含 True），再异步推送"""
+    def _auto_sync_history(self, cfg: dict):
+        """启用 MySQL 后自动推送本地历史数据到远程（后台异步，进行中不重复）
+
+        仅覆盖「本地模式 → MySQL 模式」切换；降级期间增量由 merge_back
+        在 MySQL 恢复时自动合并，此处不重复处理。
+        """
         if self._sync_worker and self._sync_worker.isRunning():
-            show_info_bar("同步进行中，请稍候", "warning",
-                          title="提示", parent=self, duration=2000)
             return
-        # 保存顺序 bug 防护：同步前必须先落盘，否则远程读取的是旧配置
-        try:
-            _save_settings({"mysql_sync": self._collect_cfg(enabled=True)})
-        except Exception as e:
-            show_info_bar(str(e), "error",
-                          title="配置保存失败", parent=self, duration=4000)
-            return
-        self._btn_sync.setEnabled(False)
-        cfg = self._collect_cfg(enabled=True)
+        cfg = dict(cfg)
         cfg.pop("auto_sync", None)
         table_name = ("aftersale_records"
                       if self.sync_scope == "aftersale" else None)
         self._sync_worker = MysqlSyncWorker(table_name, self, cfg=cfg)
-        self._sync_worker.progress.connect(
-            lambda msg: self._btn_sync.setToolTip(msg))
-        self._sync_worker.success.connect(self._on_sync_done)
-        self._sync_worker.error.connect(self._on_sync_error)
+        self._sync_worker.success.connect(self._on_auto_sync_done)
+        self._sync_worker.error.connect(self._on_auto_sync_error)
         self._sync_worker.start()
 
-    def _on_sync_done(self, _count, msg):
-        self._btn_sync.setEnabled(True)
-        self._btn_sync.setToolTip(
-            "将本地数据推送到远程 MySQL（自动先保存当前表单配置）")
-        show_info_bar(msg, "success", title="MySQL 同步完成",
+    def _on_auto_sync_done(self, count, msg):
+        show_info_bar(f"本地历史数据已同步到远程，共 {count} 条（{msg}）",
+                      "success", title="历史数据同步完成",
                       parent=self, duration=3000)
 
-    def _on_sync_error(self, msg):
-        self._btn_sync.setEnabled(True)
-        self._btn_sync.setToolTip(
-            "将本地数据推送到远程 MySQL（自动先保存当前表单配置）")
-        show_info_bar(msg, "error", title="MySQL 同步失败",
+    def _on_auto_sync_error(self, msg):
+        show_info_bar(f"{msg}。可等 MySQL 可用后重新保存配置重试",
+                      "error", title="历史数据同步失败",
                       parent=self, duration=4000)
