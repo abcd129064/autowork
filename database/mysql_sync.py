@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS aftersale_records (
     snk_code      VARCHAR(255) DEFAULT '',
     device_code   VARCHAR(255) DEFAULT '',
     cycle_start   VARCHAR(32) DEFAULT '',
+    updated_at    VARCHAR(32) DEFAULT '',
     INDEX idx_aftersale_cycle (cycle_start),
     INDEX idx_aftersale_table_no (table_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4

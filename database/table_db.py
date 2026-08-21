@@ -318,7 +318,8 @@ CREATE TABLE IF NOT EXISTS aftersale_records (
     response_time TEXT DEFAULT '',
     snk_code      TEXT DEFAULT '',
     device_code   TEXT DEFAULT '',
-    cycle_start   TEXT DEFAULT ''
+    cycle_start   TEXT DEFAULT '',
+    updated_at    TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
     ON aftersale_records(cycle_start, id);
@@ -371,6 +372,9 @@ def _ensure_initialized(conn):
         if "occurred_at" not in as_cols:
             conn.execute(
                 "ALTER TABLE aftersale_records ADD COLUMN occurred_at TEXT DEFAULT ''")
+        if "updated_at" not in as_cols:
+            conn.execute(
+                "ALTER TABLE aftersale_records ADD COLUMN updated_at TEXT DEFAULT ''")
         conn.commit()
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
     cols = [r[1] for r in conn.execute("PRAGMA table_info(billiard_tables)").fetchall()]
@@ -534,12 +538,27 @@ def _log_degraded(exc):
 
 
 def _trigger_merge_back():
-    """MySQL 恢复后触发兜底增量合并回写（阶段二实现，先占位记日志）"""
+    """MySQL 恢复后触发兜底增量合并回写（后台异步，避免阻塞 _get_conn 调用方）"""
     try:
         from core.conn_logger import conn_logger
-        conn_logger.info("merge_back", "MySQL 已恢复，待合并兜底增量（阶段二实现）")
+        conn_logger.info("merge_back", "MySQL 已恢复，启动兜底增量合并")
     except Exception:
         pass
+    try:
+        from workers.merge_back_worker import MergeBackWorker
+        worker = MergeBackWorker()
+        _merge_back_workers.add(worker)  # 防 GC
+        worker.finished.connect(lambda *_: _merge_back_workers.discard(worker))
+        worker.start()
+    except Exception as e:
+        try:
+            from core.conn_logger import conn_logger
+            conn_logger.error("merge_back", f"启动合并 worker 失败：{e}")
+        except Exception:
+            pass
+
+
+_merge_back_workers = set()  # 保活合并 worker，防被 GC 导致崩溃
 
 
 def _ensure_mysql_tables(conn):
@@ -568,6 +587,9 @@ def _ensure_mysql_tables(conn):
         if "occurred_at" not in exist:
             conn.execute("ALTER TABLE aftersale_records "
                          "ADD COLUMN occurred_at VARCHAR(32) DEFAULT ''")
+        if "updated_at" not in exist:
+            conn.execute("ALTER TABLE aftersale_records "
+                         "ADD COLUMN updated_at VARCHAR(32) DEFAULT ''")
         conn.commit()
     except Exception:
         pass  # 表可能尚未创建，DDL 兜底

@@ -131,6 +131,7 @@ class TableFetchWorker(QThread):
 API1_BASE = "https://xqzg.newbv.cn"
 API1_LOGIN_URL = f"{API1_BASE}/api/rbac/auth/login/"
 API1_DATA_URL = f"{API1_BASE}/api/snooker_om/status/"
+API1_MIGRATE_URL = f"{API1_BASE}/api/snooker_om/migrate_image/"
 
 
 class SnookerOmFetchWorker(QThread):
@@ -383,7 +384,12 @@ def build_image_path(file_path: str, device_code: str, category: str) -> str:
 class MigrateImageWorker(QThread):
     """异步执行图像分类迁移，将图片从一个分类目录移动到另一个分类目录
 
-    通过接口2的 migrate_image 接口逐张迁移图片，支持 Token 过期自动重登。
+    按数据源分派（source 参数）：
+    - kd（接口2）：JWT 登录 + POST /api/devices/migrate_image/；
+    - xqzg（接口1）：Session 登录 + POST /api/snooker_om/migrate_image/，
+      需带 Referer + X-CSRFToken（Django CSRF 校验），Session 过期自动重登。
+    成功判定：HTTP 200 且响应体 status 不为 "error"
+    （xqzg 用 200 + {"status":"error","msg":...} 表达业务失败，只看状态码会假成功）。
     迁移完成后根据成功/失败数量分别触发 success 或 error 信号。
 
     Signals:
@@ -397,25 +403,39 @@ class MigrateImageWorker(QThread):
 
     def __init__(self, file_path: str, device_code: str,
                  file_names: list, src_category: str, dest_category: str,
-                 username=None, password=None, parent=None):
+                 username=None, password=None, parent=None, source="kd"):
         """file_path 形如 "2026/08/02"；分类传中文（如 "操作"→"待处理"）；
-        账号密码缺省时从 settings.json 读取"""
+        source: "kd" / "xqzg"（决定端点与认证方式）；
+        账号密码缺省时按 source 从 settings.json 对应 api1/api2 读取"""
         super().__init__(parent)
         self.file_path = file_path
         self.device_code = device_code
         self.file_names = file_names
         self.src_category = src_category
         self.dest_category = dest_category
-        # 账号密码：优先用外部传入，兜底从 settings.json 配置读取
+        self.source = "xqzg" if source == "xqzg" else "kd"
+        # 账号密码：优先用外部传入，兜底按源从 settings.json 配置读取
         creds = _load_api_credentials()
-        api2_cfg = creds.get("api2", {})
-        self.username = username or api2_cfg.get("username", "")
-        self.password = password or api2_cfg.get("password", "")
-        self._token = None  # JWT token，登录后赋值
+        cred_key = "api1" if self.source == "xqzg" else "api2"
+        cred_cfg = creds.get(cred_key, {})
+        self.username = username or cred_cfg.get("username", "")
+        self.password = password or cred_cfg.get("password", "")
+        self._token = None     # kd：JWT token，登录后赋值
+        self._session = None   # xqzg：requests.Session，登录后赋值
 
     def _login(self):
-        """登录接口2获取 JWT token，成功返回 token，失败返回 None"""
+        """按数据源登录：kd 返回 JWT token；xqzg 返回 Session；失败返回 None"""
         try:
+            if self.source == "xqzg":
+                session = requests.Session()
+                resp = session.post(API1_LOGIN_URL, json={
+                    "username": self.username,
+                    "password": self.password,
+                }, timeout=15)
+                if resp.status_code == 200:
+                    self._session = session
+                    return session
+                return None
             resp = requests.post(API2_LOGIN_URL, json={
                 "username": self.username,
                 "password": self.password,
@@ -428,39 +448,71 @@ class MigrateImageWorker(QThread):
             pass  # 网络异常静默处理，由调用方判断并提示
         return None
 
-    def _migrate_one(self, file_name: str, src_path: str, dest_path: str) -> bool:
-        """迁移单张图片，成功返回 True，失败返回 False"""
-        headers = {"Authorization": f"Bearer {self._token}"}
+    def _post_migrate(self, file_name: str, src_path: str, dest_path: str):
+        """按源发起一次迁移 POST，返回 (resp, status_code)；网络异常返回 (None, 0)"""
         # 接口要求 multipart/form-data 格式提交路径参数
         form_data = {
             "src_path": (None, src_path),
             "dest_path": (None, dest_path),
             "file_name": (None, file_name),
         }
-        resp = requests.post(API2_MIGRATE_URL, files=form_data,
-                             headers=headers, timeout=20)
+        try:
+            if self.source == "xqzg":
+                # Django CSRF：HTTPS 下校验 Referer；POST 需带 X-CSRFToken
+                headers = {
+                    "Referer": f"{API1_BASE}/",
+                    "X-CSRFToken":
+                        (self._session.cookies.get("csrftoken") or "")
+                        if self._session else "",
+                }
+                resp = self._session.post(API1_MIGRATE_URL, files=form_data,
+                                          headers=headers, timeout=20)
+            else:
+                resp = requests.post(API2_MIGRATE_URL, files=form_data,
+                                     headers={
+                                         "Authorization":
+                                             f"Bearer {self._token}"},
+                                     timeout=20)
+            return resp, resp.status_code
+        except requests.exceptions.RequestException:
+            return None, 0
 
-        # Token 过期(401)时自动重登重试一次，避免整批任务因单次过期全部失败
-        if resp.status_code == 401:
-            if not self._login():
-                return False  # 重登也失败，直接返回
-            headers = {"Authorization": f"Bearer {self._token}"}
-            resp = requests.post(API2_MIGRATE_URL, files=form_data,
-                                 headers=headers, timeout=20)
+    @staticmethod
+    def _check_ok(resp) -> tuple:
+        """成功判定：HTTP 200 且 body.status != 'error'。返回 (ok, msg)"""
+        if resp is None:
+            return False, "网络异常"
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}: {resp.text[:120]}"
+        try:
+            data = resp.json()
+            if isinstance(data, dict) and data.get("status") == "error":
+                return False, str(data.get("msg") or "业务失败")[:160]
+        except ValueError:
+            pass  # 非 JSON 响应按 HTTP 200 判定成功
+        return True, ""
 
-        return resp.status_code == 200
+    def _migrate_one(self, file_name: str, src_path: str, dest_path: str) -> tuple:
+        """迁移单张图片；认证过期（401/403，含 xqzg Session/CSRF 过期）
+        自动重登重试一次。返回 (ok: bool, msg: str)"""
+        resp, code = self._post_migrate(file_name, src_path, dest_path)
+        if resp is not None and code in (401, 403):
+            if self._login():
+                resp, code = self._post_migrate(file_name, src_path, dest_path)
+        return self._check_ok(resp)
 
     def run(self):
         """线程主入口：登录 → 构造路径 → 逐张迁移 → 汇总结果"""
         try:
-            # 前置校验：账号密码必须已配置
+            # 前置校验：账号密码必须已配置（按源提示对应接口）
+            src_name = "接口1(xqzg)" if self.source == "xqzg" else "接口2(kd)"
             if not self.username or not self.password:
-                self.error.emit("接口2账号密码未配置")
+                self.error.emit(f"{src_name}账号密码未配置")
                 return
 
-            # 第一步：登录拿 token
+            # 第一步：登录（kd 拿 JWT / xqzg 拿 Session）
             if not self._login():
-                self.error.emit("接口2登录失败，请检查账号密码")
+                self.error.emit(f"{src_name}登录失败，请检查账号密码")
                 return
 
             # 第二步：拼接源路径和目标路径（media/{日期}/{设备码}/{分类}/）
@@ -473,10 +525,11 @@ class MigrateImageWorker(QThread):
             fail_list = []  # 记录失败文件名，方便排查
 
             for i, fname in enumerate(self.file_names, 1):
-                if self._migrate_one(fname, src_path, dest_path):
+                ok, why = self._migrate_one(fname, src_path, dest_path)
+                if ok:
                     ok_count += 1
                 else:
-                    fail_list.append(fname)
+                    fail_list.append(f"{fname}（{why}）" if why else fname)
                 self.progress.emit(i, total)  # 通知 UI 刷新进度条
 
             # 第四步：汇总结果，全部成功走 success，有失败走 error

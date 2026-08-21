@@ -383,16 +383,22 @@ DevicesFetchWorker(file_path="", page=1, pagesize=1200,
 
 ### MigrateImageWorker
 
-异步执行图像分类迁移（`POST /api/devices/migrate_image/`，form 参数 `src_path`/`dest_path`/`file_name`），支持批量，Token 过期自动重试。
+异步执行图像分类迁移，按数据源分派端点与认证（2026-08-22 修复：此前误调 kd 端点导致 xqzg 假成功）：
+
+- **kd**：JWT + `POST /api/devices/migrate_image/`（接口2）
+- **xqzg**：Session + `Referer` + `X-CSRFToken` + `POST /api/snooker_om/migrate_image/`（接口1，Django HTTPS CSRF 校验需带 Referer）
+- **成功判定**：HTTP 200 且响应体 `status != "error"`（xqzg 用 200+`{"status":"error"}` 表达业务失败，只看状态码会假成功）
+- 401/403（含 xqzg Session/CSRF 过期）自动重登重试一次，支持批量
 
 ```python
 MigrateImageWorker(file_path, device_code, file_names,
                    src_category, dest_category,
-                   username=None, password=None)
+                   username=None, password=None, source="kd")
 ```
 
 - `file_path`：日期路径，如 `"2026/08/02"`
 - `src_category` / `dest_category`：中文分类名（见 `CATEGORY_DIRS`）
+- `source`：`"kd"`（默认）/ `"xqzg"`，决定端点与认证方式；面板调用时传 `self._active_source()`
 
 | 信号 | 类型 | 说明 |
 |------|------|------|
@@ -617,7 +623,7 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 |------|------|------|
 | 数据组织 | 按日期分区快照（`file_path`=`2026/08/02`），历史保留 60 天 | 全量快照、无日期分区，面板日期选择器禁用 |
 | `target_directory` 路径 | `/home/opt/backend/media/{日期}/{device_code}`（含日期分区） | `/opt/rbac-SnookerOm/backend/media//{device_code}`（无日期、双斜杠） |
-| 图片迁移（migrate_image） | 可用（按 kd 路径约定拼接目标目录） | 不可用（路径无日期分区，面板不显示迁移按钮） |
+| 图片迁移（migrate_image） | 可用（JWT + `POST /api/devices/migrate_image/`） | 可用（Session + Referer + X-CSRFToken + `POST /api/snooker_om/migrate_image/`，2026-08-22 修复：此前误调 kd 端点导致假成功——xqzg 文件从未被移动） |
 | 服务端关键词过滤 | 支持（`DevicesFetchWorker(keyword=...)`） | 不支持（全量拉取后本地 FTS 过滤） |
 | 每小时定时刷新 | 启用（status 时效性高） | 停用 |
 | 响应键名 | `lists` | `results` |

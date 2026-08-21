@@ -18,6 +18,7 @@ from qfluentwidgets import (CardWidget, BodyLabel, CaptionLabel, LineEdit,
 from core.app_paths import get_app_dir
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import show_info_bar
+from database.mysql_sync_card_logic import should_attempt_sync, should_attempt_test
 from workers.mysql_sync_worker import MysqlSyncWorker, MysqlTestWorker
 
 
@@ -160,11 +161,16 @@ class MysqlSyncCard(CardWidget):
         }
 
     def _on_save(self):
-        """保存配置：合并写 settings.json 并提示"""
+        """保存配置：合并写 settings.json 并提示（含数据源切换结果）"""
         try:
-            _save_settings({"mysql_sync": self._collect_cfg()})
-            show_info_bar("配置已写入 settings.json，即时生效", "success",
-                          title="已保存", parent=self, duration=2500)
+            cfg = self._collect_cfg()
+            _save_settings({"mysql_sync": cfg})
+            hint = ("已启用 MySQL，应用将直接读写远程数据库"
+                    if cfg["enabled"] else
+                    "已关闭 MySQL，应用将使用本地 SQLite")
+            show_info_bar(f"配置已写入 settings.json，即时生效；{hint}",
+                          "success",
+                          title="已保存", parent=self, duration=3000)
         except Exception as e:
             show_info_bar(str(e), "error",
                           title="保存失败", parent=self, duration=4000)
@@ -177,8 +183,17 @@ class MysqlSyncCard(CardWidget):
             show_info_bar("已有测试进行中，请稍候", "warning",
                           title="提示", parent=self, duration=2000)
             return
+        # 入口防御：未启用 MySQL 或密码为空时直接提示当前为本地 SQLite，
+        # 避免调用 MysqlTestWorker 产生误导性"MySQL 连接成功/失败"提示
+        form_cfg = self._collect_cfg()
+        can, hint = should_attempt_test(form_cfg)
+        if not can:
+            msg_type = "info" if "本地 SQLite" in hint else "warning"
+            show_info_bar(hint, msg_type, title="提示",
+                          parent=self, duration=2500)
+            return
         self._btn_test.setEnabled(False)
-        cfg = self._collect_cfg()
+        cfg = form_cfg
         cfg.pop("auto_sync", None)
         self._test_worker = MysqlTestWorker(cfg, self)
         self._test_worker.finished.connect(self._on_test_done)
@@ -196,20 +211,32 @@ class MysqlSyncCard(CardWidget):
     # ---------- 立即同步 ----------
 
     def _on_sync(self):
-        """立即同步：先用表单配置落盘（enabled 隐含 True），再异步推送"""
+        """立即同步：先用表单真实配置落盘，再异步推送
+
+        关键修复：不再强制 enabled=True 覆盖用户"关掉启用"的意图；
+        入口检查 enabled（与底层 push_all 主模式守卫双重防御），未启用时
+        明确提示"当前数据库为本地 SQLite"，不调用 worker。
+        """
         if self._sync_worker and self._sync_worker.isRunning():
             show_info_bar("同步进行中，请稍候", "warning",
                           title="提示", parent=self, duration=2000)
             return
+        # 入口防御：用表单真实 enabled 判定，未启用直接提示
+        form_cfg = self._collect_cfg()  # 不用 enabled 参数——尊重用户表单
+        can, hint = should_attempt_sync(form_cfg)
+        if not can:
+            show_info_bar(hint, "info", title="提示",
+                          parent=self, duration=2500)
+            return
         # 保存顺序 bug 防护：同步前必须先落盘，否则远程读取的是旧配置
         try:
-            _save_settings({"mysql_sync": self._collect_cfg(enabled=True)})
+            _save_settings({"mysql_sync": form_cfg})
         except Exception as e:
             show_info_bar(str(e), "error",
                           title="配置保存失败", parent=self, duration=4000)
             return
         self._btn_sync.setEnabled(False)
-        cfg = self._collect_cfg(enabled=True)
+        cfg = form_cfg
         cfg.pop("auto_sync", None)
         table_name = ("aftersale_records"
                       if self.sync_scope == "aftersale" else None)

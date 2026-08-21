@@ -892,7 +892,7 @@ class RecordsPage(QWidget):
         toolbar.addWidget(self._btn_import)
 
         self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出 xlsx", self)
-        self._btn_export.setToolTip("按当前筛选条件导出为 xlsx")
+        self._btn_export.setToolTip("按当前筛选条件导出 xlsx（按类型分 Sheet + 统计图表）")
         self._btn_export.clicked.connect(self._on_export)
         toolbar.addWidget(self._btn_export)
 
@@ -938,6 +938,9 @@ class RecordsPage(QWidget):
         bottom.setSpacing(6)
         self._lbl_stats = CaptionLabel("", self)
         bottom.addWidget(self._lbl_stats)
+        # 数据源指示：MySQL / 本地 SQLite / 降级兜底，切换后端后用户可据此确认当前读的库
+        self._lbl_source = CaptionLabel("", self)
+        bottom.addWidget(self._lbl_source)
         bottom.addStretch(1)
         self._lbl_cycle = CaptionLabel("", self)
         bottom.addWidget(self._lbl_cycle)
@@ -973,6 +976,27 @@ class RecordsPage(QWidget):
     def _on_filter_changed(self):
         self._page_no = 1
         self._load()
+
+    def _update_source_label(self):
+        """刷新数据源指示标签（读取时调用，反映最新后端状态）
+
+        - MySQL 开启且可用：绿色「数据源: MySQL」
+        - MySQL 未开启：灰色「数据源: 本地 SQLite」
+        - MySQL 开启但不可用（降级兜底）：橙色「本地 SQLite（MySQL 不可用，降级兜底）」
+        """
+        from database import backend
+        if not backend.is_mysql_test_mode():
+            text, color = "数据源: 本地 SQLite", "#9e9e9e"
+        elif backend.get_state() == backend.STATE_ONLINE:
+            text, color = "数据源: MySQL", "#52c41a"
+        else:
+            text, color = ("数据源: 本地 SQLite（MySQL 不可用，降级兜底）",
+                           "#fa8c16")
+        self._lbl_source.setText(text)
+        self._lbl_source.setStyleSheet(f"color: {color};")
+        self._lbl_source.setToolTip(
+            "关闭 MySQL 后自动读写本地 SQLite；"
+            "MySQL 恢复可用时会自动切回并合并兜底增量")
 
     def _on_refresh(self):
         """手动刷新：重建周期选项并重查（多人协作看到他人新数据）"""
@@ -1047,6 +1071,7 @@ class RecordsPage(QWidget):
         self._rows = rows
         self._populate(rows)
         self._update_pager()
+        self._update_source_label()
         self._lbl_stats.setText(
             f"共 {stats.get('total', 0)} 条 · "
             f"已解决 {stats.get('resolved', 0)} · "
@@ -1059,6 +1084,7 @@ class RecordsPage(QWidget):
 
     def _on_load_error(self, msg):
         self._lbl_stats.setText(f"查询失败: {msg}")
+        self._update_source_label()
 
     def _populate(self, rows):
         """行数据 → 表格：已解决/未解决着色"""
