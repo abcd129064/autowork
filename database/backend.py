@@ -312,7 +312,8 @@ MYSQL_DDL = {
             remark           TEXT,
             cameraPassExt    VARCHAR(512) DEFAULT '',
             snk_code         VARCHAR(128) DEFAULT '',
-            code             VARCHAR(255) DEFAULT ''
+            code             VARCHAR(255) DEFAULT '',
+            city             VARCHAR(255) DEFAULT ''
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     "sync_meta": """

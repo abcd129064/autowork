@@ -33,6 +33,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 from core.perf import is_acrylic_enabled
 from core.utils import show_info_bar
 from database import aftersale_db, table_db
+from windows.mysql_sync_card import MysqlSyncCard
 from workers.aftersale_worker import AftersaleDBWorker
 
 # 表格固定行高（与管理面板一致，避免默认行高浪费纵向空间）
@@ -113,6 +114,10 @@ QListWidget {{
 QListWidget::item {{ padding: 4px 8px; border-radius: 4px; }}
 QListWidget::item:hover {{ background-color: {item_hover}; }}
 QListWidget::item:selected {{ background-color: {accent}; color: #ffffff; }}
+QListWidget::item:disabled {{ color: #909090; padding: 10px 8px; }}
+QScrollBar:vertical {{ width: 6px; background: transparent; }}
+QScrollBar::handle:vertical {{ background: {border}; border-radius: 3px; min-height: 24px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 """
 
 
@@ -221,13 +226,14 @@ class AftersaleForm(QWidget):
         self._snk_code = ""      # 关联球桌带出（隐藏字段，随记录落库）
         self._search_kw = ""
         self._cand_worker = None
+        self._last_city = ""  # 最近一次由球桌带出的城市（地区联动清空依据）
         self._init_ui()
 
-        # 桌号搜索防抖：停止输入 300ms 后才查库，避免逐字触发查询
+        # 球房搜索防抖：停止输入 300ms 后才查库，避免逐字触发查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
         self._search_timer.setSingleShot(True)
-        self._search_timer.timeout.connect(self._do_table_search)
+        self._search_timer.timeout.connect(self._do_room_search)
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -237,21 +243,44 @@ class AftersaleForm(QWidget):
         form = QFormLayout()
         form.setSpacing(8)
 
-        # 类型（必填，11 值枚举）
+        # 类型（必填，预置 + 历史候选 + 自由输入；原生 QComboBox 才支持 editable）
         self.type_combo = FluentCombo(self)
+        self.type_combo.setEditable(True)
+        self.type_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
         self.type_combo.addItems(aftersale_db.ISSUE_TYPES)
-        self.type_combo.setFixedWidth(260)
+        self.type_combo.setFixedWidth(320)
         form.addRow("类型 *:", self.type_combo)
 
-        # 桌号（必填，关联球桌管理）
-        self.table_no_edit = SearchLineEdit(self)
-        self.table_no_edit.setPlaceholderText("输入桌号搜索球桌，如 226-04；可自由填写")
-        self.table_no_edit.setFixedWidth(320)
-        self.table_no_edit.textChanged.connect(self._on_table_text_changed)
-        self.table_no_edit.clearSignal.connect(self._hide_candidates)
-        form.addRow("桌号 *:", self.table_no_edit)
+        # 球房（必填，输入球房名搜索该球房下的球桌）+ 桌号 + 地区（同一行）
+        self.room_edit = SearchLineEdit(self)
+        self.room_edit.setPlaceholderText("输入球房名搜索球桌，如 BaoClub")
+        self.room_edit.setFixedWidth(260)
+        self.room_edit.textChanged.connect(self._on_room_text_changed)
+        self.room_edit.clearSignal.connect(self._hide_candidates)
 
-        # 球桌候选列表（默认隐藏，搜索命中后展示）
+        # 桌号（必填，选球桌自动带出，可手改兜底）
+        self.table_no_edit = LineEdit(self)
+        self.table_no_edit.setPlaceholderText("选桌自动带出")
+        self.table_no_edit.setFixedWidth(110)
+
+        # 地区（必填，预置 + 自由输入；原生 QComboBox 才支持 editable）
+        self.region_combo = FluentCombo(self)
+        self.region_combo.setEditable(True)
+        self.region_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        self.region_combo.addItems(aftersale_db.REGIONS_PRESET)
+        self.region_combo.setFixedWidth(140)
+
+        room_row = QHBoxLayout()
+        room_row.setSpacing(8)
+        room_row.addWidget(self.room_edit)
+        room_row.addWidget(QLabel("桌号 *:", self))
+        room_row.addWidget(self.table_no_edit)
+        room_row.addWidget(QLabel("地区 *:", self))
+        room_row.addWidget(self.region_combo)
+        room_row.addStretch(1)
+        form.addRow("球房 *:", room_row)
+
+        # 球桌候选列表（默认隐藏，球房搜索命中后展示）
         self._cand_list = QListWidget(self)
         self._cand_list.setFixedHeight(132)
         self._cand_list.setVisible(False)
@@ -263,25 +292,11 @@ class AftersaleForm(QWidget):
             pass
         form.addRow("", self._cand_list)
 
-        # 球房（必填，选桌号自动带出，可手改）
-        self.room_edit = LineEdit(self)
-        self.room_edit.setPlaceholderText("选择桌号自动带出，或直接填写球房名称")
-        self.room_edit.setFixedWidth(320)
-        form.addRow("球房 *:", self.room_edit)
-
-        # 地区（必填，预置 + 自由输入；原生 QComboBox 才支持 editable）
-        self.region_combo = FluentCombo(self)
-        self.region_combo.setEditable(True)
-        self.region_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
-        self.region_combo.addItems(aftersale_db.REGIONS_PRESET)
-        self.region_combo.setFixedWidth(260)
-        form.addRow("地区 *:", self.region_combo)
-
         # 问题（必填，历史候选 + 自由输入；原生 QComboBox 才支持 editable）
         self.problem_combo = FluentCombo(self)
         self.problem_combo.setEditable(True)
         self.problem_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
-        self.problem_combo.setFixedWidth(380)
+        self.problem_combo.setFixedWidth(320)
         form.addRow("问题 *:", self.problem_combo)
 
         # 发生原因（选填，多行）
@@ -293,6 +308,7 @@ class AftersaleForm(QWidget):
         # 是否解决 / 是否我们主动发起 / 是否是我们的问题（同一行，后两者在右侧）
         self.resolved_combo = FluentCombo(self)
         self.resolved_combo.addItems(["否", "是"])
+        self.resolved_combo.setCurrentIndex(1)
         self.resolved_combo.setFixedWidth(120)
 
         self.is_initiative_combo = FluentCombo(self)
@@ -301,6 +317,8 @@ class AftersaleForm(QWidget):
 
         self.is_our_problem_combo = FluentCombo(self)
         self.is_our_problem_combo.addItems(["否", "是"])
+        # 默认「是」：售后问题默认视为我方问题，无需每次手动改
+        self.is_our_problem_combo.setCurrentIndex(1)
         self.is_our_problem_combo.setFixedWidth(120)
 
         status_row = QHBoxLayout()
@@ -352,7 +370,17 @@ class AftersaleForm(QWidget):
     # ---------- 候选值加载 ----------
 
     def load_candidates(self, cands: dict):
-        """填充动态候选（问题/解决人/地区），保留用户已输入文本"""
+        """填充动态候选（问题/解决人/地区/类型），保留用户已输入文本"""
+        # 类型：预置 + 历史新增合并
+        cur_type = self.type_combo.currentText().strip()
+        types = list(aftersale_db.ISSUE_TYPES)
+        for t in cands.get("types", []):
+            if t not in types:
+                types.append(t)
+        self.type_combo.clear()
+        self.type_combo.addItems(types)
+        if cur_type:
+            self.type_combo.setEditText(cur_type)
         cur_problem = self.problem_combo.currentText().strip()
         self.problem_combo.clear()
         self.problem_combo.addItems(cands.get("problems", []))
@@ -374,41 +402,54 @@ class AftersaleForm(QWidget):
         if cur_region:
             self.region_combo.setEditText(cur_region)
 
-    # ---------- 桌号搜索与带出 ----------
+    # ---------- 球房搜索与带出 ----------
 
-    def _on_table_text_changed(self, text):
+    def _on_room_text_changed(self, text):
+        """球房输入变化 → 记录关键词、作废旧桌号关联并防抖重启"""
         self._search_kw = str(text or "").strip()
-        self._snk_code = ""  # 文本变动后旧的关联失效
+        self._snk_code = ""  # 文本变动后旧的桌号关联失效
+        self.table_no_edit.clear()  # 球房变了，旧桌号不再可信
+        if (self._last_city and
+                self.region_combo.currentText().strip() == self._last_city):
+            # 地区是上次由球桌带出的城市：随球房变动联动清空
+            self.region_combo.setEditText("")
+            self._last_city = ""
         if not self._search_kw:
             self._hide_candidates()
             return
         self._search_timer.start()
 
-    def _do_table_search(self):
-        """防抖后异步搜索球桌管理库（含搜索条件快照，过期结果丢弃）"""
+    def _do_room_search(self):
+        """防抖后异步按球房名搜索球桌（含搜索条件快照，过期结果丢弃）"""
         kw = self._search_kw
         if not kw:
             return
         self._cand_worker = AftersaleDBWorker(
-            table_db.query_page, 1, 12, kw, False, False)
+            table_db.query_tables_by_room, kw, 30)
         self._cand_worker.finished.connect(
-            lambda result, k=kw: self._on_candidates(k, result))
+            lambda result, k=kw: self._on_room_candidates(k, result))
         self._cand_worker.error.connect(lambda _m: self._hide_candidates())
         self._cand_worker.start()
 
-    def _on_candidates(self, kw, result):
+    def _on_room_candidates(self, kw, result):
         if kw != self._search_kw:
             return  # 输入已变化，丢弃过期结果
-        _total, rows = result
-        # 精确匹配单台球桌：静默带出，不弹候选
-        exact = [r for r in rows
-                 if str(r.get("name") or "").strip().lower() == kw.lower()]
-        if len(exact) == 1:
-            self._apply_table(exact[0])
+        rows = result or []
+        # 只命中唯一球桌：静默带出，不弹候选
+        if len(rows) == 1:
+            self._apply_table(rows[0])
             self._hide_candidates()
             return
         if not rows:
-            self._hide_candidates()
+            if kw:
+                # 有搜索词但无结果：展示不可选提示，引导直接填写
+                self._cand_list.clear()
+                tip = QListWidgetItem(f"未找到「{kw}」的球桌，可直接填写")
+                tip.setFlags(Qt.ItemFlag.NoItemFlags)  # 禁止选中
+                self._cand_list.addItem(tip)
+                self._cand_list.setVisible(True)
+            else:
+                self._hide_candidates()
             return
         self._cand_rows = rows
         self._cand_list.clear()
@@ -428,13 +469,23 @@ class AftersaleForm(QWidget):
         self._hide_candidates()
 
     def _apply_table(self, row):
-        """选中球桌 → 带出桌号/球房/SNK（阻断信号避免重复触发搜索）"""
-        self.table_no_edit.blockSignals(True)
+        """选中球桌 → 带出桌号/球房/城市/SNK（阻断信号避免重复触发搜索）"""
         self.table_no_edit.setText(str(row.get("name") or ""))
-        self.table_no_edit.blockSignals(False)
+        self.room_edit.blockSignals(True)
         self.room_edit.setText(str(row.get("roomName") or ""))
+        self.room_edit.blockSignals(False)
         self._snk_code = str(row.get("snk_code") or "")
-        self._search_kw = str(row.get("name") or "").strip()
+        self._search_kw = str(row.get("roomName") or "").strip()
+        city = str(row.get("city") or "").strip()
+        if city:
+            self.region_combo.setEditText(city)
+            self._last_city = city
+        elif (self._last_city and
+                self.region_combo.currentText().strip() == self._last_city):
+            # 新球桌城市未知（老库未采集）：清掉上一桌带出的残留城市，
+            # 避免换球房后地区仍显示旧城市
+            self.region_combo.setEditText("")
+            self._last_city = ""
 
     def _hide_candidates(self):
         self._cand_list.setVisible(False)
@@ -443,10 +494,12 @@ class AftersaleForm(QWidget):
 
     def set_values(self, rec: dict):
         """编辑模式：用已有记录填充表单"""
-        self.type_combo.setCurrentText(str(rec.get("issue_type") or ""))
+        self.type_combo.setEditText(str(rec.get("issue_type") or ""))
         self.table_no_edit.setText(str(rec.get("table_no") or ""))
-        self._search_kw = str(rec.get("table_no") or "").strip()
+        self.room_edit.blockSignals(True)
         self.room_edit.setText(str(rec.get("room_name") or ""))
+        self.room_edit.blockSignals(False)
+        self._search_kw = str(rec.get("room_name") or "").strip()
         self.region_combo.setEditText(str(rec.get("region") or ""))
         self.problem_combo.setEditText(str(rec.get("problem") or ""))
         self.cause_edit.setPlainText(str(rec.get("cause") or ""))
@@ -454,12 +507,13 @@ class AftersaleForm(QWidget):
         self.is_initiative_combo.setCurrentText(
             str(rec.get("is_initiative") or "否"))
         self.is_our_problem_combo.setCurrentText(
-            str(rec.get("is_our_problem") or "否"))
+            str(rec.get("is_our_problem") or "是"))
         self.solution_edit.setPlainText(str(rec.get("solution") or ""))
         self.resolver_combo.setEditText(str(rec.get("resolver") or ""))
         self.response_combo.setEditText(str(rec.get("response_time") or ""))
         self.creator_edit.setText(str(rec.get("creator") or ""))
         self._snk_code = str(rec.get("snk_code") or "")
+        self._last_city = ""  # 编辑回填不参与球房联动清空
 
     def collect(self) -> dict:
         """收集表单值为记录 dict（不含必填校验）"""
@@ -472,7 +526,7 @@ class AftersaleForm(QWidget):
             "cause": self.cause_edit.toPlainText().strip(),
             "resolved": self.resolved_combo.currentText().strip() or "否",
             "is_initiative": self.is_initiative_combo.currentText().strip() or "否",
-            "is_our_problem": self.is_our_problem_combo.currentText().strip() or "否",
+            "is_our_problem": self.is_our_problem_combo.currentText().strip() or "是",
             "solution": self.solution_edit.toPlainText().strip(),
             "resolver": self.resolver_combo.currentText().strip(),
             "response_time": self.response_combo.currentText().strip(),
@@ -504,12 +558,13 @@ class AftersaleForm(QWidget):
         self.problem_combo.setEditText("")
         self.resolver_combo.setEditText("")
         self.response_combo.setEditText("")
-        self.resolved_combo.setCurrentIndex(0)
+        self.resolved_combo.setCurrentIndex(1)  # 默认「是」（与构造一致）
         self.is_initiative_combo.setCurrentIndex(0)
-        self.is_our_problem_combo.setCurrentIndex(0)
-        self.type_combo.setCurrentIndex(-1)
+        self.is_our_problem_combo.setCurrentIndex(1)  # 默认「是」
+        self.type_combo.setEditText("")
         self.region_combo.setEditText("")
         self._snk_code = ""
+        self._last_city = ""
         self._hide_candidates()
 
 
@@ -555,11 +610,13 @@ class EntryPage(QWidget):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        self._btn_clear = PushButton("清空", card)
+        self._btn_clear = PushButton(FluentIcon.DELETE, "清空", card)
+        self._btn_clear.setFixedHeight(36)
         self._btn_clear.setToolTip("清空表单全部内容")
         self._btn_clear.clicked.connect(self.form.clear_form)
         btn_row.addWidget(self._btn_clear)
         self._btn_submit = PrimaryPushButton(FluentIcon.ACCEPT, "提交记录", card)
+        self._btn_submit.setFixedHeight(36)
         self._btn_submit.setToolTip("校验必填项后写入数据库")
         self._btn_submit.clicked.connect(self._on_submit)
         btn_row.addWidget(self._btn_submit)
@@ -655,16 +712,16 @@ class EditRecordDialog(MessageBoxBase):
 
 # 表格列定义：(字段key, 表头, 列宽)
 RECORD_COLUMNS = (
-    ("created_at", "填写时间", 132),
-    ("issue_type", "类型", 84),
+    ("created_at", "填写时间", 158),
+    ("issue_type", "类型", 100),
     ("table_no", "桌号", 84),
     ("room_name", "球房", 170),
-    ("region", "地区", 60),
+    ("region", "地区", 70),
     ("problem", "问题", 190),
     ("resolved", "是否解决", 72),
-    ("is_initiative", "是否我们主动发起", 110),
-    ("is_our_problem", "是否是我们的问题", 120),
-    ("resolver", "解决人", 76),
+    ("is_initiative", "是否我们主动发起", 72),
+    ("is_our_problem", "是否是我们的问题", 72),
+    ("resolver", "解决人", 82),
     ("response_time", "响应时间", 84),
     ("creator", "填写人", 76),
 )
@@ -683,6 +740,7 @@ class RecordsPage(QWidget):
         self._export_worker = None
         self._import_worker = None
         self._cycles_loaded = False
+        self._type_loaded = False
         # 保活集合：仍在运行的旧 worker 转入此处，等其线程结束后自动
         # deleteLater，避免最后一个 Python 引用被 GC 回收时 C++ 线程仍在跑
         # 触发 "QThread: Destroyed while thread is still running" 崩溃
@@ -772,7 +830,9 @@ class RecordsPage(QWidget):
         self._table.doubleClicked.connect(lambda _idx: self._on_edit())
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(True)
+        # 长文本列（问题）自适应拉伸，其余列保持可拖动
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        header.setStretchLastSection(False)
         for i, (_k, _h, w) in enumerate(RECORD_COLUMNS):
             self._table.setColumnWidth(i, w)
         root.addWidget(self._table, 1)
@@ -841,6 +901,40 @@ class RecordsPage(QWidget):
         super().showEvent(event)
         if not self._cycles_loaded:
             self._load_cycles_then_data()
+        if not self._type_loaded:
+            self._load_type_options()
+
+    def _load_type_options(self):
+        """把历史自定义类型合并进筛选下拉（保留「全部类型」与当前选择）
+
+        类型已允许自由输入，仅预置 11 枚举会筛不到自定义类型；
+        首次进入页面拉一次历史类型补进下拉即可。
+        """
+        self._retire_worker(getattr(self, "_type_worker", None))
+
+        def _done(cands):
+            self._type_loaded = True
+            try:
+                types = list(aftersale_db.ISSUE_TYPES)
+                for t in (cands or {}).get("types", []):
+                    if t not in types:
+                        types.append(t)
+                prev = self._type_combo.currentText()
+                self._type_combo.blockSignals(True)
+                self._type_combo.clear()
+                self._type_combo.addItem("全部类型")
+                self._type_combo.addItems(types)
+                idx = self._type_combo.findText(prev)
+                self._type_combo.setCurrentIndex(idx if idx >= 0 else 0)
+                self._type_combo.blockSignals(False)
+            except RuntimeError:
+                pass  # 页面已销毁
+
+        w = AftersaleDBWorker(aftersale_db.get_field_candidates)
+        w.finished.connect(_done)
+        w.error.connect(lambda _m: setattr(self, "_type_loaded", True))
+        w.start()
+        self._type_worker = w  # 保活引用
 
     def _retire_worker(self, worker):
         """安全下线仍在运行的旧 worker：切断其指向本对象的旧信号回调，
@@ -1106,10 +1200,48 @@ class RecordsPage(QWidget):
         show_info_bar(msg, "error", title="导入失败", parent=self, duration=4000)
 
 
+# ==================== MySQL 设置页 ====================
+
+class MysqlSettingsPage(QWidget):
+    """MySQL 远程同步设置页：复用运维面板的 MysqlSyncCard 组件
+
+    开启「启用」开关并保存后，本面板的填写录入/记录与统计直接读写远程
+    MySQL（多人共享，各自提交即落库）；关闭则回到本地 SQLite。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        scroll = ScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 滚动区自身不参与焦点：避免点击后焦点转移触发 ensureVisible 自动滚动（画面跳动）
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        view = QWidget()
+        view.setStyleSheet("QWidget { background: transparent; }")
+        scroll.setWidget(view)
+        root.addWidget(scroll)
+
+        layout = QVBoxLayout(view)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+        self._card = MysqlSyncCard(self, sync_scope="aftersale")
+        layout.addWidget(self._card)
+        layout.addStretch(1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 每次进入都重新读取配置：运维面板可能已修改，保持两处表单同步
+        self._card.load_settings()
+
+
 # ==================== 售后面板窗口 ====================
 
 class AftersalePanelWindow(FluentWindow):
-    """售后面板：FluentWindow + 左侧导航 + 两个功能页面（填写录入/记录与统计）"""
+    """售后面板：FluentWindow + 左侧导航 + 三个功能页面（填写录入/记录与统计/MySQL 设置）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1120,9 +1252,13 @@ class AftersalePanelWindow(FluentWindow):
         self.entry_page.setObjectName("aftersaleEntryPage")
         self.records_page = RecordsPage(self)
         self.records_page.setObjectName("aftersaleRecordsPage")
+        self.mysql_page = MysqlSettingsPage(self)
+        self.mysql_page.setObjectName("aftersaleMysqlPage")
 
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
+        self.addSubInterface(self.mysql_page, FluentIcon.CLOUD, "MySQL 设置",
+                             position=NavigationItemPosition.BOTTOM)
 
         self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
         self.navigationInterface.setCurrentItem(self.entry_page.objectName())
@@ -1161,7 +1297,7 @@ class AftersalePanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
-        for page in (self.entry_page, self.records_page):
+        for page in (self.entry_page, self.records_page, self.mysql_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))

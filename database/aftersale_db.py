@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 from database import table_db
 
-# ==================== 字段枚举（来源：售后问题汇总8月.xlsx 解析） ====================
+# ==================== 字段枚举 ====================
 
 # 类型（11 值，Excel 中为分组首行标记，系统改为每条独立选择）
 ISSUE_TYPES = (
@@ -148,7 +148,7 @@ def insert_record(record: dict) -> int:
          str(record.get("cause") or ""),
          str(record.get("resolved") or "否"),
          str(record.get("is_initiative") or "否"),
-         str(record.get("is_our_problem") or "否"),
+         str(record.get("is_our_problem") or "是"),
          str(record.get("solution") or ""),
          str(record.get("resolver") or ""),
          str(record.get("response_time") or ""),
@@ -194,7 +194,7 @@ def update_record(record: dict) -> int:
          str(record.get("cause") or ""),
          str(record.get("resolved") or "否"),
          str(record.get("is_initiative") or "否"),
-         str(record.get("is_our_problem") or "否"),
+         str(record.get("is_our_problem") or "是"),
          str(record.get("solution") or ""),
          str(record.get("resolver") or ""),
          str(record.get("response_time") or ""),
@@ -296,12 +296,13 @@ def get_cycle_options() -> list:
 
 
 def get_field_candidates() -> dict:
-    """动态候选：问题/解决人/地区（按使用频次降序，各取前 60）"""
+    """动态候选：问题/解决人/地区/类型（按使用频次降序，各取前 60）"""
     conn = _conn()
     out = {}
     for key, field in (("problems", "problem"),
                        ("resolvers", "resolver"),
-                       ("regions", "region")):
+                       ("regions", "region"),
+                       ("types", "issue_type")):
         cur = conn.execute(
             f"SELECT {field}, COUNT(*) FROM aftersale_records "
             f"WHERE {field} != '' GROUP BY {field} "

@@ -39,6 +39,15 @@ def parse_snk_code(remark: str) -> str:
     return m.group(0) if m else ""
 
 
+def parse_city(item: dict) -> str:
+    """从接口记录解析城市（接口字段名 roomCity，容错小写/别名）"""
+    for k in ("roomCity", "roomcity", "city"):
+        v = item.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS billiard_tables (
     id      INTEGER PRIMARY KEY,
@@ -48,7 +57,8 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     remark  TEXT DEFAULT '',
     cameraPassExt TEXT DEFAULT '',
     snk_code TEXT DEFAULT '',
-    code    TEXT DEFAULT ''
+    code    TEXT DEFAULT '',
+    city    TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
@@ -355,6 +365,11 @@ def _ensure_initialized(conn):
         conn.execute("DROP TABLE IF EXISTS tables_fts")
         conn.execute("DELETE FROM sync_meta WHERE key='fts_built'")
         conn.commit()
+    # 迁移：旧表无 city 列（城市，接口 roomCity 字段）时自动补列
+    # 不进 FTS（不按城市搜索），无需重建 FTS 表
+    if cols and "city" not in cols:
+        conn.execute("ALTER TABLE billiard_tables ADD COLUMN city TEXT DEFAULT ''")
+        conn.commit()
     # 迁移：kd_status 旧表可能缺少扩展字段，自动 ALTER ADD
     kd_cols = [r[1] for r in conn.execute("PRAGMA table_info(kd_status)").fetchall()]
     if kd_cols and "device_code" not in kd_cols:
@@ -456,6 +471,14 @@ def _ensure_mysql_tables(conn):
         conn.execute(ddl)
     # 迁移：已存在的旧 aftersale_records 库缺新增字段时 ALTER ADD 补列
     _migrate_mysql_aftersale(conn)
+    # 迁移：旧 billiard_tables 库缺 city 列（接口 roomCity）时补列
+    try:
+        exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM billiard_tables")}
+        if "city" not in exist:
+            conn.execute(
+                "ALTER TABLE billiard_tables ADD COLUMN city VARCHAR(255) DEFAULT ''")
+    except Exception:
+        pass  # 表可能尚未创建，DDL 兜底
     conn.commit()
 
 
@@ -511,14 +534,21 @@ def save_all(rows: list) -> int:
             str(item.get("cameraPassExt") or ""),
             snk,
             str(item.get("code") or ""),
+            parse_city(item),
         ))
     conn.executemany(
         "INSERT OR REPLACE INTO billiard_tables "
-        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
+        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
+    # 同步时间戳：先 INSERT 后 UPDATE（双后端兼容的 upsert；
+    # MySQL 下 INSERT OR REPLACE 被转换为普通 INSERT，直接 INSERT 会 1062）
+    try:
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
+    except Exception:
+        conn.execute(
+            "UPDATE sync_meta SET value = ? WHERE key = 'last_sync'", (now,))
     conn.commit()
     return len(data)
 
@@ -579,6 +609,33 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
     return total, rows
 
 
+def query_tables_by_room(room_kw: str, limit: int = 30) -> list:
+    """按球房名模糊查询球桌列表（售后面板：球房带出桌号）
+
+    与 query_page 的全字段搜索不同：只匹配 roomName，排除「公司测试」
+    与手动版本设备，结果按桌号升序，返回 list[dict]（name/roomName/snk_code）。
+    """
+    kw = str(room_kw or "").strip()
+    if not kw:
+        return []
+    conn = _get_conn()
+    like = f"%{kw}%"
+    conds = [
+        "TRIM(roomName) != ?",
+        "(name NOT LIKE ? AND roomName NOT LIKE ?)",
+        "roomName LIKE ?",
+    ]
+    params = [TEST_ROOM_NAME,
+              f"%{MANUAL_DEVICE_FLAG}%", f"%{MANUAL_DEVICE_FLAG}%",
+              like]
+    cursor = conn.execute(
+        f"SELECT id, name, roomName, snk_code, city FROM billiard_tables"
+        f" WHERE {' AND '.join(conds)} ORDER BY name LIMIT ?",
+        params + [limit])
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+
 def insert_one(record: dict) -> int:
     """手动插入单条记录（API 失效时的兜底入口），返回新记录 id
 
@@ -590,8 +647,8 @@ def insert_one(record: dict) -> int:
     snk = str(record.get("snk_code") or "").strip() or parse_snk_code(remark)
     cur = conn.execute(
         "INSERT INTO billiard_tables "
-        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "(name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(record.get("name") or ""),
             str(record.get("roomName") or ""),
@@ -600,6 +657,7 @@ def insert_one(record: dict) -> int:
             str(record.get("cameraPassExt") or ""),
             snk,
             str(record.get("code") or ""),
+            parse_city(record),
         ))
     conn.commit()
     return cur.lastrowid
