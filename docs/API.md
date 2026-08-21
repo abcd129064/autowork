@@ -626,6 +626,8 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 
 **修复记录（2026-08）**：历史版本 `save_xqzg` 只落库 13 个统计字段，丢弃 `device_code`/`status`/`target_directory`/8 类文件清单，导致 xqzg 源下状态列恒为「未知」、文件面板/右键复制为空、CSV 缺设备编码列、status 列排序 SQL 报错（旧表无该列）且 error 信号未连接静默失败。已修复：`save_xqzg` 全字段落库；旧库（SQLite `PRAGMA` / MySQL `SHOW COLUMNS`）启动时自动 `ALTER TABLE ADD COLUMN` 补列并重建 FTS（`xqzg_fts` 补 `device_code` 列后 drop 重建）；查询/排序/FTS/懒加载全覆盖扩展字段；两个拉取 Worker 按 `total` 自动翻页拉全（单页 1000/1200，上限 50 页），超过单页大小的设备不再静默丢失；`_DBQueryWorker` 信号改名 `result_ready`（避免遮蔽 Qt 原生 `finished`）并补齐 error 连接，切换数据源来回切换不报错、不丢缓存。
 
+**MySQL 迁移二坑（2026-08 二次修复）**：(1) MySQL 的 TEXT/BLOB 列不允许字面量 `DEFAULT` 子句（`ALTER ... ADD COLUMN normal_files LONGTEXT DEFAULT '[]'` 报 1101），迁移循环在第一个文件列中断且异常被吞 → 标量列补上、8 个文件列永久缺失（点文件列报 1054 Unknown column）。迁移改为**逐列检测**（缺哪列补哪列），文件列 `LONGTEXT` 不带 DEFAULT，读取端 `json.loads(None)` 兼容 NULL。(2) `save_xqzg` 是 DELETE 全表 + INSERT，若 INSERT 因缺列失败会把整表数据清空（MySQL autocommit 不可回滚）→ 列表 total=0、翻页按钮禁用。写入前新增列探测 `_probe_status_ext_cols`：缺扩展列时先报错不删数据；落库 Worker 补连 error 信号，失败弹「保存失败」而非静默。**注意**：修复前同步的旧行扩展列（device_code/status/文件清单）为 NULL/空，需在 xqzg 源下重新点一次「搜索」拉取全字段数据后，状态列/文件面板才完整。
+
 ---
 
 ### database.backend

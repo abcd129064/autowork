@@ -450,41 +450,88 @@ _mysql_tables_ready = False       # 建表只执行一次（全局标志，跨�
 
 
 def _get_conn():
-    """获取数据库连接（惰性创建）
+    """获取数据库连接（MySQL 主 + SQLite 兜底）
 
-    MySQL 测试模式：每线程独立连接（thread-local），避免 pymysql
-    单连接多线程并发导致 Packet sequence number wrong。
-    SQLite 模式：模块级单连接（WAL 模式，支持多线程读）。
+    MySQL 模式：
+    - ONLINE：走 MySQL；连接失败自动 mark_degraded 并回退本地 SQLite；
+    - DEGRADED：每次操作前试探 MySQL 是否恢复，成功则 mark_online 并触发
+      合并回写（_trigger_merge_back，阶段二实现），失败则继续 SQLite 兜底。
+    SQLite 模式：模块级单连接（WAL，支持多线程读）。
     """
-    global _conn, _mysql_tables_ready
+    global _mysql_tables_ready
     if backend.is_mysql_test_mode():
-        # thread-local 连接：每个 QThread worker 独立连接，彻底避免并发冲突
-        conn = getattr(_mysql_local, 'conn', None)
-        if conn is not None:
+        if backend.get_state() == backend.STATE_ONLINE:
+            # ONLINE：优先复用 thread-local MySQL 连接
+            conn = getattr(_mysql_local, 'conn', None)
+            if conn is not None:
+                try:
+                    conn._conn.ping(reconnect=True)
+                    return conn
+                except Exception:
+                    pass  # 连接断开，尝试重建
             try:
-                conn._conn.ping(reconnect=True)
-                return conn
+                conn = backend.create_mysql_connection()
+            except Exception as e:
+                # MySQL 不可用 → 降级兜底，业务不中断
+                backend.mark_degraded()
+                _log_degraded(e)
+                return _get_sqlite_conn()
+            if not _mysql_tables_ready:
+                _ensure_mysql_tables(conn)
+                _mysql_tables_ready = True
+            _mysql_local.conn = conn
+            return conn
+        else:
+            # DEGRADED：试探 MySQL 是否恢复
+            try:
+                conn = backend.create_mysql_connection()
             except Exception:
-                pass  # 连接已断开，重建
-        conn = backend.create_mysql_connection()
-        if not _mysql_tables_ready:
-            _ensure_mysql_tables(conn)
-            _mysql_tables_ready = True
-        _mysql_local.conn = conn
-        return conn
-    else:
-        if _conn is None:
-            os.makedirs(_DB_DIR, exist_ok=True)
-            # check_same_thread=False：查询/保存分散在多个 QThread worker 里跑，
-            # 共用这一个连接省掉多连接各自建表迁移的开销；并发安全交给下面
-            # 的 WAL + busy_timeout，否则默认校验会直接抛 ProgrammingError
-            _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-            # WAL 读写分离：worker 批量写入时 UI 线程的分页查询不被阻塞
-            _conn.execute("PRAGMA journal_mode=WAL")
-            # 抢锁失败时最多等 3 秒而不是立刻报 database is locked
-            _conn.execute("PRAGMA busy_timeout=3000")
-            _ensure_initialized(_conn)
-        return _conn
+                return _get_sqlite_conn()  # 仍不可用，继续兜底
+            # 恢复成功
+            if not _mysql_tables_ready:
+                _ensure_mysql_tables(conn)
+                _mysql_tables_ready = True
+            _mysql_local.conn = conn
+            backend.mark_online()
+            _trigger_merge_back()  # 阶段二：合并兜底增量回 MySQL
+            return conn
+    return _get_sqlite_conn()
+
+
+def _get_sqlite_conn():
+    """本地 SQLite 单连接（WAL；兜底模式与非 MySQL 模式共用）"""
+    global _conn
+    if _conn is None:
+        os.makedirs(_DB_DIR, exist_ok=True)
+        # check_same_thread=False：查询/保存分散在多个 QThread worker 里跑，
+        # 共用这一个连接省掉多连接各自建表迁移的开销；并发安全交给下面
+        # 的 WAL + busy_timeout，否则默认校验会直接抛 ProgrammingError
+        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        # WAL 读写分离：worker 批量写入时 UI 线程的分页查询不被阻塞
+        _conn.execute("PRAGMA journal_mode=WAL")
+        # 抢锁失败时最多等 3 秒而不是立刻报 database is locked
+        _conn.execute("PRAGMA busy_timeout=3000")
+        _ensure_initialized(_conn)
+    return _conn
+
+
+def _log_degraded(exc):
+    """降级记日志（best-effort，不阻塞业务）"""
+    try:
+        from core.conn_logger import conn_logger
+        conn_logger.error("backend_degraded",
+                          f"MySQL 不可用，回退本地 SQLite：{exc}")
+    except Exception:
+        pass
+
+
+def _trigger_merge_back():
+    """MySQL 恢复后触发兜底增量合并回写（阶段二实现，先占位记日志）"""
+    try:
+        from core.conn_logger import conn_logger
+        conn_logger.info("merge_back", "MySQL 已恢复，待合并兜底增量（阶段二实现）")
+    except Exception:
+        pass
 
 
 def _ensure_mysql_tables(conn):
@@ -516,21 +563,28 @@ def _ensure_mysql_tables(conn):
         conn.commit()
     except Exception:
         pass  # 表可能尚未创建，DDL 兜底
-    # 迁移：旧 xqzg_status 库缺扩展字段时补列（与 kd_status 同套字段，
-    # 历史版本只存 13 个统计字段）
-    try:
-        exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM xqzg_status")}
-        if "device_code" not in exist:
-            for f in KD_EXTRA_FIELDS:
-                ctype = ("LONGTEXT" if f in KD_FILE_FIELDS else
-                         "VARCHAR(32)" if f == "status" else
+    # 迁移：xqzg_status / kd_status 缺扩展字段时逐列补（与 kd 同套字段，
+    # 历史版本只存 13 个统计字段）。必须逐列检测：文件列（LONGTEXT）不允许
+    # DEFAULT 子句，若循环里带 DEFAULT '[]' 会在第一个文件列报 1101 被吞，
+    # 且只看 device_code 会把「部分成功」误判为已完成，导致其余列永久缺失
+    for table in ("xqzg_status", "kd_status"):
+        try:
+            exist = {r[0] for r in conn.execute(f"SHOW COLUMNS FROM {table}")}
+        except Exception:
+            continue  # 表可能尚未创建，DDL 兜底
+        for f in KD_EXTRA_FIELDS:
+            if f in exist:
+                continue
+            if f in KD_FILE_FIELDS:
+                # TEXT/BLOB 列在 MySQL 不允许字面量默认值，保持 NULL 由
+                # 读取端 json.loads(None) 兼容（见 get_*_row_full）
+                ddl = f"ALTER TABLE {table} ADD COLUMN {f} LONGTEXT"
+            else:
+                ctype = ("VARCHAR(32)" if f == "status" else
                          "VARCHAR(512)" if f == "target_directory" else "VARCHAR(255)")
-                default = "'[]'" if f in KD_FILE_FIELDS else "''"
-                conn.execute(
-                    f"ALTER TABLE xqzg_status ADD COLUMN {f} {ctype} DEFAULT {default}")
-            conn.commit()
-    except Exception:
-        pass  # 表可能尚未创建，DDL 兜底
+                ddl = f"ALTER TABLE {table} ADD COLUMN {f} {ctype} DEFAULT ''"
+            conn.execute(ddl)
+        conn.commit()
 
 
 # 公开别名：aftersale_db 等同包模块复用双后端连接路由（私有名保留不破坏存量调用）
@@ -551,6 +605,25 @@ def close():
         except Exception:
             pass
         _mysql_local.conn = None
+
+
+# ==================== sync_meta 时间戳写入（双后端兼容 upsert） ====================
+
+def _upsert_sync_meta(conn, key: str, value: str):
+    """写入 sync_meta 时间戳（双后端兼容的 upsert）
+
+    MySQL 下 INSERT OR REPLACE 被转换为普通 INSERT，对已存在的 key 直接
+    INSERT 会抛 1062（Duplicate entry ... for key 'sync_meta.PRIMARY'），
+    导致刷新/重同步整条链路失败。故先尝试 INSERT，失败回退 UPDATE，
+    语义等价于 SQLite 的 INSERT OR REPLACE / MySQL 的 ON DUPLICATE KEY UPDATE。
+    供 save_all / save_xqzg / save_kd / upsert_kd 等刷新接口统一复用。
+    """
+    try:
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES (?, ?)", (key, value))
+    except Exception:
+        conn.execute(
+            "UPDATE sync_meta SET value = ? WHERE key = ?", (value, key))
 
 
 # ==================== 原有球桌表操作 ====================
@@ -592,14 +665,8 @@ def save_all(rows: list) -> int:
         "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 同步时间戳：先 INSERT 后 UPDATE（双后端兼容的 upsert；
-    # MySQL 下 INSERT OR REPLACE 被转换为普通 INSERT，直接 INSERT 会 1062）
-    try:
-        conn.execute(
-            "INSERT INTO sync_meta (key, value) VALUES ('last_sync', ?)", (now,))
-    except Exception:
-        conn.execute(
-            "UPDATE sync_meta SET value = ? WHERE key = 'last_sync'", (now,))
+    # 同步时间戳：双后端兼容 upsert（MySQL 下 INSERT 已存在 key 会 1062）
+    _upsert_sync_meta(conn, "last_sync", now)
     conn.commit()
     return len(data)
 
@@ -959,6 +1026,16 @@ def get_meta() -> tuple:
 
 # ==================== 接口1 xqzg_status 表操作 ====================
 
+# 写入前列探测：旧库（尤其 MySQL 远程表）可能缺文件列，缺列时先报错而不是
+# DELETE 成功后 INSERT 失败把整表数据清空（MySQL autocommit 下无法回滚）
+def _probe_status_ext_cols(conn, table: str):
+    try:
+        conn.execute(f"SELECT normal_files FROM {table} LIMIT 1")
+    except Exception as e:
+        raise RuntimeError(
+            f"{table} 表缺少扩展列 normal_files，自动迁移未生效，请升级数据库结构: {e}") from e
+
+
 def save_xqzg(rows: list) -> int:
     """全量替换接口1数据（含扩展字段：状态/设备码/文件清单），返回写入条数
 
@@ -966,6 +1043,7 @@ def save_xqzg(rows: list) -> int:
     target_directory / 8 类文件清单，全部落库，保证两种数据源展示能力一致。
     """
     conn = _get_conn()
+    _probe_status_ext_cols(conn, "xqzg_status")
     conn.execute("DELETE FROM xqzg_status")
     all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
     placeholders = ", ".join(["?"] * (len(all_fields) + 1))
@@ -986,9 +1064,8 @@ def save_xqzg(rows: list) -> int:
     conn.executemany(
         f"INSERT OR REPLACE INTO xqzg_status ({col_names}) VALUES ({placeholders})", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync_xqzg', ?)",
-        (now,))
+    # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新 last_sync_xqzg 会 1062）
+    _upsert_sync_meta(conn, "last_sync_xqzg", now)
     conn.commit()
     return len(data)
 
@@ -1018,6 +1095,7 @@ def save_kd(rows: list, file_path: str = "") -> int:
         file_path: 日期路径，如 "2026/08/02"；仅替换该日期的数据
     """
     conn = _get_conn()
+    _probe_status_ext_cols(conn, "kd_status")
     # 只删除该日期的数据，保留其他日期
     conn.execute("DELETE FROM kd_status WHERE file_path = ?", (file_path,))
     all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
@@ -1041,8 +1119,8 @@ def save_kd(rows: list, file_path: str = "") -> int:
         f"INSERT OR REPLACE INTO kd_status ({col_names}) VALUES ({placeholders})", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
+    # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新同日期会 1062）
+    _upsert_sync_meta(conn, meta_key, now)
     conn.commit()
     inserted = len(data)
     # 保存后顺手清理 60 天前的历史分区，避免数据库随天数无限膨胀
@@ -1096,8 +1174,8 @@ def upsert_kd(rows: list, file_path: str = "") -> int:
             inserts)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
+    # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新同日期会 1062）
+    _upsert_sync_meta(conn, meta_key, now)
     conn.commit()
     return updated + len(inserts)
 
@@ -1677,8 +1755,8 @@ def _save_status_table(table_name: str, rows: list, meta_key: str) -> int:
     conn.executemany(
         f"INSERT OR REPLACE INTO {table_name} ({col_names}) VALUES ({placeholders})", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?, ?)", (meta_key, now))
+    # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新会 1062）
+    _upsert_sync_meta(conn, meta_key, now)
     conn.commit()
     return len(data)
 

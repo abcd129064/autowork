@@ -15,6 +15,7 @@ table_db.py 所有读写均通过此模块路由：
 import json
 import os
 import re
+import threading
 
 
 # ==================== MySQL 测试模式开关 ====================
@@ -444,3 +445,53 @@ MYSQL_DDL = {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 }
+
+
+# ==================== 后端状态机（MySQL 主 + SQLite 兜底）====================
+
+STATE_ONLINE = "ONLINE"      # MySQL 可用，读写走 MySQL
+STATE_DEGRADED = "DEGRADED"  # MySQL 不可用，回退本地 SQLite 兜底
+
+_state = STATE_ONLINE
+_state_lock = threading.Lock()
+
+
+def get_state() -> str:
+    """当前后端状态：ONLINE=MySQL 主库，DEGRADED=SQLite 兜底"""
+    with _state_lock:
+        return _state
+
+
+def mark_degraded() -> bool:
+    """标记降级（MySQL 不可用）。返回是否发生状态切换"""
+    global _state
+    with _state_lock:
+        if _state == STATE_DEGRADED:
+            return False
+        _state = STATE_DEGRADED
+    _log_state_change(STATE_DEGRADED)
+    return True
+
+
+def mark_online() -> bool:
+    """标记在线（MySQL 恢复）。返回是否发生状态切换"""
+    global _state
+    with _state_lock:
+        if _state == STATE_ONLINE:
+            return False
+        _state = STATE_ONLINE
+    _log_state_change(STATE_ONLINE)
+    return True
+
+
+def _log_state_change(new_state: str):
+    """状态切换记连接日志（best-effort，绝不阻塞业务）"""
+    try:
+        from core.conn_logger import conn_logger
+        if new_state == STATE_DEGRADED:
+            conn_logger.error("backend_state",
+                              "MySQL 不可用，已回退本地 SQLite 兜底")
+        else:
+            conn_logger.info("backend_state", "MySQL 已恢复在线")
+    except Exception:
+        pass

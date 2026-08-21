@@ -2379,6 +2379,9 @@ class DevicePage(QWidget):
         # 默认参数 dd 快照本次日期描述，理由同 _load_local 里的 lambda 快照
         self._save_worker.result_ready.connect(
             lambda count, dd=date_desc: self._on_save_finished(count, dd))
+        # 落库失败必须可见（如远程 MySQL 表缺列）：否则按钮不恢复、数据空白无反馈
+        self._save_worker.error.connect(
+            lambda msg, dd=date_desc: self._on_save_error(msg, dd))
         self._save_worker.start()
 
     def _on_save_finished(self, count, date_desc=""):
@@ -2397,6 +2400,12 @@ class DevicePage(QWidget):
         if (current_kw and current_kw != getattr(self, "_fetch_keyword", "")
                 and self._active_source() == "kd"):
             self._fetch_api_keyword(current_kw)
+
+    def _on_save_error(self, msg, date_desc=""):
+        """落库失败：恢复同步按钮并提示首行错误（静默失败会让用户看到空白/旧数据）"""
+        self._sync_btn.setEnabled(True)
+        show_info_bar(str(msg).split(chr(10))[0], "error",
+                      title="保存失败", parent=self, duration=5000)
 
     def _on_search_error(self, msg):
         """设备搜索失败：恢复同步按钮并提示"""
@@ -3017,6 +3026,7 @@ class DevicePage(QWidget):
         else:
             self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
         self._save_worker.result_ready.connect(self._on_refresh_save_finished)
+        self._save_worker.error.connect(self._on_save_error)
         self._save_worker.start()
 
     def _on_refresh_save_finished(self, _count):
