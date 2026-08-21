@@ -24,6 +24,13 @@
 - **管理设置**：配置双接口 API 账号密码、选择启用数据源、测试连接
 - **小游戏**：摸鱼中心（2048/贪吃蛇等）
 
+### 售后面板（售后问题登记与统计）
+- **填写录入**：售后问题登记表单（字段对齐售后汇总 Excel），球房输入搜索球桌库自动带出桌号/SNK/地区，发生时间步进补录历史日期
+- **记录与统计**：按周期/类型/状态/关键词筛选 + 分页 + 已解决/未解决统计，支持编辑/删除/导出 xlsx/导入 Excel（导入前预览确认）
+- **周期管理**：统计周期可配置（周二起默认/自然周/自定义起始日+天数），记录按发生时间动态归属周期，列表/统计/周期下拉/导出四处口径一致
+- **多后端存储**：本地 SQLite / 远程 MySQL 双后端，跟随数据库设置开关切换；MySQL 模式下多人各自提交即落库，刷新可见
+- **数据库设置**：MySQL 连接配置、测试连接、立即同步（售后记录按业务键去重推送，不覆盖他人数据）
+
 ### 远程连接（P2P）
 - **XTCP 模式**：基于 frp 的 P2P 内网穿透，支持多 visitor 管理
 - **TCP 模式**：直连服务器，保存服务器列表
@@ -50,7 +57,9 @@
 |------|------|
 | GUI 框架 | PySide6 (Qt6) + PySide6-Fluent-Widgets |
 | HTTP/API | requests（wechat2-billiard / xqzg / kd 三接口） |
-| 本地数据库 | SQLite3（球桌/设备状态缓存） |
+| 本地数据库 | SQLite3（球桌/设备状态/售后记录缓存） |
+| 远程数据库 | MySQL（pymysql，可选双后端 + 镜像同步） |
+| Excel 读写 | openpyxl（售后记录导入/导出） |
 | SSH/SFTP | paramiko |
 | P2P 穿透 | frp (frpc) XTCP |
 | 远程桌面 | mstsc.exe + Win32 API 窗口嵌入 |
@@ -88,18 +97,25 @@ autowork/
 │   └── windows_api.py         #   显示设置/窗口嵌入/进程挂起恢复
 │
 ├── workers/                   # 后台线程 Worker 层
+│   ├── aftersale_worker.py    #   售后数据后台 Worker（通用 DB 操作封装）
 │   ├── collect_worker.py      #   视频/日志收集与打包上传 Worker（设备状态页）
+│   ├── mysql_sync_worker.py   #   MySQL 同步/测试连接 Worker
 │   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
 │   ├── newlog_worker.py       #   NewLog 批量整理 Worker（日志逐行转发 GUI）
 │   ├── single_video_worker.py #   单杆视频生成 Worker（日志解析 + 计分水印）
 │   └── table_worker.py        #   球桌/设备数据 API Worker（拉取/迁移/登录测试）
 │
-├── database/                  # 本地数据层
-│   ├── table_db.py            #   SQLite 存取（FTS5 搜索、球桌/xqzg/kd 按日期分区）
+├── database/                  # 数据层（SQLite/MySQL 双后端）
+│   ├── backend.py             #   数据库后端切换层（MySQL 替代 SQLite 路由 + 方言适配）
+│   ├── table_db.py            #   球桌/设备数据存取（FTS5 搜索、按日期分区）
+│   ├── aftersale_db.py        #   售后记录数据层（周期计算、筛选统计、导入导出）
+│   ├── mysql_sync.py          #   MySQL 远程镜像同步（SQLite → MySQL 单向推送）
 │   └── tables.db              #   SQLite 数据库文件
 │
 ├── windows/                   # 独立窗口层
 │   ├── management_panel.py    #   运维管理面板（球桌/设备/健康度/设置/小游戏六页）
+│   ├── aftersale_panel.py     #   售后面板（填写录入/记录统计/设置三页）
+│   ├── mysql_sync_card.py     #   MySQL 同步配置卡片（运维/售后面板共用）
 │   ├── forensic_report.py     #   SSH 故障取证报告面板（含 AI 分析）
 │   ├── image_viewer.py        #   图片预览查看器（翻页/分类迁移）
 │   ├── port_fake.py           #   端口占用模拟器（真实监听指定端口）
@@ -255,6 +271,34 @@ AI 分析配置（设置 → AI）：
 - `forensic_ai_analysis`：SSH 故障取证报告的 AI 分析开关
 - `ai_api_keys`：各厂商 API Key 字典（DPAPI 加密），未配置时回退官方环境变量
 
+数据库设置（售后面板/运维面板 → 数据库设置，MySQL 双后端与镜像同步）：
+
+```json
+"mysql_sync": {
+  "enabled": true,
+  "host": "49.235.34.253",
+  "port": 3306,
+  "user": "root",
+  "password": "...",
+  "database": "autowork",
+  "auto_sync": true
+}
+```
+
+- `enabled`：开启后 MySQL 完全替代本地 SQLite，应用直接读写远程数据库；关闭回到本地 SQLite
+- `password`：DPAPI 加密落盘
+- `auto_sync`：每次 API 同步后自动推送到 MySQL
+- 售后记录推送按业务键去重（不覆盖他人数据）；运维数据全量镜像
+
+售后统计周期（售后面板 → 设置 → 统计周期设置）：
+
+```json
+"aftersale_cycle": { "type": "tue", "start": "2026-08-18", "span": 7 }
+```
+
+- `type`：`tue`（周二起，默认）/ `mon`（自然周）/ `custom`（自定义起始日+天数）
+- 记录按发生时间动态归属周期，切换模式后列表/统计/周期下拉/导出立即按新规则重新归属
+
 frp 服务器配置（设置 → 远程连接）：
 
 ```json
@@ -288,7 +332,7 @@ frp 服务器配置（设置 → 远程连接）：
 - 主题样式文件位于 `styles/`，打包时通过 `AutoWork.spec` 的 `datas` 包含
 - 新增模块请遵循单向依赖链，避免循环导入
 - 连接日志自动落盘到 `logs/autowork_conn.log`（2MB 轮转）
-- 版本号由 `core/version.py` 自动计算（git 提交数），无 git 环境时回退 `2.8.0`
+- 版本号由 `core/version.py` 自动计算（`BASE_VERSION.git提交数`，当前 BASE=2.9），无 git 环境时回退 `2.9.0`
 - 敏感配置（`ssh_pass` / `upload_pass` / `ai_api_keys` 等）经 DPAPI 加密后落盘，换机器或系统用户后需重新填写
 
 ## 许可证

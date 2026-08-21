@@ -21,6 +21,8 @@ import sqlite3
 import time
 from datetime import datetime
 
+from database import backend
+
 # ==================== 配置读取 ====================
 
 def _load_mysql_config() -> dict:
@@ -305,12 +307,15 @@ _BT_COLS = ("id", "name", "roomName", "onlineStatusName",
             "remark", "cameraPassExt", "snk_code", "code", "city")
 _BT_MYSQL_COLS = _BT_COLS  # 同名
 
-# xqzg_status 字段
+# xqzg_status 字段（与 kd_status 同套字段，无 file_path 日期分区）
 _XQZG_COLS = (
     "id", "table_id", "club_name", "pic_total", "normal_count",
     "normal_total", "except_count", "operation_rate", "untreated_count",
     "operation_count", "accuracy_count", "already_count", "rubbish_count",
-    "error_rate",
+    "error_rate", "device_code", "target_directory", "status",
+    "normal_files", "except_files", "untreated_files",
+    "operation_files", "accuracy_files", "already_files", "rubbish_files",
+    "version_files",
 )
 
 # kd_status 字段
@@ -440,6 +445,10 @@ def push_all(progress_cb=None) -> tuple:
     cfg = _load_mysql_config()
     if not cfg:
         return False, "MySQL 同步未启用或配置缺失", 0
+    # MySQL 主模式（enabled=true）下数据已直写远程库，本地 SQLite 停留在
+    # 切换前陈旧快照；此时镜像推送只会 TRUNCATE 掉新鲜数据，必须跳过。
+    if backend.is_mysql_test_mode():
+        return True, "MySQL 主模式：数据已直写远程库，无需镜像推送", 0
 
     t0 = time.time()
     total = 0
@@ -503,6 +512,8 @@ def push_table(table_name: str, progress_cb=None) -> tuple:
     cfg = _load_mysql_config()
     if not cfg:
         return False, "MySQL 同步未启用或配置缺失", 0
+    if backend.is_mysql_test_mode():
+        return True, "MySQL 主模式：数据已直写远程库，无需镜像推送", 0
 
     _TABLE_MAP = {
         "billiard_tables": (_BT_COLS, _BT_MYSQL_COLS, "replace"),
@@ -553,6 +564,8 @@ def push_aftersale(cfg: dict = None, progress_cb=None) -> tuple:
             cfg = _load_mysql_config()
         if not cfg:
             return False, "MySQL 同步未启用或配置缺失", 0
+        if backend.is_mysql_test_mode():
+            return True, "MySQL 主模式：售后已直写远程库，无需推送", 0
         from database import aftersale_db
         _ensure_schema(cfg)
         conn = _connect(cfg)

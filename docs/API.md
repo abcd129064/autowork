@@ -508,6 +508,63 @@ NewLogWorker(target_name)
 
 ---
 
+## workers/aftersale_worker.py 售后数据 Worker
+
+### AftersaleDBWorker
+
+通用后台 DB 操作 Worker：将 `aftersale_db` / `table_db` 的同步 DB 操作移到工作线程，避免阻塞 GUI。
+
+```python
+AftersaleDBWorker(func, *args, **kwargs)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `result_ready` | `Signal(object)` | 查询/保存结果（**不能命名为 finished，会遮蔽 Qt 原生 finished**） |
+| `error` | `Signal(str)` | 异常信息 `类型名: 描述` |
+
+**保活与清理机制**（防频繁刷新时旧 worker 被 GC 销毁导致 `QThread: Destroyed while thread is still running` 崩溃）：
+- 模块级 `_running` 集合强引用，线程退出前不被 GC
+- 用 Qt **原生** `finished` 信号挂 `_release`（run() 返回后由 Qt 发射，线程已标记结束，销毁安全）
+- `run()` 内用 `isInterruptionRequested()` 丢弃过期结果（新查询取代旧查询时不回调）
+
+> 坑：PySide6 中 `super().finished` 会被子类同名信号遮蔽，不能用于此目的；自定义信号必须避开 QThread 原生信号名（finished/started）。
+
+---
+
+## workers/mysql_sync_worker.py MySQL 同步 Worker
+
+### MysqlSyncWorker
+
+异步推送本地 SQLite 数据到远程 MySQL。
+
+```python
+MysqlSyncWorker(table_name=None, parent=None, cfg=None)
+```
+
+- `table_name` 为空推全部表；`"aftersale_records"` 走售后业务键 upsert；其他表名单独推送
+- `cfg`：显式连接配置（「立即同步」用表单最新值，避免读旧配置）
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `progress` | `Signal(str)` | 阶段进度（如 "billiard_tables: 120 条已推送"） |
+| `success` | `Signal(int, str)` | 成功（总条数, 耗时描述） |
+| `error` | `Signal(str)` | 失败信息 |
+
+### MysqlTestWorker
+
+异步测试 MySQL 连接。
+
+```python
+MysqlTestWorker(cfg, parent=None)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `finished` | `Signal(bool, str)` | (是否成功, 描述) |
+
+---
+
 ## database/ 数据层
 
 ### database.table_db
@@ -542,13 +599,126 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 
 | 函数 | 说明 |
 |------|------|
-| `save_xqzg(rows)` / `query_xqzg_page(page_no, page_size, keyword="", order_by="", desc=False)` | xqzg 数据存取（无日期分区，数据在 `results` 键） |
+| `save_xqzg(rows)` / `query_xqzg_page(page_no, page_size, keyword="", order_by="", desc=False, include_files=False)` | xqzg 数据存取（无日期分区，数据在 `results` 键；`include_files=True` 时返回 8 类文件清单反序列化，列表页默认轻量模式） |
 | `save_kd(rows, file_path="")` / `query_kd_page(page_no, page_size, keyword="", file_path="", order_by="", desc=False, include_files=False)` | kd 数据按日期分区存取（自动序列化/反序列化文件列表字段）；`include_files=False` 时轻量查询不含 8 类文件 JSON |
 | `upsert_kd(rows, file_path="")` | 按 `(file_path, device_code)` 增量更新/插入（keyword 搜索拉取专用，不覆盖同日期其他设备） |
-| `get_kd_row_full(row_id)` | 按 id 查完整行（含文件清单反序列化，配合轻量列表页懒加载） |
+| `get_kd_row_full(row_id)` / `get_xqzg_row_full(row_id)` | 按 id 查完整行（含文件清单反序列化，配合轻量列表页懒加载） |
 | `get_kd_dates()` | 获取本地已有的 kd 日期分区列表（降序） |
 
 kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动清理过期分区。
+
+**两数据源字段对照（同套接口字段，无独有字段）**：
+
+接口1（xqzg，`https://xqzg.newbv.cn/api/snooker_om/status/`）与接口2（kd，`http://kd.newbv.cn:30005/api/devices/status/`）返回同套字段集（约 50 个）：`device_code` / `room_id` / `table_id` / `club_name` / `status` / `address` / `local_code` / 各类计数 / `target_directory` / `normal_total` / `pic_total` / 8 类文件清单（`normal_files`…`version_files`）/ `region` / `error_rate` / `operation_rate` 等。`xqzg_status` 与 `kd_status` 表均按「13 个统计字段（`STATUS_FIELDS`）+ 10 个扩展字段（`KD_EXTRA_FIELDS`：`device_code`、`target_directory`、`status`、8 类文件清单）」落库，文件清单 JSON 序列化；FTS 搜索字段 = 统计字段 + `device_code`。
+
+**设计上就不同的点（非 bug，勿按缺陷处理）**：
+
+| 差异 | kd（接口2） | xqzg（接口1） |
+|------|------|------|
+| 数据组织 | 按日期分区快照（`file_path`=`2026/08/02`），历史保留 60 天 | 全量快照、无日期分区，面板日期选择器禁用 |
+| `target_directory` 路径 | `/home/opt/backend/media/{日期}/{device_code}`（含日期分区） | `/opt/rbac-SnookerOm/backend/media//{device_code}`（无日期、双斜杠） |
+| 图片迁移（migrate_image） | 可用（按 kd 路径约定拼接目标目录） | 不可用（路径无日期分区，面板不显示迁移按钮） |
+| 服务端关键词过滤 | 支持（`DevicesFetchWorker(keyword=...)`） | 不支持（全量拉取后本地 FTS 过滤） |
+| 每小时定时刷新 | 启用（status 时效性高） | 停用 |
+| 响应键名 | `lists` | `results` |
+| 认证 | JWT（`/api/getAccessToken/`），401 自动重登 | Session + CSRF，401/403 自动重登 |
+| `photo_list` | 有内容 | 恒为空数组 |
+
+**修复记录（2026-08）**：历史版本 `save_xqzg` 只落库 13 个统计字段，丢弃 `device_code`/`status`/`target_directory`/8 类文件清单，导致 xqzg 源下状态列恒为「未知」、文件面板/右键复制为空、CSV 缺设备编码列、status 列排序 SQL 报错（旧表无该列）且 error 信号未连接静默失败。已修复：`save_xqzg` 全字段落库；旧库（SQLite `PRAGMA` / MySQL `SHOW COLUMNS`）启动时自动 `ALTER TABLE ADD COLUMN` 补列并重建 FTS（`xqzg_fts` 补 `device_code` 列后 drop 重建）；查询/排序/FTS/懒加载全覆盖扩展字段；两个拉取 Worker 按 `total` 自动翻页拉全（单页 1000/1200，上限 50 页），超过单页大小的设备不再静默丢失；`_DBQueryWorker` 信号改名 `result_ready`（避免遮蔽 Qt 原生 `finished`）并补齐 error 连接，切换数据源来回切换不报错、不丢缓存。
+
+---
+
+### database.backend
+
+数据库后端切换层（测试模式：MySQL 完全替代本地 SQLite）。`table_db` / `aftersale_db` 的所有读写均经此模块路由：开关关闭走 sqlite3 本地连接（原行为零改动），开关开启走 `MysqlConnectionAdapter` 包装的 pymysql 连接，调用方无需感知方言差异。
+
+| 函数/常量 | 签名 | 说明 |
+|-----------|------|------|
+| `is_mysql_test_mode()` | `() -> bool` | MySQL 测试模式是否开启（读 `settings.json` → `mysql_sync.enabled`） |
+| `create_mysql_connection()` | `() -> MysqlConnectionAdapter` | 创建 MySQL 连接适配器；pymysql 未安装抛 RuntimeError。关键参数：`autocommit=True`（QThread 结束后 thread-local 连接被丢弃，若留未提交事务会持元数据锁级联卡死）、读写超时 60s |
+| `convert_placeholders(sql)` | `(str) -> str` | SQLite 占位符 `?` → MySQL `%s`（跳过字符串字面量内的 `?`） |
+| `convert_on_conflict(sql)` | `(str) -> str` | `ON CONFLICT(col) DO UPDATE SET ...=excluded.x` → `ON DUPLICATE KEY UPDATE ...=VALUES(x)` |
+| `convert_insert_or_replace(sql)` | `(str) -> str` | `INSERT OR REPLACE` → `INSERT`（MySQL 无此语法） |
+| `MYSQL_DDL` | `dict` | 8 张表的 MySQL 建表语句（IF NOT EXISTS 幂等，与 SQLite DDL 一一对应） |
+
+**类 `MysqlConnectionAdapter`**：模拟 `sqlite3.Connection` 接口。`execute`/`executemany` 自动套用全部方言转换；`PRAGMA` 静默跳过；`executescript` 按分号拆条执行；附 `column_exists` / `table_exists`（替代 `PRAGMA table_info`）。
+
+**类 `MysqlCursorAdapter`**：模拟 `sqlite3.Cursor` 接口（`fetchone`/`fetchall`/`description`/`rowcount`/`lastrowid`/可迭代）。
+
+方言转换还涵盖：SQLite `date()` 函数 → `DATE_SUB/DATE_FORMAT`、去除 `COLLATE NOCASE`、`sync_meta.key/value` 保留字加反引号。
+
+---
+
+### database.aftersale_db
+
+售后记录数据层（SQLite / MySQL 双后端，自动跟随 MySQL 测试开关）。连接复用 `table_db` 双后端路由（SQLite 单连接 / MySQL thread-local）；MySQL 模式下多人各自提交即提交即落库，其他用户刷新/手动同步后可见。
+
+#### 常量
+
+| 常量 | 说明 |
+|------|------|
+| `ISSUE_TYPES` | 类型枚举（11 值：硬件问题/程序相关/识别问题/...） |
+| `REGIONS_PRESET` | 地区预置（9 值，允许自由输入新地区） |
+| `RESPONSE_TIME_PRESET` | 响应时间预置档位（5 档，允许自由输入） |
+| `RECORD_FIELDS` | 记录字段元组（与建表 DDL 一致，不含 id） |
+
+#### 周期计算（可配置模式）
+
+周期模式：`tue`=周二起（默认）/ `mon`=自然周（周一起）/ `custom`=自定义起始日+周期天数。配置存于 `settings.json` 的 `aftersale_cycle` 节点。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `load_cycle_mode()` | `() -> dict` | 读取周期模式 `{type, start, span}`，缺省/非法回退周二起 |
+| `save_cycle_mode(mode)` | `(dict) -> dict` | 合并写周期配置（保留 settings.json 其余字段），返回规范化配置 |
+| `cycle_span_days()` | `() -> int` | 当前模式周期天数：tue/mon 固定 7，custom 取配置值（≥1） |
+| `cycle_start_of(dt)` | `(datetime) -> str` | 计算给定时间所属周期起始日（`yyyy/MM/dd`），按当前模式分发 |
+| `current_cycle_start()` | `() -> str` | 当前周期起始日 |
+| `cycle_label(cycle_start)` | `(str) -> str` | 周期展示标签 `08/18 - 08/24`（起始日 + span-1 天） |
+
+**周期归属统一按记录发生时间动态计算**：列表筛选、统计、周期下拉、导出四处共用 `_record_cycle(occurred_at, created_at)`（occurred_at 缺失/非法时回退 created_at）→ `cycle_start_of`，不依赖冗余落库的 `cycle_start` 字段（该字段仅作导出展示，可能因周期配置变更与实际归属不一致）。SQL 侧只过滤类型/状态/关键词，周期在 Python 侧按同一规则过滤，保证列表与统计口径一致。
+
+#### 增删改
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `insert_record(record)` | `(dict) -> int` | 新增记录返回 id。created_at 取填写时刻；occurred_at 缺省取当日；cycle_start 按发生时间归属（缺失回退填写时间）；snk_code/device_code 未提供时按桌号精确匹配球桌库自动带出 |
+| `update_record(record)` | `(dict) -> int` | 按 id 更新（created_at 保留原值），cycle_start 缺失时按发生时间重算 |
+| `delete_record(rec_id)` | `(id) -> int` | 按 id 删除，返回受影响行数 |
+
+#### 查询
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `query_page(page_no, page_size, keyword="", cycle_start="", issue_type="", resolved="")` | `-> (total, rows)` | 分页查询。周期在 Python 侧按记录时间动态归属（`_match_cycle`），SQL 仅过滤类型/状态/关键词 |
+| `query_with_stats(...)` | `-> (total, rows, stats)` | 分页 + 同口径统计。stats 不带 resolved 筛选（避免已解决/未解决计数退化），返回 `{total, resolved, unresolved}` |
+| `get_cycle_options()` | `() -> list` | 周期下拉选项：库中记录实际归属周期（按 occurred_at 动态计算）去重降序。**仅返回确有数据的周期，不额外插入库中不存在的当前周期** |
+| `get_field_candidates()` | `() -> dict` | 动态候选 `{problems, resolvers, regions}`（按使用频次降序各取前 60），问题候选为空时合并预置常见项 |
+
+#### 导出 / 导入
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `export_xlsx(path, keyword="", cycle_start="", issue_type="", resolved="")` | `-> int` | 按筛选条件导出全部记录为 xlsx，返回条数。表头与售后汇总 Excel 对齐，附加填写时间/填写人/周期列；周期列按发生时间动态归属展示 |
+| `parse_excel_rows(xlsx_path)` | `-> (headers, rows)` | 解析售后汇总 Excel（不写库），供导入预览与正式导入共用。表头按中文名定位，类型列分组首行向下填充，空行跳过，是否解决默认「否」，缺必需列抛 ValueError |
+| `import_excel_rows(xlsx_path)` | `-> int` | 一次性导入历史 Excel，返回导入条数（内部调 `parse_excel_rows` 后批量写库） |
+
+---
+
+### database.mysql_sync
+
+MySQL 远程镜像同步层（SQLite → MySQL 单向推送）。SQLite 始终为主读写库，本模块只做单向推送，绝不反向写入 SQLite；pymysql 不可用或连接失败时静默降级。首次连接自动建库建表（幂等）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `test_connection(cfg=None)` | `-> (ok, msg)` | 测试 MySQL 连接是否可达（先无 database 连接测基础连通性） |
+| `ensure_schema(cfg=None)` | `-> (ok, msg)` | 确保远程库与表结构就绪（幂等，含旧库补列迁移） |
+| `push_all(progress_cb=None)` | `-> (ok, msg, total)` | 全量推送 5 张运维业务表（billiard_tables/xqzg_status/kd_status 全量覆盖，submission_log 增量追加，device_mapping 全量覆盖），记录 last_push_time |
+| `push_table(table_name, progress_cb=None)` | `-> (ok, msg, count)` | 按表名单独推送 |
+| `push_aftersale(cfg=None, progress_cb=None)` | `-> (ok, msg, count)` | 售后记录安全推送：业务键 `(created_at, creator, table_no, problem)` 去重 upsert（不 TRUNCATE 不按 id 去重）。多用户共享库全量 replace 会清掉他人数据，两侧 id 各自增长会撞车；不存在则 INSERT、存在则 UPDATE，本地删除不反向删除远程 |
+| `is_enabled()` | `() -> bool` | MySQL 同步是否已启用 |
+| `get_last_push_time()` | `() -> str` | 从 MySQL 读取上次推送时间，未推送过/连接失败返回空串 |
+
+推送策略：`_push_replace`（TRUNCATE + INSERT 全量覆盖）/ `_push_upsert`（ON DUPLICATE KEY UPDATE 按主键去重）/ `_push_insert_ignore`（INSERT IGNORE 仅追加）。`_read_sqlite` 按实际列与目标列取交集读取，本地老库缺列补空串占位。
 
 ---
 
@@ -706,6 +876,62 @@ ManagementPanelWindow(parent=None)
 | `_silent_refresh()` | 迁移后静默重拉当前数据源 |
 
 **模块级辅助**：`_load_settings()` / `_save_settings(data)`（settings.json 合并读写）、`_copy_table_selection(table)`（表格选中内容复制）、`FILE_FIELD_CATEGORIES`（文件字段 → 中文分类）。
+
+---
+
+### AftersalePanelWindow（售后面板）
+
+`windows/aftersale_panel.py`：售后面板（qfluentwidgets `FluentWindow` + 左侧导航，风格仿运维管理面板）。由主窗口 `_on_open_aftersale`（单例复用）或运维面板入口打开，支持 `python -m windows.aftersale_panel` 独立调试。数据层 `database/aftersale_db.py`，所有 DB 读写经 `AftersaleDBWorker` 后台线程，UI 零阻塞。
+
+```python
+AftersalePanelWindow(parent=None)
+```
+
+**页面构成**：
+
+| 页面 | 类 | 说明 |
+|------|------|------|
+| 填写录入 | `EntryPage` | 售后问题登记表单（`AftersaleForm`），提交后写库并通知记录页刷新 |
+| 记录与统计 | `RecordsPage` | 筛选（周期/类型/状态/关键词）+ 分页 + 统计 + 编辑/删除/导出 xlsx/导入 Excel |
+| 设置 | `SettingsPage` | 统计周期设置（`CycleSettingsPage`）+ 数据库设置（`MysqlSyncCard` sync_scope="aftersale"） |
+
+**共享表单 `AftersaleForm`**（录入页与编辑弹窗复用）：字段与售后汇总 Excel 对齐 + 系统附加字段。球房输入防抖搜索球桌库，候选点选/唯一命中自动带出桌号/SNK/城市；发生时间步进按钮补录历史日期。
+
+| 方法 | 说明 |
+|------|------|
+| `load_candidates(cands)` | 填充动态候选（问题/解决人/地区），保留已输入文本 |
+| `set_values(rec)` / `collect()` / `validate()` / `clear_form()` | 编辑回填 / 收集值 / 必填校验 / 清空 |
+
+**周期筛选**（`RecordsPage`）：周期下拉选项来自 `get_cycle_options()`（库中记录实际归属周期）；当前周期仅在库中有数据时出现。切换周期后列表与统计按同一套归属规则重查，一一对应。
+
+| 关键方法 | 说明 |
+|------|------|
+| `_load_cycles_then_data()` | 先异步拉周期选项填充下拉，再加载数据 |
+| `_on_cycles_loaded(cycle_starts)` | 填充周期下拉（当前周期仅有数据时显示），默认选中当前周期否则全部周期 |
+| `_load()` | 按当前筛选异步查询（分页 + 统计一次返回） |
+| `set_keyword(kw)` | 球桌管理右键跳转：按桌号预筛选，周期放宽为全部 |
+
+**弹窗**：`EditRecordDialog(MessageBoxBase)` 编辑记录（复用共享表单）；`ImportPreviewDialog(QDialog)` 导入预览（字段要求提示 + 前 20 行解析效果 + 确认导入）。`FluentCombo` 为原生 QComboBox + Fluent 统一样式（主题自适应 + 自绘下拉箭头，支持 setEditable/findData）。
+
+**周期设置 `CycleSettingsPage`**：统计周期模式单选（周二起默认/自然周/自定义起始日+天数），保存写 settings.json 并 `saved` 信号通知记录页刷新周期下拉与统计。
+
+---
+
+### MysqlSyncCard（MySQL 同步配置卡片）
+
+`windows/mysql_sync_card.py`：可复用 MySQL 同步配置卡片（运维面板 / 售后面板共用）。连接表单 + 启用/自动同步开关 + 测试连接/立即同步/保存配置按钮。配置读写 DPAPI 加密落盘，以磁盘最新内容为 base 合并写（防双缓存覆盖）。
+
+```python
+MysqlSyncCard(parent=None, sync_scope="ops")
+```
+
+- `sync_scope="ops"`：推 5 张运维业务表，卡片标题「MySQL 远程同步」
+- `sync_scope="aftersale"`：只推售后记录，卡片标题「数据库设置（MySQL）」
+
+| 方法 | 说明 |
+|------|------|
+| `load()` | 从 settings.json 加载当前配置填充表单 |
+| `_on_test()` / `_on_sync()` / `_on_save()` | 异步测试连接 / 先落盘再推送 / 合并写配置即时生效 |
 
 ---
 
@@ -979,6 +1205,9 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `perf_acrylic` | bool | true | 亚克力效果性能开关 |
 | `perf_animation` | bool | true | 界面动画性能开关 |
 | `api_credentials` | object | — | 运维面板 API 配置（见下表） |
+| `mysql_sync` | object | — | MySQL 同步配置（见下表，售后面板/运维面板共用） |
+| `aftersale_cycle` | object | `{type:tue}` | 售后统计周期模式（见下表） |
+| `newlog_target_name` | str | — | NewLog 整理署名，同时作为售后面板填写人默认值 |
 | `shortcut_*` | str | 见上表 | 快捷键配置（共 9 项） |
 
 **api_credentials 子结构**（由管理设置页维护）：
@@ -988,6 +1217,24 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `active_source` | 启用的设备数据源：`kd`（默认）/ `xqzg` |
 | `api1.username` / `api1.password` | 接口1 xqzg（Session 认证）账号密码 |
 | `api2.username` / `api2.password` | 接口2 kd（JWT 认证）账号密码 |
+
+**mysql_sync 子结构**（由运维面板/售后面板的 MySQL 同步卡片维护，密码 DPAPI 加密）：
+
+| 字段 | 说明 |
+|------|------|
+| `enabled` | 是否启用（开启后 MySQL 完全替代本地 SQLite） |
+| `host` / `port` | MySQL 服务器地址与端口（默认 3306） |
+| `user` / `password` | 账号密码（密码 DPAPI 加密） |
+| `database` | 数据库名（默认 autowork） |
+| `auto_sync` | 每次 API 同步后自动推送到 MySQL |
+
+**aftersale_cycle 子结构**（由售后面板「设置 → 统计周期设置」维护）：
+
+| 字段 | 说明 |
+|------|------|
+| `type` | 周期模式：`tue`（周二起，默认）/ `mon`（自然周）/ `custom`（自定义） |
+| `start` | custom 模式的周期起始日（`yyyy-MM-dd`） |
+| `span` | custom 模式的周期天数（≥1，默认 7） |
 
 ---
 

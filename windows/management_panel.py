@@ -280,7 +280,11 @@ def _trigger_auto_mysql_sync():
     global _mysql_auto_worker
     settings = _load_settings()
     mysql_cfg = settings.get("mysql_sync", {})
-    if not mysql_cfg.get("enabled") or not mysql_cfg.get("auto_sync"):
+    # MySQL 主模式（enabled=true）下 SQLite 已非主库，镜像推送只会用陈旧 SQLite
+    # TRUNCATE 覆盖新鲜 MySQL 数据 → 跳过。auto_sync 仅在 SQLite 主+镜像时生效。
+    if mysql_cfg.get("enabled"):
+        return
+    if not mysql_cfg.get("auto_sync"):
         return
     if _mysql_auto_worker and _mysql_auto_worker.isRunning():
         return
@@ -325,7 +329,8 @@ def _query_xqzg_page_with_stats(page_no, page_size, keyword,
                                 sort_key, sort_desc, hf_days):
     """xqzg 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）"""
     total, rows = table_db.query_xqzg_page(
-        page_no, page_size, keyword, sort_key, sort_desc)
+        page_no, page_size, keyword, sort_key, sort_desc,
+        include_files=False)  # 列表页轻量行，文件 JSON 点开行时按 id 懒加载
     try:
         hf = table_db.get_submission_stats(days=hf_days)
     except Exception:
@@ -364,13 +369,19 @@ def _show_export_bar(parent, path: str, count: int):
 
 # ==================== 后台数据库查询/保存 Worker ====================
 
+# 运行中的查询 worker 保活集合：QThread 对象在 run() 结束前保持强引用，
+# 防止频繁刷新/切换时旧 worker 被 GC 销毁导致
+# `QThread: Destroyed while thread is still running` 崩溃
+_running = set()
+
+
 class _DBQueryWorker(QThread):
     """后台数据库查询/保存 Worker（通用封装）
 
     将 table_db 的同步操作移到工作线程，避免阻塞 GUI。
-    通过 finished 信号返回结果，error 信号返回异常信息。
+    通过 result_ready 信号返回结果，error 信号返回异常信息。
     """
-    finished = Signal(object)
+    result_ready = Signal(object)  # 查询/保存结果（不能命名为 finished，会遮蔽 Qt 原生 finished）
     error = Signal(str)
 
     def __init__(self, func, *args, **kwargs):
@@ -378,11 +389,20 @@ class _DBQueryWorker(QThread):
         self.func = func
         self.args = args
         self.kwargs = kwargs
+        _running.add(self)  # 保活：线程退出前不被 GC
+        # 用 Qt 原生 finished 做清理：它由 Qt 在 run() 返回后（线程已标记结束）发射，
+        # Queued 到主线程执行 _release 时销毁是安全的。
+        # 注意：PySide6 中 super().finished 会被子类同名信号遮蔽，不能用于此目的
+        self.finished.connect(self._release)
+
+    def _release(self):
+        """线程已退出，可安全释放保活引用（Queued 到主线程执行）"""
+        _running.discard(self)
 
     def run(self):
         try:
             result = self.func(*self.args, **self.kwargs)
-            self.finished.emit(result)
+            self.result_ready.emit(result)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -1061,7 +1081,7 @@ class TablePage(QWidget):
         self._load_local()
         # 异步获取元数据，判断是否需要首次同步
         self._meta_worker = _DBQueryWorker(table_db.get_meta)
-        self._meta_worker.finished.connect(self._on_meta_finished)
+        self._meta_worker.result_ready.connect(self._on_meta_finished)
         self._meta_worker.start()
 
     def _init_ui(self):
@@ -1204,7 +1224,7 @@ class TablePage(QWidget):
         self._query_worker = _DBQueryWorker(
             table_db.query_page, self._page_no, self._page_size, keyword,
             include_test=self._show_test, include_manual=self._show_manual)
-        self._query_worker.finished.connect(
+        self._query_worker.result_ready.connect(
             lambda result, kw=keyword: self._on_query_finished(result, kw))
         self._query_worker.start()
 
@@ -1216,7 +1236,7 @@ class TablePage(QWidget):
         self._update_pager(keyword)
         # 异步获取同步时间
         self._time_worker = _DBQueryWorker(table_db.get_meta)
-        self._time_worker.finished.connect(self._on_time_meta)
+        self._time_worker.result_ready.connect(self._on_time_meta)
         self._time_worker.start()
 
     def _on_time_meta(self, result):
@@ -1238,7 +1258,7 @@ class TablePage(QWidget):
     def _on_sync_done(self, rows):
         """API 同步完成：异步保存数据到本地数据库"""
         self._save_worker = _DBQueryWorker(table_db.save_all, rows)
-        self._save_worker.finished.connect(self._on_save_finished)
+        self._save_worker.result_ready.connect(self._on_save_finished)
         self._save_worker.start()
 
     def _on_save_finished(self, count):
@@ -1480,7 +1500,7 @@ class TablePage(QWidget):
         self._export_worker = _DBQueryWorker(
             table_db.query_page, 1, _EXPORT_MAX_ROWS, keyword,
             include_test=self._show_test, include_manual=self._show_manual)
-        self._export_worker.finished.connect(
+        self._export_worker.result_ready.connect(
             lambda result, p=path: self._on_export_query(result, p))
         self._export_worker.error.connect(
             lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
@@ -1679,7 +1699,7 @@ class FileListPanel(QWidget):
             self._query_worker.disconnect(self)
         self._query_worker = _DBQueryWorker(
             table_db.query_kd_by_device, code, date)
-        self._query_worker.finished.connect(self._on_refresh_query)
+        self._query_worker.result_ready.connect(self._on_refresh_query)
         self._query_worker.start()
 
     def _on_refresh_query(self, fresh):
@@ -2280,8 +2300,12 @@ class DevicePage(QWidget):
                 self._sort_key, self._sort_desc, _HF_DAYS)
         # 用默认参数 d/kw 快照本次查询的日期与关键词：lambda 闭包捕获的是变量引用，
         # 不快照的话，等回调触发时用户已切日期/改关键词，会拿新值误判本次查询已过期
-        self._query_worker.finished.connect(
+        self._query_worker.result_ready.connect(
             lambda result, d=date, kw=keyword: self._on_query_finished(result, d, kw))
+        # 查询/排序出错不能静默：xqzg 旧库缺 status 列时列表头排序曾整表静默失败
+        self._query_worker.error.connect(
+            lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
+                                      title="查询失败", parent=self, duration=4000))
         self._query_worker.start()
 
     def _on_query_finished(self, result, date="", keyword=""):
@@ -2339,7 +2363,7 @@ class DevicePage(QWidget):
         带 keyword 拉取的结果是部分数据，走 upsert_kd 增量更新；
         save_kd 是按日期全量替换，直接保存会删除同日期下其他设备。
         """
-        rows = data.get("lists") or data.get("results") or []
+        rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
         keyword = getattr(self, "_fetch_keyword", "")
         if self._active_source() == "xqzg":
             self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
@@ -2353,7 +2377,7 @@ class DevicePage(QWidget):
             self._save_worker = _DBQueryWorker(save_func, rows, date)
             date_desc = date
         # 默认参数 dd 快照本次日期描述，理由同 _load_local 里的 lambda 快照
-        self._save_worker.finished.connect(
+        self._save_worker.result_ready.connect(
             lambda count, dd=date_desc: self._on_save_finished(count, dd))
         self._save_worker.start()
 
@@ -2511,18 +2535,20 @@ class DevicePage(QWidget):
         return {}
 
     def _get_full_row_at(self, row_idx) -> dict:
-        """获取指定行完整数据（含 8 类文件清单）：kd 数据按 id 懒加载
+        """获取指定行完整数据（含 8 类文件清单）：按数据源懒加载完整行
 
         列表页缓存为轻量行（不含文件 JSON），仅在点开详情时单点查询；
-        xqzg 数据源无文件字段直接返回缓存行。
+        kd/xqzg 接口同套字段、落库均含文件清单，按数据源分别懒加载。
         """
         row = self._get_row_at(row_idx)
-        if not row or self._active_source() != "kd":
+        if not row:
             return row
         row_id = row.get("id")
         if row_id is None:
             return row
-        return table_db.get_kd_row_full(row_id) or row
+        if self._active_source() == "kd":
+            return table_db.get_kd_row_full(row_id) or row
+        return table_db.get_xqzg_row_full(row_id) or row
 
     def _show_context_menu(self, pos):
         """右键菜单：查看文件列表 / 复制文件列表 / 复制单元格 / 远程连接 / 清除映射"""
@@ -2687,7 +2713,11 @@ class DevicePage(QWidget):
         if not data:
             return
         title, fields = cfg
-        can_migrate = bool(fields) and all(f in _MIGRATABLE_FIELDS for f in fields)
+        # 迁移仅 kd 数据源可用：xqzg 的 target_directory 无日期分区（路径没有
+        # /yyyy/MM/dd/ 段），migrate_image 按 kd 路径约定拼接会拼错目标
+        can_migrate = (self._active_source() == "kd"
+                       and bool(fields)
+                       and all(f in _MIGRATABLE_FIELDS for f in fields))
         self._file_panel.show_files(data, title, fields, can_migrate=can_migrate)
         # 注意：点击精度/问题单元格只展示文件列表，不触发收集；
         # 收集统一由迁移按钮（精度/问题提交）成功后在 _on_migrate_ok 中触发
@@ -2980,13 +3010,13 @@ class DevicePage(QWidget):
 
     def _on_refresh_done(self, data):
         """迁移后静默刷新完成：异步保存数据"""
-        rows = data.get("lists") or data.get("results") or []
+        rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
         date = self._current_date()
         if self._active_source() == "xqzg":
             self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
         else:
             self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
-        self._save_worker.finished.connect(self._on_refresh_save_finished)
+        self._save_worker.result_ready.connect(self._on_refresh_save_finished)
         self._save_worker.start()
 
     def _on_refresh_save_finished(self, _count):
@@ -3018,10 +3048,10 @@ class DevicePage(QWidget):
 
     def _on_hourly_done(self, data):
         """每小时定时拉取完成：异步保存数据"""
-        rows = data.get("lists") or data.get("results") or []
+        rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
         today = QDate.currentDate().toString("yyyy/MM/dd")
         self._save_worker = _DBQueryWorker(table_db.save_kd, rows, today)
-        self._save_worker.finished.connect(
+        self._save_worker.result_ready.connect(
             lambda count: self._on_hourly_save_finished(count, today))
         self._save_worker.start()
 
@@ -3063,7 +3093,7 @@ class DevicePage(QWidget):
             self._export_worker = _DBQueryWorker(
                 table_db.query_kd_page, 1, _EXPORT_MAX_ROWS, keyword, date,
                 self._sort_key, self._sort_desc)
-        self._export_worker.finished.connect(
+        self._export_worker.result_ready.connect(
             lambda result, p=path, s=src: self._on_export_query(result, p, s))
         self._export_worker.error.connect(
             lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
@@ -3073,12 +3103,9 @@ class DevicePage(QWidget):
     def _on_export_query(self, result, path, src):
         """导出查询完成：按数据源拼表头写 CSV（utf-8-sig）"""
         _total, rows = result
-        if src == "kd":
-            header = ["设备编码"] + [c[1] for c in DEVICE_COLUMNS]
-            keys = ["device_code"] + [c[0] for c in DEVICE_COLUMNS]
-        else:
-            header = [c[1] for c in DEVICE_COLUMNS]
-            keys = [c[0] for c in DEVICE_COLUMNS]
+        # 两数据源接口同套字段、落库均含 device_code：统一带设备编码列
+        header = ["设备编码"] + [c[1] for c in DEVICE_COLUMNS]
+        keys = ["device_code"] + [c[0] for c in DEVICE_COLUMNS]
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
@@ -3157,9 +3184,9 @@ class DevicePage(QWidget):
 
     def _on_backfill_done(self, data, date):
         """补漏拉取完成：异步落库（复用 _DBQueryWorker，不阻塞 GUI）"""
-        rows = data.get("lists") or data.get("results") or []
+        rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
         self._backfill_save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
-        self._backfill_save_worker.finished.connect(
+        self._backfill_save_worker.result_ready.connect(
             lambda count, dt=date: self._on_backfill_saved(count, dt))
         self._backfill_save_worker.error.connect(
             lambda msg, dt=date: self._on_backfill_save_error(msg, dt))
@@ -3868,7 +3895,7 @@ class TrendPage(QWidget):
                 pass
         worker = _DBQueryWorker(func, *args)
         setattr(self, attr, worker)
-        worker.finished.connect(on_ok)
+        worker.result_ready.connect(on_ok)
         worker.error.connect(
             lambda msg: logger.warning("趋势页查询失败: %s", msg))
         worker.start()

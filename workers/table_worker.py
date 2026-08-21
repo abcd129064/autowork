@@ -137,11 +137,16 @@ class SnookerOmFetchWorker(QThread):
     """异步拉取接口1数据（Session + CSRF 认证，支持过期自动重登录）
 
     Signals:
-        result_ready(dict): 接口返回的完整 JSON（含 total, results, summary_row 等）
+        result_ready(list): 拉取到的全量记录列表（自动按 total 翻页拉全，
+            即接口 results 键的全部内容；单页 detail 数据不再透出）
         error(str): 错误信息
     """
-    result_ready = Signal(dict)
+    result_ready = Signal(list)
     error = Signal(str)
+
+    # 单页大小与最大页数保护（防止接口异常导致死循环）
+    _PAGE_SIZE = 1000
+    _MAX_PAGES = 50
 
     def __init__(self, file_path="", page=1, pagesize=1000,
                  username=None, password=None, parent=None):
@@ -170,7 +175,11 @@ class SnookerOmFetchWorker(QThread):
         return None
 
     def run(self):
-        """登录 → 拉数据，401/403 自动重登重试一次"""
+        """登录 → 拉数据，401/403 自动重登重试一次；按接口 total 循环翻页拉全
+
+        首页拿 total 后自动翻页（与 TableFetchWorker 同策略），避免设备数
+        超过单页 pagesize 时后续记录被静默遗漏。
+        """
         try:
             if not self.username or not self.password:
                 self.error.emit("接口1账号密码未配置，请在 settings.json 的 api_credentials.api1 中填写")
@@ -181,23 +190,42 @@ class SnookerOmFetchWorker(QThread):
                 self.error.emit("接口1登录失败，请检查账号密码")
                 return
 
-            params = {
+            base_params = {
                 "file_path": self.file_path,
                 "page": self.page,
                 "pagesize": self.pagesize,
             }
-            resp = session.get(API1_DATA_URL, params=params, timeout=30)
-
-            # Session 过期，自动重新登录重试一次
-            if resp.status_code in (401, 403):
-                session = self._login()
-                if session is None:
-                    self.error.emit("接口1 Session 过期且重新登录失败")
-                    return
+            rows = []
+            page = max(1, self.page)
+            # 以「已请求页数 × 每页条数」是否覆盖 total 为准，翻页直至拉全
+            while page - self.page < self._MAX_PAGES:
+                params = dict(base_params, page=page)
                 resp = session.get(API1_DATA_URL, params=params, timeout=30)
 
-            resp.raise_for_status()
-            self.result_ready.emit(resp.json())
+                # Session 过期，自动重新登录重试一次
+                if resp.status_code in (401, 403):
+                    session = self._login()
+                    if session is None:
+                        self.error.emit("接口1 Session 过期且重新登录失败")
+                        return
+                    resp = session.get(API1_DATA_URL, params=params, timeout=30)
+
+                resp.raise_for_status()
+                data = resp.json()
+                batch = data.get("results") or []
+                if not batch:  # 接口提前返回空页，避免死循环
+                    break
+                rows.extend(batch)
+                # total 可能为字符串，统一转 int；无法解析时按已拉取数量处理
+                try:
+                    total = int(data.get("total") or 0)
+                except (TypeError, ValueError):
+                    total = len(rows)
+                if page * int(self.pagesize) >= total:
+                    break
+                page += 1
+
+            self.result_ready.emit(rows)
 
         except requests.exceptions.Timeout:
             self.error.emit("接口1请求超时（30秒），请检查网络")
@@ -229,9 +257,19 @@ DIR_CATEGORIES = {v: k for k, v in CATEGORY_DIRS.items()}
 
 
 class DevicesFetchWorker(QThread):
-    """异步拉取接口2设备状态（JWT 认证，Token 过期自动重登，支持关键词搜索）"""
-    result_ready = Signal(dict)
+    """异步拉取接口2设备状态（JWT 认证，Token 过期自动重登，支持关键词搜索）
+
+    Signals:
+        result_ready(list): 拉取到的全量记录列表（自动按 total 翻页拉全，
+            即接口 lists 键的全部内容）
+        error(str): 错误信息
+    """
+    result_ready = Signal(list)
     error = Signal(str)
+
+    # 单页大小与最大页数保护（防止接口异常导致死循环）
+    _PAGE_SIZE = 1200
+    _MAX_PAGES = 50
 
     def __init__(self, file_path="", page=1, pagesize=1200, keyword="",
                  username=None, password=None, parent=None):
@@ -264,7 +302,11 @@ class DevicesFetchWorker(QThread):
         return None
 
     def run(self):
-        """登录拿 token → 拉设备状态，401 自动重登重试一次"""
+        """登录拿 token → 拉设备状态，401 自动重登重试一次；按 total 循环翻页拉全
+
+        首页拿 total 后自动翻页，避免设备数超过单页 pagesize 时后续记录
+        被静默遗漏（keyword 搜索时 total 为匹配数，同样翻页拉全）。
+        """
         try:
             if not self.username or not self.password:
                 self.error.emit("接口2账号密码未配置，请在 settings.json 的 api_credentials.api2 中填写")
@@ -276,7 +318,7 @@ class DevicesFetchWorker(QThread):
                 self.error.emit("接口2登录失败，请检查账号密码")
                 return
 
-            params = {
+            base_params = {
                 "file_path": self.file_path,
                 "page": self.page,
                 "pagesize": self.pagesize,
@@ -284,23 +326,43 @@ class DevicesFetchWorker(QThread):
             # 搜索状态：携带 keyword 参数，服务端只返回匹配设备
             # （requests 的 params 字典自动做 URL 编码，中文等字符安全转义）
             if self.keyword:
-                params["keyword"] = self.keyword
-            headers = {"Authorization": f"Bearer {token}"}
-            resp = requests.get(API2_DATA_URL, params=params,
-                                headers=headers, timeout=30)
+                base_params["keyword"] = self.keyword
 
-            # Token 过期 (401)，自动重新登录重试一次
-            if resp.status_code == 401:
-                token = self._login()
-                if not token:
-                    self.error.emit("接口2 Token 过期且重新登录失败")
-                    return
+            rows = []
+            page = max(1, self.page)
+            # 以「已请求页数 × 每页条数」是否覆盖 total 为准，翻页直至拉全
+            while page - self.page < self._MAX_PAGES:
+                params = dict(base_params, page=page)
                 headers = {"Authorization": f"Bearer {token}"}
                 resp = requests.get(API2_DATA_URL, params=params,
                                     headers=headers, timeout=30)
 
-            resp.raise_for_status()
-            self.result_ready.emit(resp.json())
+                # Token 过期 (401)，自动重新登录重试一次
+                if resp.status_code == 401:
+                    token = self._login()
+                    if not token:
+                        self.error.emit("接口2 Token 过期且重新登录失败")
+                        return
+                    headers = {"Authorization": f"Bearer {token}"}
+                    resp = requests.get(API2_DATA_URL, params=params,
+                                        headers=headers, timeout=30)
+
+                resp.raise_for_status()
+                data = resp.json()
+                batch = data.get("lists") or []
+                if not batch:  # 接口提前返回空页，避免死循环
+                    break
+                rows.extend(batch)
+                # total 可能为字符串，统一转 int；无法解析时按已拉取数量处理
+                try:
+                    total = int(data.get("total") or 0)
+                except (TypeError, ValueError):
+                    total = len(rows)
+                if page * int(self.pagesize) >= total:
+                    break
+                page += 1
+
+            self.result_ready.emit(rows)
 
         except requests.exceptions.Timeout:
             self.error.emit("接口2请求超时（30秒），请检查网络")
