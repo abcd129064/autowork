@@ -8,6 +8,7 @@ import subprocess
 import sys
 import os
 import shutil
+import stat
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
@@ -27,6 +28,29 @@ if os.path.isfile(db_path):
     finally:
         _c.close()
 
+def _rmtree_readonly(path):
+    """递归删除目录；Windows 下遇到只读文件先清只读属性再删，
+    避免 PyInstaller 清理旧 dist 时因只读 frpc.exe 抛 PermissionError。"""
+    if not os.path.exists(path):
+        return
+    def _onerror(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+            func(p)
+        except OSError:
+            pass
+    shutil.rmtree(path, onerror=_onerror)
+
+
+# ---- 打包前：清理上一次构建产物（只读容错）----
+# 历史版本会把只读的 frpc.exe 复制进 dist/AutoWork，PyInstaller 的
+# COLLECT 清理步骤在 Windows 上删不掉只读文件会直接报错退出，
+# 因此这里先自行清理，确保后续 PyInstaller 无需处理被锁的只读文件。
+_old_dist = os.path.join(ROOT, 'dist', 'AutoWork')
+if os.path.isdir(_old_dist):
+    _rmtree_readonly(_old_dist)
+    print('[build_exe] 已清理旧 dist/AutoWork')
+
 result = subprocess.run(
     [sys.executable, "-m", "PyInstaller",
      "--noconfirm", "AutoWork.spec"],
@@ -40,7 +64,13 @@ dist_dir = os.path.join(ROOT, 'dist', 'AutoWork')
 for name in ('settings.json', 'frpc.exe'):
     src = os.path.join(ROOT, name)
     if os.path.isfile(src):
-        shutil.copy2(src, os.path.join(dist_dir, name))
+        dst = os.path.join(dist_dir, name)
+        shutil.copy2(src, dst)
+        # 清除目标只读位，保证下次打包清理时能正常删除
+        try:
+            os.chmod(dst, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
         print(f'[build_exe] 已复制 {name} -> dist/AutoWork/')
     else:
         print(f'[build_exe] 跳过 {name}（源文件不存在）')

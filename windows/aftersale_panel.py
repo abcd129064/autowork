@@ -1114,7 +1114,7 @@ class AftersalePanelWindow(FluentWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("售后面板")
-        self.resize(1920, 1080)
+        self.resize(1360, 768)
         self.setMinimumSize(900, 520)
         self.entry_page = EntryPage(self)
         self.entry_page.setObjectName("aftersaleEntryPage")
