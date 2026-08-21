@@ -51,3 +51,9 @@ _cv2_backup/
 AutoWork.spec.bak
 *.whl
 frp-source-integration.md
+
+.workbuddy
+.qoder
+docs/MySQL双后端边界分析.md
+docs/测试规划.md
+docs/项目理解报告.md
