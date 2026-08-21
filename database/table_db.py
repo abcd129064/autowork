@@ -205,6 +205,7 @@ def _build_order_clause(order_by: str, desc: bool) -> str:
 _CREATE_STATUS_SQL = """
 CREATE TABLE IF NOT EXISTS xqzg_status (
     id              INTEGER PRIMARY KEY,
+    file_path       TEXT DEFAULT '',
     table_id        TEXT DEFAULT '',
     club_name       TEXT DEFAULT '',
     pic_total       TEXT DEFAULT '',
@@ -330,9 +331,10 @@ CREATE INDEX IF NOT EXISTS idx_aftersale_table_no
 # 反序列化大量 JSON 带来的 CPU/内存开销
 _KD_LIGHT_FIELDS = ("file_path",) + STATUS_FIELDS + ("device_code", "target_directory", "status")
 
-# xqzg 表与 kd 表同套字段，仅无 file_path 日期分区（xqzg 为全量快照）
-_XQZG_LIGHT_FIELDS = STATUS_FIELDS + ("device_code", "target_directory", "status")
-_XQZG_FULL_FIELDS = STATUS_FIELDS + KD_EXTRA_FIELDS
+# xqzg 表与 kd 表同套字段，同样按 file_path 日期分区
+# （xqzg API 也支持 ?file_path=yyyy/MM/dd 参数，迁移按钮依赖日期路径拼接）
+_XQZG_LIGHT_FIELDS = ("file_path",) + STATUS_FIELDS + ("device_code", "target_directory", "status")
+_XQZG_FULL_FIELDS = ("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS
 
 
 # 模块级初始化标志：建表脚本与迁移检查只在首次连接时执行一次，
@@ -423,6 +425,12 @@ def _ensure_initialized(conn):
         for f in KD_EXTRA_FIELDS:
             default = "'[]'" if f in KD_FILE_FIELDS else "''"
             conn.execute(f"ALTER TABLE xqzg_status ADD COLUMN {f} TEXT DEFAULT {default}")
+        conn.commit()
+    # 迁移：xqzg_status 旧表缺 file_path 日期分区列（2026-08-22 新增），
+    # ALTER ADD 补列后所有历史行 file_path=''（旧全量快照语义不变）
+    xqzg_cols = [r[1] for r in conn.execute("PRAGMA table_info(xqzg_status)").fetchall()]
+    if xqzg_cols and "file_path" not in xqzg_cols:
+        conn.execute("ALTER TABLE xqzg_status ADD COLUMN file_path TEXT DEFAULT ''")
         conn.commit()
     # 迁移：xqzg_fts 结构落后（缺 device_code 列）时删除，由 _setup_fts 重建
     # （含 rebuild），避免触发器列数不匹配导致 FTS 降级 LIKE
@@ -585,6 +593,16 @@ def _ensure_mysql_tables(conn):
                 ddl = f"ALTER TABLE {table} ADD COLUMN {f} {ctype} DEFAULT ''"
             conn.execute(ddl)
         conn.commit()
+    # 迁移：xqzg_status 缺 file_path 日期分区列（2026-08-22 新增），
+    # kd_status 建表脚本里已含 file_path 字段无需 ALTER
+    try:
+        xqzg_exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM xqzg_status")}
+        if "file_path" not in xqzg_exist:
+            conn.execute(
+                "ALTER TABLE xqzg_status ADD COLUMN file_path VARCHAR(64) DEFAULT ''")
+            conn.commit()
+    except Exception:
+        pass  # 表可能尚未创建，DDL 兜底
 
 
 # 公开别名：aftersale_db 等同包模块复用双后端连接路由（私有名保留不破坏存量调用）
@@ -1036,53 +1054,64 @@ def _probe_status_ext_cols(conn, table: str):
             f"{table} 表缺少扩展列 normal_files，自动迁移未生效，请升级数据库结构: {e}") from e
 
 
-def save_xqzg(rows: list) -> int:
-    """全量替换接口1数据（含扩展字段：状态/设备码/文件清单），返回写入条数
+def save_xqzg(rows: list, file_path: str = "") -> int:
+    """按日期替换接口1数据（含扩展字段：状态/设备码/文件清单），返回写入条数
 
     接口1 与接口2 返回同套字段，除统计计数外还含 device_code / status /
     target_directory / 8 类文件清单，全部落库，保证两种数据源展示能力一致。
+    接口1 API 支持 ?file_path=yyyy/MM/dd，按日期分区存储（与 kd_status 同策略）。
+
+    Args:
+        rows: API 返回的记录列表
+        file_path: 日期路径，如 "2026/08/02"；仅替换该日期的数据
     """
     conn = _get_conn()
     _probe_status_ext_cols(conn, "xqzg_status")
-    conn.execute("DELETE FROM xqzg_status")
+    # 只删除该日期的数据，保留其他日期
+    conn.execute("DELETE FROM xqzg_status WHERE file_path = ?", (file_path,))
     all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
-    placeholders = ", ".join(["?"] * (len(all_fields) + 1))
-    col_names = "id, " + ", ".join(all_fields)
+    placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
+    col_names = "id, file_path, " + ", ".join(all_fields)
+    # 获取当前最大 id，续接编号
+    max_id = conn.execute("SELECT MAX(id) FROM xqzg_status").fetchone()[0] or 0
     data = []
-    for idx, item in enumerate(rows, 1):
-        row_vals = [idx]
+    for idx, item in enumerate(rows, max_id + 1):
+        row_vals = [idx, file_path]
         for f in STATUS_FIELDS:
             row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
         for f in KD_EXTRA_FIELDS:
             val = item.get(f)
             if f in KD_FILE_FIELDS:
-                row_vals.append(json.dumps(
-                    val if isinstance(val, list) else [], ensure_ascii=False))
+                row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
             else:
                 row_vals.append(str(val if val is not None else ""))
         data.append(tuple(row_vals))
     conn.executemany(
         f"INSERT OR REPLACE INTO xqzg_status ({col_names}) VALUES ({placeholders})", data)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新 last_sync_xqzg 会 1062）
-    _upsert_sync_meta(conn, "last_sync_xqzg", now)
+    # 同步时间戳：双后端兼容 upsert，按日期分区避免固定键 1062
+    meta_key = f"last_sync_xqzg_{file_path.replace('/', '')}" if file_path else "last_sync_xqzg"
+    _upsert_sync_meta(conn, meta_key, now)
     conn.commit()
     return len(data)
 
 
 def query_xqzg_page(page_no: int, page_size: int, keyword: str = "",
+                    file_path: str = "",
                     order_by: str = "", desc: bool = False,
                     include_files: bool = False) -> tuple:
     """接口1数据分页查询
 
     Args:
+        file_path: 日期路径筛选，如 "2026/08/02"；为空则查全部日期
         order_by: 排序字段名（白名单校验）；为空按 id 排序
         desc: 是否降序
         include_files: 是否携带 8 类文件清单 JSON（列表页用默认轻量模式，
             详情按需走 get_xqzg_row_full 按 id 懒加载）
     """
     return _query_status_page("xqzg_status", page_no, page_size, keyword,
-                              order_by, desc, include_files=include_files)
+                              order_by, desc, file_path=file_path,
+                              include_files=include_files)
 
 
 # ==================== 接口2 kd_status 表操作 ====================
@@ -1403,7 +1432,7 @@ def get_xqzg_row_full(row_id: int) -> dict:
     才按 id 单点查询；记录不存在时返回空 dict。
     """
     conn = _get_conn()
-    cols = ("id",) + STATUS_FIELDS + KD_EXTRA_FIELDS
+    cols = ("id", "file_path") + STATUS_FIELDS + KD_EXTRA_FIELDS
     cur = conn.execute(
         f"SELECT {', '.join(cols)} FROM xqzg_status WHERE id = ?", (row_id,))
     r = cur.fetchone()
@@ -1416,6 +1445,32 @@ def get_xqzg_row_full(row_id: int) -> dict:
         except (json.JSONDecodeError, TypeError):
             row_dict[f] = []
     return row_dict
+
+
+def get_xqzg_dates() -> list:
+    """获取 xqzg_status 中已存储的所有日期列表（降序）"""
+    conn = _get_conn()
+    cursor = conn.execute(
+        "SELECT DISTINCT file_path FROM xqzg_status WHERE file_path != '' ORDER BY file_path DESC")
+    return [r[0] for r in cursor.fetchall()]
+
+
+def get_xqzg_synced_dates() -> list:
+    """从 sync_meta 提取曾同步过的 xqzg 日期（含接口返回空数据的日期）
+
+    save_xqzg 落库时会写 last_sync_xqzg_YYYYMMDD 元数据（file_path 为空时回退
+    固定键 last_sync_xqzg），即使该日无设备数据；历史补漏用它区分「从未拉取」
+    与「拉过但为空」，避免对接口确实无数据的日期反复重试。
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT key FROM sync_meta WHERE key LIKE 'last_sync_xqzg_%'").fetchall()
+    dates = []
+    for (key,) in rows:
+        s = key.replace("last_sync_xqzg_", "")
+        if len(s) == 8 and s.isdigit():
+            dates.append(f"{s[:4]}/{s[4:6]}/{s[6:]}")
+    return dates
 
 
 def get_kd_dates() -> list:
@@ -1763,31 +1818,39 @@ def _save_status_table(table_name: str, rows: list, meta_key: str) -> int:
 
 def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: str = "",
                        order_by: str = "", desc: bool = False,
+                       file_path: str = "",
                        include_files: bool = False) -> tuple:
     """运维数据表通用分页查询（order_by/desc 见 _build_order_clause）
 
     include_files=False：只查轻量字段（状态/计数等，不含 8 类文件 JSON），
     文件清单按需走 get_xqzg_row_full 按 id 懒加载；True 时返回全部字段
     并反序列化文件清单（详情弹窗用）。
+    file_path：日期分区筛选（如 "2026/08/02"），仅对含 file_path 列的表生效。
     """
     conn = _get_conn()
     all_fields = _XQZG_FULL_FIELDS if include_files else _XQZG_LIGHT_FIELDS
-    where = ""
+    conds = []
     params = []
+    # 日期分区筛选
+    if file_path:
+        conds.append("file_path = ?")
+        params.append(file_path)
     kw = keyword.strip()
     if kw:
         # 优先 FTS5 trigram 索引，短关键词/不可用回退多列 LIKE
         fts_table = _FTS_MAP.get(table_name, (None,))[0]
         fts = _fts_cond(fts_table, kw) if fts_table else None
         if fts:
-            where = f" WHERE {fts[0]}"
-            params = fts[1]
+            conds.append(fts[0])
+            params.extend(fts[1])
         else:
             like = f"%{kw}%"
             search_fields = STATUS_FIELDS + ("device_code",)
-            conds = " OR ".join([f"{f} LIKE ?" for f in search_fields])
-            where = f" WHERE {conds}"
-            params = [like] * len(search_fields)
+            kw_cond = " OR ".join([f"{f} LIKE ?" for f in search_fields])
+            conds.append(f"({kw_cond})")
+            params.extend([like] * len(search_fields))
+
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
 
     total = conn.execute(
         f"SELECT COUNT(*) FROM {table_name}{where}", params).fetchone()[0]

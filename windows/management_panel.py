@@ -325,11 +325,11 @@ def _query_kd_page_with_stats(page_no, page_size, keyword, date,
     return total, rows, hf
 
 
-def _query_xqzg_page_with_stats(page_no, page_size, keyword,
+def _query_xqzg_page_with_stats(page_no, page_size, keyword, date,
                                 sort_key, sort_desc, hf_days):
     """xqzg 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）"""
     total, rows = table_db.query_xqzg_page(
-        page_no, page_size, keyword, sort_key, sort_desc,
+        page_no, page_size, keyword, date, sort_key, sort_desc,
         include_files=False)  # 列表页轻量行，文件 JSON 点开行时按 id 懒加载
     try:
         hf = table_db.get_submission_stats(days=hf_days)
@@ -2240,28 +2240,16 @@ class DevicePage(QWidget):
         return get_active_api_source()
 
     def _apply_source_date_state(self):
-        """按数据源设置日期选择器可用状态
-
-        xqzg 接口数据不按日期存储/筛选（xqzg_status 表无 file_path 列），
-        禁用日期选择器避免“切日期却看到同一份数据”的误解。
-        """
-        is_xqzg = (self._active_source() == "xqzg")
-        self._date_picker.setEnabled(not is_xqzg)
-        # 步进按钮与日期选择器同组，同步启用/禁用
+        """按数据源同步日期选择器状态（xqzg 与 kd 同样支持 file_path 日期筛选）"""
+        self._date_picker.setEnabled(True)
         for attr in ("_btn_date_prev", "_btn_date_next"):
             btn = getattr(self, attr, None)
             if btn is not None:
-                btn.setEnabled(not is_xqzg)
-        if is_xqzg:
-            self._date_picker.setToolTip("xqzg 数据源不按日期区分，日期选择不可用")
-        else:
-            self._date_picker.setToolTip("")
-        # 同步管理每小时定时拉取：仅 kd 数据源启用（xqzg 无 status 时效需求）
+                btn.setEnabled(True)
+        self._date_picker.setToolTip("")
+        # 同步管理每小时定时拉取：xqzg 与 kd 都按当前日期定时拉取
         timer = getattr(self, "_hourly_timer", None)
-        if timer is not None:
-            if is_xqzg:
-                timer.stop()
-            elif not timer.isActive():
+        if timer is not None and not timer.isActive():
                 timer.start()
 
     def showEvent(self, event):
@@ -2284,14 +2272,14 @@ class DevicePage(QWidget):
             # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
             self._query_worker.disconnect(self)
         keyword = self._search_edit.text().strip()
+        date = self._current_date()
         if self._active_source() == "xqzg":
+            # xqzg 与 kd 同样按 file_path 日期分区筛选
             self._query_worker = _DBQueryWorker(
                 _query_xqzg_page_with_stats,
-                self._page_no, self._page_size, keyword,
+                self._page_no, self._page_size, keyword, date,
                 self._sort_key, self._sort_desc, _HF_DAYS)
-            date = ""  # xqzg 不按日期筛选
         else:
-            date = self._current_date()
             # include_files=False：列表页只查轻量字段，文件 JSON 点开行时按 id 懒加载；
             # 高频问题统计与分页查询同批在 Worker 线程完成，界面零同步查询
             self._query_worker = _DBQueryWorker(
@@ -2366,8 +2354,9 @@ class DevicePage(QWidget):
         rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
         keyword = getattr(self, "_fetch_keyword", "")
         if self._active_source() == "xqzg":
-            self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
-            date_desc = "全部日期"
+            date = self._current_date()
+            self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows, date)
+            date_desc = date
         else:
             date = self._current_date()
             # 落库函数按有无关键词二选一，是搜索态数据安全的命门：
@@ -2722,10 +2711,9 @@ class DevicePage(QWidget):
         if not data:
             return
         title, fields = cfg
-        # 迁移仅 kd 数据源可用：xqzg 的 target_directory 无日期分区（路径没有
-        # /yyyy/MM/dd/ 段），migrate_image 按 kd 路径约定拼接会拼错目标
-        can_migrate = (self._active_source() == "kd"
-                       and bool(fields)
+        # xqzg 与 kd 同样按 file_path 日期分区，迁移路径拼接方式一致；
+        # 此前误以为 xqzg 无日期分区而禁用，现已与 kd 对齐
+        can_migrate = (bool(fields)
                        and all(f in _MIGRATABLE_FIELDS for f in fields))
         self._file_panel.show_files(data, title, fields, can_migrate=can_migrate)
         # 注意：点击精度/问题单元格只展示文件列表，不触发收集；
@@ -3022,7 +3010,7 @@ class DevicePage(QWidget):
         rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
         date = self._current_date()
         if self._active_source() == "xqzg":
-            self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows)
+            self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows, date)
         else:
             self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
         self._save_worker.result_ready.connect(self._on_refresh_save_finished)
@@ -3136,14 +3124,30 @@ class DevicePage(QWidget):
     _BACKFILL_INTERVAL = 1500  # 串行拉取间隔（毫秒），避免并发打爆 API
 
     def _backfill_missing_dates(self):
-        """生成应有日期序列（最早 kd 日期→今天，无数据则近 60 天），对比已存
+        """生成应有日期序列（最早日期→今天，无数据则近 60 天），对比已存
         分区找出缺失日期静默串行补拉（每次最多 10 天，不弹 UI 仅日志）
+
+        kd 与 xqzg 都按 file_path 日期分区存储，补漏策略一致；
+        依据当前数据源选择对应的 worker / 落库函数 / 日期查询函数。
         """
-        if self._active_source() != "kd" or getattr(self, "_backfill_running", False):
+        if getattr(self, "_backfill_running", False):
+            return
+        src = self._active_source()
+        if src == "kd":
+            worker_cls = DevicesFetchWorker
+            save_func = table_db.save_kd
+            get_dates = table_db.get_kd_dates
+            get_synced = table_db.get_kd_synced_dates
+        elif src == "xqzg":
+            worker_cls = SnookerOmFetchWorker
+            save_func = table_db.save_xqzg
+            get_dates = table_db.get_xqzg_dates
+            get_synced = table_db.get_xqzg_synced_dates
+        else:
             return
         try:
             # 已覆盖 = 有数据的分区 + 拉过但接口为空的日期（sync_meta）
-            covered = set(table_db.get_kd_dates()) | set(table_db.get_kd_synced_dates())
+            covered = set(get_dates()) | set(get_synced())
         except Exception:
             return
         today = QDate.currentDate()
@@ -3163,8 +3167,9 @@ class DevicePage(QWidget):
             return
         self._backfill_running = True
         self._backfill_queue = missing[:self._BACKFILL_MAX]
-        logger.info("历史补漏：缺失 %d 天，本次补 %d 天: %s",
-                    len(missing), len(self._backfill_queue),
+        self._backfill_save_func = save_func
+        logger.info("历史补漏[%s]：缺失 %d 天，本次补 %d 天: %s",
+                    src, len(missing), len(self._backfill_queue),
                     ", ".join(self._backfill_queue))
         self._backfill_next()
 
@@ -3183,7 +3188,13 @@ class DevicePage(QWidget):
             QTimer.singleShot(3000, self._backfill_next)
             return
         date = self._backfill_queue.pop(0)
-        worker = DevicesFetchWorker(file_path=date)
+        worker = self._backfill_save_func  # noqa: F841  占位便于理解
+        # 根据数据源选择对应的拉取 Worker（kd 用 DevicesFetchWorker，xqzg 用 SnookerOmFetchWorker）
+        src = self._active_source()
+        if src == "kd":
+            worker = DevicesFetchWorker(file_path=date)
+        else:
+            worker = SnookerOmFetchWorker(file_path=date)
         # lambda 用默认参数快照当前日期：补漏链逐天换日期，不快照会把结果存错日期
         worker.result_ready.connect(
             lambda data, dt=date: self._on_backfill_done(data, dt))
@@ -3195,7 +3206,8 @@ class DevicePage(QWidget):
     def _on_backfill_done(self, data, date):
         """补漏拉取完成：异步落库（复用 _DBQueryWorker，不阻塞 GUI）"""
         rows = data  # 拉取 Worker 翻页后 result_ready 直接发射 rows 列表
-        self._backfill_save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
+        self._backfill_save_worker = _DBQueryWorker(
+            self._backfill_save_func, rows, date)
         self._backfill_save_worker.result_ready.connect(
             lambda count, dt=date: self._on_backfill_saved(count, dt))
         self._backfill_save_worker.error.connect(

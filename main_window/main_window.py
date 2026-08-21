@@ -205,6 +205,63 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._init_p2p_panel()
         # 恢复上次关闭前的远程会话（延迟执行，等待主窗口就绪）
         self._restore_remote_sessions()
+        # MySQL 主模式：启动周备份（兜底基线刷新）+ 后端状态监控（降级/恢复提示）
+        self._init_fallback_backup()
+        self._init_backend_state_monitor()
+
+    # ==================== 兜底备份与后端状态监控 ====================
+
+    def _init_fallback_backup(self):
+        """启动周备份：启动后延迟首次检查 + 每 24h 重复（仅 MySQL 主模式生效）"""
+        self._backup_worker = None
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(24 * 60 * 60 * 1000)  # 24h
+        self._backup_timer.timeout.connect(self._start_backup_worker)
+        # 启动后延迟 5s 首次检查，避开启动高峰
+        QTimer.singleShot(5000, self._start_backup_worker)
+        self._backup_timer.start()
+
+    def _start_backup_worker(self):
+        """后台执行周备份（单例防并发；非 MySQL 主模式跳过）"""
+        from database import backend
+        if not backend.is_mysql_test_mode():
+            return
+        if self._backup_worker and self._backup_worker.isRunning():
+            return
+        from workers.backup_worker import BackupWorker
+        self._backup_worker = BackupWorker(self)
+        self._backup_worker.result.connect(self._on_backup_result)
+        self._backup_worker.start()
+
+    def _on_backup_result(self, ok, msg, count):
+        """周备份结果提示（未到期跳过时不打扰用户）"""
+        if not ok:
+            self._show_info_bar(f"MySQL 周备份失败：{msg}", "warning", duration=4000)
+        elif count > 0:
+            self._show_info_bar(f"MySQL 周备份完成：{msg}", "success", duration=3000)
+
+    def _init_backend_state_monitor(self):
+        """后端状态轮询：降级/恢复时提示用户"""
+        from database import backend
+        self._last_backend_state = backend.get_state()
+        self._backend_state_timer = QTimer(self)
+        self._backend_state_timer.setInterval(3000)
+        self._backend_state_timer.timeout.connect(self._poll_backend_state)
+        self._backend_state_timer.start()
+
+    def _poll_backend_state(self):
+        """轮询后端状态，变化时提示"""
+        from database import backend
+        cur = backend.get_state()
+        if cur == self._last_backend_state:
+            return
+        prev = self._last_backend_state
+        self._last_backend_state = cur
+        if cur == backend.STATE_DEGRADED:
+            self._show_info_bar("MySQL 不可用，已切换本地 SQLite 兜底",
+                                "warning", duration=5000)
+        elif cur == backend.STATE_ONLINE and prev == backend.STATE_DEGRADED:
+            self._show_info_bar("MySQL 已恢复在线", "success", duration=3000)
 
     def connect_signals(self):
         """连接信号和槽"""

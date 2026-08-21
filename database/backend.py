@@ -326,6 +326,7 @@ MYSQL_DDL = {
     "xqzg_status": """
         CREATE TABLE IF NOT EXISTS xqzg_status (
             id               INT PRIMARY KEY,
+            file_path        VARCHAR(64) DEFAULT '',
             table_id         VARCHAR(255) DEFAULT '',
             club_name        VARCHAR(255) DEFAULT '',
             pic_total        VARCHAR(64) DEFAULT '',
