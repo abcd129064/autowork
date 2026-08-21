@@ -4,7 +4,7 @@
 职责：
 - insert_record / update_record / delete_record：售后记录增删改
 - query_page / query_with_stats：筛选 + 分页 + 统计（周期/类型/状态/关键词）
-- get_cycle_options：历史周期下拉选项
+- get_cycle_options：周期下拉选项（库中记录实际归属的周期）
 - get_field_candidates：问题/解决人/地区动态候选
 - export_xlsx：按筛选条件导出（表头与 售后问题汇总8月.xlsx 对齐）
 - import_excel_rows：一次性导入历史 Excel
@@ -12,9 +12,11 @@
 连接复用 table_db 双后端路由（SQLite 单连接 / MySQL thread-local），
 MySQL 模式下多人各自提交即提交即落库，其他用户刷新/手动同步后可见。
 周期规则：周二开始、周一结束为默认；可在售后面板「周期设置」切换为自然周
-（周一~周日）或自定义（起始日+周期天数）。按发生时间 occurred_at 自动计算
-cycle_start 冗余落库（8/25 填写 8/20 发生的售后归属 8/18-8/24 周期）；
-发生时间缺失时回退按填写时间。
+（周一~周日）或自定义（起始日+周期天数）。
+周期归属统一按记录发生时间 occurred_at 动态计算（缺失时回退填写时间
+created_at）——列表、统计、周期下拉、导出共用 cycle_start_of 同一规则，
+不依赖冗余落库的 cycle_start 字段（该字段仅作导出展示，可能因周期配置
+变更与记录实际归属不一致）。
 """
 
 import os
@@ -163,9 +165,9 @@ def current_cycle_start() -> str:
 
 
 def _parse_occurred(occurred: str):
-    """解析发生时间日期串（YYYY-MM-DD），非法返回 None 由调用方回退"""
+    """解析日期串（YYYY-MM-DD，兼容带时分秒的完整时间），非法返回 None 由调用方回退"""
     try:
-        return datetime.strptime(str(occurred or "").strip(), "%Y-%m-%d")
+        return datetime.strptime(str(occurred or "").strip()[:10], "%Y-%m-%d")
     except (ValueError, TypeError):
         return None
 
@@ -178,6 +180,29 @@ def cycle_label(cycle_start: str) -> str:
         return str(cycle_start or "")
     end = start + timedelta(days=cycle_span_days() - 1)
     return f"{start:%m/%d} - {end:%m/%d}"
+
+
+# ==================== 周期归属（统一按发生时间动态计算） ====================
+
+def _record_cycle(occurred_at: str, created_at: str):
+    """记录归属周期：优先按 occurred_at 计算，缺失/非法时回退 created_at，
+
+    两者均无返回 None。列表筛选、统计、下拉选项、导出全部经此函数归属，
+    保证四处口径一致；不依赖冗余落库的 cycle_start 字段。
+    """
+    for raw in (occurred_at, created_at):
+        dt = _parse_occurred(raw)
+        if dt:
+            return cycle_start_of(dt)
+    return None
+
+
+def _match_cycle(record: dict, cycle_start: str) -> bool:
+    """记录是否属于所选周期：按记录时间动态计算后匹配（空周期不过滤）"""
+    if not cycle_start:
+        return True
+    return _record_cycle(record.get("occurred_at"),
+                         record.get("created_at")) == str(cycle_start).strip()
 
 
 # ==================== 连接与工具 ====================
@@ -319,17 +344,16 @@ def delete_record(rec_id) -> int:
 
 # ==================== 查询 ====================
 
-def _build_where(keyword: str, cycle_start: str, issue_type: str,
+def _build_where(keyword: str, issue_type: str,
                  resolved: str) -> tuple:
-    """构造筛选 WHERE 子句与参数（周期/类型/状态/关键词）
+    """构造筛选 WHERE 子句与参数（类型/状态/关键词）
 
+    周期不在 SQL 侧过滤：周期归属需按记录时间动态计算（cycle_start_of），
+    由 Python 侧 _match_cycle 统一处理，避免与冗余 cycle_start 字段不一致。
     统计口径说明：resolved 为空才参与筛选；统计函数单独调用时
     传空串即得「已解决/未解决」分组基数。
     """
     conds, params = [], []
-    if cycle_start:
-        conds.append("cycle_start = ?")
-        params.append(str(cycle_start).strip())
     if issue_type:
         conds.append("issue_type = ?")
         params.append(str(issue_type).strip())
@@ -349,19 +373,23 @@ def _build_where(keyword: str, cycle_start: str, issue_type: str,
 def query_page(page_no: int, page_size: int, keyword: str = "",
                cycle_start: str = "", issue_type: str = "",
                resolved: str = "") -> tuple:
-    """分页查询售后记录，返回 (total, rows)"""
+    """分页查询售后记录，返回 (total, rows)
+
+    周期筛选在 Python 侧按记录时间动态归属（_match_cycle），
+    SQL 仅过滤类型/状态/关键词；数据量小（售后记录），全量取回无压力。
+    """
     conn = _conn()
-    where, params = _build_where(keyword, cycle_start, issue_type, resolved)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM aftersale_records{where}", params).fetchone()[0]
-    offset = (max(1, page_no) - 1) * page_size
+    where, params = _build_where(keyword, issue_type, resolved)
     cur = conn.execute(
         f"SELECT id, {', '.join(RECORD_FIELDS)} FROM aftersale_records"
-        f"{where} ORDER BY id DESC LIMIT ? OFFSET ?",
-        params + [page_size, offset])
+        f"{where} ORDER BY id DESC", params)
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    return total, rows
+    if cycle_start:
+        rows = [r for r in rows if _match_cycle(r, cycle_start)]
+    total = len(rows)
+    offset = (max(1, page_no) - 1) * page_size
+    return total, rows[offset:offset + page_size]
 
 
 def query_with_stats(page_no: int, page_size: int, keyword: str = "",
@@ -369,34 +397,41 @@ def query_with_stats(page_no: int, page_size: int, keyword: str = "",
                      resolved: str = "") -> tuple:
     """分页查询 + 同口径统计，返回 (total, rows, stats)
 
+    周期按记录时间动态归属（与列表同规则），保证列表与统计一一对应；
     stats 统计不带 resolved 筛选（否则已解决/未解决计数退化），
     展示「共 X · 已解决 Y · 未解决 Z」。
     """
     total, rows = query_page(page_no, page_size, keyword, cycle_start,
                              issue_type, resolved)
     conn = _conn()
-    where, params = _build_where(keyword, cycle_start, issue_type, "")
-    base = conn.execute(
-        f"SELECT COUNT(*), SUM(CASE WHEN resolved = '是' THEN 1 ELSE 0 END) "
-        f"FROM aftersale_records{where}", params).fetchone()
-    n_all = int(base[0] or 0)
-    n_resolved = int(base[1] or 0)
+    where, params = _build_where(keyword, issue_type, "")
+    cur = conn.execute(
+        f"SELECT occurred_at, created_at, resolved FROM aftersale_records"
+        f"{where}", params)
+    recs = [dict(zip(("occurred_at", "created_at", "resolved"), r))
+            for r in cur.fetchall()]
+    if cycle_start:
+        recs = [r for r in recs if _match_cycle(r, cycle_start)]
+    n_all = len(recs)
+    n_resolved = sum(1 for r in recs if r["resolved"] == "是")
     stats = {"total": n_all, "resolved": n_resolved,
              "unresolved": n_all - n_resolved}
     return total, rows, stats
 
 
 def get_cycle_options() -> list:
-    """历史周期选项（distinct cycle_start 降序，含当前周期）"""
+    """周期下拉选项：库中记录实际归属的周期（按 occurred_at 动态计算，
+
+    缺失回退 created_at），按起始日降序。仅返回库中确实存在数据的周期，
+    不额外插入库中不存在的当前周期（当前周期无数据则不出现）。
+    """
     conn = _conn()
     cur = conn.execute(
-        "SELECT DISTINCT cycle_start FROM aftersale_records "
-        "WHERE cycle_start != '' ORDER BY cycle_start DESC")
-    cycles = [r[0] for r in cur.fetchall()]
-    current = current_cycle_start()
-    if current not in cycles:
-        cycles.insert(0, current)
-    return cycles
+        "SELECT occurred_at, created_at FROM aftersale_records")
+    cycles = {_record_cycle(occ, created)
+              for occ, created in cur.fetchall()}
+    cycles.discard(None)
+    return sorted(cycles, reverse=True)
 
 
 def get_field_candidates() -> dict:
@@ -430,12 +465,14 @@ def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
     from openpyxl.styles import Font, PatternFill, Alignment
 
     conn = _conn()
-    where, params = _build_where(keyword, cycle_start, issue_type, resolved)
+    where, params = _build_where(keyword, issue_type, resolved)
     cur = conn.execute(
         f"SELECT {', '.join(RECORD_FIELDS)} FROM aftersale_records"
         f"{where} ORDER BY id DESC", params)
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    if cycle_start:
+        rows = [r for r in rows if _match_cycle(r, cycle_start)]
 
     wb = Workbook()
     ws = wb.active
@@ -448,12 +485,14 @@ def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
-    # 数据行（周期列展示范围标签）
+    # 数据行（周期列按发生时间动态归属，与列表筛选口径一致）
     for r, rec in enumerate(rows, 2):
         for c, (key, _h) in enumerate(_EXPORT_HEADERS, 1):
             val = rec.get(key) or ""
-            if key == "cycle_start" and val:
-                val = cycle_label(val)
+            if key == "cycle_start":
+                cs = _record_cycle(rec.get("occurred_at"),
+                                   rec.get("created_at"))
+                val = cycle_label(cs) if cs else ""
             ws.cell(row=r, column=c, value=str(val))
     # 列宽与冻结首行
     widths = (12, 24, 10, 8, 28, 30, 10, 30, 10, 12, 18, 12, 10, 16)
@@ -467,14 +506,15 @@ def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
     return len(rows)
 
 
-def import_excel_rows(xlsx_path: str) -> int:
-    """一次性导入历史 Excel（售后问题汇总 格式），返回导入条数
+def parse_excel_rows(xlsx_path: str) -> tuple:
+    """解析售后汇总 Excel，返回 (Excel 表头列表, 记录字典列表)；不写库
 
+    与 import_excel_rows 共用同一解析逻辑，供导入预览与正式导入使用。
     规则：
     - 表头按中文名定位（类型/球房/桌号/地区/问题/发生原因/是否解决/解决方案/解决人/响应时间）
     - 类型列在 Excel 中为分组首行标记，逐行向下填充
     - 跳过全空行；是否解决空值默认「否」
-    - created_at 填导入时间，creator 标记「Excel导入」
+    - created_at 填解析时间，creator 标记「Excel导入」，周期按当前配置归属
     """
     from openpyxl import load_workbook
 
@@ -483,9 +523,12 @@ def import_excel_rows(xlsx_path: str) -> int:
 
     # 表头定位：首行按中文名匹配列号
     header_map = {}
+    excel_headers = []
     for c in range(1, ws.max_column + 1):
         h = str(ws.cell(row=1, column=c).value or "").strip()
-        header_map[h] = c
+        if h:
+            header_map[h] = c
+            excel_headers.append(h)
     need = ("类型", "球房", "桌号", "地区", "问题")
     missing = [h for h in need if h not in header_map]
     if missing:
@@ -516,19 +559,36 @@ def import_excel_rows(xlsx_path: str) -> int:
         resolved = _val(r, "是否解决") or "否"
         if resolved not in ("是", "否"):
             resolved = "否"
-        data.append((
-            created_at, occurred, "Excel导入", issue_type, table_no, room,
-            _val(r, "地区"), problem, _val(r, "发生原因"), resolved,
-            _val(r, "解决方案"), _val(r, "解决人"), _val(r, "响应时间"),
-            "", "", cycle))
+        data.append({
+            "created_at": created_at, "occurred_at": occurred,
+            "creator": "Excel导入", "issue_type": issue_type,
+            "table_no": table_no, "room_name": room,
+            "region": _val(r, "地区"), "problem": problem,
+            "cause": _val(r, "发生原因"), "resolved": resolved,
+            "solution": _val(r, "解决方案"), "resolver": _val(r, "解决人"),
+            "response_time": _val(r, "响应时间"), "cycle_start": cycle,
+        })
+    return excel_headers, data
+
+
+def import_excel_rows(xlsx_path: str) -> int:
+    """一次性导入历史 Excel（售后问题汇总 格式），返回导入条数
+
+    解析规则见 parse_excel_rows；解析结果批量写入数据库。
+    """
+    _headers, data = parse_excel_rows(xlsx_path)
     if not data:
         return 0
+    order = ("created_at", "occurred_at", "creator", "issue_type", "table_no",
+             "room_name", "region", "problem", "cause", "resolved",
+             "solution", "resolver", "response_time", "cycle_start")
     conn = _conn()
     conn.executemany(
         "INSERT INTO aftersale_records "
         "(created_at, occurred_at, creator, issue_type, table_no, room_name, "
         "region, problem, cause, resolved, solution, resolver, response_time, "
         "snk_code, device_code, cycle_start) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [tuple(rec[k] for k in order) + ("", "") for rec in data])
     conn.commit()
     return len(data)

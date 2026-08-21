@@ -16,8 +16,9 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
-    QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication)
-from PySide6.QtCore import Qt, QTimer, QThread, QPointF, QDate
+    QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication,
+    QDialog)
+from PySide6.QtCore import Qt, QTimer, QThread, QPointF, QDate, Signal
 from PySide6.QtGui import QColor, QBrush, QPainter, QPen
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, RoundMenu, Action,
@@ -437,7 +438,7 @@ class AftersaleForm(QWidget):
             return
         self._cand_worker = AftersaleDBWorker(
             table_db.query_tables_by_room, kw, 30)
-        self._cand_worker.finished.connect(
+        self._cand_worker.result_ready.connect(
             lambda result, k=kw: self._on_room_candidates(k, result))
         self._cand_worker.error.connect(lambda _m: self._hide_candidates())
         self._cand_worker.start()
@@ -651,7 +652,7 @@ class EntryPage(QWidget):
     def _refresh_candidates(self):
         """进入页面刷新动态候选（问题/解决人/地区）"""
         self._cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
-        self._cand_worker.finished.connect(self.form.load_candidates)
+        self._cand_worker.result_ready.connect(self.form.load_candidates)
         self._cand_worker.error.connect(lambda _m: None)
         self._cand_worker.start()
 
@@ -667,7 +668,7 @@ class EntryPage(QWidget):
         self._btn_submit.setEnabled(False)
         record = self.form.collect()
         self._save_worker = AftersaleDBWorker(aftersale_db.insert_record, record)
-        self._save_worker.finished.connect(self._on_saved)
+        self._save_worker.result_ready.connect(self._on_saved)
         self._save_worker.error.connect(self._on_save_error)
         self._save_worker.start()
 
@@ -744,6 +745,87 @@ RECORD_COLUMNS = (
     ("creator", "填写人", 64),
 )
 
+# 导入预览列定义（与导出表头对齐 + 系统附加列）
+_PREVIEW_COLUMNS = (
+    ("issue_type", "类型"), ("room_name", "球房"), ("table_no", "桌号"),
+    ("region", "地区"), ("problem", "问题"), ("cause", "发生原因"),
+    ("resolved", "是否解决"), ("solution", "解决方案"),
+    ("resolver", "解决人"), ("response_time", "响应时间"),
+    ("created_at", "填写时间"), ("occurred_at", "发生时间"),
+    ("creator", "填写人"), ("cycle_start", "周期"),
+)
+_PREVIEW_WIDTHS = (76, 208, 64, 50, 248, 220, 76, 160, 64, 76, 152, 90, 64, 110)
+
+
+class ImportPreviewDialog(QDialog):
+    """导入预览：字段要求提示 + 解析效果预览，确认后执行导入"""
+
+    def __init__(self, excel_headers, rows, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("导入预览")
+        self.resize(1180, 660)
+        self.setMinimumSize(900, 480)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
+
+        # 字段要求提示
+        req = ("类型", "球房", "桌号", "地区", "问题")
+        opt = ("发生原因", "是否解决", "解决方案", "解决人", "响应时间")
+        missing = [h for h in (*req, *opt) if h not in excel_headers]
+        tip = ("表格需要以下列（表头需与列名完全一致）\n"
+               f"必填：{'、'.join(req)}\n"
+               f"可选：{'、'.join(opt)}")
+        if missing:
+            tip += f"\n\n⚠ 当前表格缺失列：{'、'.join(missing)}（缺失的可选列将留空，是否解决默认「否」）"
+        tip += ("\n自动补充：填写时间=导入时间、填写人=Excel导入、"
+                "发生时间=导入当日、周期=按当前周期设置归属")
+        lbl = CaptionLabel(tip, self)
+        lbl.setWordWrap(True)
+        root.addWidget(lbl)
+
+        # 解析效果预览表（前 20 行）
+        table = TableWidget(self)
+        table.setColumnCount(len(_PREVIEW_COLUMNS))
+        table.setHorizontalHeaderLabels([c[1] for c in _PREVIEW_COLUMNS])
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(_FIXED_ROW_HEIGHT)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setWordWrap(False)
+        for i, w in enumerate(_PREVIEW_WIDTHS):
+            table.setColumnWidth(i, w)
+        shown = rows[:20]
+        table.setRowCount(len(shown))
+        for r, rec in enumerate(shown):
+            for c, (key, _h) in enumerate(_PREVIEW_COLUMNS):
+                val = str(rec.get(key) or "")
+                if key == "cycle_start" and val:
+                    val = aftersale_db.cycle_label(val)
+                item = QTableWidgetItem(val)
+                item.setToolTip(val)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.setItem(r, c, item)
+        root.addWidget(table, 1)
+        self._table = table
+
+        # 底部：统计 + 取消/确认
+        bottom = QHBoxLayout()
+        bottom.setSpacing(6)
+        more = "" if len(rows) <= 20 else f"（预览前 20 行）"
+        self._lbl_count = CaptionLabel(
+            f"共解析 {len(rows)} 条可导入记录{more}", self)
+        bottom.addWidget(self._lbl_count)
+        bottom.addStretch(1)
+        btn_cancel = PushButton("取消", self)
+        btn_cancel.clicked.connect(self.reject)
+        bottom.addWidget(btn_cancel)
+        btn_ok = PrimaryPushButton(FluentIcon.ACCEPT, "确认导入", self)
+        btn_ok.setToolTip("按预览效果批量写入数据库")
+        btn_ok.clicked.connect(self.accept)
+        bottom.addWidget(btn_ok)
+        root.addLayout(bottom)
+
 
 class RecordsPage(QWidget):
     """记录与统计页：筛选/分页/统计/编辑/删除/导出/导入/刷新"""
@@ -780,7 +862,7 @@ class RecordsPage(QWidget):
         self._type_combo = FluentCombo(self)
         self._type_combo.addItem("全部类型")
         self._type_combo.addItems(aftersale_db.ISSUE_TYPES)
-        self._type_combo.setFixedWidth(120)
+        self._type_combo.setFixedWidth(130)
         self._type_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
         toolbar.addWidget(self._type_combo)
@@ -790,7 +872,7 @@ class RecordsPage(QWidget):
         self._resolved_combo.addItem("全部状态", userData="")
         self._resolved_combo.addItem("未解决", userData="否")
         self._resolved_combo.addItem("已解决", userData="是")
-        self._resolved_combo.setFixedWidth(100)
+        self._resolved_combo.setFixedWidth(130)
         self._resolved_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
         toolbar.addWidget(self._resolved_combo)
@@ -919,7 +1001,7 @@ class RecordsPage(QWidget):
     def _load_cycles_then_data(self):
         """先异步拉周期选项填充下拉，再加载数据"""
         self._worker = AftersaleDBWorker(aftersale_db.get_cycle_options)
-        self._worker.finished.connect(self._on_cycles_loaded)
+        self._worker.result_ready.connect(self._on_cycles_loaded)
         self._worker.error.connect(lambda _m: self._load())
         self._worker.start()
 
@@ -929,14 +1011,17 @@ class RecordsPage(QWidget):
         self._cycle_combo.blockSignals(True)
         self._cycle_combo.clear()
         current = aftersale_db.current_cycle_start()
-        self._cycle_combo.addItem(
-            f"当前周期 {aftersale_db.cycle_label(current)}", userData=current)
+        cycles = list(cycle_starts or [])
+        # 当前周期仅在库中确实存在该周期数据时才出现（不额外新建库中不存在的周期）
+        if current in cycles:
+            self._cycle_combo.addItem(
+                f"当前周期 {aftersale_db.cycle_label(current)}", userData=current)
+            cycles.remove(current)
         self._cycle_combo.addItem("全部周期", userData="")
-        for cs in cycle_starts or []:
-            if cs != current:
-                self._cycle_combo.addItem(
-                    aftersale_db.cycle_label(cs), userData=cs)
-        # 恢复之前的选择（默认当前周期）
+        for cs in cycles:
+            self._cycle_combo.addItem(
+                aftersale_db.cycle_label(cs), userData=cs)
+        # 恢复之前的选择；默认当前周期（库中有数据）否则全部周期
         idx = self._cycle_combo.findData(prev if prev is not None else current)
         self._cycle_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._cycle_combo.blockSignals(False)
@@ -952,7 +1037,7 @@ class RecordsPage(QWidget):
             aftersale_db.query_with_stats,
             self._page_no, self._page_size,
             f["keyword"], f["cycle_start"], f["issue_type"], f["resolved"])
-        self._worker.finished.connect(self._on_loaded)
+        self._worker.result_ready.connect(self._on_loaded)
         self._worker.error.connect(self._on_load_error)
         self._worker.start()
 
@@ -1044,7 +1129,7 @@ class RecordsPage(QWidget):
         dlg = EditRecordDialog(rec, self)
         # 编辑弹窗也需动态候选
         cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
-        cand_worker.finished.connect(dlg.form.load_candidates)
+        cand_worker.result_ready.connect(dlg.form.load_candidates)
         cand_worker.start()
         self._edit_cand_worker = cand_worker  # 保活引用
         if dlg.exec() and getattr(dlg, "collected", None):
@@ -1066,7 +1151,7 @@ class RecordsPage(QWidget):
 
     def _run_update(self, record):
         self._worker = AftersaleDBWorker(aftersale_db.update_record, record)
-        self._worker.finished.connect(
+        self._worker.result_ready.connect(
             lambda _n: (show_info_bar("记录已更新", "success",
                                       title="保存成功", parent=self, duration=2000),
                         self._load()))
@@ -1084,7 +1169,7 @@ class RecordsPage(QWidget):
         if not MessageBox("确认删除", f"确定删除该售后记录？\n{desc}", self.window()).exec():
             return
         self._worker = AftersaleDBWorker(aftersale_db.delete_record, rec.get("id"))
-        self._worker.finished.connect(
+        self._worker.result_ready.connect(
             lambda _n: (show_info_bar("记录已删除", "success",
                                       title="删除成功", parent=self, duration=2000),
                         self._load()))
@@ -1108,7 +1193,7 @@ class RecordsPage(QWidget):
         self._export_worker = AftersaleDBWorker(
             aftersale_db.export_xlsx, path,
             f["keyword"], f["cycle_start"], f["issue_type"], f["resolved"])
-        self._export_worker.finished.connect(self._on_export_done)
+        self._export_worker.result_ready.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
         self._export_worker.start()
 
@@ -1128,13 +1213,25 @@ class RecordsPage(QWidget):
             self, "选择售后汇总 Excel", "", "Excel 文件 (*.xlsx)")
         if not path:
             return
-        if not MessageBox("导入确认",
-                          "将解析该 Excel 并批量写入数据库。是否继续？",
-                          self.window()).exec():
+        # 第一步：后台解析（不写库），成功后弹预览确认
+        self._btn_import.setEnabled(False)
+        self._preview_path = path
+        self._import_worker = AftersaleDBWorker(aftersale_db.parse_excel_rows, path)
+        self._import_worker.result_ready.connect(self._on_import_preview_ready)
+        self._import_worker.error.connect(self._on_import_error)
+        self._import_worker.start()
+
+    def _on_import_preview_ready(self, result):
+        """解析完成：弹预览对话框，确认后真正写库"""
+        self._btn_import.setEnabled(True)
+        excel_headers, rows = result
+        dlg = ImportPreviewDialog(excel_headers, rows, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._btn_import.setEnabled(False)
-        self._import_worker = AftersaleDBWorker(aftersale_db.import_excel_rows, path)
-        self._import_worker.finished.connect(self._on_import_done)
+        self._import_worker = AftersaleDBWorker(
+            aftersale_db.import_excel_rows, self._preview_path)
+        self._import_worker.result_ready.connect(self._on_import_done)
         self._import_worker.error.connect(self._on_import_error)
         self._import_worker.start()
 
@@ -1153,21 +1250,25 @@ class RecordsPage(QWidget):
 # ==================== 周期设置页 ====================
 
 class CycleSettingsPage(QWidget):
-    """周期设置页：统计周期模式（周二起默认 / 自然周 / 自定义起始日+天数），保存即生效"""
+    """周期设置卡片：统计周期模式（周二起默认 / 自然周 / 自定义起始日+天数），保存即生效
+
+    saved 信号：保存成功后发出，供设置面板通知记录页刷新周期下拉
+    """
+
+    saved = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
 
     def showEvent(self, event):
-        """页面每次显示时回显最新配置（不依赖导航信号，Qt 原生事件更稳）"""
+        """卡片每次显示时回显最新配置（不依赖导航信号，Qt 原生事件更稳）"""
         super().showEvent(event)
         self.load()
 
     def _init_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(0, 0, 0, 0)  # 作为设置面板卡片嵌入，外边距由面板控制
 
         card = CardWidget(self)
         vbox = QVBoxLayout(card)
@@ -1176,7 +1277,7 @@ class CycleSettingsPage(QWidget):
         vbox.addWidget(BodyLabel("统计周期设置", card))
         vbox.addWidget(CaptionLabel(
             "周期决定售后记录按发生时间归属的统计区间（周二起周一止为原默认）；"
-            "保存后新录入记录立即按新周期归属，历史记录周期保持原值不变", card))
+            "保存后立即生效，历史记录的归属按新规则重新计算，无需手工修改", card))
 
         # 周期模式单选
         self._rb_tue = RadioButton("周二 ~ 周一（原默认，每周二开始）", card)
@@ -1212,7 +1313,7 @@ class CycleSettingsPage(QWidget):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
         self._btn_save = PrimaryPushButton(FluentIcon.ACCEPT, "保存", card)
-        self._btn_save.setToolTip("保存后新录入记录立即按新周期归属")
+        self._btn_save.setToolTip("保存后立即生效：列表/统计/周期下拉按新规则重新归属")
         self._btn_save.setFixedHeight(36)
         self._btn_save.clicked.connect(self._on_save)
         btn_row.addWidget(self._btn_save)
@@ -1252,14 +1353,46 @@ class CycleSettingsPage(QWidget):
             "start": self._start_picker.date.toString("yyyy-MM-dd"),
             "span": self._span_spin.value(),
         })
-        show_info_bar("周期设置已保存，新录入记录立即按新周期归属",
+        show_info_bar("周期设置已保存，列表/统计已按新周期重新归属",
                       "success", title="周期设置", parent=self, duration=3000)
+        self.saved.emit()  # 通知记录页刷新周期下拉与统计
+
+
+# ==================== 设置面板（周期 + 数据库） ====================
+
+class SettingsPage(QWidget):
+    """设置面板：统计周期设置 + 数据库设置（原 MySQL 设置更名）
+
+    周期设置保存后通过 cycle_page.saved 信号通知记录页刷新周期下拉；
+    数据库卡片复用 MysqlSyncCard（仅推售后记录）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
+
+        # 周期设置卡片
+        self.cycle_page = CycleSettingsPage(self)
+        root.addWidget(self.cycle_page)
+
+        # 数据库设置卡片（原 MySQL 设置，仅同步售后记录）
+        self.mysql_card = MysqlSyncCard(self, sync_scope="aftersale")
+        self.mysql_card.load()
+        root.addWidget(self.mysql_card)
+        root.addStretch(1)
+
+    def showEvent(self, event):
+        """进入设置面板回显最新配置（导航信号部分版本缺失，用 Qt 原生事件兜底）"""
+        super().showEvent(event)
+        self.mysql_card.load()
 
 
 # ==================== 售后面板窗口 ====================
 
 class AftersalePanelWindow(FluentWindow):
-    """售后面板：FluentWindow + 左侧导航 + 两个功能页面（填写录入/记录与统计）"""
+    """售后面板：FluentWindow + 左侧导航 + 三个功能页面（填写录入/记录与统计/设置）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1275,21 +1408,12 @@ class AftersalePanelWindow(FluentWindow):
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
 
-        # MySQL 远程同步设置（复用运维面板组件，仅推售后记录）
-        self.mysql_page = QWidget(self)
-        self.mysql_page.setObjectName("aftersaleMysqlPage")
-        lay = QVBoxLayout(self.mysql_page)
-        lay.setContentsMargins(24, 20, 24, 20)
-        self.mysql_card = MysqlSyncCard(self.mysql_page, sync_scope="aftersale")
-        self.mysql_card.load()
-        lay.addWidget(self.mysql_card)
-        lay.addStretch(1)
-        self.addSubInterface(self.mysql_page, FluentIcon.SETTING, "MySQL 设置")
-
-        # 统计周期设置（周二起默认 / 自然周 / 自定义起始日+天数）
-        self.cycle_page = CycleSettingsPage(self)
-        self.cycle_page.setObjectName("aftersaleCyclePage")
-        self.addSubInterface(self.cycle_page, FluentIcon.CALENDAR, "周期设置")
+        # 设置面板：统计周期设置 + 数据库设置（原 MySQL 设置）
+        self.settings_page = SettingsPage(self)
+        self.settings_page.setObjectName("aftersaleSettingsPage")
+        self.addSubInterface(self.settings_page, FluentIcon.SETTING, "设置")
+        # 周期设置保存后，记录页周期下拉与统计立即按新周期刷新
+        self.settings_page.cycle_page.saved.connect(self._on_cycle_saved)
 
         self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
         self.navigationInterface.setCurrentItem(self.entry_page.objectName())
@@ -1299,12 +1423,16 @@ class AftersalePanelWindow(FluentWindow):
         except Exception:
             pass
 
+    def _on_cycle_saved(self):
+        """周期设置保存成功：记录页重建周期下拉并重查（新周期立即生效）"""
+        self.records_page._cycles_loaded = False
+        self.records_page._load_cycles_then_data()
+
     def _on_nav_changed(self, current, _pre=None):
-        """导航切换：进入 MySQL 设置页时刷新表单（部分 qfluentwidgets 版本无该信号，
-        周期设置页已改用 showEvent 兜底刷新，不依赖此信号）"""
+        """导航切换：进入设置面板时刷新数据库配置表单（showEvent 已兜底，此处兼容旧信号）"""
         obj = getattr(current, "routeKey", None)
-        if obj == "aftersaleMysqlPage" and getattr(self, "mysql_card", None):
-            self.mysql_card.load()
+        if obj == "aftersaleSettingsPage" and getattr(self, "settings_page", None):
+            self.settings_page.mysql_card.load()
 
     def showEvent(self, event):
         super().showEvent(event)

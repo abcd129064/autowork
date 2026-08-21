@@ -67,7 +67,8 @@ class MysqlSyncCard(CardWidget):
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
         scope_name = "售后记录" if self.sync_scope == "aftersale" else "运维业务数据"
-        vbox.addWidget(BodyLabel("MySQL 远程同步", self))
+        card_title = "数据库设置（MySQL）" if self.sync_scope == "aftersale" else "MySQL 远程同步"
+        vbox.addWidget(BodyLabel(card_title, self))
         vbox.addWidget(CaptionLabel(
             f"开启后 MySQL 完全替代本地 SQLite，应用直接读写远程数据库；"
             f"关闭则回到本地 SQLite。同步范围：{scope_name}", self))
