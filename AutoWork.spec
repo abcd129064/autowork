@@ -202,7 +202,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='AutoWork',
+    name='autowork',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

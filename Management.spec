@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""售后面板独立打包 spec（入口 windows/aftersale_panel.py）
+"""运维管理面板独立打包 spec（入口 windows/management_panel.py）
 
 与 AutoWork.spec 相同的沙箱兼容补丁与 conda 适配逻辑；
-仅保留售后面板运行所需依赖（不含 SSH/SFTP/frp/取证/AI 等主程序模块）。
-构建：python -m PyInstaller --noconfirm AfterSale.spec
-产物：dist/AfterSale/aftersale.exe（settings.json 由 build_exe.py 复制到 exe 旁，
-无 settings 时默认 SQLite 本地模式，首次运行自建 database/tables.db）
+仅保留运维面板运行所需依赖（球桌管理/设备状态/健康趋势/设置/小游戏，
+含 SSH/SFTP 远程会话与售后面板内嵌兜底）。
+构建：python -m PyInstaller --noconfirm Management.spec
+产物：dist/Management/management.exe（settings.json 由 build_exe.py 复制到 exe 旁）
 """
 
 import os
@@ -95,16 +95,16 @@ if _qt_prefix and os.path.basename(os.path.normpath(_qt_prefix)) == 'Library':
                 (os.path.join(_qt_plugins, _d), f'PySide6/plugins/{_d}'))
 
 a = Analysis(
-    ['windows/aftersale_panel.py'],
+    ['windows/management_panel.py'],
     pathex=[],
     binaries=list(_conda_binaries),
     datas=[
         # 主题资源与图标（get_resource_dir() 读取）
         ('styles', 'styles'),
         ('app_icon.ico', '.'),
-        # 球桌库种子：录入页桌号关联搜索依赖（table_db 用 __file__ 定位）
+        # 球桌库种子：球桌/设备数据依赖（table_db 用 __file__ 定位）
         ('database/tables.db', 'database'),
-        # 资源目录（字体/头像/底图，单杆视频等工具共用，随包分发保险）
+        # 资源目录（字体/头像/底图，小游戏与工具共用，随包分发保险）
         ('resource', 'resource'),
     ] + _conda_datas,
     hiddenimports=[
@@ -113,11 +113,19 @@ a = Analysis(
         'PySide6.QtGui',
         'PySide6.QtSvg',
         'PySide6.QtSvgWidgets',
+        'PySide6.QtNetwork',
+        'paramiko',
+        'cryptography',
+        'bcrypt',
         'darkdetect',
         'darkdetect._windows_detect',
-        # 双后端依赖：MySQL 驱动 + Excel 导入导出
+        # 双后端依赖：MySQL 驱动 + Excel 导出
         'pymysql',
         'openpyxl',
+        # 图片预览/迁移（image_viewer、collect_worker）
+        'PIL.ImageQt',
+        'PIL.ImageFilter',
+        'PIL.ImageEnhance',
     ] + qfw_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -127,12 +135,35 @@ a = Analysis(
     optimize=0,
 )
 
-# babel 语言数据裁剪（trafilatura 链不需要，但 darkdetect/qfw 可能带入少量）
-_babel_keep = {'en.dat', 'zh.dat', 'zh_Hans.dat', 'zh_Hant.dat'}
+# babel 语言数据裁剪（trafilatura 链：摸鱼阅读器仅需中英及常用语言）
+_babel_keep = {
+    'en.dat', 'zh.dat', 'zh_Hans.dat', 'zh_Hant.dat',
+    'ja.dat', 'ko.dat', 'fr.dat', 'de.dat', 'es.dat', 'it.dat',
+    'pt.dat', 'pt_BR.dat', 'ru.dat', 'ar.dat', 'hi.dat',
+    'vi.dat', 'th.dat', 'id.dat', 'ms.dat', 'tr.dat',
+}
 a.datas = [
     _d for _d in a.datas
     if not (_d[0].replace('\\', '/').startswith('babel/locale-data/')
             and os.path.basename(_d[0]) not in _babel_keep)
+]
+# qpdf.dll 插件依赖已排除的 Qt6Pdf.dll，剔除避免运行时插件加载警告；
+# qsqlpsql.dll 依赖未收集的 libpq.dll（项目用 Python sqlite3，不用 QtSql 驱动）
+_skip_plugins_dll = ('imageformats/qpdf.dll', 'sqldrivers/qsqlpsql.dll')
+a.datas = [
+    _d for _d in a.datas
+    if not _d[0].replace('\\', '/').endswith(_skip_plugins_dll)
+]
+a.binaries = [
+    _b for _b in a.binaries
+    if not _b[0].replace('\\', '/').endswith(_skip_plugins_dll)
+]
+# MKL/LLVM 全量剔除（同 AutoWork.spec：numpy 实为 PyPI openblas 版，
+# hook 误判收集的 MKL 依赖全部排除，不影响功能）
+_mkl_drop = ('mkl', 'omptarget', 'sycl')
+a.binaries = [
+    _b for _b in a.binaries
+    if not os.path.basename(_b[0]).lower().startswith(_mkl_drop)
 ]
 
 pyz = PYZ(a.pure)
@@ -142,7 +173,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='aftersale',
+    name='management',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -162,5 +193,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='AfterSale',
+    name='Management',
 )

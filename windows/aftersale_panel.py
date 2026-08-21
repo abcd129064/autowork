@@ -1512,10 +1512,10 @@ if __name__ == "__main__":
     from qfluentwidgets import setTheme, setThemeColor, Theme
 
     def _debug_theme():
-        """读取 settings.json 主题配置（与主程序入口一致）"""
+        """读取 settings.json 主题配置（打包后从 exe 旁读取，与主程序入口一致）"""
         try:
-            p = os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "settings.json")
+            from core.app_paths import get_app_dir
+            p = os.path.join(get_app_dir(), "settings.json")
             with open(p, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             return (Theme.DARK if cfg.get("dark_theme") else Theme.LIGHT,
@@ -1523,11 +1523,17 @@ if __name__ == "__main__":
         except Exception:
             return Theme.LIGHT, "#00BCD4"
 
+    # 支持 --table=桌号 参数：主程序/运维面板拉起独立进程时按桌号预筛选
+    _table_arg = next((a.split("=", 1)[1] for a in sys.argv[1:]
+                       if a.startswith("--table=")), "")
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     theme, color = _debug_theme()
     setTheme(theme)
     setThemeColor(color, lazy=True)
     win = AftersalePanelWindow()
+    if _table_arg:
+        win.open_records_for_table(_table_arg)
     win.show()
     sys.exit(app.exec())

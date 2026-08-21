@@ -4,6 +4,7 @@
 import os
 import re
 import socket
+import subprocess
 import time
 
 try:
@@ -142,3 +143,41 @@ def show_info_bar(message, message_type="info", title=None, duration=2500, paren
     return factory.get(message_type, InfoBar.info)(
         title=title, content=message, parent=parent,
         position=InfoBarPosition.BOTTOM_RIGHT, duration=duration)
+
+
+# ==================== 打包版兄弟程序拉起 ====================
+
+# 各独立打包应用的产物目录名（与 spec 的 COLLECT name 对应），
+# 主程序/管理面板拉起兄弟 exe 时按此查找同级发布目录
+_SIBLING_DIRS = {"aftersale.exe": "AfterSale", "management.exe": "Management"}
+
+
+def launch_sibling_app(exe_name: str, args: list = None) -> bool:
+    """拉起同包分发的独立 exe（如 aftersale.exe / management.exe）
+
+    查找顺序（仅打包环境）：
+    1. 当前 exe 同目录（用户把兄弟程序放在一起时）
+    2. 同级发布目录（dist/AutoWork 旁 dist/AfterSale、dist/Management）
+    3. 当前 exe 所在目录的父目录直接放同名 exe
+
+    找到则异步启动并返回 True；开发环境或未找到返回 False，
+    调用方应回退为内嵌打开，保证两种形态（独立进程/内嵌）都可用。
+    """
+    import sys
+    if not getattr(sys, "frozen", False):
+        return False
+    app_dir = os.path.dirname(os.path.abspath(sys.executable))
+    parent = os.path.dirname(app_dir)
+    cands = [os.path.join(app_dir, exe_name)]
+    _dir = _SIBLING_DIRS.get(exe_name)
+    if _dir:
+        cands.append(os.path.join(parent, _dir, exe_name))
+    cands.append(os.path.join(parent, exe_name))
+    for cand in cands:
+        if os.path.isfile(cand):
+            try:
+                subprocess.Popen([cand] + list(args or []))
+                return True
+            except Exception:
+                return False
+    return False

@@ -44,7 +44,7 @@ from core.app_paths import get_app_dir
 from core.frp_remote import get_session_manager
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from core.secrets import decrypt_settings, encrypt_settings
-from core.utils import show_info_bar
+from core.utils import launch_sibling_app, show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
@@ -1415,7 +1415,13 @@ class TablePage(QWidget):
         menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
 
     def _open_aftersale_for_table(self, table_name):
-        """打开售后面板并按桌号预筛选（球桌 → 售后记录反查）"""
+        """打开售后面板并按桌号预筛选（球桌 → 售后记录反查）
+
+        打包分发场景优先拉起独立 aftersale.exe 并传桌号参数，
+        开发环境或未随包分发时回退内嵌窗口（行为不变）。
+        """
+        if launch_sibling_app("aftersale.exe", [f"--table={table_name}"]):
+            return
         from windows.aftersale_panel import AftersalePanelWindow
         win = self.window()
         panel = getattr(win, "_aftersale_panel_ref", None)
@@ -4452,10 +4458,10 @@ if __name__ == "__main__":
     from qfluentwidgets import setTheme, setThemeColor, Theme
 
     def _debug_theme_color():
-        """调试入口读取 settings.json 主题强调色（与主程序入口一致）"""
+        """调试入口读取 settings.json 主题强调色（打包后从 exe 旁读取）"""
         try:
-            p = os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "settings.json")
+            from core.app_paths import get_app_dir
+            p = os.path.join(get_app_dir(), "settings.json")
             with open(p, "r", encoding="utf-8") as f:
                 return json.load(f).get("theme_color", "#00BCD4")
         except Exception:
