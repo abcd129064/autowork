@@ -44,6 +44,7 @@ moyu_state.json
 # frpc 隧道配置（含内网地址等敏感信息，不提交）
 frpc_xtcp.toml
 frpc_xtcp_panel.toml
+frpc_xtcp_meta.json
 frpc.exe
 
 # 打包体积优化回滚备份资产（方案 D 临时保险，验证后删除）
