@@ -1,0 +1,159 @@
+classDiagram
+    direction LR
+
+    %% ============ 数据层 database/ ============
+    class Backend {
+        +STATE_ONLINE: str
+        +STATE_DEGRADED: str
+        +MYSQL_DDL: dict
+        +is_mysql_test_mode() bool
+        +invalidate_mysql_settings_cache()
+        +get_state() str
+        +mark_degraded() bool
+        +mark_online() bool
+        +create_mysql_connection() MysqlConnectionAdapter
+        +convert_placeholders(sql) str
+        +convert_on_conflict(sql) str
+        +convert_insert_or_replace(sql) str
+    }
+    class MysqlConnectionAdapter {
+        -_conn
+        -_healthy: bool
+        +execute(sql, params) MysqlCursorAdapter
+        +executemany(sql, seq) MysqlCursorAdapter
+        +begin() / commit() / rollback() / close()
+        +column_exists(table, col) bool
+        +table_exists(table) bool
+    }
+    class MysqlCursorAdapter {
+        -_cur
+        +execute(sql, params) self
+        +fetchone() / fetchall()
+        +lastrowid / rowcount / description
+    }
+    class Schema {
+        +TABLE_META: dict
+        +MIGRATIONS: dict
+        +to_sqlite_ddl(table) str
+        +to_mysql_ddl(table) str
+    }
+    class SqliteIO {
+        +read_sqlite_table(table, columns) list
+    }
+    class TableDB {
+        +DB_PATH: str
+        +FIELDS: tuple
+        +STATUS_FIELDS: tuple
+        +KD_EXTRA_FIELDS: tuple
+        +_get_conn()
+        +_upsert_sync_meta(conn, key, value)
+        +save_all(rows) int
+        +query_page(page, size, kw) tuple
+        +save_xqzg(rows, file_path) int
+        +query_xqzg_page(...) tuple
+        +save_kd(rows, file_path) int
+        +upsert_kd(rows, file_path) int
+        +query_kd_page(...) tuple
+        +get_latest_kd_status(table_id) dict
+        +sync_health_alerts(rows) int
+        +log_submission(...) int
+        +get_device_mapping(code) dict
+        +set_device_mapping(code, dir, source) bool
+        +_ensure_initialized(conn)
+    }
+    class AftersaleDB {
+        +RECORD_FIELDS: tuple
+        +RECORD_KEY_COLS: tuple
+        +insert_record(record) int
+        +update_record(record) int
+        +delete_record(id) int
+        +query_page(...) tuple
+        +export_xlsx(path, ...) int
+        +import_excel_rows(path) int
+        +cycle_start_of(dt) str
+    }
+    class MysqlSync {
+        +_read_sqlite(table, columns) list
+        +push_all(progress_cb) tuple
+        +push_table(table, progress_cb) tuple
+        +push_aftersale(cfg, progress_cb) tuple
+        +test_connection(cfg) tuple
+        +_ensure_schema(cfg)
+    }
+    class MergeBack {
+        +merge_back(progress_cb) tuple
+        +merge_aftersale(mysql_conn, cb) int
+        +merge_device_mapping(mysql_conn, cb) int
+        +merge_ops_tables(mysql_conn, cb) int
+    }
+    class FallbackBackup {
+        +backup_mysql_to_sqlite(cb) tuple
+        +maybe_backup(cb) tuple
+        +is_backup_due() bool
+        +get_last_backup_time() str
+    }
+
+    %% ============ workers/ ============
+    class MergeBackWorker {
+        +progress: Signal(str)
+        +result: Signal(bool, str, int)
+        +run()
+    }
+    class MysqlSyncWorker {
+        +progress: Signal(str)
+        +success: Signal(int, str)
+        +error: Signal(str)
+        +run()
+    }
+    class BackupWorker {
+        +result: Signal(bool, str, int)
+        +run()
+    }
+    class TableWorker {
+        +result_ready: Signal(list)
+        +error: Signal(str)
+        +run()
+    }
+
+    %% ============ windows/ ============
+    class ManagementPanel {
+        +TablePage
+        +UploadListDialog
+        +DeviceFilesDialog
+        +HealthPage
+        +MysqlSyncCard
+        +_trigger_auto_mysql_sync()
+    }
+    class TablePanel {
+        +_check_device_offline(name) bool
+    }
+    class ForensicReport {
+        +lookup_table_info(snk, host) dict
+        +lookup_kd_status(table_id, snk) dict
+    }
+
+    %% ============ 关系 ============
+    TableDB --> Backend : 路由连接/方言
+    TableDB --> Schema : 生成 DDL（目标态）
+    TableDB --> SqliteIO : 只读工具（目标态）
+    AftersaleDB --> TableDB : get_conn()
+    MysqlSync --> Backend : is_mysql_test_mode 守卫
+    MysqlSync --> Schema : DDL 引用（目标态）
+    MysqlSync --> SqliteIO : 读 SQLite（目标态）
+    MergeBack --> Backend : create_mysql_connection
+    MergeBack --> Schema : 列元数据（目标态）
+    MergeBack --> SqliteIO : 读 SQLite（目标态）
+    FallbackBackup --> Backend : create_mysql_connection
+    FallbackBackup --> SqliteIO : 读/写 SQLite（目标态）
+    Backend --> MysqlConnectionAdapter : 创建
+    MysqlConnectionAdapter --> MysqlCursorAdapter : 包装
+
+    MergeBackWorker --> MergeBack : run 调用
+    MysqlSyncWorker --> MysqlSync : run 调用
+    BackupWorker --> FallbackBackup : run 调用
+    TableWorker --> TableDB : save_all/upsert_kd
+    ManagementPanel --> TableDB : 查询/保存
+    ManagementPanel --> TableWorker : 拉 API
+    ManagementPanel --> MysqlSyncCard : 配置卡片
+    TablePanel --> TableDB : get_latest_kd_status（目标态）
+    ForensicReport --> TableDB : 只读 API（目标态）

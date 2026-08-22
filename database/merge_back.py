@@ -22,11 +22,12 @@ MySQL 从 DEGRADED 恢复为 ONLINE 时，把降级期间写入本地 SQLite 的
 import sqlite3
 from datetime import datetime
 
+from database import aftersale_db
 from database import backend
+from database.sqlite_io import read_sqlite_table
 from database.table_db import DB_PATH
 
-# 售后业务键（与 mysql_sync._AFTERSALE_KEY_COLS 一致）
-_AFTERSALE_KEY = ("created_at", "creator", "table_no", "problem")
+# 售后业务键（与 aftersale_db.RECORD_KEY_COLS 一致，单一来源）
 # 合并读取的售后字段（含 updated_at 供 LWW 判定）
 _AFTERSALE_COLS = (
     "created_at", "occurred_at", "creator", "issue_type", "table_no",
@@ -43,26 +44,20 @@ _OPS_TABLES = {
 }
 
 
-def _read_sqlite_rows(table: str, columns: tuple) -> list:
-    """从本地 SQLite 读全部行，按列名取交集防御列差异"""
+def _read_rows_as_tuples(table: str, columns: tuple) -> list:
+    """从本地 SQLite 读全部行，按请求列顺序返回 tuple 列表（缺列补空串）
+
+    列交集 + 缺列补空语义由 database.sqlite_io.read_sqlite_table 提供
+    （T01 数据层基础设施，只读），此处仅做 dict → tuple 适配以兼容
+    合并逻辑期望的 tuple 行形态。
+    """
     sl = sqlite3.connect(DB_PATH)
     try:
-        exist = [r[1] for r in sl.execute(
-            f"PRAGMA table_info({table})").fetchall()]
-        if not exist:
-            return []
-        cols = [c for c in columns if c in exist]
-        rows = sl.execute(
-            f"SELECT {', '.join(cols)} FROM {table}").fetchall()
+        records = read_sqlite_table(sl, table, columns)
     finally:
         sl.close()
-    if len(cols) == len(columns):
-        return rows
-    out = []
-    for r in rows:
-        d = dict(zip(cols, r))
-        out.append(tuple(d.get(c, "") for c in columns))
-    return out
+    return [tuple("" if r[c] is None else r[c] for c in columns)
+            for r in records]
 
 
 def _parse_dt(s) -> datetime:
@@ -79,17 +74,18 @@ def merge_aftersale(mysql_conn, progress_cb=None) -> int:
 
     返回合并条数（新增 + 更新）。
     """
-    rows = _read_sqlite_rows("aftersale_records", _AFTERSALE_COLS)
+    rows = _read_rows_as_tuples("aftersale_records", _AFTERSALE_COLS)
     if not rows:
         return 0
+    key_cols = aftersale_db.RECORD_KEY_COLS
     cols_str = ", ".join(f"`{c}`" for c in _AFTERSALE_COLS)
     ph = ", ".join(["%s"] * len(_AFTERSALE_COLS))
     insert_sql = (f"INSERT INTO `aftersale_records` ({cols_str}) "
                   f"VALUES ({ph})")
     # UPDATE 全部非键列（含 updated_at）
-    non_key = [c for c in _AFTERSALE_COLS if c not in _AFTERSALE_KEY]
+    non_key = [c for c in _AFTERSALE_COLS if c not in key_cols]
     set_str = ", ".join(f"`{c}` = %s" for c in non_key)
-    key_where = " AND ".join(f"`{c}` = %s" for c in _AFTERSALE_KEY)
+    key_where = " AND ".join(f"`{c}` = %s" for c in key_cols)
     update_sql = (f"UPDATE `aftersale_records` SET {set_str} "
                   f"WHERE {key_where}")
     sel_sql = (f"SELECT updated_at FROM `aftersale_records` "
@@ -99,7 +95,7 @@ def merge_aftersale(mysql_conn, progress_cb=None) -> int:
     with mysql_conn.cursor() as cur:
         for r in rows:
             d = dict(zip(_AFTERSALE_COLS, r))
-            keys = [d[c] for c in _AFTERSALE_KEY]
+            keys = [d[c] for c in key_cols]
             cur.execute(sel_sql, keys)
             exist = cur.fetchone()
             local_ts = _parse_dt(d.get("updated_at"))
@@ -124,7 +120,7 @@ def merge_aftersale(mysql_conn, progress_cb=None) -> int:
 def merge_device_mapping(mysql_conn, progress_cb=None) -> int:
     """device_mapping LWW 合并：按 device_code 主键，updated_at 较新者覆盖"""
     cols = ("device_code", "local_dir", "source", "created_at", "updated_at")
-    rows = _read_sqlite_rows("device_mapping", cols)
+    rows = _read_rows_as_tuples("device_mapping", cols)
     if not rows:
         return 0
     ph = ", ".join(["%s"] * len(cols))

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""MySQL 同步配置卡片（可复用组件：运维面板 / 售后面板共用）
+"""MySQL 配置卡片（可复用组件：运维面板 / 售后面板共用）
 
-- 连接表单 + 启用/自动同步开关 + 测试连接/立即同步/保存配置按钮
-- sync_scope="ops" 推 5 张业务表；sync_scope="aftersale" 只推售后记录
+- 连接表单 + 启用开关 + 测试连接/保存配置按钮
+- sync_scope="ops" 运维业务数据；sync_scope="aftersale" 售后记录
 - 配置读写：DPAPI 加密落盘；以磁盘最新内容为 base 合并，避免双缓存覆盖
+- 镜像推送（自动同步/立即同步）已随机制 B 下线：仅保留连接测试与配置保存
 """
 
 import json
@@ -20,7 +21,7 @@ from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import show_info_bar
 from database import backend
 from database.mysql_sync_card_logic import should_attempt_test
-from workers.mysql_sync_worker import MysqlSyncWorker, MysqlTestWorker
+from workers.mysql_sync_worker import MysqlTestWorker
 
 
 def _settings_path() -> str:
@@ -59,8 +60,6 @@ class MysqlSyncCard(CardWidget):
         super().__init__(parent)
         self.sync_scope = sync_scope
         self._test_worker = None
-        self._sync_worker = None
-        self._last_enabled = False  # 上次磁盘配置的启用状态（保存时对比是否发生切换）
         self._init_ui()
 
     # ---------- UI ----------
@@ -74,8 +73,7 @@ class MysqlSyncCard(CardWidget):
         vbox.addWidget(BodyLabel(card_title, self))
         vbox.addWidget(CaptionLabel(
             f"开启后 MySQL 完全替代本地 SQLite，应用实时读写远程数据库；"
-            f"关闭则回到本地 SQLite。保存启用时自动将本地历史数据同步到远程。"
-            f"同步范围：{scope_name}", self))
+            f"关闭则回到本地 SQLite。同步范围：{scope_name}", self))
 
         # 开关行
         sw_row = QHBoxLayout()
@@ -85,13 +83,6 @@ class MysqlSyncCard(CardWidget):
         self._switch_enabled.setOnText("开")
         self._switch_enabled.setOffText("关")
         sw_row.addWidget(self._switch_enabled)
-        sw_row.addSpacing(20)
-        sw_row.addWidget(QLabel("自动同步:", self))
-        self._switch_auto = SwitchButton(self)
-        self._switch_auto.setOnText("开")
-        self._switch_auto.setOffText("关")
-        self._switch_auto.setToolTip("每次 API 同步后自动推送到 MySQL")
-        sw_row.addWidget(self._switch_auto)
         sw_row.addStretch(1)
         vbox.addLayout(sw_row)
 
@@ -123,7 +114,7 @@ class MysqlSyncCard(CardWidget):
         self._btn_test.clicked.connect(self._on_test)
         btn_row.addWidget(self._btn_test)
         self._btn_save = PushButton(FluentIcon.SAVE, "保存配置", self)
-        self._btn_save.setToolTip("写入 settings.json 即时生效；启用时会自动同步本地历史数据")
+        self._btn_save.setToolTip("写入 settings.json 即时生效")
         self._btn_save.clicked.connect(self._on_save)
         btn_row.addWidget(self._btn_save)
         vbox.addLayout(btn_row)
@@ -139,8 +130,6 @@ class MysqlSyncCard(CardWidget):
         self._edit_pass.setText(str(cfg.get("password", "")))
         self._edit_db.setText(str(cfg.get("database", "autowork")))
         self._switch_enabled.setChecked(bool(cfg.get("enabled", False)))
-        self._switch_auto.setChecked(bool(cfg.get("auto_sync", False)))
-        self._last_enabled = bool(cfg.get("enabled", False))
 
     def _collect_cfg(self, enabled: bool = None) -> dict:
         """收集表单配置为 dict（端口非法时兜底 3306）"""
@@ -156,28 +145,22 @@ class MysqlSyncCard(CardWidget):
             "user": self._edit_user.text().strip() or "root",
             "password": self._edit_pass.text(),
             "database": self._edit_db.text().strip() or "autowork",
-            "auto_sync": self._switch_auto.isChecked(),
         }
 
     def _on_save(self):
-        """保存配置：合并写 settings.json 并提示；从本地切到 MySQL 时自动同步历史数据
+        """保存配置：合并写 settings.json 并提示
 
-        实时主库模式下写入直接进 MySQL，本地无新增，「立即同步」无意义，
-        已移除；但本地模式期间录入/导入的历史数据需要推送，故仅在
-        启用开关从关变开时自动后台同步一次（防重入）。
+        实时主库模式下写入直接进 MySQL，本地无新增，「立即同步」/自动
+        推送已随镜像推送机制 B 下线；保存只负责写配置并让 backend 各线程
+        按新配置重建连接。
         """
         try:
             cfg = self._collect_cfg()
-            was_enabled = self._last_enabled
             _save_settings({"mysql_sync": cfg})
             # backend 的开关/凭据走进程缓存；保存成功后让各线程在下一次
             # 数据库访问时按新配置重建连接，避免继续使用旧 host/账号。
             backend.invalidate_mysql_settings_cache()
-            self._last_enabled = cfg["enabled"]
-            if cfg["enabled"] and not was_enabled:
-                self._auto_sync_history(cfg)
-                hint = "已启用 MySQL，正在后台同步本地历史数据到远程"
-            elif cfg["enabled"]:
+            if cfg["enabled"]:
                 hint = "已启用 MySQL，应用将直接读写远程数据库"
             else:
                 hint = "已关闭 MySQL，应用将使用本地 SQLite"
@@ -206,9 +189,7 @@ class MysqlSyncCard(CardWidget):
                           parent=self, duration=2500)
             return
         self._btn_test.setEnabled(False)
-        cfg = form_cfg
-        cfg.pop("auto_sync", None)
-        self._test_worker = MysqlTestWorker(cfg, self)
+        self._test_worker = MysqlTestWorker(form_cfg, self)
         self._test_worker.finished.connect(self._on_test_done)
         self._test_worker.start()
 
@@ -220,32 +201,3 @@ class MysqlSyncCard(CardWidget):
         else:
             show_info_bar(msg, "error", title="MySQL 连接失败",
                           parent=self, duration=4000)
-
-    # ---------- 自动同步本地历史 ----------
-
-    def _auto_sync_history(self, cfg: dict):
-        """启用 MySQL 后自动推送本地历史数据到远程（后台异步，进行中不重复）
-
-        仅覆盖「本地模式 → MySQL 模式」切换；降级期间增量由 merge_back
-        在 MySQL 恢复时自动合并，此处不重复处理。
-        """
-        if self._sync_worker and self._sync_worker.isRunning():
-            return
-        cfg = dict(cfg)
-        cfg.pop("auto_sync", None)
-        table_name = ("aftersale_records"
-                      if self.sync_scope == "aftersale" else None)
-        self._sync_worker = MysqlSyncWorker(table_name, self, cfg=cfg)
-        self._sync_worker.success.connect(self._on_auto_sync_done)
-        self._sync_worker.error.connect(self._on_auto_sync_error)
-        self._sync_worker.start()
-
-    def _on_auto_sync_done(self, count, msg):
-        show_info_bar(f"本地历史数据已同步到远程，共 {count} 条（{msg}）",
-                      "success", title="历史数据同步完成",
-                      parent=self, duration=3000)
-
-    def _on_auto_sync_error(self, msg):
-        show_info_bar(f"{msg}。可等 MySQL 可用后重新保存配置重试",
-                      "error", title="历史数据同步失败",
-                      parent=self, duration=4000)

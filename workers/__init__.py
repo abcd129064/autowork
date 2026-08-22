@@ -16,6 +16,5 @@ from .table_worker import (
     DevicesFetchWorker,
 )
 from .mysql_sync_worker import (
-    MysqlSyncWorker,
     MysqlTestWorker,
 )

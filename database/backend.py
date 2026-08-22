@@ -17,6 +17,8 @@ import os
 import re
 import threading
 
+from database import schema
+
 
 # ==================== MySQL 测试模式开关 ====================
 
@@ -378,151 +380,12 @@ def create_mysql_connection():
 
 # ==================== MySQL 建表 DDL ====================
 
-# 与 table_db.py 中 SQLite DDL 一一对应（IF NOT EXISTS 幂等，无 ALTER 需求）
-MYSQL_DDL = {
-    "billiard_tables": """
-        CREATE TABLE IF NOT EXISTS billiard_tables (
-            id               INT PRIMARY KEY,
-            name             VARCHAR(255) DEFAULT '',
-            roomName         VARCHAR(255) DEFAULT '',
-            onlineStatusName VARCHAR(255) DEFAULT '',
-            remark           TEXT,
-            cameraPassExt    VARCHAR(512) DEFAULT '',
-            snk_code         VARCHAR(128) DEFAULT '',
-            code             VARCHAR(255) DEFAULT '',
-            city             VARCHAR(255) DEFAULT ''
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "sync_meta": """
-        CREATE TABLE IF NOT EXISTS sync_meta (
-            `key`  VARCHAR(128) PRIMARY KEY,
-            value  TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "xqzg_status": """
-        CREATE TABLE IF NOT EXISTS xqzg_status (
-            id               INT PRIMARY KEY,
-            file_path        VARCHAR(64) DEFAULT '',
-            table_id         VARCHAR(255) DEFAULT '',
-            club_name        VARCHAR(255) DEFAULT '',
-            pic_total        VARCHAR(64) DEFAULT '',
-            normal_count     VARCHAR(64) DEFAULT '',
-            normal_total     VARCHAR(64) DEFAULT '',
-            except_count     VARCHAR(64) DEFAULT '',
-            operation_rate   VARCHAR(64) DEFAULT '',
-            untreated_count  VARCHAR(64) DEFAULT '',
-            operation_count  VARCHAR(64) DEFAULT '',
-            accuracy_count   VARCHAR(64) DEFAULT '',
-            already_count    VARCHAR(64) DEFAULT '',
-            rubbish_count    VARCHAR(64) DEFAULT '',
-            error_rate       VARCHAR(64) DEFAULT '',
-            device_code      VARCHAR(255) DEFAULT '',
-            target_directory VARCHAR(512) DEFAULT '',
-            status           VARCHAR(32) DEFAULT '',
-            normal_files     LONGTEXT,
-            except_files     LONGTEXT,
-            untreated_files  LONGTEXT,
-            operation_files  LONGTEXT,
-            accuracy_files   LONGTEXT,
-            already_files    LONGTEXT,
-            rubbish_files    LONGTEXT,
-            version_files    LONGTEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "kd_status": """
-        CREATE TABLE IF NOT EXISTS kd_status (
-            id               INT PRIMARY KEY,
-            file_path        VARCHAR(64) DEFAULT '',
-            table_id         VARCHAR(255) DEFAULT '',
-            club_name        VARCHAR(255) DEFAULT '',
-            pic_total        VARCHAR(64) DEFAULT '',
-            normal_count     VARCHAR(64) DEFAULT '',
-            normal_total     VARCHAR(64) DEFAULT '',
-            except_count     VARCHAR(64) DEFAULT '',
-            operation_rate   VARCHAR(64) DEFAULT '',
-            untreated_count  VARCHAR(64) DEFAULT '',
-            operation_count  VARCHAR(64) DEFAULT '',
-            accuracy_count   VARCHAR(64) DEFAULT '',
-            already_count    VARCHAR(64) DEFAULT '',
-            rubbish_count    VARCHAR(64) DEFAULT '',
-            error_rate       VARCHAR(64) DEFAULT '',
-            device_code      VARCHAR(255) DEFAULT '',
-            target_directory VARCHAR(512) DEFAULT '',
-            status           VARCHAR(32) DEFAULT '',
-            normal_files     LONGTEXT,
-            except_files     LONGTEXT,
-            untreated_files  LONGTEXT,
-            operation_files  LONGTEXT,
-            accuracy_files   LONGTEXT,
-            already_files    LONGTEXT,
-            rubbish_files    LONGTEXT,
-            version_files    LONGTEXT,
-            INDEX idx_kd_file_path (file_path),
-            INDEX idx_kd_device_code (device_code)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "submission_log": """
-        CREATE TABLE IF NOT EXISTS submission_log (
-            id             INT AUTO_INCREMENT PRIMARY KEY,
-            created_at     VARCHAR(32) DEFAULT '',
-            device_code    VARCHAR(255) DEFAULT '',
-            table_id       VARCHAR(255) DEFAULT '',
-            club_name      VARCHAR(255) DEFAULT '',
-            category       VARCHAR(64) DEFAULT '',
-            file_name      VARCHAR(512) DEFAULT '',
-            file_path_date VARCHAR(64) DEFAULT '',
-            collect_ok     TINYINT DEFAULT 0,
-            upload_zip     VARCHAR(512),
-            upload_ok      TINYINT,
-            INDEX idx_sub_device_time (device_code, created_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "device_mapping": """
-        CREATE TABLE IF NOT EXISTS device_mapping (
-            device_code VARCHAR(255) PRIMARY KEY,
-            local_dir   VARCHAR(512) DEFAULT '',
-            source      VARCHAR(32) DEFAULT 'auto',
-            created_at  VARCHAR(32) DEFAULT '',
-            updated_at  VARCHAR(32) DEFAULT ''
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "health_alerts": """
-        CREATE TABLE IF NOT EXISTS health_alerts (
-            name             VARCHAR(255) PRIMARY KEY,
-            roomName         VARCHAR(255) DEFAULT '',
-            onlineStatusName VARCHAR(255) DEFAULT '',
-            health           DOUBLE DEFAULT 0,
-            resolved_health  DOUBLE,
-            updated_at       VARCHAR(32) DEFAULT ''
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    "aftersale_records": """
-        CREATE TABLE IF NOT EXISTS aftersale_records (
-            id            INT AUTO_INCREMENT PRIMARY KEY,
-            created_at    VARCHAR(32) DEFAULT '',
-            occurred_at   VARCHAR(32) DEFAULT '',
-            creator       VARCHAR(255) DEFAULT '',
-            issue_type    VARCHAR(255) DEFAULT '',
-            table_no      VARCHAR(255) DEFAULT '',
-            room_name     VARCHAR(255) DEFAULT '',
-            region        VARCHAR(255) DEFAULT '',
-            problem       TEXT,
-            cause         TEXT,
-            resolved      VARCHAR(255) DEFAULT '否',
-            is_initiative VARCHAR(255) DEFAULT '否',
-            is_our_problem VARCHAR(255) DEFAULT '是',
-            solution      TEXT,
-            resolver      VARCHAR(255) DEFAULT '',
-            response_time VARCHAR(255) DEFAULT '',
-            snk_code      VARCHAR(255) DEFAULT '',
-            device_code   VARCHAR(255) DEFAULT '',
-            cycle_start   VARCHAR(32) DEFAULT '',
-            updated_at    VARCHAR(32) DEFAULT '',
-            INDEX idx_aftersale_cycle (cycle_start),
-            INDEX idx_aftersale_table_no (table_no)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-}
+# 单一来源：由 database/schema.py 生成（与 SQLite DDL 一一对应，
+# IF NOT EXISTS 幂等，无 ALTER 需求）。保持 dict 接口，
+# table_db._ensure_mysql_tables 的 ``for ddl in backend.MYSQL_DDL.values()``
+# 不受影响。类型映射（INTEGER→INT、TEXT→VARCHAR/TEXT/LONGTEXT、
+# AUTO_INCREMENT、ENGINE/CHARSET、索引）见 schema.py 模块 docstring。
+MYSQL_DDL = {t: schema.to_mysql_ddl(t) for t in schema.TABLE_NAMES}
 
 
 # ==================== 后端状态机（MySQL 主 + SQLite 兜底）====================

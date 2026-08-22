@@ -1,0 +1,67 @@
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant MP as ManagementPanel<br/>(windows/management/)
+    participant TW as TableWorker<br/>(workers/table_worker.py)
+    participant TD as TableDB<br/>(database/table_db.py)
+    participant BKD as Backend<br/>(database/backend.py)
+    participant SC as Schema<br/>(database/schema.py)
+    participant MYSQL as MySQL
+    participant SQLITE as SQLite tables.db
+    participant MBW as MergeBackWorker
+    participant MB as MergeBack
+
+    %% ===== 1. API 拉取并保存（MySQL 主模式 ONLINE） =====
+    U->>MP: 点击刷新
+    MP->>TW: TableFetchWorker.start()
+    TW-->>MP: result_ready(rows)
+    MP->>TD: save_all(rows) / save_xqzg / save_kd
+    TD->>BKD: is_mysql_test_mode() / get_state()
+    BKD-->>TD: ONLINE
+    TD->>BKD: create_mysql_connection()
+    BKD-->>TD: MysqlConnectionAdapter
+    TD->>MYSQL: DELETE + executemany(INSERT OR REPLACE→INSERT)
+    TD->>MYSQL: _upsert_sync_meta(conn,'last_sync',now)
+    MYSQL-->>TD: ok
+    TD-->>MP: count
+
+    %% ===== 2. MySQL 不可用 → 自动降级 SQLite 兜底 =====
+    U->>MP: 再次刷新
+    MP->>TD: query_page(...)
+    TD->>BKD: create_mysql_connection()
+    BKD-->>TD: 连接失败
+    TD->>BKD: mark_degraded()
+    TD->>SQLITE: _get_sqlite_conn()（WAL 单连接）
+    SQLITE-->>TD: rows（兜底基线）
+    TD-->>MP: total, rows
+
+    %% ===== 3. MySQL 恢复 → 触发 LWW 合并回写 =====
+    U->>MP: 再次操作
+    MP->>TD: save_all(rows)
+    TD->>BKD: create_mysql_connection()
+    BKD-->>TD: 成功（恢复）
+    TD->>BKD: mark_online()
+    TD->>MBW: _trigger_merge_back()（异步）
+    MBW->>MB: merge_back()
+    MB->>BKD: create_mysql_connection()
+    MB->>SQLITE: read_sqlite_table（sqlite_io）
+    MB->>MYSQL: merge_aftersale（业务键+LWW）
+    MB->>MYSQL: merge_device_mapping（主键+LWW）
+    MB->>MYSQL: merge_ops_tables（SQLite 优先）
+    MB-->>MBW: (ok, msg, count)
+    MBW-->>U: InfoBar「兜底数据已合并回 MySQL」
+
+    %% ===== 4. 周备份：MySQL → SQLite 兜底基线 =====
+    BKD-->>FB: 启动延迟 5s + 24h QTimer（main_window）
+    FB->>BKD: get_state()==ONLINE
+    FB->>MYSQL: SELECT 全表
+    FB->>SQLITE: DELETE + INSERT OR REPLACE
+    FB->>SQLITE: set_last_backup_time（sync_meta）
+
+    %% ===== 5. 直读旁路收敛（目标态） =====
+    U->>TablePanel: 远程连接前离线检查
+    TablePanel->>TD: get_latest_kd_status(table_id)
+    TD->>BKD: get_conn()（ONLINE→MySQL / DEGRADED→SQLite）
+    BKD-->>TD: conn
+    TD-->>TablePanel: {"status","file_path"}
+    Note over TablePanel: 目标态：不再裸 sqlite3.connect(table_db.DB_PATH)

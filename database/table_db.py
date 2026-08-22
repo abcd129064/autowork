@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from database import backend
+from database import schema
 
 # 数据库文件路径：database/tables.db（随项目目录）
 _DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database")
@@ -49,23 +50,15 @@ def parse_city(item: dict) -> str:
     return ""
 
 
-_CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS billiard_tables (
-    id      INTEGER PRIMARY KEY,
-    name    TEXT DEFAULT '',
-    roomName TEXT DEFAULT '',
-    onlineStatusName TEXT DEFAULT '',
-    remark  TEXT DEFAULT '',
-    cameraPassExt TEXT DEFAULT '',
-    snk_code TEXT DEFAULT '',
-    code    TEXT DEFAULT '',
-    city    TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS sync_meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-"""
+# DDL 单一来源：全部由 database/schema.py 生成（与 backend.MYSQL_DDL
+# 一一对应，消除手工重复维护导致的漂移）。常量名保留为引用别名，
+# _ensure_initialized 内 executescript 使用处不变。
+# - _CREATE_SQL：billiard_tables + sync_meta（两张表共用一段脚本）
+# - _CREATE_STATUS_SQL：xqzg_status + kd_status
+_CREATE_SQL = "\n".join((
+    schema.to_sqlite_ddl("billiard_tables"),
+    schema.to_sqlite_ddl("sync_meta"),
+))
 
 # ==================== 新增：接口1 / 接口2 运维数据表 ====================
 
@@ -163,8 +156,8 @@ def _setup_fts(conn):
         if not built:
             for _, (fts, _) in _FTS_MAP.items():
                 conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('fts_built', '1')")
+            # 双后端兼容 upsert（MySQL 下重复刷新同一 key 会 1062）
+            _upsert_sync_meta(conn, "fts_built", "1")
             conn.commit()
         _fts_available = True
     except sqlite3.Error as e:
@@ -203,130 +196,22 @@ def _build_order_clause(order_by: str, desc: bool) -> str:
         return f" ORDER BY CAST({order_by} AS REAL) {direction}"
     return f" ORDER BY {order_by} {direction}"
 
-_CREATE_STATUS_SQL = """
-CREATE TABLE IF NOT EXISTS xqzg_status (
-    id              INTEGER PRIMARY KEY,
-    file_path       TEXT DEFAULT '',
-    table_id        TEXT DEFAULT '',
-    club_name       TEXT DEFAULT '',
-    pic_total       TEXT DEFAULT '',
-    normal_count    TEXT DEFAULT '',
-    normal_total    TEXT DEFAULT '',
-    except_count    TEXT DEFAULT '',
-    operation_rate  TEXT DEFAULT '',
-    untreated_count TEXT DEFAULT '',
-    operation_count TEXT DEFAULT '',
-    accuracy_count  TEXT DEFAULT '',
-    already_count   TEXT DEFAULT '',
-    rubbish_count   TEXT DEFAULT '',
-    error_rate      TEXT DEFAULT '',
-    device_code     TEXT DEFAULT '',
-    target_directory TEXT DEFAULT '',
-    status          TEXT DEFAULT '',
-    normal_files    TEXT DEFAULT '[]',
-    except_files    TEXT DEFAULT '[]',
-    untreated_files TEXT DEFAULT '[]',
-    operation_files TEXT DEFAULT '[]',
-    accuracy_files  TEXT DEFAULT '[]',
-    already_files   TEXT DEFAULT '[]',
-    rubbish_files   TEXT DEFAULT '[]',
-    version_files   TEXT DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS kd_status (
-    id              INTEGER PRIMARY KEY,
-    file_path       TEXT DEFAULT '',
-    table_id        TEXT DEFAULT '',
-    club_name       TEXT DEFAULT '',
-    pic_total       TEXT DEFAULT '',
-    normal_count    TEXT DEFAULT '',
-    normal_total    TEXT DEFAULT '',
-    except_count    TEXT DEFAULT '',
-    operation_rate  TEXT DEFAULT '',
-    untreated_count TEXT DEFAULT '',
-    operation_count TEXT DEFAULT '',
-    accuracy_count  TEXT DEFAULT '',
-    already_count   TEXT DEFAULT '',
-    rubbish_count   TEXT DEFAULT '',
-    error_rate      TEXT DEFAULT '',
-    device_code     TEXT DEFAULT '',
-    target_directory TEXT DEFAULT '',
-    status          TEXT DEFAULT '',
-    normal_files    TEXT DEFAULT '[]',
-    except_files    TEXT DEFAULT '[]',
-    untreated_files TEXT DEFAULT '[]',
-    operation_files TEXT DEFAULT '[]',
-    accuracy_files  TEXT DEFAULT '[]',
-    already_files   TEXT DEFAULT '[]',
-    rubbish_files   TEXT DEFAULT '[]',
-    version_files   TEXT DEFAULT '[]'
-);
--- 日期分区 + 默认 id 排序的覆盖索引：file_path 筛选的分页查询（列表页主路径）
--- 无需回表扫描全表；CREATE INDEX IF NOT EXISTS 幂等，旧库首次初始化自动补建
-CREATE INDEX IF NOT EXISTS idx_kd_status_path_id ON kd_status(file_path, id);
-"""
+_CREATE_STATUS_SQL = "\n".join((
+    schema.to_sqlite_ddl("xqzg_status"),
+    schema.to_sqlite_ddl("kd_status"),
+))
 
 # ==================== 精度/问题提交本地台账（C1） ====================
 
-_CREATE_SUBMISSION_SQL = """
-CREATE TABLE IF NOT EXISTS submission_log (
-    id             INTEGER PRIMARY KEY,
-    created_at     TEXT DEFAULT '',
-    device_code    TEXT DEFAULT '',
-    table_id       TEXT DEFAULT '',
-    club_name      TEXT DEFAULT '',
-    category       TEXT DEFAULT '',
-    file_name      TEXT DEFAULT '',
-    file_path_date TEXT DEFAULT '',
-    collect_ok     INTEGER DEFAULT 0,
-    upload_zip     TEXT,
-    upload_ok      INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_submission_device_time
-    ON submission_log(device_code, created_at);
-"""
+_CREATE_SUBMISSION_SQL = schema.to_sqlite_ddl("submission_log")
 
 # ==================== 设备映射表（C4：设备码 → 本地 videos 目录） ====================
 
-_CREATE_MAPPING_SQL = """
-CREATE TABLE IF NOT EXISTS device_mapping (
-    device_code TEXT PRIMARY KEY,
-    local_dir   TEXT DEFAULT '',
-    source      TEXT DEFAULT 'auto',
-    created_at  TEXT DEFAULT '',
-    updated_at  TEXT DEFAULT ''
-);
-"""
+_CREATE_MAPPING_SQL = schema.to_sqlite_ddl("device_mapping")
 
 # ==================== 售后记录表（售后面板，双后端） ====================
 
-_CREATE_AFTERSALE_SQL = """
-CREATE TABLE IF NOT EXISTS aftersale_records (
-    id            INTEGER PRIMARY KEY,
-    created_at    TEXT DEFAULT '',
-    occurred_at   TEXT DEFAULT '',
-    creator       TEXT DEFAULT '',
-    issue_type    TEXT DEFAULT '',
-    table_no      TEXT DEFAULT '',
-    room_name     TEXT DEFAULT '',
-    region        TEXT DEFAULT '',
-    problem       TEXT DEFAULT '',
-    cause         TEXT DEFAULT '',
-    resolved      TEXT DEFAULT '否',
-    is_initiative TEXT DEFAULT '否',
-    is_our_problem TEXT DEFAULT '是',
-    solution      TEXT DEFAULT '',
-    resolver      TEXT DEFAULT '',
-    response_time TEXT DEFAULT '',
-    snk_code      TEXT DEFAULT '',
-    device_code   TEXT DEFAULT '',
-    cycle_start   TEXT DEFAULT '',
-    updated_at    TEXT DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
-    ON aftersale_records(cycle_start, id);
-CREATE INDEX IF NOT EXISTS idx_aftersale_table_no
-    ON aftersale_records(table_no);
-"""
+_CREATE_AFTERSALE_SQL = schema.to_sqlite_ddl("aftersale_records")
 
 # 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
 # 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
@@ -342,6 +227,28 @@ _XQZG_FULL_FIELDS = ("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS
 # 模块级初始化标志：建表脚本与迁移检查只在首次连接时执行一次，
 # 避免高频 query_page（搜索防抖逐字触发）重复执行 DDL/PRAGMA 带来的开销
 _initialized = False
+
+
+def _migrate_sqlite_add_columns(conn, table: str) -> bool:
+    """按 schema.MIGRATIONS 注册表补列（SQLite 侧），返回是否发生变更
+
+    列级元数据（类型/默认值）单一来源为 database/schema.py 的 MIGRATIONS
+    注册表；表不存在时跳过（与历史迁移一致：PRAGMA 列集为空不迁移）；
+    列已存在则跳过，缺失列按注册表顺序逐个 ALTER TABLE ADD COLUMN。
+    """
+    cols = {r[1] for r in conn.execute(
+        f"PRAGMA table_info({table})").fetchall()}
+    if not cols:
+        return False
+    changed = False
+    for m in schema.MIGRATIONS.get(table, []):
+        if m.col not in cols:
+            conn.execute(schema.sqlite_alter_sql(m))
+            cols.add(m.col)
+            changed = True
+    if changed:
+        conn.commit()
+    return changed
 
 
 def _ensure_initialized(conn):
@@ -360,32 +267,23 @@ def _ensure_initialized(conn):
     conn.executescript(_CREATE_MAPPING_SQL)
     conn.executescript(_CREATE_HEALTH_ALERT_SQL)
     conn.executescript(_CREATE_AFTERSALE_SQL)
-    # 迁移：旧 aftersale_records 表缺 is_initiative/is_our_problem 列时补列
-    as_cols = [r[1] for r in conn.execute(
-        "PRAGMA table_info(aftersale_records)").fetchall()]
-    if as_cols:
-        if "is_initiative" not in as_cols:
-            conn.execute(
-                "ALTER TABLE aftersale_records ADD COLUMN is_initiative TEXT DEFAULT '否'")
-        if "is_our_problem" not in as_cols:
-            conn.execute(
-                "ALTER TABLE aftersale_records ADD COLUMN is_our_problem TEXT DEFAULT '是'")
-        if "occurred_at" not in as_cols:
-            conn.execute(
-                "ALTER TABLE aftersale_records ADD COLUMN occurred_at TEXT DEFAULT ''")
-        if "updated_at" not in as_cols:
-            conn.execute(
-                "ALTER TABLE aftersale_records ADD COLUMN updated_at TEXT DEFAULT ''")
-        conn.commit()
+    # 迁移：旧库按 schema.MIGRATIONS 注册表补列（列级元数据单一来源）。
+    # 简单补列表（aftersale_records / kd_status / xqzg_status）统一走
+    # _migrate_sqlite_add_columns；billiard_tables 因带回填/FTS 副作用
+    # 在下方单独处理。
+    _migrate_sqlite_add_columns(conn, "aftersale_records")
+    _migrate_sqlite_add_columns(conn, "kd_status")
+    _migrate_sqlite_add_columns(conn, "xqzg_status")
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(billiard_tables)").fetchall()]
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(billiard_tables)").fetchall()}
     if cols and "name" not in cols:
         conn.execute("DROP TABLE billiard_tables")
         conn.executescript(_CREATE_SQL)
-        cols = []
+        cols = set()
     # 迁移：旧表无 snk_code 列时自动补列，并从已有 remark 回填 snk 标识
     if cols and "snk_code" not in cols:
-        conn.execute("ALTER TABLE billiard_tables ADD COLUMN snk_code TEXT DEFAULT ''")
+        conn.execute(schema.sqlite_alter_for("billiard_tables", "snk_code"))
         for rid, remark in conn.execute("SELECT id, remark FROM billiard_tables"):
             snk = parse_snk_code(remark)
             if snk:
@@ -395,7 +293,7 @@ def _ensure_initialized(conn):
     # 迁移：旧表无 code 列时自动补列；FTS 表结构落后（缺 code 列）时
     # 删除后由 _setup_fts 统一重建（含 rebuild），避免触发器列数不匹配降级
     if cols and "code" not in cols:
-        conn.execute("ALTER TABLE billiard_tables ADD COLUMN code TEXT DEFAULT ''")
+        conn.execute(schema.sqlite_alter_for("billiard_tables", "code"))
         conn.execute("DROP TRIGGER IF EXISTS tables_fts_ai")
         conn.execute("DROP TRIGGER IF EXISTS tables_fts_ad")
         conn.execute("DROP TRIGGER IF EXISTS tables_fts_au")
@@ -405,37 +303,7 @@ def _ensure_initialized(conn):
     # 迁移：旧表无 city 列（接口 roomCity 字段）时自动补列；
     # city 不参与 FTS 搜索，无需重建索引
     if cols and "city" not in cols:
-        conn.execute("ALTER TABLE billiard_tables ADD COLUMN city TEXT DEFAULT ''")
-        conn.commit()
-    # 迁移：kd_status 旧表可能缺少扩展字段，自动 ALTER ADD
-    kd_cols = [r[1] for r in conn.execute("PRAGMA table_info(kd_status)").fetchall()]
-    if kd_cols and "device_code" not in kd_cols:
-        for f in KD_EXTRA_FIELDS:
-            default = "'[]'" if f in KD_FILE_FIELDS else "''"
-            conn.execute(f"ALTER TABLE kd_status ADD COLUMN {f} TEXT DEFAULT {default}")
-        conn.commit()
-    if kd_cols and "file_path" not in kd_cols:
-        conn.execute("ALTER TABLE kd_status ADD COLUMN file_path TEXT DEFAULT ''")
-        conn.commit()
-    # KD_EXTRA_FIELDS 已含 status：上面循环补列后必须刷新列快照，否则旧列集
-    # 仍判 status 缺失会重复 ADD，触发 duplicate column name
-    kd_cols = [r[1] for r in conn.execute("PRAGMA table_info(kd_status)").fetchall()]
-    if kd_cols and "status" not in kd_cols:
-        conn.execute("ALTER TABLE kd_status ADD COLUMN status TEXT DEFAULT ''")
-        conn.commit()
-    # 迁移：xqzg_status 旧表可能缺少扩展字段（接口1 与接口2 同套字段，
-    # 历史版本只存 13 个统计字段），自动 ALTER ADD 补齐
-    xqzg_cols = [r[1] for r in conn.execute("PRAGMA table_info(xqzg_status)").fetchall()]
-    if xqzg_cols and "device_code" not in xqzg_cols:
-        for f in KD_EXTRA_FIELDS:
-            default = "'[]'" if f in KD_FILE_FIELDS else "''"
-            conn.execute(f"ALTER TABLE xqzg_status ADD COLUMN {f} TEXT DEFAULT {default}")
-        conn.commit()
-    # 迁移：xqzg_status 旧表缺 file_path 日期分区列（2026-08-22 新增），
-    # ALTER ADD 补列后所有历史行 file_path=''（旧全量快照语义不变）
-    xqzg_cols = [r[1] for r in conn.execute("PRAGMA table_info(xqzg_status)").fetchall()]
-    if xqzg_cols and "file_path" not in xqzg_cols:
-        conn.execute("ALTER TABLE xqzg_status ADD COLUMN file_path TEXT DEFAULT ''")
+        conn.execute(schema.sqlite_alter_for("billiard_tables", "city"))
         conn.commit()
     # 迁移：xqzg_fts 结构落后（缺 device_code 列）时删除，由 _setup_fts 重建
     # （含 rebuild），避免触发器列数不匹配导致 FTS 降级 LIKE
@@ -585,65 +453,26 @@ def _ensure_mysql_tables(conn):
     for ddl in backend.MYSQL_DDL.values():
         conn.execute(ddl)
     conn.commit()
-    # 迁移：旧 billiard_tables 库缺 city 列（接口 roomCity）时补列
-    try:
-        exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM billiard_tables")}
-        if "city" not in exist:
-            conn.execute(
-                "ALTER TABLE billiard_tables ADD COLUMN city VARCHAR(255) DEFAULT ''")
-            conn.commit()
-    except Exception:
-        pass  # 表可能尚未创建，DDL 兜底
-    # 迁移：旧 aftersale_records 库缺 is_initiative/is_our_problem 列时补列
-    try:
-        exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM aftersale_records")}
-        if "is_initiative" not in exist:
-            conn.execute("ALTER TABLE aftersale_records "
-                         "ADD COLUMN is_initiative VARCHAR(255) DEFAULT '否'")
-        if "is_our_problem" not in exist:
-            conn.execute("ALTER TABLE aftersale_records "
-                         "ADD COLUMN is_our_problem VARCHAR(255) DEFAULT '是'")
-        if "occurred_at" not in exist:
-            conn.execute("ALTER TABLE aftersale_records "
-                         "ADD COLUMN occurred_at VARCHAR(32) DEFAULT ''")
-        if "updated_at" not in exist:
-            conn.execute("ALTER TABLE aftersale_records "
-                         "ADD COLUMN updated_at VARCHAR(32) DEFAULT ''")
-        conn.commit()
-    except Exception:
-        pass  # 表可能尚未创建，DDL 兜底
-    # 迁移：xqzg_status / kd_status 缺扩展字段时逐列补（与 kd 同套字段，
-    # 历史版本只存 13 个统计字段）。必须逐列检测：文件列（LONGTEXT）不允许
-    # DEFAULT 子句，若循环里带 DEFAULT '[]' 会在第一个文件列报 1101 被吞，
-    # 且只看 device_code 会把「部分成功」误判为已完成，导致其余列永久缺失
-    for table in ("xqzg_status", "kd_status"):
+    # 迁移：按 schema.MIGRATIONS 注册表逐表补列（MySQL 侧）。
+    # 列级元数据（类型/默认值）与 SQLite 侧共用单一来源；文件列 LONGTEXT
+    # 不允许 DEFAULT 子句，由注册表 mysql_default=None 表达（读取端
+    # json.loads(None) 兼容）。表可能尚未创建时 SHOW COLUMNS 抛错，
+    # 跳过该表由 DDL 兜底（与历史行为一致）。
+    for table in ("billiard_tables", "aftersale_records",
+                  "xqzg_status", "kd_status"):
         try:
             exist = {r[0] for r in conn.execute(f"SHOW COLUMNS FROM {table}")}
         except Exception:
             continue  # 表可能尚未创建，DDL 兜底
-        for f in KD_EXTRA_FIELDS:
-            if f in exist:
+        changed = False
+        for m in schema.MIGRATIONS.get(table, []):
+            if m.col in exist:
                 continue
-            if f in KD_FILE_FIELDS:
-                # TEXT/BLOB 列在 MySQL 不允许字面量默认值，保持 NULL 由
-                # 读取端 json.loads(None) 兼容（见 get_*_row_full）
-                ddl = f"ALTER TABLE {table} ADD COLUMN {f} LONGTEXT"
-            else:
-                ctype = ("VARCHAR(32)" if f == "status" else
-                         "VARCHAR(512)" if f == "target_directory" else "VARCHAR(255)")
-                ddl = f"ALTER TABLE {table} ADD COLUMN {f} {ctype} DEFAULT ''"
-            conn.execute(ddl)
-        conn.commit()
-    # 迁移：xqzg_status 缺 file_path 日期分区列（2026-08-22 新增），
-    # kd_status 建表脚本里已含 file_path 字段无需 ALTER
-    try:
-        xqzg_exist = {r[0] for r in conn.execute("SHOW COLUMNS FROM xqzg_status")}
-        if "file_path" not in xqzg_exist:
-            conn.execute(
-                "ALTER TABLE xqzg_status ADD COLUMN file_path VARCHAR(64) DEFAULT ''")
+            conn.execute(schema.mysql_alter_sql(m))
+            exist.add(m.col)
+            changed = True
+        if changed:
             conn.commit()
-    except Exception:
-        pass  # 表可能尚未创建，DDL 兜底
 
 
 # 公开别名：aftersale_db 等同包模块复用双后端连接路由（私有名保留不破坏存量调用）
@@ -905,6 +734,37 @@ def get_table_name_by_snk(snk: str) -> str:
     return str(row[0] or "").strip() if row else ""
 
 
+def get_table_info_by_snk_or_host(snk: str = "", host_hint: str = "") -> dict:
+    """按 snk 或 host 反查球桌信息（取证报告「关联球桌」用）
+
+    匹配优先级：snk_code 精确（COLLATE NOCASE）→ remark LIKE %snk% →
+    remark LIKE %host_hint%（会话别名不一定带 snk，连接 IP 是最后线索）。
+
+    Returns:
+        {"name","roomName","onlineStatusName","snk_code","remark"}；
+        未找到返回空 dict。
+    """
+    conn = _get_conn()
+    sql = ("SELECT name, roomName, onlineStatusName, snk_code, remark "
+           "FROM billiard_tables WHERE ")
+    row = None
+    snk = str(snk or "").strip()
+    host = str(host_hint or "").strip()
+    if snk:
+        row = conn.execute(
+            sql + "snk_code = ? COLLATE NOCASE LIMIT 1", (snk,)).fetchone()
+        if row is None:
+            row = conn.execute(
+                sql + "remark LIKE ? LIMIT 1", (f"%{snk}%",)).fetchone()
+    if row is None and host:
+        row = conn.execute(
+            sql + "remark LIKE ? LIMIT 1", (f"%{host}%",)).fetchone()
+    if row is None:
+        return {}
+    return dict(zip(("name", "roomName", "onlineStatusName",
+                     "snk_code", "remark"), row))
+
+
 # ==================== 健康度异常告警（设备健康度管理页） ====================
 
 # 阈值（基准 4000）：4000 是接口默认值视为空值不算异常；
@@ -913,16 +773,7 @@ HEALTH_WARN = 4000.0
 HEALTH_SEVERE = 5000.0
 HEALTH_INVALID_MAX = 400000.0
 
-_CREATE_HEALTH_ALERT_SQL = """
-CREATE TABLE IF NOT EXISTS health_alerts (
-    name            TEXT PRIMARY KEY,
-    roomName        TEXT DEFAULT '',
-    onlineStatusName TEXT DEFAULT '',
-    health          REAL DEFAULT 0,
-    resolved_health REAL,
-    updated_at      TEXT DEFAULT ''
-);
-"""
+_CREATE_HEALTH_ALERT_SQL = schema.to_sqlite_ddl("health_alerts")
 
 
 def _filter_alert_items(rows) -> list:
@@ -1586,8 +1437,59 @@ def get_latest_kd_status(table_id: str) -> dict:
     conn = _get_conn()
     row = conn.execute(
         "SELECT status, file_path FROM kd_status WHERE TRIM(table_id) = ? "
-        "ORDER BY file_path DESC LIMIT 1", (tid,)).fetchone()
+        "ORDER BY file_path DESC, id DESC LIMIT 1", (tid,)).fetchone()
     return {"status": str(row[0] or "").strip(), "file_path": row[1]} if row else {}
+
+
+def get_latest_kd_status_by_code(device_code: str) -> dict:
+    """按设备码模糊匹配最新分区设备状态（球桌面板离线前置检查降级用）
+
+    精确按球桌号匹配不到时降级按 device_code LIKE %code% 匹配；
+    取 file_path DESC, id DESC 第一条（与历史直连查询一致）。
+
+    Returns:
+        {"status": "0/1/2", "file_path": "yyyy/MM/dd"}；未找到返回空 dict
+    """
+    code = str(device_code or "").strip()
+    if not code:
+        return {}
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT status, file_path FROM kd_status WHERE device_code LIKE ? "
+        "ORDER BY file_path DESC, id DESC LIMIT 1", (f"%{code}%",)).fetchone()
+    return {"status": str(row[0] or "").strip(), "file_path": row[1]} if row else {}
+
+
+def query_latest_kd_full(table_id: str = "", device_code: str = "") -> dict:
+    """查指定球桌/设备码最新分区的完整 kd_status 行（取证报告用）
+
+    匹配优先级：TRIM(table_id) 精确 → device_code 精确；均取
+    file_path DESC, id DESC 第一条。返回含 file_path + 全部统计/扩展
+    字段（8 类文件清单反序列化）的 dict；未找到返回空 dict。
+    """
+    conn = _get_conn()
+    all_fields = ("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS
+    cols = "id, " + ", ".join(all_fields)
+    row = None
+    tid = str(table_id or "").strip()
+    if tid:
+        row = conn.execute(
+            f"SELECT {cols} FROM kd_status WHERE TRIM(table_id) = ? "
+            "ORDER BY file_path DESC, id DESC LIMIT 1", (tid,)).fetchone()
+    if row is None and str(device_code or "").strip():
+        row = conn.execute(
+            f"SELECT {cols} FROM kd_status WHERE device_code = ? COLLATE NOCASE "
+            "ORDER BY file_path DESC, id DESC LIMIT 1",
+            (str(device_code).strip(),)).fetchone()
+    if row is None:
+        return {}
+    row_dict = dict(zip(["id"] + list(all_fields), row))
+    for f in KD_FILE_FIELDS:
+        try:
+            row_dict[f] = json.loads(row_dict.get(f) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            row_dict[f] = []
+    return row_dict
 
 
 # ==================== kd 健康度聚合查询（C3 趋势看板） ====================

@@ -16,7 +16,6 @@ import json
 import os
 import re
 import socket
-import sqlite3
 from datetime import datetime
 
 from PySide6.QtCore import QThread, Signal
@@ -94,20 +93,7 @@ def get_forensic_dir() -> str:
     return path
 
 
-# ─── 本地数据查询（独立只读 SQLite 连接，供后台线程安全调用） ───────────
-
-def _open_readonly_db():
-    """打开 tables.db 的独立只读连接；库文件不存在/打开失败返回 None"""
-    try:
-        from database.table_db import DB_PATH
-        if not os.path.exists(DB_PATH):
-            return None
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-        conn.execute("PRAGMA busy_timeout=3000")
-        return conn
-    except sqlite3.Error:
-        return None
-
+# ─── 本地数据查询（经 table_db 双后端 API，SELECT only） ───────────────
 
 def lookup_table_info(snk: str, host: str) -> dict:
     """从 billiard_tables 反查球桌信息
@@ -115,34 +101,15 @@ def lookup_table_info(snk: str, host: str) -> dict:
     匹配优先级：snk_code 精确 → remark 含 snk → remark 含 host。
     返回 {"name","roomName","onlineStatusName","snk_code","remark"}；
     查不到或库不可用返回空 dict。
+
+    经 table_db.get_table_info_by_snk_or_host 路由双后端（主模式读
+    MySQL / 本地读 SQLite），不向 UI 暴露裸连接。
     """
-    snk = str(snk or "").strip()
-    host = str(host or "").strip()
-    conn = _open_readonly_db()
-    if conn is None:
-        return {}
     try:
-        sql = ("SELECT name, roomName, onlineStatusName, snk_code, remark "
-               "FROM billiard_tables WHERE ")
-        row = None
-        if snk:
-            row = conn.execute(
-                sql + "snk_code = ? COLLATE NOCASE LIMIT 1", (snk,)).fetchone()
-            if row is None:
-                row = conn.execute(
-                    sql + "remark LIKE ? LIMIT 1", (f"%{snk}%",)).fetchone()
-        if row is None and host:
-            # 最后兜底按 host 匹配：会话别名不一定带 snk 标识，连接 IP 是最后的线索
-            row = conn.execute(
-                sql + "remark LIKE ? LIMIT 1", (f"%{host}%",)).fetchone()
-        if row is None:
-            return {}
-        return dict(zip(("name", "roomName", "onlineStatusName",
-                         "snk_code", "remark"), row))
-    except sqlite3.Error:
+        from database import table_db
+        return table_db.get_table_info_by_snk_or_host(snk, host)
+    except Exception:
         return {}
-    finally:
-        conn.close()
 
 
 def lookup_kd_status(table_id: str, snk: str) -> dict:
@@ -151,30 +118,15 @@ def lookup_kd_status(table_id: str, snk: str) -> dict:
     优先按球桌号 table_id（TRIM 匹配），未命中再按 snk 当 device_code 查；
     均取 file_path 倒序第一条（该设备最近一次上报）。
     返回字段 dict（含 file_path）；查不到返回空 dict。
+
+    经 table_db.query_latest_kd_full 路由双后端（SELECT only）。
     """
-    conn = _open_readonly_db()
-    if conn is None:
-        return {}
-    cols = ", ".join(f for f, _ in _KD_REPORT_FIELDS)
-    sql = (f"SELECT {cols} FROM kd_status WHERE {{cond}} "
-           f"ORDER BY file_path DESC LIMIT 1")
     try:
-        row = None
-        tid = str(table_id or "").strip()
-        if tid:
-            row = conn.execute(
-                sql.format(cond="TRIM(table_id) = ?"), (tid,)).fetchone()
-        if row is None and str(snk or "").strip():
-            row = conn.execute(
-                sql.format(cond="device_code = ? COLLATE NOCASE"),
-                (str(snk).strip(),)).fetchone()
-        if row is None:
-            return {}
-        return dict(zip((f for f, _ in _KD_REPORT_FIELDS), row))
-    except sqlite3.Error:
+        from database import table_db
+        return table_db.query_latest_kd_full(
+            table_id, str(snk or "").strip())
+    except Exception:
         return {}
-    finally:
-        conn.close()
 
 
 # ─── 日志采集 ────────────────────────────────────────────────────────────

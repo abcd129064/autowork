@@ -47,6 +47,11 @@ RECORD_FIELDS = (
     "updated_at",
 )
 
+# 售后业务键（多用户共享去重/合并定位用）：SQLite 与 MySQL 两侧 id 各自
+# 增长会撞车，按 (created_at, creator, table_no, problem) 判定同一条记录。
+# merge_back / 历史 mysql_sync 推送共用此定义（单一来源）。
+RECORD_KEY_COLS = ("created_at", "creator", "table_no", "problem")
+
 # 关键词搜索覆盖列（全字段模糊匹配）
 _SEARCH_FIELDS = (
     "table_no", "room_name", "problem", "region",

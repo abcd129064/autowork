@@ -9,7 +9,6 @@
 """
 
 import math
-import sqlite3
 from datetime import datetime
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -509,22 +508,14 @@ class TablePanelWindow(QDialog):
         if not name:
             return True
         try:
-            conn = sqlite3.connect(table_db.DB_PATH, timeout=3)
-            try:
-                # 最新分区一条：file_path 为日期分区（如 2026/08/02），id 递增
-                row = conn.execute(
-                    "SELECT status, file_path FROM kd_status WHERE TRIM(table_id) = ? "
-                    "ORDER BY file_path DESC, id DESC LIMIT 1", (name,)).fetchone()
-                if row is None:  # 降级：按球桌号模糊匹配 device_code
-                    row = conn.execute(
-                        "SELECT status, file_path FROM kd_status WHERE device_code LIKE ? "
-                        "ORDER BY file_path DESC, id DESC LIMIT 1",
-                        (f"%{name}%",)).fetchone()
-            finally:
-                conn.close()
-            if row is None or str(row[0]).strip() != "0":
+            # 经 table_db 双后端 API（主模式读 MySQL / 本地读 SQLite），
+            # 不再裸连 SQLite 旁路。
+            info = table_db.get_latest_kd_status(name)
+            if not info:  # 降级：按球桌号模糊匹配 device_code
+                info = table_db.get_latest_kd_status_by_code(name)
+            if not info or str(info.get("status") or "").strip() != "0":
                 return True  # 未匹配到记录或非离线状态，直接放行
-            last_report = str(row[1] or "").strip() or "未知"
+            last_report = str(info.get("file_path") or "").strip() or "未知"
             dlg = MessageBox(
                 "设备离线",
                 f"球桌「{name}」对应设备已下线（最后上报：{last_report}）。\n仍要尝试连接吗？",
