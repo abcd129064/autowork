@@ -4150,7 +4150,7 @@ class HealthPage(QWidget):
             "基准 4000；>4000~5000 为健康度异常；"
             ">5000 为严重异常。"
             "勾选条目后点「已处理」，health 未变化则不再展示；"
-            "多人共用 MySQL 时，他人标记的已处理在同步后自动对齐", self)
+            "使用服务器 MySQL 时，他人标记的已处理在同步后自动对齐", self)
         layout.addWidget(hint)
 
         self._table = TableWidget(self)

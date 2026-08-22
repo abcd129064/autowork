@@ -730,19 +730,19 @@ class EditRecordDialog(MessageBoxBase):
 # 表格列定义：(字段key, 表头, 列宽)
 # 列宽按真实数据内容核定（12 条真实记录最长值 + 表头文字，中文字符按 13px、ASCII 按 7px、标点按 3.5px 估算 + 24px 留白）
 RECORD_COLUMNS = (
-    ("created_at", "填写时间", 152),
-    ("occurred_at", "发生时间", 90),
-    ("issue_type", "类型", 76),
-    ("table_no", "桌号", 64),
-    ("room_name", "球房", 208),
-    ("region", "地区", 50),
-    ("problem", "问题", 248),
+    ("created_at", "填写时间", 160),
+    ("occurred_at", "发生时间", 160),
+    ("issue_type", "类型", 90),
+    ("table_no", "桌号", 90),
+    ("room_name", "球房", 200),
+    ("region", "地区", 70),
+    ("problem", "问题", 220),
     ("resolved", "是否解决", 76),
-    ("is_initiative", "是否我们主动发起", 128),
-    ("is_our_problem", "是否是我们的问题", 142),
-    ("resolver", "解决人", 64),
-    ("response_time", "响应时间", 76),
-    ("creator", "填写人", 64),
+    ("is_initiative", "是否我们主动发起", 76),
+    ("is_our_problem", "是否是我们的问题", 76),
+    ("resolver", "解决人", 82),
+    ("response_time", "响应时间", 85),
+    ("creator", "填写人", 72),
 )
 
 # 导入预览列定义（与导出表头对齐 + 系统附加列）
