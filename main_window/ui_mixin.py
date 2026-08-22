@@ -23,6 +23,8 @@ from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
 from qfluentwidgets.components.widgets.menu import MenuActionListWidget, MenuAnimationManager
 
+from core.design_tokens import pt_to_px
+
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from core.utils import launch_sibling_app
@@ -1668,7 +1670,7 @@ class UIMixin:
         else:
             app_font.setFamilies(QApplication.font().families())
         if size:
-            pixel_size = max(12, int(int(size) * 4 / 3))
+            pixel_size = pt_to_px(size)
         else:
             cur_px = QApplication.font().pixelSize()
             pixel_size = cur_px if cur_px > 0 else 14

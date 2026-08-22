@@ -351,16 +351,47 @@ def delete_record(rec_id) -> int:
     return cur.rowcount
 
 
+def mark_resolved_batch(rec_ids) -> int:
+    """批量标记已解决（最小化更新：仅改 resolved 与 updated_at），返回受影响行数
+
+    供列表「一键标记已解决 / 批量标记」使用：区别于 update_record 的全字段
+    回写，不依赖 UI 提供其余字段原值，不会误改其他字段。
+    """
+    ids = [i for i in rec_ids if i]
+    if not ids:
+        return 0
+    conn = _conn()
+    qs = ", ".join(["?"] * len(ids))
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        f"UPDATE aftersale_records SET resolved = '是', updated_at = ? "
+        f"WHERE id IN ({qs})", [now_str] + list(ids))
+    conn.commit()
+    return cur.rowcount
+
+
+def delete_records(rec_ids) -> int:
+    """按 id 批量删除记录，返回受影响行数"""
+    ids = [i for i in rec_ids if i]
+    if not ids:
+        return 0
+    conn = _conn()
+    qs = ", ".join(["?"] * len(ids))
+    cur = conn.execute(f"DELETE FROM aftersale_records WHERE id IN ({qs})", ids)
+    conn.commit()
+    return cur.rowcount
+
+
 # ==================== 查询 ====================
 
-def _build_where(keyword: str, issue_type: str,
-                 resolved: str) -> tuple:
-    """构造筛选 WHERE 子句与参数（类型/状态/关键词）
+def _build_where(keyword: str, issue_type: str, resolved: str,
+                 is_initiative: str = "", is_our_problem: str = "") -> tuple:
+    """构造筛选 WHERE 子句与参数（类型/状态/关键词/主动发起/我方问题）
 
     周期不在 SQL 侧过滤：周期归属需按记录时间动态计算（cycle_start_of），
     由 Python 侧 _match_cycle 统一处理，避免与冗余 cycle_start 字段不一致。
-    统计口径说明：resolved 为空才参与筛选；统计函数单独调用时
-    传空串即得「已解决/未解决」分组基数。
+    统计口径说明：resolved / is_initiative / is_our_problem 为空才参与筛选；
+    统计函数单独调用时传空串即得「已解决/未解决」分组基数与全景计数。
     """
     conds, params = [], []
     if issue_type:
@@ -369,6 +400,12 @@ def _build_where(keyword: str, issue_type: str,
     if resolved:
         conds.append("resolved = ?")
         params.append(str(resolved).strip())
+    if is_initiative:
+        conds.append("is_initiative = ?")
+        params.append(str(is_initiative).strip())
+    if is_our_problem:
+        conds.append("is_our_problem = ?")
+        params.append(str(is_our_problem).strip())
     kw = str(keyword or "").strip()
     if kw:
         like = f"%{kw}%"
@@ -381,14 +418,17 @@ def _build_where(keyword: str, issue_type: str,
 
 def query_page(page_no: int, page_size: int, keyword: str = "",
                cycle_start: str = "", issue_type: str = "",
-               resolved: str = "") -> tuple:
+               resolved: str = "", is_initiative: str = "",
+               is_our_problem: str = "") -> tuple:
     """分页查询售后记录，返回 (total, rows)
 
     周期筛选在 Python 侧按记录时间动态归属（_match_cycle），
-    SQL 仅过滤类型/状态/关键词；数据量小（售后记录），全量取回无压力。
+    SQL 仅过滤类型/状态/关键词/主动发起/我方问题；
+    数据量小（售后记录），全量取回无压力。
     """
     conn = _conn()
-    where, params = _build_where(keyword, issue_type, resolved)
+    where, params = _build_where(keyword, issue_type, resolved,
+                                 is_initiative, is_our_problem)
     cur = conn.execute(
         f"SELECT id, {', '.join(RECORD_FIELDS)} FROM aftersale_records"
         f"{where} ORDER BY id DESC", params)
@@ -403,28 +443,36 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
 
 def query_with_stats(page_no: int, page_size: int, keyword: str = "",
                      cycle_start: str = "", issue_type: str = "",
-                     resolved: str = "") -> tuple:
+                     resolved: str = "", is_initiative: str = "",
+                     is_our_problem: str = "") -> tuple:
     """分页查询 + 同口径统计，返回 (total, rows, stats)
 
     周期按记录时间动态归属（与列表同规则），保证列表与统计一一对应；
-    stats 统计不带 resolved 筛选（否则已解决/未解决计数退化），
-    展示「共 X · 已解决 Y · 未解决 Z」。
+    stats 统计不带 resolved/is_initiative/is_our_problem 筛选（否则
+    已解决/未解决计数退化），返回 {total, resolved, unresolved,
+    initiative, rate}：initiative 为「我方主动发起」条数，rate 为
+    已解决率（整数百分比）。
     """
     total, rows = query_page(page_no, page_size, keyword, cycle_start,
-                             issue_type, resolved)
+                             issue_type, resolved, is_initiative,
+                             is_our_problem)
     conn = _conn()
     where, params = _build_where(keyword, issue_type, "")
     cur = conn.execute(
-        f"SELECT occurred_at, created_at, resolved FROM aftersale_records"
-        f"{where}", params)
-    recs = [dict(zip(("occurred_at", "created_at", "resolved"), r))
+        f"SELECT occurred_at, created_at, resolved, is_initiative "
+        f"FROM aftersale_records{where}", params)
+    recs = [dict(zip(("occurred_at", "created_at", "resolved",
+                      "is_initiative"), r))
             for r in cur.fetchall()]
     if cycle_start:
         recs = [r for r in recs if _match_cycle(r, cycle_start)]
     n_all = len(recs)
     n_resolved = sum(1 for r in recs if r["resolved"] == "是")
+    n_init = sum(1 for r in recs if r["is_initiative"] == "是")
+    rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
     stats = {"total": n_all, "resolved": n_resolved,
-             "unresolved": n_all - n_resolved}
+             "unresolved": n_all - n_resolved,
+             "initiative": n_init, "rate": rate}
     return total, rows, stats
 
 
@@ -579,7 +627,8 @@ def _write_stats_sheet(wb, rows):
 
 
 def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
-                issue_type: str = "", resolved: str = "") -> int:
+                issue_type: str = "", resolved: str = "",
+                is_initiative: str = "", is_our_problem: str = "") -> int:
     """按筛选条件导出全部记录（不分页）为 xlsx，返回导出条数
 
     表头与 售后问题汇总8月.xlsx 对齐，附加 填写时间/填写人/周期 三列。
@@ -591,7 +640,8 @@ def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
     from openpyxl import Workbook
 
     conn = _conn()
-    where, params = _build_where(keyword, issue_type, resolved)
+    where, params = _build_where(keyword, issue_type, resolved,
+                                 is_initiative, is_our_problem)
     cur = conn.execute(
         f"SELECT {', '.join(RECORD_FIELDS)} FROM aftersale_records"
         f"{where} ORDER BY id DESC", params)

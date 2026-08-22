@@ -37,7 +37,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtCore import QTimer, Qt, Signal
 from qfluentwidgets import (PushButton, PrimaryPushButton, DropDownPushButton,
                             TransparentToolButton, LineEdit, FluentIcon, MessageBox,
-                            setFont, RoundMenu)
+                            RoundMenu)
 
 from core.app_paths import get_app_dir
 from core.conn_logger import conn_logger
@@ -193,7 +193,6 @@ class SSHTerminalPanel(QWidget):
 
         # 常用命令条：下拉按钮 + 管理入口
         self._cmd_menu_btn = DropDownPushButton("常用命令")
-        setFont(self._cmd_menu_btn, 11)
         self._cmd_menu_btn.setFocusPolicy(Qt.NoFocus)
         btn_layout.addWidget(self._cmd_menu_btn)
 
@@ -206,7 +205,6 @@ class SSHTerminalPanel(QWidget):
         btn_layout.addStretch()
 
         self._forensic_btn = PushButton("一键取证")
-        setFont(self._forensic_btn, 11)
         self._forensic_btn.setFocusPolicy(Qt.NoFocus)
         self._forensic_btn.setToolTip(
             "后台运行预置诊断命令组（含 dmesg/journalctl/syslog 系统错误日志）"
@@ -217,20 +215,17 @@ class SSHTerminalPanel(QWidget):
         btn_layout.addWidget(self._forensic_btn)
 
         self._session_dir_btn = PushButton("会话记录")
-        setFont(self._session_dir_btn, 11)
         self._session_dir_btn.setFocusPolicy(Qt.NoFocus)
         self._session_dir_btn.setToolTip("在资源管理器中打开会话日志目录")
         self._session_dir_btn.clicked.connect(self._open_session_dir)
         btn_layout.addWidget(self._session_dir_btn)
 
         self._cmd_btn = PushButton("CMD 打开")
-        setFont(self._cmd_btn, 11)
         self._cmd_btn.setFocusPolicy(Qt.NoFocus)  # 不抢焦点
         self._cmd_btn.clicked.connect(self._open_in_cmd)
         btn_layout.addWidget(self._cmd_btn)
 
         self._xshell_btn = PushButton("Xshell 打开")
-        setFont(self._xshell_btn, 11)
         self._xshell_btn.setFocusPolicy(Qt.NoFocus)  # 不抢焦点
         self._xshell_btn.clicked.connect(self._open_in_xshell)
         btn_layout.addWidget(self._xshell_btn)

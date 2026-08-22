@@ -24,6 +24,7 @@ from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 
 from core.app_paths import get_app_dir, get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler
+from core.design_tokens import pt_to_px
 from main_window import MainWindow
 
 
@@ -103,7 +104,7 @@ def main():
             else:
                 _app_font.setFamilies(app.font().families())
             if _sz:
-                _px = max(12, int(int(_sz) * 4 / 3))
+                _px = pt_to_px(_sz)
             else:
                 _cur_px = app.font().pixelSize()
                 _px = _cur_px if _cur_px > 0 else 14

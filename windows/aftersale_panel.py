@@ -12,22 +12,23 @@
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
     QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication,
-    QDialog)
+    QDialog, QPushButton as _QPushButton, QGridLayout)
 from PySide6.QtCore import Qt, QTimer, QThread, QPointF, QDate, Signal
-from PySide6.QtGui import QColor, QBrush, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, RoundMenu, Action,
     LineEdit, PlainTextEdit, BodyLabel, CaptionLabel, TitleLabel,
-    ScrollArea, CardWidget, MessageBox, MessageBoxBase, FluentWindow,
-    NavigationItemPosition, MenuAnimationType, setCustomStyleSheet,
-    qconfig, isDarkTheme, ZhDatePicker, RadioButton, SpinBox)
+    ScrollArea, CardWidget, MessageBox, MessageBoxBase, CheckBox,
+    FluentWindow, NavigationItemPosition, MenuAnimationType,
+    setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
+    SpinBox, SegmentedWidget, ProgressBar)
 
-from core.design_tokens import SEMANTIC
+from core.design_tokens import SEMANTIC, lighten, darken
 from core.perf import is_acrylic_enabled
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
@@ -160,11 +161,17 @@ class FluentCombo(_QComboBox):
         self.setFixedHeight(33)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._arrow_color = QColor("#616161")
+        self._err = False  # 字段级校验错误态（红框）
         self._apply_theme()
         try:
             qconfig.themeChanged.connect(self._apply_theme)
         except Exception:
             pass
+
+    def setError(self, on: bool):
+        """字段校验错误态：红框提示；主题切换重应用样式时保留"""
+        self._err = bool(on)
+        self._apply_theme()
 
     def _apply_theme(self):
         """按当前主题应用显式色值（不依赖 palette，主题切换后重应用）"""
@@ -181,7 +188,10 @@ class FluentCombo(_QComboBox):
                      bg_disabled="#f2f2f2", popup_bg="#ffffff", accent=accent)
             self._arrow_color = QColor("#616161")
         self._colors = c  # 缓存当前主题色，供 setEditable 后补 lineEdit 样式
-        self.setStyleSheet(_COMBO_QSS_TMPL.format(**c))
+        qss = _COMBO_QSS_TMPL.format(**c)
+        if self._err:  # 错误态追加红框（同选择器后置规则胜出）
+            qss += "QComboBox { border-color: %s; }" % SEMANTIC["danger"]
+        self.setStyleSheet(qss)
         self._style_lineedit()
         self.update()
 
@@ -213,6 +223,108 @@ class FluentCombo(_QComboBox):
         p.end()
 
 
+def _hex_rgba(hex_color: str, alpha: int) -> str:
+    """#rrggbb → rgba()（QSS 徽章/确认条底色用，半透明底深浅主题均清晰）"""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+# ==================== 表单分组与自定义 Fluent 组件 ====================
+
+class _SectionCard(CardWidget):
+    """表单分组卡片：左侧强调色竖条 + 分组标题（设计稿三段式布局）"""
+
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.content_layout = QVBoxLayout(self)
+        self.content_layout.setContentsMargins(16, 12, 16, 14)
+        self.content_layout.setSpacing(10)
+        head = QHBoxLayout()
+        head.setSpacing(7)
+        bar = QLabel(self)
+        bar.setFixedSize(3, 12)
+        bar.setStyleSheet(
+            f"background: {_accent_hex()}; border-radius: 1px;")
+        try:
+            qconfig.themeColorChanged.connect(lambda _c: bar.setStyleSheet(
+                f"background: {_accent_hex()}; border-radius: 1px;"))
+        except Exception:
+            pass
+        head.addWidget(bar)
+        head.addWidget(BodyLabel(title, self))
+        head.addStretch(1)
+        self.content_layout.addLayout(head)
+
+
+class YesNoSegment(SegmentedWidget):
+    """是/否 二值分段开关（qfluentwidgets 现成 SegmentedWidget）
+
+    对外暴露 value()/setValue(str)，读写口径与旧 FluentCombo 的
+    currentText 一致（"是"/"否"），collect/set_values 无感知。
+    """
+
+    _DEFAULT = "否"
+
+    def __init__(self, default=_DEFAULT, parent=None):
+        super().__init__(parent)
+        self.addItem("否", "否")
+        self.addItem("是", "是")
+        self.setCurrentItem(default)
+        self.setFixedHeight(30)
+        self.currentItemChanged.connect(lambda _k: self._restyle())
+        self._restyle()
+
+    def _restyle(self):
+        """选中「是」时整段染成功绿（Fluent 语义色），「否」保持默认灰"""
+        val = self.value()
+        ok = SEMANTIC["success"]
+        if val == "是":
+            self.setStyleSheet(
+                f"SegmentedWidget {{ background: {_hex_rgba(ok, 16)}; }}"
+                f"SegmentedItem {{ background: transparent; color: {ok}; }}"
+                f"SegmentedItem[selected=true] {{ background: {ok};"
+                " color: #ffffff; border-radius: 4px; }")
+        else:
+            self.setStyleSheet("")
+
+    def value(self) -> str:
+        key = self.currentRouteKey()
+        return key if key in ("是", "否") else self._DEFAULT
+
+    def setValue(self, text):
+        t = str(text or "").strip()
+        self.setCurrentItem(t if t in ("是", "否") else self._DEFAULT)
+
+
+def _field_label(text, required=False, parent=None) -> QLabel:
+    """字段标签：12px 次级文本色；必填追加红色 * 富文本"""
+    lb = QLabel(parent)
+    if required:
+        lb.setText(text + ' <span style="color:#cf4452;">*</span>')
+    else:
+        lb.setText(text)
+    lb.setStyleSheet(
+        "font-size: 12px; color: #444b55; background: transparent;")
+    try:
+        qconfig.themeChanged.connect(
+            lambda: lb.setStyleSheet("font-size: 12px; color: %s;"
+                " background: transparent;" % (
+                    "#c5c8ce" if isDarkTheme() else "#444b55")))
+    except Exception:
+        pass
+    return lb
+
+
+def _inline_error(text, parent=None) -> QLabel:
+    """字段级内联错误提示（默认隐藏，校验失败时显示）"""
+    lb = QLabel(text, parent)
+    lb.setStyleSheet(
+        "font-size: 11px; color: #cf4452; background: transparent;")
+    lb.setVisible(False)
+    return lb
+
+
 # ==================== 共享表单（录入页与编辑弹窗复用） ====================
 
 class AftersaleForm(QWidget):
@@ -239,66 +351,105 @@ class AftersaleForm(QWidget):
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setSpacing(10)
 
-        form = QFormLayout()
-        form.setSpacing(8)
-
-        # 类型（必填，11 值枚举）+ 发生时间（必填，默认当日；周期按发生时间归属）同行
+        # ---------- 板块一：基本信息（标签上置，控件固定宽度，右侧留白） ----------
+        sec1 = _SectionCard("基本信息", self)
+        row1 = QHBoxLayout()
+        row1.setSpacing(16)
+        col_type = QVBoxLayout()
+        col_type.setSpacing(3)
+        col_type.addWidget(_field_label("问题类型", True, self))
+        # 与「问题描述-问题」同规格：可编辑下拉 + NoInsert（可选预置也可手输）
         self.type_combo = FluentCombo(self)
+        self.type_combo.setEditable(True)
+        self.type_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
         self.type_combo.addItems(aftersale_db.ISSUE_TYPES)
         self.type_combo.setFixedWidth(320)
+        col_type.addWidget(self.type_combo)
+        self._err_type = _inline_error("必填项未填写", self)
+        col_type.addWidget(self._err_type)
+        row1.addLayout(col_type)
+        col_occ = QVBoxLayout()
+        col_occ.setSpacing(3)
+        col_occ.addWidget(_field_label("发生时间", True, self))
+        occurred_row = QHBoxLayout()
+        occurred_row.setSpacing(2)
         self.occurred_picker = ZhDatePicker(self)
         self.occurred_picker.setFixedWidth(150)
+        self.occurred_picker.setFixedHeight(33)
         self.occurred_picker.setDate(QDate.currentDate())
-        # 日期步进按钮（参考主界面）：紧贴选择器组成一组，连续点击逐日前移/后移，
+        occurred_row.addWidget(self.occurred_picker)
+        # 日期步进按钮（实心三角成组）：连续点击逐日前移/后移，
         # 补录历史发生日期（如 8/25 录 8/20 的售后）连续点 ◀ 即可回退
-        self._btn_occurred_prev = ToolButton(FluentIcon.LEFT_ARROW, self)
-        self._btn_occurred_prev.setFixedWidth(26)
+        self._btn_occurred_prev = ToolButton(
+            FluentIcon.CARE_LEFT_SOLID, self)
+        self._btn_occurred_prev.setFixedSize(28, 33)
         self._btn_occurred_prev.setToolTip("前一天")
         self._btn_occurred_prev.clicked.connect(
             lambda _=False: self._step_occurred(-1))
-        self._btn_occurred_next = ToolButton(FluentIcon.RIGHT_ARROW, self)
-        self._btn_occurred_next.setFixedWidth(26)
+        occurred_row.addWidget(self._btn_occurred_prev)
+        self._btn_occurred_next = ToolButton(
+            FluentIcon.CARE_RIGHT_SOLID, self)
+        self._btn_occurred_next.setFixedSize(28, 33)
         self._btn_occurred_next.setToolTip("后一天")
         self._btn_occurred_next.clicked.connect(
             lambda _=False: self._step_occurred(1))
-        type_row = QHBoxLayout()
-        type_row.setSpacing(8)
-        type_row.addWidget(self.type_combo)
-        type_row.addSpacing(16)
-        type_row.addWidget(QLabel("发生时间 *:", self))
-        occurred_group = QHBoxLayout()
-        occurred_group.setSpacing(2)
-        occurred_group.addWidget(self.occurred_picker)
-        occurred_group.addWidget(self._btn_occurred_prev)
-        occurred_group.addWidget(self._btn_occurred_next)
-        type_row.addLayout(occurred_group)
-        type_row.addStretch(1)
-        form.addRow("类型 *:", type_row)
+        occurred_row.addWidget(self._btn_occurred_next)
+        col_occ.addLayout(occurred_row)
+        row1.addLayout(col_occ)
+        col_creator = QVBoxLayout()
+        col_creator.setSpacing(3)
+        col_creator.addWidget(_field_label("填写人", False, self))
+        self.creator_edit = LineEdit(self)
+        self.creator_edit.setText(_default_creator())  # 默认取配置，可改
+        self.creator_edit.setFixedWidth(160)
+        col_creator.addWidget(self.creator_edit)
+        row1.addLayout(col_creator)
+        row1.addStretch(1)
+        sec1.content_layout.addLayout(row1)
+        root.addWidget(sec1)
 
-        # 球房（必填，输入搜索球桌）+ 桌号（选桌自动带出）+ 地区（球桌带出城市）同行
+        # ---------- 板块二：位置关联（控件固定宽度，带出芯片 + 关联确认条） ----------
+        sec2 = _SectionCard("位置关联", self)
+        row2 = QHBoxLayout()
+        row2.setSpacing(16)
+        room_col = QVBoxLayout()
+        room_col.setSpacing(3)
+        room_col.addWidget(_field_label("球房", True, self))
         self.room_edit = SearchLineEdit(self)
         self.room_edit.setPlaceholderText("输入球房名搜索球桌，如 BaoClub")
-        self.room_edit.setFixedWidth(260)
+        self.room_edit.setFixedWidth(320)
         self.room_edit.textChanged.connect(self._on_room_text_changed)
         self.room_edit.clearSignal.connect(self._hide_candidates)
+        room_col.addWidget(self.room_edit)
+        self._err_room = _inline_error("必填项未填写", self)
+        room_col.addWidget(self._err_room)
+        row2.addLayout(room_col)
+        tbl_col = QVBoxLayout()
+        tbl_col.setSpacing(3)
+        tbl_col.addWidget(_field_label("桌号", False, self))
         self.table_no_edit = LineEdit(self)
         self.table_no_edit.setPlaceholderText("选桌自动带出")
-        self.table_no_edit.setFixedWidth(110)
+        self.table_no_edit.setFixedWidth(140)
+        tbl_col.addWidget(self.table_no_edit)
+        self._err_table = _inline_error("必填项未填写", self)
+        tbl_col.addWidget(self._err_table)
+        row2.addLayout(tbl_col)
+        reg_col = QVBoxLayout()
+        reg_col.setSpacing(3)
+        reg_col.addWidget(_field_label("地区", True, self))
         self.region_combo = FluentCombo(self)
         self.region_combo.setEditable(True)
         self.region_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
         self.region_combo.addItems(aftersale_db.REGIONS_PRESET)
-        self.region_combo.setFixedWidth(140)
-        room_row = QHBoxLayout()
-        room_row.setSpacing(8)
-        room_row.addWidget(self.room_edit)
-        room_row.addWidget(self.table_no_edit)
-        room_row.addWidget(self.region_combo)
-        room_row.addStretch(1)
-        form.addRow("球房 *:", room_row)
-
+        self.region_combo.setFixedWidth(160)
+        reg_col.addWidget(self.region_combo)
+        self._err_region = _inline_error("必填项未填写", self)
+        reg_col.addWidget(self._err_region)
+        row2.addLayout(reg_col)
+        row2.addStretch(1)
+        sec2.content_layout.addLayout(row2)
         # 球桌候选列表（默认隐藏，搜索命中后展示）
         self._cand_list = QListWidget(self)
         self._cand_list.setFixedHeight(132)
@@ -306,82 +457,95 @@ class AftersaleForm(QWidget):
         self._cand_list.itemClicked.connect(self._on_candidate_clicked)
         _style_cand_list(self._cand_list)
         try:
-            qconfig.themeChanged.connect(lambda: _style_cand_list(self._cand_list))
+            qconfig.themeChanged.connect(
+                lambda: _style_cand_list(self._cand_list))
         except Exception:
             pass
-        form.addRow("", self._cand_list)
+        sec2.content_layout.addWidget(self._cand_list)
+        # 关联确认条：选桌后展示桌号 + SNK，隐藏字段 snk_code 的可视反馈
+        self._link_bar = QLabel(self)
+        self._link_bar.setObjectName("aftersaleLinkBar")
+        self._link_bar.setWordWrap(True)
+        self._link_bar.setStyleSheet(
+            "QLabel#aftersaleLinkBar { background: %s; color: %s;"
+            " border-radius: 6px; padding: 5px 10px; font-size: 12px; }"
+            % (_hex_rgba(SEMANTIC["success"], 26), SEMANTIC["success"]))
+        self._link_bar.setVisible(False)
+        sec2.content_layout.addWidget(self._link_bar)
+        root.addWidget(sec2)
 
-        # 问题（必填，历史候选 + 自由输入；原生 QComboBox 才支持 editable）
+        # ---------- 板块三：问题描述 ----------
+        sec3 = _SectionCard("问题描述", self)
+        v3 = sec3.content_layout
+        v3.addWidget(_field_label("问题", True, self))
         self.problem_combo = FluentCombo(self)
         self.problem_combo.setEditable(True)
         self.problem_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
         self.problem_combo.setFixedWidth(320)
-        form.addRow("问题 *:", self.problem_combo)
-
-        # 发生原因（选填，多行）
+        v3.addWidget(self.problem_combo)
+        self._err_problem = _inline_error("必填项未填写", self)
+        v3.addWidget(self._err_problem)
+        # 发生原因 / 解决方案：等宽等高多行文本框并排（64px ≈ 3 行）
+        txt_row = QHBoxLayout()
+        txt_row.setSpacing(14)
+        col_cause = QVBoxLayout()
+        col_cause.setSpacing(5)
+        col_cause.addWidget(_field_label("发生原因", False, self))
         self.cause_edit = PlainTextEdit(self)
-        self.cause_edit.setFixedHeight(56)
+        self.cause_edit.setFixedHeight(64)
         self.cause_edit.setPlaceholderText("选填")
-        form.addRow("发生原因:", self.cause_edit)
-
-        # 是否解决 / 是否我们主动发起 / 是否是我们的问题（同一行，后两者在右侧）
-        self.resolved_combo = FluentCombo(self)
-        self.resolved_combo.addItems(["否", "是"])
-        self.resolved_combo.setCurrentIndex(1)  # 默认「是」
-        self.resolved_combo.setFixedWidth(120)
-        self.is_initiative_combo = FluentCombo(self)
-        self.is_initiative_combo.addItems(["否", "是"])
-        self.is_initiative_combo.setCurrentIndex(0)  # 默认「否」= 非主动报修
-        self.is_initiative_combo.setFixedWidth(100)
-        self.is_our_problem_combo = FluentCombo(self)
-        self.is_our_problem_combo.addItems(["否", "是"])
-        self.is_our_problem_combo.setCurrentIndex(1)  # 默认「是」= 我方问题
-        self.is_our_problem_combo.setFixedWidth(100)
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
-        row1.addWidget(QLabel("是否解决 *:", self))
-        row1.addWidget(self.resolved_combo)
-        row1.addSpacing(16)
-        row1.addWidget(QLabel("是否我们主动发起:", self))
-        row1.addWidget(self.is_initiative_combo)
-        row1.addSpacing(16)
-        row1.addWidget(QLabel("是否是我们的问题:", self))
-        row1.addWidget(self.is_our_problem_combo)
-        row1.addStretch(1)
-        form.addRow(row1)
-
-        # 解决方案（选填，多行）
+        col_cause.addWidget(self.cause_edit)
+        txt_row.addLayout(col_cause, 1)
+        col_sol = QVBoxLayout()
+        col_sol.setSpacing(5)
+        col_sol.addWidget(_field_label("解决方案", False, self))
         self.solution_edit = PlainTextEdit(self)
-        self.solution_edit.setFixedHeight(56)
-        self.solution_edit.setPlaceholderText("选填")
-        form.addRow("解决方案:", self.solution_edit)
-
-        # 解决人 / 响应时间 / 填写人（一行两列紧凑布局）
-        row2 = QHBoxLayout()
+        self.solution_edit.setFixedHeight(64)
+        self.solution_edit.setPlaceholderText("选填，多行文本")
+        col_sol.addWidget(self.solution_edit)
+        txt_row.addLayout(col_sol, 1)
+        v3.addLayout(txt_row)
+        # 三个是/否判定：分段开关（默认值与旧版一致：是 / 否 / 是）
+        seg_row = QHBoxLayout()
+        seg_row.setSpacing(18)
+        seg_row.addWidget(_field_label("是否解决", True, self))
+        self.resolved_combo = YesNoSegment("是", self)
+        seg_row.addWidget(self.resolved_combo)
+        seg_row.addWidget(_field_label("我们主动发起", False, self))
+        self.is_initiative_combo = YesNoSegment("否", self)
+        seg_row.addWidget(self.is_initiative_combo)
+        seg_row.addWidget(_field_label("是我们的问题", False, self))
+        self.is_our_problem_combo = YesNoSegment("是", self)
+        seg_row.addWidget(self.is_our_problem_combo)
+        seg_row.addStretch(1)
+        v3.addLayout(seg_row)
+        # 解决人 / 响应时间：左右平分两列
+        res_row = QHBoxLayout()
+        res_row.setSpacing(16)
+        col_res = QVBoxLayout()
+        col_res.setSpacing(5)
+        col_res.addWidget(_field_label("解决人", False, self))
         self.resolver_combo = FluentCombo(self)
         self.resolver_combo.setEditable(True)
         self.resolver_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
-        self.resolver_combo.setFixedWidth(180)
-        row2.addWidget(QLabel("解决人:", self))
-        row2.addWidget(self.resolver_combo)
-        row2.addSpacing(16)
+        self.resolver_combo.setFixedWidth(220)
+        col_res.addWidget(self.resolver_combo)
+        res_row.addLayout(col_res)
+        col_resp = QVBoxLayout()
+        col_resp.setSpacing(5)
+        col_resp.addWidget(_field_label("响应时间", False, self))
         self.response_combo = FluentCombo(self)
         self.response_combo.setEditable(True)
         self.response_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
         self.response_combo.addItems(aftersale_db.RESPONSE_TIME_PRESET)
-        self.response_combo.setFixedWidth(180)
-        row2.addWidget(QLabel("响应时间:", self))
-        row2.addWidget(self.response_combo)
-        row2.addSpacing(16)
-        self.creator_edit = LineEdit(self)
-        self.creator_edit.setFixedWidth(140)
-        self.creator_edit.setText(_default_creator())
-        row2.addWidget(QLabel("填写人:", self))
-        row2.addWidget(self.creator_edit)
-        row2.addStretch(1)
-        form.addRow(row2)
+        self.response_combo.setFixedWidth(220)
+        col_resp.addWidget(self.response_combo)
+        res_row.addLayout(col_resp)
+        res_row.addStretch(1)
+        v3.addLayout(res_row)
+        root.addWidget(sec3)
 
-        root.addLayout(form)
+        self.first_error = None  # 最近一次校验的首个错误控件（供滚动聚焦）
 
     # ---------- 候选值加载 ----------
 
@@ -415,6 +579,7 @@ class AftersaleForm(QWidget):
         self._search_kw = str(text or "").strip()
         self._snk_code = ""  # 文本变动后旧的关联失效
         self.table_no_edit.clear()  # 旧桌号失效，防止错带到新球房
+        self._set_linked(False)  # 旧关联确认条/带出芯片失效
         # 地区：仅当当前文本是上次带出的城市时联动清空（手填/改过的地区保留）
         if (self._last_city and
                 self.region_combo.currentText().strip() == self._last_city):
@@ -488,6 +653,22 @@ class AftersaleForm(QWidget):
             # 避免换球房后地区仍显示旧城市；手填的地区不受影响
             self.region_combo.setEditText("")
             self._last_city = ""
+        self._set_linked(True, row)
+
+    def _set_linked(self, on, row=None):
+        """切换关联确认条（隐藏字段 snk_code 的可视反馈）"""
+        if not on or not row:
+            self._link_bar.setVisible(False)
+            return
+        city = str(row.get("city") or row.get("region") or "").strip()
+        parts = ["已关联球桌：%s · %s 号桌" % (
+            str(row.get("roomName") or ""), str(row.get("name") or ""))]
+        if str(row.get("snk_code") or ""):
+            parts.append("SNK: %s" % str(row.get("snk_code")))
+        if city:
+            parts.append("城市自动带出")
+        self._link_bar.setText("✓　" + "　|　".join(parts))
+        self._link_bar.setVisible(True)
 
     def _hide_candidates(self):
         self._cand_list.setVisible(False)
@@ -515,17 +696,16 @@ class AftersaleForm(QWidget):
         self.region_combo.setEditText(str(rec.get("region") or ""))
         self.problem_combo.setEditText(str(rec.get("problem") or ""))
         self.cause_edit.setPlainText(str(rec.get("cause") or ""))
-        self.resolved_combo.setCurrentText(str(rec.get("resolved") or "是"))
-        self.is_initiative_combo.setCurrentText(
-            str(rec.get("is_initiative") or "否"))
-        self.is_our_problem_combo.setCurrentText(
-            str(rec.get("is_our_problem") or "是"))
+        self.resolved_combo.setValue(rec.get("resolved") or "是")
+        self.is_initiative_combo.setValue(rec.get("is_initiative") or "否")
+        self.is_our_problem_combo.setValue(rec.get("is_our_problem") or "是")
         self.solution_edit.setPlainText(str(rec.get("solution") or ""))
         self.resolver_combo.setEditText(str(rec.get("resolver") or ""))
         self.response_combo.setEditText(str(rec.get("response_time") or ""))
         self.creator_edit.setText(str(rec.get("creator") or ""))
         self._snk_code = str(rec.get("snk_code") or "")
         self._last_city = ""  # 编辑回填不参与城市联动
+        self.clear_error()
 
     def collect(self) -> dict:
         """收集表单值为记录 dict（不含必填校验）"""
@@ -537,9 +717,9 @@ class AftersaleForm(QWidget):
             "region": self.region_combo.currentText().strip(),
             "problem": self.problem_combo.currentText().strip(),
             "cause": self.cause_edit.toPlainText().strip(),
-            "resolved": self.resolved_combo.currentText().strip() or "是",
-            "is_initiative": self.is_initiative_combo.currentText().strip() or "否",
-            "is_our_problem": self.is_our_problem_combo.currentText().strip() or "是",
+            "resolved": self.resolved_combo.value(),
+            "is_initiative": self.is_initiative_combo.value(),
+            "is_our_problem": self.is_our_problem_combo.value(),
             "solution": self.solution_edit.toPlainText().strip(),
             "resolver": self.resolver_combo.currentText().strip(),
             "response_time": self.response_combo.currentText().strip(),
@@ -547,20 +727,45 @@ class AftersaleForm(QWidget):
             "snk_code": self._snk_code,
         }
 
+    def _required_map(self):
+        """必填字段 → (取值, 错误控件, 输入控件)，顺序即校验/聚焦顺序"""
+        return [
+            ("类型", not self.type_combo.currentText().strip(),
+             self._err_type, self.type_combo),
+            ("桌号", not self.table_no_edit.text().strip(),
+             self._err_table, self.table_no_edit),
+            ("球房", not self.room_edit.text().strip(),
+             self._err_room, self.room_edit),
+            ("地区", not self.region_combo.currentText().strip(),
+             self._err_region, self.region_combo),
+            ("问题", not self.problem_combo.currentText().strip(),
+             self._err_problem, self.problem_combo),
+        ]
+
     def validate(self) -> list:
-        """必填校验，返回缺失字段中文名列表（空列表为通过）"""
+        """必填校验：返回缺失字段中文名列表，并驱动字段级红框/内联提示
+
+        同时记录 first_error（首个错误输入控件），供调用方滚动聚焦。
+        """
         missing = []
-        if not self.type_combo.currentText().strip():
-            missing.append("类型")
-        if not self.table_no_edit.text().strip():
-            missing.append("桌号")
-        if not self.room_edit.text().strip():
-            missing.append("球房")
-        if not self.region_combo.currentText().strip():
-            missing.append("地区")
-        if not self.problem_combo.currentText().strip():
-            missing.append("问题")
+        self.first_error = None
+        for name, bad, err_lbl, ctl in self._required_map():
+            err_lbl.setVisible(bad)
+            if hasattr(ctl, "setError"):
+                ctl.setError(bad)
+            if bad:
+                missing.append(name)
+                if self.first_error is None:
+                    self.first_error = ctl
         return missing
+
+    def clear_error(self):
+        """清除全部字段级错误态（输入恢复后由调用方触发）"""
+        for _name, _bad, err_lbl, ctl in self._required_map():
+            err_lbl.setVisible(False)
+            if hasattr(ctl, "setError"):
+                ctl.setError(False)
+        self.first_error = None
 
     def clear_form(self):
         """清空表单（保留填写人与下拉候选）"""
@@ -571,21 +776,23 @@ class AftersaleForm(QWidget):
         self.problem_combo.setEditText("")
         self.resolver_combo.setEditText("")
         self.response_combo.setEditText("")
-        self.resolved_combo.setCurrentIndex(1)  # 默认「是」
-        self.is_initiative_combo.setCurrentIndex(0)  # 默认「否」
-        self.is_our_problem_combo.setCurrentIndex(1)  # 默认「是」
+        self.resolved_combo.setValue("是")
+        self.is_initiative_combo.setValue("否")
+        self.is_our_problem_combo.setValue("是")
         self.type_combo.setCurrentIndex(-1)
         self.occurred_picker.setDate(QDate.currentDate())  # 默认当日
         self.region_combo.setEditText("")
         self._snk_code = ""
         self._last_city = ""
+        self._set_linked(False)
+        self.clear_error()
         self._hide_candidates()
 
 
 # ==================== 板块一：填写录入页 ====================
 
 class EntryPage(QWidget):
-    """填写录入页：表单卡片 + 提交/清空"""
+    """填写录入页：页头（周期指示）+ 三段表单 + 随内容操作条"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -594,54 +801,135 @@ class EntryPage(QWidget):
         self._init_ui()
 
     def _init_ui(self):
+        # 外边距与记录页一致（左右 20），标题不贴边
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(20, 16, 20, 12)
+        root.setSpacing(10)
 
+        # 页头：标题 + 说明左对齐，周期指示芯片右对齐
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head_l = QVBoxLayout()
+        head_l.setSpacing(2)
+        head_l.addWidget(TitleLabel("填写录入", self))
+        head_l.addWidget(CaptionLabel(
+            "提交后写入数据库，多人协作刷新可见", self))
+        head.addLayout(head_l)
+        head.addStretch(1)
+        self._cycle_chip = CaptionLabel(self)
+        self._cycle_chip.setStyleSheet(
+            "background: %s; color: %s; border-radius: 10px;"
+            " padding: 3px 10px;" % (
+                _hex_rgba(SEMANTIC["info"], 18), SEMANTIC["info"]))
+        head.addWidget(self._cycle_chip)
+        root.addLayout(head)
+
+        # 表单滚动区：内容按自身高度排布，不拉伸铺满整页；
+        # 操作条随内容放在最后一栏控件下方（与修改前一致）
         scroll = ScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }")
         view = QWidget()
         view.setStyleSheet("QWidget { background: transparent; }")
         scroll.setWidget(view)
-        root.addWidget(scroll)
-
         layout = QVBoxLayout(view)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(12)
+        self.form = AftersaleForm(view)
+        layout.addWidget(self.form)
 
-        card = CardWidget(view)
-        vbox = QVBoxLayout(card)
-        vbox.setContentsMargins(16, 14, 16, 14)
-        vbox.setSpacing(8)
-        vbox.addWidget(BodyLabel("售后问题登记", card))
-        vbox.addWidget(CaptionLabel(
-            "带 * 为必填项;"
-            "提交后会写入数据库，多人协作时其他人刷新可见", card))
-        self.form = AftersaleForm(card)
-        vbox.addWidget(self.form)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        self._btn_clear = PushButton(FluentIcon.DELETE, "清空", card)
+        # 操作条：必填进度 + 清空/提交（表单末栏下方，右对齐）
+        bar = QHBoxLayout()
+        bar.setSpacing(10)
+        self._prog = ProgressBar(view)
+        self._prog.setRange(0, 5)
+        self._prog.setValue(0)
+        self._prog.setTextVisible(False)
+        self._prog.setFixedWidth(72)
+        bar.addWidget(self._prog)
+        self._prog_text = CaptionLabel("必填项 0/5 已填写", view)
+        bar.addWidget(self._prog_text)
+        bar.addStretch(1)
+        self._btn_clear = PushButton(FluentIcon.DELETE, "清空", view)
         self._btn_clear.setToolTip("清空表单全部内容")
-        self._btn_clear.setFixedHeight(36)
-        self._btn_clear.clicked.connect(self.form.clear_form)
-        btn_row.addWidget(self._btn_clear)
-        self._btn_submit = PrimaryPushButton(FluentIcon.ACCEPT, "提交记录", card)
+        self._btn_clear.setFixedHeight(34)
+        self._btn_clear.clicked.connect(self._on_clear)
+        bar.addWidget(self._btn_clear)
+        self._btn_submit = PrimaryPushButton(FluentIcon.ACCEPT, "提交记录", view)
         self._btn_submit.setToolTip("校验必填项后写入数据库")
-        self._btn_submit.setFixedHeight(36)
+        self._btn_submit.setFixedHeight(34)
         self._btn_submit.clicked.connect(self._on_submit)
-        btn_row.addWidget(self._btn_submit)
-        vbox.addLayout(btn_row)
-
-        layout.addWidget(card)
+        bar.addWidget(self._btn_submit)
+        layout.addLayout(bar)
+        # 剩余高度由 stretch 吸收，表单保持固定排版不随窗口拉伸
         layout.addStretch(1)
+        root.addWidget(scroll, 1)
+        self._scroll = scroll
+
+        # 必填进度联动：任一必填控件变化即重算
+        f = self.form
+        for sig in (f.type_combo.currentTextChanged,
+                    f.table_no_edit.textChanged,
+                    f.room_edit.textChanged,
+                    f.region_combo.editTextChanged,
+                    f.region_combo.currentIndexChanged,
+                    f.problem_combo.editTextChanged,
+                    f.problem_combo.currentIndexChanged):
+            try:
+                sig.connect(self._update_required_progress)
+            except Exception:
+                pass
 
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_candidates()
+        self._refresh_cycle_chip()
+
+    def _refresh_cycle_chip(self):
+        """页头周期指示：本周期 mm/dd – mm/dd（周期设置变化后 showEvent 重算）"""
+        try:
+            start = datetime.strptime(
+                aftersale_db.current_cycle_start(), "%Y/%m/%d")
+            end = start + timedelta(
+                days=aftersale_db.cycle_span_days() - 1)
+            self._cycle_chip.setText("本周期 %s – %s · 按发生时间自动归属" % (
+                start.strftime("%m/%d"), end.strftime("%m/%d")))
+        except Exception:
+            self._cycle_chip.setText("按发生时间自动归属")
+
+    def _update_required_progress(self, *_a):
+        """必填进度：n/5 实时刷新；填齐变绿，缺项琥珀色点名"""
+        bad = [name for name, is_bad, _l, _c in self.form._required_map()
+               if is_bad]
+        done = 5 - len(bad)
+        self._prog.setValue(done)
+        if not bad:
+            self._prog_text.setText("必填项 5/5 已填齐")
+            self._prog_text.setStyleSheet("color: %s;" % SEMANTIC["success"])
+            self._prog.setStyleSheet(
+                "QProgressBar { background: %s; border: none;"
+                " border-radius: 2px; } QProgressBar::chunk {"
+                " background: %s; border-radius: 2px; }" % (
+                    _hex_rgba(SEMANTIC["success"], 18),
+                    SEMANTIC["success"]))
+        else:
+            self._prog_text.setText("还差 %d 项：%s" % (
+                len(bad), "、".join(bad)))
+            self._prog_text.setStyleSheet("color: %s;" % SEMANTIC["warning"])
+            self._prog.setStyleSheet(
+                "QProgressBar { background: %s; border: none;"
+                " border-radius: 2px; } QProgressBar::chunk {"
+                " background: %s; border-radius: 2px; }" % (
+                    _hex_rgba(SEMANTIC["warning"], 18),
+                    SEMANTIC["warning"]))
+
+    def _on_clear(self):
+        self.form.clear_form()
+        self._update_required_progress()
 
     def _refresh_candidates(self):
         """进入页面刷新动态候选（问题/解决人/地区）"""
@@ -651,11 +939,15 @@ class EntryPage(QWidget):
         self._cand_worker.start()
 
     def _on_submit(self):
-        """提交：必填校验 → 后台线程写库 → 清表单"""
+        """提交：必填校验（失败则字段级红框+滚动聚焦）→ 后台写库 → 清表单"""
         missing = self.form.validate()
         if missing:
             show_info_bar(f"请先填写必填项: {'、'.join(missing)}", "warning",
                           title="无法提交", parent=self, duration=3000)
+            if self.form.first_error is not None:
+                self.form.first_error.setFocus()
+                self._scroll.ensureWidgetVisible(
+                    self.form.first_error, 0, 90)
             return
         if self._save_worker and self._save_worker.isRunning():
             return
@@ -669,6 +961,7 @@ class EntryPage(QWidget):
     def _on_saved(self, rec_id):
         self._btn_submit.setEnabled(True)
         self.form.clear_form()
+        self._update_required_progress()
         show_info_bar(f"售后记录已提交（编号 {rec_id}）", "success",
                       title="提交成功", parent=self, duration=2500)
         # 通知窗口刷新记录页（若已构建）
@@ -721,23 +1014,74 @@ class EditRecordDialog(MessageBoxBase):
 
 # ==================== 板块二：记录与统计页 ====================
 
-# 表格列定义：(字段key, 表头, 列宽)
-# 列宽按真实数据内容核定（12 条真实记录最长值 + 表头文字，中文字符按 13px、ASCII 按 7px、标点按 3.5px 估算 + 24px 留白）
-RECORD_COLUMNS = (
-    ("created_at", "填写时间", 160),
-    ("occurred_at", "发生时间", 160),
+# 表格展示列（信息整合版：球房+地区+桌号合入「位置」，填写人并入填写时间，
+# 解决人并入响应时间；「是否…」判定字段转入 tooltip，保留全部信息不丢失）。
+# 第 0 列为勾选框（多选/批量操作），不在本定义内。
+TABLE_COLUMNS = (
+    ("created_at", "填写时间", 150),
+    ("occurred_at", "发生时间", 148),
     ("issue_type", "类型", 90),
-    ("table_no", "桌号", 90),
-    ("room_name", "球房", 200),
-    ("region", "地区", 70),
-    ("problem", "问题", 220),
-    ("resolved", "是否解决", 76),
-    ("is_initiative", "是否我们主动发起", 76),
-    ("is_our_problem", "是否是我们的问题", 76),
-    ("resolver", "解决人", 82),
-    ("response_time", "响应时间", 85),
-    ("creator", "填写人", 72),
+    ("location", "位置", 200),
+    ("problem", "问题", 220),   # Interactive 列，初始宽度 220，可拖拽调宽
+    ("resolved", "状态", 92),
+    ("response_time", "响应", 110),
+    ("ops", "操作", 168),
 )
+_COL_CHECK = 0  # 勾选列列号
+
+# 状态徽章取值：语义色（红=未解决 / 绿=已解决），徽章底色由运行时加透明度生成
+
+
+# ---------- 表格行内控件工厂（徽章 / 小按钮） ----------
+
+def _badge_label(text: str, color: str, parent=None) -> QLabel:
+    """状态徽章：圆角胶囊 + 语义色文字 + 同色半透明底"""
+    lb = QLabel(text, parent)
+    lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lb.setFixedHeight(20)
+    lb.setStyleSheet(
+        f"QLabel {{ background: {_hex_rgba(color, 30)}; color: {color};"
+        " border-radius: 9px; padding: 0 9px; font-size: 12px; }")
+    return lb
+
+
+_ROW_BTN_TMPL = (
+    "QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {bd};"
+    " border-radius: 4px; padding: 2px 8px; font-size: 12px; }}"
+    "QPushButton:hover {{ background: {hov}; border-color: {hov_bd}; }}"
+    "QPushButton:pressed {{ background: {prs}; }}"
+)
+
+
+def _row_btn(text: str, style: str, on_click, parent=None) -> _QPushButton:
+    """行内操作按钮：primary=强调色实心 / danger=红色描边 / ghost=中性描边
+
+    强调色实时读取当前主题（与迁移按钮同套路），hover/pressed 由令牌派生。
+    """
+    from core.theme_qss import current_accent_hex
+    accent = current_accent_hex()
+    if style == "primary":
+        kw = dict(bg=accent, fg="#ffffff", bd=accent,
+                  hov=lighten(accent, 0.12), hov_bd=lighten(accent, 0.12),
+                  prs=darken(accent, 0.18))
+    elif style == "danger":
+        d = SEMANTIC["danger"]
+        kw = dict(bg="transparent", fg=d, bd=_hex_rgba(d, 140),
+                  hov=_hex_rgba(d, 26), hov_bd=d, prs=_hex_rgba(d, 46))
+    else:  # ghost：中性描边（深浅主题各一套灰，跟随主题切换）
+        if isDarkTheme():
+            kw = dict(bg="transparent", fg="#c8d0dc", bd="#484848",
+                      hov="#333333", hov_bd="#5c5c5c", prs="#3a3a3a")
+        else:
+            kw = dict(bg="transparent", fg="#333333", bd="#c9c9c9",
+                      hov="#f0f0f0", hov_bd="#a6a6a6", prs="#e4e4e4")
+    btn = _QPushButton(text, parent)
+    btn.setFixedHeight(24)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setStyleSheet(_ROW_BTN_TMPL.format(**kw))
+    btn.clicked.connect(lambda _=False: on_click())
+    return btn
+
 
 # 导入预览列定义（与导出表头对齐 + 系统附加列）
 _PREVIEW_COLUMNS = (
@@ -822,7 +1166,12 @@ class ImportPreviewDialog(QDialog):
 
 
 class RecordsPage(QWidget):
-    """记录与统计页：筛选/分页/统计/编辑/删除/导出/导入/刷新"""
+    """记录与统计页：周期概览指标卡 + 筛选/分页/批量操作/一键解决/编辑/删除/导出/导入
+
+    表格列经过信息整合（球房+地区+桌号合入「位置」，填写人并入填写时间，
+    解决人并入响应时间），判定字段转入 tooltip；状态以语义徽章呈现，
+    未解决行提供行内一键「标记已解决」。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -834,12 +1183,43 @@ class RecordsPage(QWidget):
         self._export_worker = None
         self._import_worker = None
         self._cycles_loaded = False
+        self._batch_worker = None
         self._init_ui()
 
     def _init_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 14, 20, 12)
+        root.setSpacing(8)
+
+        # --- 页头：标题 + 说明 + 数据源状态（右对齐） ---
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head_box = QVBoxLayout()
+        head_box.setSpacing(1)
+        head_box.addWidget(TitleLabel("记录与统计", self))
+        head_box.addWidget(CaptionLabel(
+            "售后问题从上报到解决的全流程跟踪", self))
+        head.addLayout(head_box)
+        head.addStretch(1)
+        # 数据源指示：MySQL / 本地 SQLite / 降级兜底
+        self._lbl_source = CaptionLabel("", self)
+        head.addWidget(self._lbl_source, 0, Qt.AlignmentFlag.AlignTop)
+        root.addLayout(head)
+
+        # --- 周期概览指标卡（四张，随筛选口径实时更新） ---
+        ov_head = QHBoxLayout()
+        ov_head.setSpacing(8)
+        self._lbl_overview = BodyLabel("概览", self)
+        ov_head.addWidget(self._lbl_overview)
+        ov_head.addStretch(1)
+        root.addLayout(ov_head)
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(10)
+        self._card_total = self._make_stats_card(cards_row)
+        self._card_unresolved = self._make_stats_card(cards_row)
+        self._card_rate = self._make_stats_card(cards_row)
+        self._card_initiative = self._make_stats_card(cards_row)
+        root.addLayout(cards_row)
 
         # --- 工具栏 ---
         toolbar = QHBoxLayout()
@@ -871,10 +1251,32 @@ class RecordsPage(QWidget):
             lambda _i: self._on_filter_changed())
         toolbar.addWidget(self._resolved_combo)
 
+        # 是否是我们的问题筛选
+        self._our_problem_combo = FluentCombo(self)
+        self._our_problem_combo.addItem("全部", userData="")
+        self._our_problem_combo.addItem("是", userData="是")
+        self._our_problem_combo.addItem("否", userData="否")
+        self._our_problem_combo.setToolTip("是否是我们的问题")
+        self._our_problem_combo.setFixedWidth(130)
+        self._our_problem_combo.currentIndexChanged.connect(
+            lambda _i: self._on_filter_changed())
+        toolbar.addWidget(self._our_problem_combo)
+
+        # 是否我们主动发起筛选
+        self._initiative_combo = FluentCombo(self)
+        self._initiative_combo.addItem("全部", userData="")
+        self._initiative_combo.addItem("是", userData="是")
+        self._initiative_combo.addItem("否", userData="否")
+        self._initiative_combo.setToolTip("是否我们主动发起")
+        self._initiative_combo.setFixedWidth(130)
+        self._initiative_combo.currentIndexChanged.connect(
+            lambda _i: self._on_filter_changed())
+        toolbar.addWidget(self._initiative_combo)
+
         # 关键词搜索（防抖）
         self._search_edit = SearchLineEdit(self)
-        self._search_edit.setPlaceholderText("搜索")
-        self._search_edit.setFixedWidth(220)
+        self._search_edit.setPlaceholderText("搜索球房 / 问题 / 填写人")
+        self._search_edit.setFixedWidth(180)
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
 
@@ -903,28 +1305,36 @@ class RecordsPage(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._on_filter_changed)
 
+        # --- 批量操作条（勾选行后出现：批量标记已解决 / 批量删除） ---
+        self._batch_bar = self._make_batch_bar()
+        self._batch_bar.setVisible(False)
+        root.addWidget(self._batch_bar)
+
         # --- 表格 ---
         self._table = TableWidget(self)
-        self._table.setColumnCount(len(RECORD_COLUMNS))
-        self._table.setHorizontalHeaderLabels([c[1] for c in RECORD_COLUMNS])
+        # 勾选列 + 数据列（列号：勾选=0，数据列 1..N，注意不要少算勾选列）
+        self._table.setColumnCount(_COL_CHECK + 1 + len(TABLE_COLUMNS))
+        self._table.setHorizontalHeaderLabels(
+            [""] + [c[1] for c in TABLE_COLUMNS])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(_FIXED_ROW_HEIGHT)
+        # 行高放宽到 40：双行单元格（位置/填写时间/响应）需要两行文字空间
+        self._table.verticalHeader().setDefaultSectionSize(40)
         self._table.setAlternatingRowColors(True)
         self._table.setWordWrap(False)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.doubleClicked.connect(lambda _idx: self._on_edit())
+        self._table.itemChanged.connect(self._on_item_changed)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        # 问题列自适应（按字段名定位列号，避免列序调整后索引错位导致其他列被拉伸）
-        _problem_idx = next(i for i, (k, _h, _w) in enumerate(RECORD_COLUMNS) if k == "problem")
-        header.setSectionResizeMode(_problem_idx, QHeaderView.ResizeMode.Stretch)
+        # 全部列保持 Interactive：列宽由用户拖拽独立控制，不设 Stretch 拉伸列
         header.setStretchLastSection(False)
-        for i, (_k, _h, w) in enumerate(RECORD_COLUMNS):
-            self._table.setColumnWidth(i, w)
+        self._table.setColumnWidth(_COL_CHECK, 36)
+        for i, (_k, _h, w) in enumerate(TABLE_COLUMNS):
+            self._table.setColumnWidth(_COL_CHECK + 1 + i, w)
         root.addWidget(self._table, 1)
 
         # --- 分页 + 状态栏 ---
@@ -932,9 +1342,6 @@ class RecordsPage(QWidget):
         bottom.setSpacing(6)
         self._lbl_stats = CaptionLabel("", self)
         bottom.addWidget(self._lbl_stats)
-        # 数据源指示：MySQL / 本地 SQLite / 降级兜底，切换后端后用户可据此确认当前读的库
-        self._lbl_source = CaptionLabel("", self)
-        bottom.addWidget(self._lbl_source)
         bottom.addStretch(1)
         self._lbl_cycle = CaptionLabel("", self)
         bottom.addWidget(self._lbl_cycle)
@@ -951,16 +1358,69 @@ class RecordsPage(QWidget):
         bottom.addWidget(self._btn_next)
         root.addLayout(bottom)
 
+    # ---------- 概览卡与批量条构造 ----------
+
+    def _make_stats_card(self, layout) -> tuple:
+        """单张指标卡：标签 + 大数字 + 辅助说明，返回 (card, 数字label, 说明label)"""
+        card = CardWidget(self)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(2)
+        lbl = CaptionLabel("", card)
+        num = QLabel("0", card)
+        num.setStyleSheet("font-size: 24px; font-weight: 500; background: transparent;")
+        sub = CaptionLabel("", card)
+        lay.addWidget(lbl)
+        lay.addWidget(num)
+        lay.addWidget(sub)
+        layout.addWidget(card, 1)
+        return (card, lbl, num, sub)
+
+    def _make_batch_bar(self) -> QWidget:
+        """批量操作条：勾选行后浮现（全选本页 / 批量标记已解决 / 批量删除 / 取消）"""
+        bar = QWidget(self)
+        bar.setObjectName("batchBar")
+        bar.setStyleSheet(
+            "QWidget#batchBar { background: "
+            f"{_hex_rgba(SEMANTIC['info'], 20)};"
+            f" border: 1px solid {_hex_rgba(SEMANTIC['info'], 90)};"
+            " border-radius: 6px; }")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setSpacing(8)
+        self._chk_all = CheckBox("全选本页", bar)
+        self._chk_all.stateChanged.connect(self._on_toggle_all)
+        lay.addWidget(self._chk_all)
+        self._lbl_selected = BodyLabel("已选 0 项", bar)
+        lay.addWidget(self._lbl_selected)
+        btn_resolve = _row_btn(
+            "批量标记已解决", "primary", self._on_batch_resolve, bar)
+        lay.addWidget(btn_resolve)
+        btn_delete = _row_btn("批量删除", "danger", self._on_batch_delete, bar)
+        lay.addWidget(btn_delete)
+        btn_clear = _row_btn("取消选择", "ghost", self._on_clear_selection, bar)
+        lay.addWidget(btn_clear)
+        lay.addStretch(1)
+        return bar
+
+    @staticmethod
+    def _short_dt(val: str) -> str:
+        """2026-08-22 21:14:33 → 08-22 21:14（表格内紧凑展示，完整值放 tooltip）"""
+        s = str(val or "").strip()
+        return s[5:16] if len(s) >= 16 else s
+
     # ---------- 筛选条件 ----------
 
     def _current_filters(self) -> dict:
-        """汇集当前筛选条件（周期/类型/状态/关键词）"""
+        """汇集当前筛选条件（周期/类型/状态/是否我们主动发起/是否我们的问题/关键词）"""
         cycle = self._cycle_combo.currentData()
         return {
             "cycle_start": str(cycle or ""),
             "issue_type": (self._type_combo.currentText()
                            if self._type_combo.currentIndex() > 0 else ""),
             "resolved": self._resolved_combo.currentData() or "",
+            "is_initiative": self._initiative_combo.currentData() or "",
+            "is_our_problem": self._our_problem_combo.currentData() or "",
             "keyword": self._search_edit.text().strip(),
         }
 
@@ -1054,7 +1514,10 @@ class RecordsPage(QWidget):
         self._worker = AftersaleDBWorker(
             aftersale_db.query_with_stats,
             self._page_no, self._page_size,
-            f["keyword"], f["cycle_start"], f["issue_type"], f["resolved"])
+            keyword=f["keyword"], cycle_start=f["cycle_start"],
+            issue_type=f["issue_type"], resolved=f["resolved"],
+            is_initiative=f["is_initiative"],
+            is_our_problem=f["is_our_problem"])
         self._worker.result_ready.connect(self._on_loaded)
         self._worker.error.connect(self._on_load_error)
         self._worker.start()
@@ -1066,40 +1529,276 @@ class RecordsPage(QWidget):
         self._populate(rows)
         self._update_pager()
         self._update_source_label()
-        self._lbl_stats.setText(
-            f"共 {stats.get('total', 0)} 条 · "
-            f"已解决 {stats.get('resolved', 0)} · "
-            f"未解决 {stats.get('unresolved', 0)}")
+        self._update_overview(stats)
         cycle = self._current_filters().get("cycle_start") or ""
         if cycle:
             self._lbl_cycle.setText(f"周期: {aftersale_db.cycle_label(cycle)}")
+            self._lbl_overview.setText(
+                f"概览 · {aftersale_db.cycle_label(cycle)}")
         else:
             self._lbl_cycle.setText("周期: 全部")
+            self._lbl_overview.setText("概览 · 全部周期")
 
     def _on_load_error(self, msg):
         self._lbl_stats.setText(f"查询失败: {msg}")
         self._update_source_label()
 
+    # ---------- 概览指标卡 ----------
+
+    def _update_overview(self, stats: dict):
+        """统计 → 四张指标卡（本周期记录/未解决/已解决率/主动发起）"""
+        total = int(stats.get("total") or 0)
+        unresolved = int(stats.get("unresolved") or 0)
+        rate = int(stats.get("rate") or 0)
+        initiative = int(stats.get("initiative") or 0)
+
+        _card, _lbl, num, sub = self._card_total
+        num.setText(str(total))
+        num.setStyleSheet("font-size: 24px; font-weight: 500; background: transparent;")
+        sub.setText(f"已解决 {stats.get('resolved', 0)} 条")
+
+        _card, _lbl, num, sub = self._card_unresolved
+        num.setText(str(unresolved))
+        # 未解决为 0 时用常规字色，有积压时用危险红提醒
+        color = SEMANTIC["danger"] if unresolved > 0 else ""
+        base = "font-size: 24px; font-weight: 500; background: transparent;"
+        num.setStyleSheet(base + (f" color: {color};" if color else ""))
+        sub.setText("待处理" if unresolved else "无积压")
+
+        _card, _lbl, num, sub = self._card_rate
+        num.setText(f"{rate}%")
+        num.setStyleSheet(base + (f" color: {SEMANTIC['success']};" if rate >= 90 else ""))
+        sub.setText("已解决率")
+
+        _card, _lbl, num, sub = self._card_initiative
+        init_rate = int(round(initiative * 100 / total)) if total else 0
+        num.setText(str(initiative))
+        num.setStyleSheet(base)
+        sub.setText(f"主动发起 · 占 {init_rate}%")
+
+        self._lbl_stats.setText(f"共 {total} 条")
+
+    # ---------- 表格渲染 ----------
+
+    def _row_tooltip(self, rec: dict) -> str:
+        """行 tooltip：整合字段完整信息（含移入 tooltip 的判定字段）"""
+        return (
+            f"填写时间: {rec.get('created_at') or ''}\n"
+            f"填写人: {rec.get('creator') or ''}\n"
+            f"发生时间: {rec.get('occurred_at') or ''}\n"
+            f"类型: {rec.get('issue_type') or ''}\n"
+            f"位置: {rec.get('room_name') or ''} · "
+            f"{rec.get('region') or ''} · {rec.get('table_no') or ''}\n"
+            f"问题: {rec.get('problem') or ''}\n"
+            f"发生原因: {rec.get('cause') or ''}\n"
+            f"是否解决: {rec.get('resolved') or '否'}\n"
+            f"是否我们主动发起: {rec.get('is_initiative') or '否'}\n"
+            f"是否是我们的问题: {rec.get('is_our_problem') or '否'}\n"
+            f"解决方案: {rec.get('solution') or ''}\n"
+            f"解决人: {rec.get('resolver') or ''}\n"
+            f"响应时间: {rec.get('response_time') or ''}")
+
     def _populate(self, rows):
-        """行数据 → 表格：已解决/未解决着色"""
+        """行数据 → 表格：勾选列 + 双行信息整合列 + 状态徽章 + 行内操作按钮"""
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
             self._table.setRowCount(len(rows))
             for r, item in enumerate(rows):
-                for c, (key, _h, _w) in enumerate(RECORD_COLUMNS):
-                    val = str(item.get(key) or "")
-                    cell = QTableWidgetItem(val)
-                    cell.setToolTip(val)
+                tip = self._row_tooltip(item)
+
+                # 勾选列（供批量操作）
+                chk = QTableWidgetItem()
+                chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable
+                             | Qt.ItemFlag.ItemIsEnabled)
+                chk.setCheckState(Qt.CheckState.Unchecked)
+                self._table.setItem(r, _COL_CHECK, chk)
+
+                for i, (key, _h, _w) in enumerate(TABLE_COLUMNS):
+                    col = _COL_CHECK + 1 + i
+                    if key == "created_at":
+                        cell = QTableWidgetItem(
+                            f"{self._short_dt(item.get('created_at'))}\n"
+                            f"{str(item.get('creator') or '')}")
+                        f = QFont(cell.font())
+                        f.setPointSizeF(10.5)
+                        cell.setFont(f)
+                    elif key == "location":
+                        cell = QTableWidgetItem(
+                            f"{str(item.get('room_name') or '')}\n"
+                            f"{str(item.get('region') or '')} · "
+                            f"{str(item.get('table_no') or '')}")
+                        f = QFont(cell.font())
+                        f.setPointSizeF(10.5)
+                        cell.setFont(f)
+                    elif key == "response_time":
+                        cell = QTableWidgetItem(
+                            f"{str(item.get('response_time') or '—')}\n"
+                            f"{str(item.get('resolver') or '')}")
+                        f = QFont(cell.font())
+                        f.setPointSizeF(10.5)
+                        cell.setFont(f)
+                    elif key == "resolved":
+                        # 状态徽章（setCellWidget 承载，该格不设 item）
+                        is_yes = str(item.get("resolved") or "") == "是"
+                        badge = _badge_label(
+                            "已解决" if is_yes else "未解决",
+                            SEMANTIC["success"] if is_yes else SEMANTIC["danger"],
+                            self._table.viewport())
+                        self._table.setCellWidget(r, col, badge)
+                        continue
+                    elif key == "ops":
+                        self._table.setCellWidget(
+                            r, col, self._make_ops_cell(r, item))
+                        continue
+                    else:
+                        val = str(item.get(key) or "")
+                        cell = QTableWidgetItem(val)
+                    cell.setToolTip(tip)
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    if key == "resolved":
-                        color = QColor(SEMANTIC["success"] if val == "是"
-                                       else SEMANTIC["danger"])
-                        cell.setForeground(QBrush(color))
-                    self._table.setItem(r, c, cell)
+                    self._table.setItem(r, col, cell)
         finally:
             self._table.setUpdatesEnabled(True)
             self._table.blockSignals(False)
+        self._sync_batch_bar()
+
+    def _make_ops_cell(self, row: int, rec: dict) -> QWidget:
+        """操作列容器：未解决行 = [已解决 + 编辑 + 删除]，已解决行 = [编辑 + 删除]（删除常驻）"""
+        wrap = QWidget()
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(4, 0, 4, 0)
+        lay.setSpacing(4)
+        is_yes = str(rec.get("resolved") or "") == "是"
+        if not is_yes:
+            lay.addWidget(_row_btn(
+                "已解决", "primary",
+                lambda: self._quick_resolve(row), wrap))
+        lay.addWidget(_row_btn("编辑", "ghost", lambda: self._on_edit(row), wrap))
+        lay.addWidget(_row_btn(
+            "删除", "danger", lambda: self._on_delete(row), wrap))
+        lay.addStretch(1)
+        return wrap
+
+    # ---------- 勾选与批量操作 ----------
+
+    def _checked_ids(self) -> list:
+        """当前勾选行的记录 id 列表"""
+        ids = []
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, _COL_CHECK)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                if r < len(self._rows):
+                    ids.append(self._rows[r].get("id"))
+        return ids
+
+    def _on_item_changed(self, item: QTableWidgetItem):
+        """勾选列变动 → 刷新批量条计数（程序化改勾选也经此，幂等安全）"""
+        if item.column() == _COL_CHECK:
+            self._sync_batch_bar()
+
+    def _sync_batch_bar(self):
+        """按勾选数显示/隐藏批量操作条，更新计数与全选状态"""
+        n = len(self._checked_ids())
+        self._batch_bar.setVisible(n > 0)
+        self._lbl_selected.setText(f"已选 {n} 项")
+        total_rows = self._table.rowCount()
+        self._chk_all.blockSignals(True)
+        if total_rows and n == total_rows:
+            self._chk_all.setCheckState(Qt.CheckState.Checked)
+        else:
+            self._chk_all.setCheckState(Qt.CheckState.Unchecked)
+        self._chk_all.blockSignals(False)
+
+    def _on_toggle_all(self, state):
+        """全选/取消全选本页
+
+        根因修复（两处）：
+        1. Qt.CheckState 在本环境是普通 enum.Enum（非 IntEnum），stateChanged 信号
+           发出的是 int；旧写法 `state == Qt.CheckState.Checked` 恒为 False，
+           导致「全选本页」永远把行勾选置为未勾选。这里统一取 .value 比较。
+        2. 循环前 blockSignals 避免每行 setCheckState 同步触发 itemChanged →
+           _sync_batch_bar 把 _chk_all 视觉状态弹回 Unchecked（blockSignals 只挡
+           信号不挡视觉）的竞态；循环结束后统一同步一次。
+        """
+        want = (getattr(state, "value", state) == Qt.CheckState.Checked.value)
+        new_state = (Qt.CheckState.Checked if want
+                     else Qt.CheckState.Unchecked)
+        self._table.blockSignals(True)
+        try:
+            for r in range(self._table.rowCount()):
+                it = self._table.item(r, _COL_CHECK)
+                if it is not None:
+                    it.setCheckState(new_state)
+        finally:
+            self._table.blockSignals(False)
+        self._sync_batch_bar()
+
+    def _on_clear_selection(self):
+        self._on_toggle_all(Qt.CheckState.Unchecked)
+
+    def _on_batch_resolve(self):
+        """批量标记已解决（最小化更新，仅改 resolved）"""
+        ids = self._checked_ids()
+        if not ids:
+            return
+        if self._batch_worker and self._batch_worker.isRunning():
+            return
+        if not MessageBox("批量标记已解决",
+                          f"确定将选中的 {len(ids)} 条记录标记为已解决？",
+                          self.window()).exec():
+            return
+        self._batch_worker = AftersaleDBWorker(
+            aftersale_db.mark_resolved_batch, ids)
+        self._batch_worker.result_ready.connect(
+            lambda n: (show_info_bar(f"已标记 {n} 条为已解决", "success",
+                                     title="批量操作", parent=self, duration=2500),
+                       self._load()))
+        self._batch_worker.error.connect(
+            lambda m: show_info_bar(m, "error", title="批量操作失败",
+                                    parent=self, duration=4000))
+        self._batch_worker.start()
+
+    def _on_batch_delete(self):
+        """批量删除（确认后走 delete_records）"""
+        ids = self._checked_ids()
+        if not ids:
+            return
+        if self._batch_worker and self._batch_worker.isRunning():
+            return
+        if not MessageBox("批量删除",
+                          f"确定删除选中的 {len(ids)} 条售后记录？\n删除后不可恢复",
+                          self.window()).exec():
+            return
+        self._batch_worker = AftersaleDBWorker(
+            aftersale_db.delete_records, ids)
+        self._batch_worker.result_ready.connect(
+            lambda n: (show_info_bar(f"已删除 {n} 条记录", "success",
+                                     title="批量操作", parent=self, duration=2500),
+                       self._load()))
+        self._batch_worker.error.connect(
+            lambda m: show_info_bar(m, "error", title="批量操作失败",
+                                    parent=self, duration=4000))
+        self._batch_worker.start()
+
+    # ---------- 行内快捷操作 ----------
+
+    def _quick_resolve(self, row: int):
+        """一键标记已解决：最小化更新（不弹编辑窗），3 步变 1 步"""
+        if row >= len(self._rows):
+            return
+        if self._batch_worker and self._batch_worker.isRunning():
+            return
+        rec = self._rows[row]
+        self._batch_worker = AftersaleDBWorker(
+            aftersale_db.mark_resolved_batch, [rec.get("id")])
+        self._batch_worker.result_ready.connect(
+            lambda _n: (show_info_bar("记录已标记为已解决", "success",
+                                      title="操作成功", parent=self, duration=2000),
+                        self._load()))
+        self._batch_worker.error.connect(
+            lambda m: show_info_bar(m, "error", title="操作失败",
+                                    parent=self, duration=4000))
+        self._batch_worker.start()
 
     def _update_pager(self):
         pages = max(1, (self._total + self._page_size - 1) // self._page_size)
@@ -1127,25 +1826,28 @@ class RecordsPage(QWidget):
         self._table.selectRow(idx.row())
         menu = RoundMenu(parent=self._table)
         act_edit = Action(FluentIcon.EDIT, "编辑", self._table)
-        act_edit.triggered.connect(lambda _=False: self._on_edit())
+        act_edit.triggered.connect(
+            lambda _=False: self._on_edit(idx.row()))
         menu.addAction(act_edit)
         rec = self._rows[idx.row()] if idx.row() < len(self._rows) else {}
         if str(rec.get("resolved") or "") != "是":
             act_done = Action(FluentIcon.ACCEPT, "标记已解决", self._table)
             act_done.triggered.connect(
-                lambda _=False, r=rec: self._on_mark_resolved(r))
+                lambda _=False, r=idx.row(): self._quick_resolve(r))
             menu.addAction(act_done)
         act_del = Action(FluentIcon.DELETE, "删除", self._table)
-        act_del.triggered.connect(lambda _=False: self._on_delete())
+        act_del.triggered.connect(
+            lambda _=False: self._on_delete(idx.row()))
         menu.addAction(act_del)
         menu.exec_(self._table.viewport().mapToGlobal(pos),
                    aniType=_popup_ani_type())
 
-    def _on_edit(self):
-        r = self._selected_row()
-        if r < 0:
+    def _on_edit(self, row: int = -1):
+        if row < 0:
+            row = self._selected_row()
+        if row < 0 or row >= len(self._rows):
             return
-        rec = dict(self._rows[r])
+        rec = dict(self._rows[row])
         dlg = EditRecordDialog(rec, self)
         # 编辑弹窗也需动态候选
         cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
@@ -1156,17 +1858,6 @@ class RecordsPage(QWidget):
             collected = dlg.collected
             collected["id"] = rec.get("id")
             collected["created_at"] = rec.get("created_at")  # 保留原填写时间
-            self._run_update(collected)
-
-    def _on_mark_resolved(self, rec):
-        """快捷标记已解决：弹编辑窗并预置「是」"""
-        rec = dict(rec)
-        rec["resolved"] = "是"
-        dlg = EditRecordDialog(rec, self)
-        if dlg.exec() and getattr(dlg, "collected", None):
-            collected = dlg.collected
-            collected["id"] = rec.get("id")
-            collected["created_at"] = rec.get("created_at")
             self._run_update(collected)
 
     def _run_update(self, record):
@@ -1180,13 +1871,21 @@ class RecordsPage(QWidget):
                                     parent=self, duration=4000))
         self._worker.start()
 
-    def _on_delete(self):
-        r = self._selected_row()
-        if r < 0:
+    def _on_delete(self, row: int = -1):
+        if row < 0:
+            row = self._selected_row()
+        if row < 0 or row >= len(self._rows):
             return
-        rec = self._rows[r]
+        rec = self._rows[row]
         desc = f"{rec.get('table_no') or ''} · {rec.get('problem') or ''}"
-        if not MessageBox("确认删除", f"确定删除该售后记录？\n{desc}", self.window()).exec():
+        is_yes = str(rec.get("resolved") or "") == "是"
+        msg = f"确定删除售后记录「{desc}」吗？\n删除后不可恢复。"
+        if is_yes:
+            msg += "\n该记录已标记为解决，删除后将无法恢复。"
+        dlg = MessageBox("删除售后记录", msg, self)
+        dlg.yesButton.setText("删除")
+        dlg.cancelButton.setText("取消")
+        if not dlg.exec():
             return
         self._worker = AftersaleDBWorker(aftersale_db.delete_record, rec.get("id"))
         self._worker.result_ready.connect(
@@ -1212,7 +1911,10 @@ class RecordsPage(QWidget):
         self._btn_export.setEnabled(False)
         self._export_worker = AftersaleDBWorker(
             aftersale_db.export_xlsx, path,
-            f["keyword"], f["cycle_start"], f["issue_type"], f["resolved"])
+            keyword=f["keyword"], cycle_start=f["cycle_start"],
+            issue_type=f["issue_type"], resolved=f["resolved"],
+            is_initiative=f["is_initiative"],
+            is_our_problem=f["is_our_problem"])
         self._export_worker.result_ready.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
         self._export_worker.start()
@@ -1385,23 +2087,36 @@ class SettingsPage(QWidget):
 
     周期设置保存后通过 cycle_page.saved 信号通知记录页刷新周期下拉；
     数据库卡片复用 MysqlSyncCard（仅推售后记录）。
+    整体包在 ScrollArea 里：小分辨率下设置项可滚动查看，不再被裁剪。
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        content = QWidget(self)
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(24, 20, 24, 20)
+        cl.setSpacing(14)
 
         # 周期设置卡片
-        self.cycle_page = CycleSettingsPage(self)
-        root.addWidget(self.cycle_page)
+        self.cycle_page = CycleSettingsPage(content)
+        cl.addWidget(self.cycle_page)
 
         # 数据库设置卡片（原 MySQL 设置，仅同步售后记录）
-        self.mysql_card = MysqlSyncCard(self, sync_scope="aftersale")
+        self.mysql_card = MysqlSyncCard(content, sync_scope="aftersale")
         self.mysql_card.load()
-        root.addWidget(self.mysql_card)
-        root.addStretch(1)
+        cl.addWidget(self.mysql_card)
+        cl.addStretch(1)
+
+        scroll = ScrollArea(self)
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }")
+        root.addWidget(scroll)
 
     def showEvent(self, event):
         """进入设置面板回显最新配置（导航信号部分版本缺失，用 Qt 原生事件兜底）"""
