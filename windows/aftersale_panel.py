@@ -27,7 +27,9 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     NavigationItemPosition, MenuAnimationType, setCustomStyleSheet,
     qconfig, isDarkTheme, ZhDatePicker, RadioButton, SpinBox)
 
+from core.design_tokens import SEMANTIC
 from core.perf import is_acrylic_enabled
+from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
 from database import aftersale_db, table_db
 from workers.aftersale_worker import AftersaleDBWorker
@@ -129,16 +131,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: tran
 
 
 def _accent_hex() -> str:
-    """读取 qfluentwidgets 当前主题强调色（失败回退默认青）"""
-    try:
-        tc = qconfig.themeColor
-        if hasattr(tc, "value"):
-            tc = tc.value
-        if isinstance(tc, QColor) and tc.isValid():
-            return tc.name()
-    except Exception:
-        pass
-    return "#009faa"
+    """读取 qfluentwidgets 当前主题强调色（统一走 core.theme_qss，失败回退默认青）"""
+    return current_accent_hex()
 
 
 def _style_cand_list(widget):
@@ -730,19 +724,19 @@ class EditRecordDialog(MessageBoxBase):
 # 表格列定义：(字段key, 表头, 列宽)
 # 列宽按真实数据内容核定（12 条真实记录最长值 + 表头文字，中文字符按 13px、ASCII 按 7px、标点按 3.5px 估算 + 24px 留白）
 RECORD_COLUMNS = (
-    ("created_at", "填写时间", 152),
-    ("occurred_at", "发生时间", 90),
-    ("issue_type", "类型", 76),
-    ("table_no", "桌号", 64),
-    ("room_name", "球房", 208),
-    ("region", "地区", 50),
-    ("problem", "问题", 248),
+    ("created_at", "填写时间", 160),
+    ("occurred_at", "发生时间", 160),
+    ("issue_type", "类型", 90),
+    ("table_no", "桌号", 90),
+    ("room_name", "球房", 200),
+    ("region", "地区", 70),
+    ("problem", "问题", 220),
     ("resolved", "是否解决", 76),
-    ("is_initiative", "是否我们主动发起", 128),
-    ("is_our_problem", "是否是我们的问题", 142),
-    ("resolver", "解决人", 64),
-    ("response_time", "响应时间", 76),
-    ("creator", "填写人", 64),
+    ("is_initiative", "是否我们主动发起", 76),
+    ("is_our_problem", "是否是我们的问题", 76),
+    ("resolver", "解决人", 82),
+    ("response_time", "响应时间", 85),
+    ("creator", "填写人", 72),
 )
 
 # 导入预览列定义（与导出表头对齐 + 系统附加列）
@@ -986,12 +980,12 @@ class RecordsPage(QWidget):
         """
         from database import backend
         if not backend.is_mysql_test_mode():
-            text, color = "数据源: 本地 SQLite", "#9e9e9e"
+            text, color = "数据源: 本地 SQLite", SEMANTIC["neutral"]
         elif backend.get_state() == backend.STATE_ONLINE:
-            text, color = "数据源: MySQL", "#52c41a"
+            text, color = "数据源: MySQL", SEMANTIC["success"]
         else:
             text, color = ("数据源: 本地 SQLite（MySQL 不可用，降级兜底）",
-                           "#fa8c16")
+                           SEMANTIC["warning"])
         self._lbl_source.setText(text)
         self._lbl_source.setStyleSheet(f"color: {color};")
         self._lbl_source.setToolTip(
@@ -1099,8 +1093,8 @@ class RecordsPage(QWidget):
                     cell.setToolTip(val)
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if key == "resolved":
-                        color = (QColor("#52c41a") if val == "是"
-                                 else QColor("#ff5252"))
+                        color = QColor(SEMANTIC["success"] if val == "是"
+                                       else SEMANTIC["danger"])
                         cell.setForeground(QBrush(color))
                     self._table.setItem(r, c, cell)
         finally:

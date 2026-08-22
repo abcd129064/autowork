@@ -28,6 +28,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 
 from core.app_paths import get_app_dir
 from core.perf import is_animation_enabled
+from core.theme_qss import apply_window_qss
 
 
 def _popup_ani_type():
@@ -234,6 +235,7 @@ class ConnDiagPanel(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        apply_window_qss(self)
         self.setWindowTitle("连接诊断")
         self.resize(1150, 600)
         self.setMinimumSize(760, 420)

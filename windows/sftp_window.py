@@ -19,6 +19,7 @@ from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
 
 from core.conn_logger import conn_logger
 from core.perf import is_animation_enabled
+from core.theme_qss import apply_window_qss
 from core.utils import safe_close_transport
 from workers.network_workers import (
     SFTPConnectWorker, SFTPListWorker, SFTPOperationWorker, SFTPDirTransferWorker,
@@ -1913,6 +1914,7 @@ class SFTPWindow(QDialog):
 
     def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
         super().__init__(parent)
+        apply_window_qss(self)
         title = f"SFTP 文件管理 - {server_name} ({host}:{port})" if server_name else f"SFTP 文件管理 - {host}:{port}"
         self.setWindowTitle(title)
         self.resize(1200, 800)

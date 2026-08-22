@@ -1032,6 +1032,8 @@ class UIMixin:
         self._theme_color = color
         self._save_settings({"theme_color": color})
         setThemeColor(color, lazy=True)
+        # QSS 中的强调色锚点需按新色重新替换应用
+        self._apply_theme()
         self._append_log(f"[配置] 已更新主题强调色: {color}")
         self._show_info_bar(f"[配置] 已更新主题强调色: {color}")
 
@@ -1748,13 +1750,16 @@ class UIMixin:
 
     def _load_qss(self, theme_name):
         """从 styles/ 目录加载 QSS 文件，找不到时返回空字符串。
-        打包环境下 styles/ 位于 sys._MEIPASS（_internal/），需用 get_resource_dir()"""
+        打包环境下 styles/ 位于 sys._MEIPASS（_internal/），需用 get_resource_dir()。
+        加载后把固定青色锚点替换为用户当前主题强调色（core.theme_qss 统一逻辑）"""
         qss_path = os.path.join(get_resource_dir(), 'styles', f'{theme_name}.qss')
         try:
             with open(qss_path, 'r', encoding='utf-8') as f:
-                return f.read()
+                text = f.read()
         except Exception:
             return ''
+        from core.theme_qss import substitute_accent
+        return substitute_accent(text)
 
     # ==================== 系统主题监听 ====================
 

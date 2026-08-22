@@ -41,6 +41,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.app_paths import get_app_dir
+from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from core.secrets import decrypt_settings, encrypt_settings
@@ -144,9 +145,9 @@ TABLE_COLUMNS = [
 ]
 
 _STATUS_COLORS = {
-    "运行中": QColor(16, 137, 62),
-    "空闲": QColor(0, 120, 212),
-    "下线": QColor(130, 130, 130),
+    "运行中": QColor(SEMANTIC["success"]),
+    "空闲": QColor(SEMANTIC["info"]),
+    "下线": QColor(SEMANTIC["neutral"]),
 }
 
 # 设备状态列：(字段key, 表头, 宽度)
@@ -201,19 +202,25 @@ _MIGRATE_BTN_QSS_TMPL = (
     "QPushButton:pressed {{ background-color: {pressed}; }}"
     "QPushButton:disabled {{ background-color: #8a8f98; color: #d5d7da; }}"
 )
+
+
+def _migrate_btn_qss(base_hex):
+    """迁移按钮 QSS：hover/pressed 由令牌基色派生，不再手写六组明度值"""
+    from core.design_tokens import lighten, darken
+    return _MIGRATE_BTN_QSS_TMPL.format(
+        base=base_hex, hover=lighten(base_hex, 0.12),
+        pressed=darken(base_hex, 0.18))
+
+
 _MIGRATE_BTN_QSS = {
     # 翡翠绿：正常/在用类语义
-    "使用": _MIGRATE_BTN_QSS_TMPL.format(
-        base="#1a9e6c", hover="#22b27b", pressed="#147f56"),
+    "使用": _migrate_btn_qss(SEMANTIC["success"]),
     # 琥珀金：精度/校准类语义
-    "精度": _MIGRATE_BTN_QSS_TMPL.format(
-        base="#c98a2d", hover="#d99a3d", pressed="#a87123"),
+    "精度": _migrate_btn_qss(SEMANTIC["warning"]),
     # 玫瑰红：问题/告警类语义
-    "问题": _MIGRATE_BTN_QSS_TMPL.format(
-        base="#cf4452", hover="#da5a66", pressed="#ab3641"),
+    "问题": _migrate_btn_qss(SEMANTIC["danger"]),
     # 石板灰：废弃/归档类语义
-    "废弃": _MIGRATE_BTN_QSS_TMPL.format(
-        base="#5c6675", hover="#6b7585", pressed="#4a5361"),
+    "废弃": _migrate_btn_qss(SEMANTIC["neutral"]),
 }
 
 # 可迁移的文件分类字段（其余分类点开后仅查看，不显示迁移按钮）
@@ -222,14 +229,14 @@ _MIGRATABLE_FIELDS = {
 }
 
 # 可点击查看文件列表的单元格链接色
-_LINK_COLOR = QColor(0, 120, 212)
+_LINK_COLOR = QColor(SEMANTIC["info"])
 
 # 设备状态码 → (中文描述, 颜色)
 # kd 接口 status 字段：0=下线 1=空闲 2=使用
 _DEVICE_STATUS_MAP = {
-    "0": ("下线", QColor("#000000")),
-    "1": ("空闲", QColor("#fa8c16")),
-    "2": ("使用", QColor("#52c41a")),
+    "0": ("下线", QColor(SEMANTIC["neutral"])),
+    "1": ("空闲", QColor(SEMANTIC["warning"])),
+    "2": ("使用", QColor(SEMANTIC["success"])),
 }
 
 
@@ -310,7 +317,7 @@ _EXPORT_MAX_ROWS = 1_000_000
 # 高频问题设备：近 N 天提交 ≥ 阈值次标红（C1）
 _HF_DAYS = 30
 _HF_THRESHOLD = 3
-_HF_COLOR = QColor("#e81123")
+_HF_COLOR = QColor(SEMANTIC["danger"])
 
 
 def _query_kd_page_with_stats(page_no, page_size, keyword, date,
@@ -3562,9 +3569,9 @@ class AdminSettingsPage(QWidget):
 
 # 折线序列配色：错误率=警示红、操作率=信息蓝、精度=琥珀金（虚线）
 _TREND_SERIES = (
-    ("error_rate", "错误率", QColor("#e81123"), False),
-    ("operation_rate", "操作率", QColor("#0078d4"), False),
-    ("accuracy_count", "精度", QColor("#c98a2d"), True),
+    ("error_rate", "错误率", QColor(SEMANTIC["danger"]), False),
+    ("operation_rate", "操作率", QColor(SEMANTIC["info"]), False),
+    ("accuracy_count", "精度", QColor(SEMANTIC["warning"]), True),
 )
 
 
@@ -3716,7 +3723,7 @@ class _AlertRow(CardWidget):
         lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(10)
         icon = QLabel("⚠", self)
-        icon.setStyleSheet("color: #e81123; font-size: 15px;")
+        icon.setStyleSheet(f"color: {SEMANTIC['danger']}; font-size: 15px;")
         lay.addWidget(icon)
         avg = max(float(info.get("avg_rate") or 0), 0.001)
         times = float(info.get("today_rate") or 0) / avg
@@ -3726,10 +3733,10 @@ class _AlertRow(CardWidget):
             f"{float(info.get('today_rate') or 0):.1f}%，近 "
             f"{info.get('hist_days', 0)} 日均值 "
             f"{float(info.get('avg_rate') or 0):.1f}%（{times:.1f}×）", self)
-        txt.setStyleSheet("color: #e81123;")
+        txt.setStyleSheet(f"color: {SEMANTIC['danger']};")
         lay.addWidget(txt, 1)
         jump = QLabel("查看设备 →", self)
-        jump.setStyleSheet("color: #e81123; font-weight: 600;")
+        jump.setStyleSheet(f"color: {SEMANTIC['danger']}; font-weight: 600;")
         lay.addWidget(jump)
 
     def mouseReleaseEvent(self, event):
@@ -3798,7 +3805,7 @@ class TrendPage(QWidget):
         a_lay.setSpacing(6)
         head = QHBoxLayout()
         lbl_head = QLabel("⚠ 异常突增预警（今日错误率 > 近 7 日均值×2）", alert_card)
-        lbl_head.setStyleSheet("font-weight: 600; color: #e81123;")
+        lbl_head.setStyleSheet(f"font-weight: 600; color: {SEMANTIC['danger']};")
         head.addWidget(lbl_head)
         head.addStretch(1)
         self._btn_alert_refresh = ToolButton(FluentIcon.SYNC, alert_card)
@@ -4150,7 +4157,7 @@ class HealthPage(QWidget):
             "基准 4000；>4000~5000 为健康度异常；"
             ">5000 为严重异常。"
             "勾选条目后点「已处理」，health 未变化则不再展示；"
-            "多人共用 MySQL 时，他人标记的已处理在同步后自动对齐", self)
+            "使用服务器 MySQL 时，他人标记的已处理在同步后自动对齐", self)
         layout.addWidget(hint)
 
         self._table = TableWidget(self)
@@ -4199,7 +4206,7 @@ class HealthPage(QWidget):
             h = float(r.get("health") or 0)
             # 阈值分级：>5000 严重异常（红），4000~5000 健康度异常（橙）
             severe = h > table_db.HEALTH_SEVERE
-            color = QColor("#ff5252") if severe else QColor("#f0a020")
+            color = QColor(SEMANTIC["danger"]) if severe else QColor(SEMANTIC["warning"])
             level = "严重异常" if severe else "健康度异常"
             row = self._table.rowCount()
             self._table.insertRow(row)

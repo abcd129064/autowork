@@ -122,6 +122,7 @@ class ImageViewerDialog(QDialog):
                  device_page, can_migrate=True, dest_options=(),
                  btn_qss=None, parent=None):
         super().__init__(parent)
+        apply_window_qss(self)
         self._entries = list(entries)
         self._idx = max(0, min(index, len(self._entries) - 1))
         self._file_path = file_path

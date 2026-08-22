@@ -24,6 +24,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from core.perf import is_animation_enabled
+from core.theme_qss import apply_window_qss
 from core.frp_remote import get_session_manager
 from workers.table_worker import TableFetchWorker
 from database import table_db
@@ -161,6 +162,7 @@ class TablePanelWindow(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        apply_window_qss(self)
         self.setWindowTitle("球桌管理")
         self.resize(1050, 560)
         self.setMinimumSize(700, 400)

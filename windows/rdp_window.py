@@ -24,6 +24,7 @@ from PySide6.QtGui import QGuiApplication
 from qfluentwidgets import CaptionLabel, BodyLabel, PushButton
 
 from core.conn_logger import conn_logger
+from core.theme_qss import apply_window_qss
 
 if sys.platform == 'win32':
     from win_api.windows_api import (
@@ -511,6 +512,7 @@ class RDPWindow(QDialog):
 
     def __init__(self, host, port, username, password, server_name='', log_callback=None, parent=None):
         super().__init__(parent)
+        apply_window_qss(self)
         title = f"远程桌面 - {server_name} ({host}:{port})" if server_name else f"远程桌面 - {host}:{port}"
         self.setWindowTitle(title)
         self.resize(1280, 800)

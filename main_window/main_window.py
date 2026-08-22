@@ -16,6 +16,7 @@ from qfluentwidgets.window.fluent_window import FluentWindowBase
 
 from autowork_with_table import Ui_MainWindow
 from core.utils import natural_sort_key, show_info_bar
+from core.design_tokens import SEMANTIC
 from main_window.settings_dialog import _DEFAULT_LOG_RULES, _compile_log_rules
 
 from .settings_mixin import SettingsMixin
@@ -1072,7 +1073,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
     # ==================== C6: 日志↔kd 记录双向跳转 ====================
 
     # kd 分类 → 状态栏醒目色（精度/问题需突出提示，其余分类用默认色）
-    _KD_STATUS_ACCENTS = {"accuracy_files": "#e67e22", "already_files": "#e5393f"}
+    _KD_STATUS_ACCENTS = {"accuracy_files": SEMANTIC["warning"],
+                          "already_files": SEMANTIC["danger"]}
 
     def _update_kd_record_status(self, device_code, log_filename):
         """C6 正向：选中日志时用时间戳前缀反查 kd_status 文件分类并展示

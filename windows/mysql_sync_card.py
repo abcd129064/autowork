@@ -18,6 +18,7 @@ from qfluentwidgets import (CardWidget, BodyLabel, CaptionLabel, LineEdit,
 from core.app_paths import get_app_dir
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import show_info_bar
+from database import backend
 from database.mysql_sync_card_logic import should_attempt_test
 from workers.mysql_sync_worker import MysqlSyncWorker, MysqlTestWorker
 
@@ -169,6 +170,9 @@ class MysqlSyncCard(CardWidget):
             cfg = self._collect_cfg()
             was_enabled = self._last_enabled
             _save_settings({"mysql_sync": cfg})
+            # backend 的开关/凭据走进程缓存；保存成功后让各线程在下一次
+            # 数据库访问时按新配置重建连接，避免继续使用旧 host/账号。
+            backend.invalidate_mysql_settings_cache()
             self._last_enabled = cfg["enabled"]
             if cfg["enabled"] and not was_enabled:
                 self._auto_sync_history(cfg)

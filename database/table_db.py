@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from database import backend
@@ -461,6 +462,18 @@ _mysql_local = threading.local()  # MySQL 模式：每线程独立连接，避�
 _mysql_tables_ready = False       # 建表只执行一次（全局标志，跨线程共享）
 
 
+def _discard_thread_mysql_connection():
+    """关闭当前线程的旧 MySQL 连接（配置变更或连接级异常后调用）。"""
+    conn = getattr(_mysql_local, 'conn', None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _mysql_local.conn = None
+    _mysql_local.generation = None
+
+
 def _get_conn():
     """获取数据库连接（MySQL 主 + SQLite 兜底）
 
@@ -472,15 +485,17 @@ def _get_conn():
     """
     global _mysql_tables_ready
     if backend.is_mysql_test_mode():
+        generation = backend.mysql_settings_generation()
         if backend.get_state() == backend.STATE_ONLINE:
             # ONLINE：优先复用 thread-local MySQL 连接
             conn = getattr(_mysql_local, 'conn', None)
-            if conn is not None:
-                try:
-                    conn._conn.ping(reconnect=True)
-                    return conn
-                except Exception:
-                    pass  # 连接断开，尝试重建
+            if (conn is not None
+                    and getattr(_mysql_local, 'generation', None) == generation
+                    and getattr(conn, 'healthy', True)):
+                # 热路径不再 ping：连接错误由适配器在实际 SQL 操作时标记，
+                # 下一次 _get_conn 才重连，避免每个翻页/查询多一次 RTT。
+                return conn
+            _discard_thread_mysql_connection()
             try:
                 conn = backend.create_mysql_connection()
             except Exception as e:
@@ -492,6 +507,7 @@ def _get_conn():
                 _ensure_mysql_tables(conn)
                 _mysql_tables_ready = True
             _mysql_local.conn = conn
+            _mysql_local.generation = generation
             return conn
         else:
             # DEGRADED：试探 MySQL 是否恢复
@@ -504,9 +520,12 @@ def _get_conn():
                 _ensure_mysql_tables(conn)
                 _mysql_tables_ready = True
             _mysql_local.conn = conn
+            _mysql_local.generation = generation
             backend.mark_online()
             _trigger_merge_back()  # 阶段二：合并兜底增量回 MySQL
             return conn
+    # 配置关闭后及时释放当前线程此前建立的 MySQL 连接。
+    _discard_thread_mysql_connection()
     return _get_sqlite_conn()
 
 
@@ -638,13 +657,7 @@ def close():
         _conn.close()
         _conn = None
     # MySQL thread-local 连接也尝试关闭当前线程的
-    conn = getattr(_mysql_local, 'conn', None)
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        _mysql_local.conn = None
+    _discard_thread_mysql_connection()
 
 
 # ==================== sync_meta 时间戳写入（双后端兼容 upsert） ====================
@@ -666,6 +679,29 @@ def _upsert_sync_meta(conn, key: str, value: str):
             "UPDATE sync_meta SET value = ? WHERE key = ?", (value, key))
 
 
+@contextmanager
+def _batch_transaction(conn):
+    """将一组替换写入提交为单个原子事务。
+
+    MySQL 连接维持 autocommit，避免长生命周期线程遗留读事务；批量写入时
+    显式 ``BEGIN``，使 DELETE、原生 executemany 与 sync_meta 更新只提交一次。
+    SQLite 没有适配器的 begin()，其默认隐式事务语义保持不变。
+    """
+    begin = getattr(conn, 'begin', None)
+    if callable(begin):
+        begin()
+    try:
+        yield
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    else:
+        conn.commit()
+
+
 # ==================== 原有球桌表操作 ====================
 
 def save_all(rows: list) -> int:
@@ -675,39 +711,39 @@ def save_all(rows: list) -> int:
     snk（如手动写入）时保留旧值，避免同步把手动值冲掉。
     """
     conn = _get_conn()
-    # 先记录存量 snk（TRIM(name) → snk_code），DELETE 后仍可回查
-    old_snk = {}
-    for name, snk in conn.execute(
-            "SELECT name, snk_code FROM billiard_tables"):
-        key = str(name or "").strip()
-        val = str(snk or "").strip()
-        if key and val:
-            old_snk[key] = val
-    conn.execute("DELETE FROM billiard_tables")
-    data = []
-    for item in rows:
-        remark = str(item.get("remark") or "")
-        name = str(item.get("name") or "")
-        snk = parse_snk_code(remark) or old_snk.get(name.strip(), "")
-        data.append((
-            item.get("id") or 0,
-            name,
-            str(item.get("roomName") or ""),
-            str(item.get("onlineStatusName") or ""),
-            remark,
-            str(item.get("cameraPassExt") or ""),
-            snk,
-            str(item.get("code") or ""),
-            parse_city(item),
-        ))
-    conn.executemany(
-        "INSERT OR REPLACE INTO billiard_tables "
-        "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 同步时间戳：双后端兼容 upsert（MySQL 下 INSERT 已存在 key 会 1062）
-    _upsert_sync_meta(conn, "last_sync", now)
-    conn.commit()
+    with _batch_transaction(conn):
+        # 先记录存量 snk（TRIM(name) → snk_code），DELETE 后仍可回查
+        old_snk = {}
+        for name, snk in conn.execute(
+                "SELECT name, snk_code FROM billiard_tables"):
+            key = str(name or "").strip()
+            val = str(snk or "").strip()
+            if key and val:
+                old_snk[key] = val
+        conn.execute("DELETE FROM billiard_tables")
+        data = []
+        for item in rows:
+            remark = str(item.get("remark") or "")
+            name = str(item.get("name") or "")
+            snk = parse_snk_code(remark) or old_snk.get(name.strip(), "")
+            data.append((
+                item.get("id") or 0,
+                name,
+                str(item.get("roomName") or ""),
+                str(item.get("onlineStatusName") or ""),
+                remark,
+                str(item.get("cameraPassExt") or ""),
+                snk,
+                str(item.get("code") or ""),
+                parse_city(item),
+            ))
+        conn.executemany(
+            "INSERT OR REPLACE INTO billiard_tables "
+            "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 同步时间戳：双后端兼容 upsert（MySQL 下 INSERT 已存在 key 会 1062）
+        _upsert_sync_meta(conn, "last_sync", now)
     return len(data)
 
 
@@ -889,6 +925,41 @@ CREATE TABLE IF NOT EXISTS health_alerts (
 """
 
 
+def _filter_alert_items(rows) -> list:
+    """过滤出有效告警条目，返回 [(name, roomName, onlineStatusName, health), ...]
+
+    排除规则（与同步语义一致）：
+    - name 为空或 health 无法解析为数字；
+    - health <= 4000：正常或接口默认值（4000 视为空值）；
+    - health > 40万：脏数据（异常数字）；
+    - roomName 为「公司测试」：内部测试数据（同球桌管理页筛选口径）。
+
+    同名设备多次出现时以最后一条为准（与旧逐行实现「先 INSERT 再
+    UPDATE」的最终落库结果一致）。
+    """
+    items = {}
+    for item in rows or []:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            h = float(item.get("health") or 0)
+        except (TypeError, ValueError):
+            continue
+        # 排除：默认值/正常（<=4000）与脏数据（>40万）
+        if h <= HEALTH_WARN or h > HEALTH_INVALID_MAX:
+            continue
+        if str(item.get("roomName") or "").strip() == TEST_ROOM_NAME:
+            continue
+        items[name] = (
+            name,
+            str(item.get("roomName") or ""),
+            str(item.get("onlineStatusName") or ""),
+            h,
+        )
+    return list(items.values())
+
+
 def sync_health_alerts(rows: list) -> int:
     """按最新拉取的球桌数据同步健康度告警表，返回当前应展示条数
 
@@ -901,62 +972,52 @@ def sync_health_alerts(rows: list) -> int:
         health 变化但仍异常 → 清除已处理标记重新展示；
     - 接口中消失的设备一并清理。
 
-    MySQL 多用户模式：单条 upsert 原子写入，他人已提交的处理标记
-    （resolved_health）在同步时会被读到并保留；SQLite 单机模式走逐行分支。
+    MySQL 多用户模式：ON DUPLICATE KEY UPDATE 原子 upsert，他人已提交的
+    处理标记（resolved_health）在同步时会被读到并保留；SQLite 单机模式
+    一次取回全部已处理标记后在 Python 侧分支，再 executemany 批量写入
+    （无逐行 SELECT 的 N+1 往返）。
     """
     conn = _get_conn()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if backend.is_mysql_test_mode():
         return _sync_health_alerts_mysql(conn, rows, now)
-    seen = set()
-    for item in rows or []:
-        name = str(item.get("name") or "").strip()
-        if not name:
+    items = _filter_alert_items(rows)
+    seen = {t[0] for t in items}
+    # 一次取回全部现有记录的已处理标记（roomName 等基础字段本轮必被覆盖，
+    # 无需读旧值），Python 侧判断分支，替代旧实现的逐行 SELECT（N+1）
+    existing = {
+        r[0]: r[1]
+        for r in conn.execute(
+            "SELECT name, resolved_health FROM health_alerts").fetchall()
+    }
+    inserts, updates_keep, updates_clear = [], [], []
+    for name, room, status, h in items:
+        if name not in existing:
+            inserts.append((name, room, status, h, now))
             continue
-        try:
-            h = float(item.get("health") or 0)
-        except (TypeError, ValueError):
-            continue
-        # 排除：默认值/正常（<=4000）与脏数据（>40万）
-        if h <= HEALTH_WARN or h > HEALTH_INVALID_MAX:
-            continue
-        # 排除：内部测试球房数据（同球桌管理页筛选口径）
-        if str(item.get("roomName") or "").strip() == TEST_ROOM_NAME:
-            continue
-        seen.add(name)
-        old = conn.execute(
-            "SELECT health, resolved_health FROM health_alerts WHERE name = ?",
-            (name,)).fetchone()
-        if old is None:
-            conn.execute(
-                "INSERT INTO health_alerts "
-                "(name, roomName, onlineStatusName, health, resolved_health, updated_at) "
-                "VALUES (?, ?, ?, ?, NULL, ?)",
-                (name, str(item.get("roomName") or ""),
-                 str(item.get("onlineStatusName") or ""), h, now))
-            continue
-        resolved = old[1]
-        if resolved is None:
-            # 未处理：仅更新基础字段
-            conn.execute(
-                "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
-                "health=?, updated_at=? WHERE name=?",
-                (str(item.get("roomName") or ""),
-                 str(item.get("onlineStatusName") or ""), h, now, name))
-        elif abs(h - float(resolved)) > 1e-9:
-            # 已处理但 health 变化：仍异常 → 清除标记重新展示（默认值/脏数据已在上方排除）
-            conn.execute(
-                "UPDATE health_alerts SET roomName=?, onlineStatusName=?, health=?, "
-                "resolved_health=NULL, updated_at=? WHERE name=?",
-                (str(item.get("roomName") or ""),
-                 str(item.get("onlineStatusName") or ""), h, now, name))
+        resolved = existing[name]
+        if resolved is not None and abs(h - float(resolved)) > 1e-9:
+            # 已处理但 health 变化：仍异常 → 清除标记重新展示
+            # （默认值/脏数据已在过滤阶段排除）
+            updates_clear.append((room, status, h, now, name))
         else:
-            # health 未变化：保持已处理状态，仅刷新基础字段
-            conn.execute(
-                "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
-                "updated_at=? WHERE name=?",
-                (str(item.get("roomName") or ""),
-                 str(item.get("onlineStatusName") or ""), now, name))
+            # 未处理 / 已处理且 health 未变：只刷新基础字段，
+            # resolved_health 保持原值（NULL 或处理时快照）
+            updates_keep.append((room, status, h, now, name))
+    if inserts:
+        conn.executemany(
+            "INSERT INTO health_alerts "
+            "(name, roomName, onlineStatusName, health, resolved_health, updated_at) "
+            "VALUES (?, ?, ?, ?, NULL, ?)", inserts)
+    if updates_keep:
+        conn.executemany(
+            "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
+            "health=?, updated_at=? WHERE name=?", updates_keep)
+    if updates_clear:
+        conn.executemany(
+            "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
+            "health=?, resolved_health=NULL, updated_at=? WHERE name=?",
+            updates_clear)
     if seen:
         # seen 为空说明本轮没有有效告警，跳过 DELETE——否则 NOT IN () 拼出
         # 非法 SQL，而且也不该把历史告警一次清空
@@ -980,6 +1041,9 @@ def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
     - 已处理且 health 未变：保留 resolved_health（他人/自己的处理标记不丢）；
     - 已处理但 health 变化：置 NULL 重新展示。
     其他端已提交的标记在本端同步时自然可见，实现多端状态对齐。
+
+    参数列表先收集、再一次 executemany 批量提交（旧实现逐行 execute，
+    N 台设备 = N 次调用；批量后 Python 侧只有一轮循环）。
     """
     upsert_sql = (
         "INSERT INTO health_alerts "
@@ -994,25 +1058,11 @@ def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
         "resolved_health, NULL), "
         "updated_at = VALUES(updated_at)"
     )
-    seen = set()
-    for item in rows or []:
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        try:
-            h = float(item.get("health") or 0)
-        except (TypeError, ValueError):
-            continue
-        if h <= HEALTH_WARN or h > HEALTH_INVALID_MAX:
-            continue
-        if str(item.get("roomName") or "").strip() == TEST_ROOM_NAME:
-            continue
-        seen.add(name)
-        conn.execute(upsert_sql, (
-            name,
-            str(item.get("roomName") or ""),
-            str(item.get("onlineStatusName") or ""),
-            h, now))
+    params = [(name, room, status, h, now)
+              for name, room, status, h in _filter_alert_items(rows)]
+    if params:
+        conn.executemany(upsert_sql, params)
+    seen = {p[0] for p in params}
     if seen:
         conn.execute(
             f"DELETE FROM health_alerts WHERE name NOT IN "
@@ -1088,33 +1138,33 @@ def save_xqzg(rows: list, file_path: str = "") -> int:
         file_path: 日期路径，如 "2026/08/02"；仅替换该日期的数据
     """
     conn = _get_conn()
-    _probe_status_ext_cols(conn, "xqzg_status")
-    # 只删除该日期的数据，保留其他日期
-    conn.execute("DELETE FROM xqzg_status WHERE file_path = ?", (file_path,))
-    all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
-    placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
-    col_names = "id, file_path, " + ", ".join(all_fields)
-    # 获取当前最大 id，续接编号
-    max_id = conn.execute("SELECT MAX(id) FROM xqzg_status").fetchone()[0] or 0
-    data = []
-    for idx, item in enumerate(rows, max_id + 1):
-        row_vals = [idx, file_path]
-        for f in STATUS_FIELDS:
-            row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
-        for f in KD_EXTRA_FIELDS:
-            val = item.get(f)
-            if f in KD_FILE_FIELDS:
-                row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
-            else:
-                row_vals.append(str(val if val is not None else ""))
-        data.append(tuple(row_vals))
-    conn.executemany(
-        f"INSERT OR REPLACE INTO xqzg_status ({col_names}) VALUES ({placeholders})", data)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 同步时间戳：双后端兼容 upsert，按日期分区避免固定键 1062
-    meta_key = f"last_sync_xqzg_{file_path.replace('/', '')}" if file_path else "last_sync_xqzg"
-    _upsert_sync_meta(conn, meta_key, now)
-    conn.commit()
+    with _batch_transaction(conn):
+        _probe_status_ext_cols(conn, "xqzg_status")
+        # 只删除该日期的数据，保留其他日期
+        conn.execute("DELETE FROM xqzg_status WHERE file_path = ?", (file_path,))
+        all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
+        placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
+        col_names = "id, file_path, " + ", ".join(all_fields)
+        # 获取当前最大 id，续接编号
+        max_id = conn.execute("SELECT MAX(id) FROM xqzg_status").fetchone()[0] or 0
+        data = []
+        for idx, item in enumerate(rows, max_id + 1):
+            row_vals = [idx, file_path]
+            for f in STATUS_FIELDS:
+                row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
+            for f in KD_EXTRA_FIELDS:
+                val = item.get(f)
+                if f in KD_FILE_FIELDS:
+                    row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
+                else:
+                    row_vals.append(str(val if val is not None else ""))
+            data.append(tuple(row_vals))
+        conn.executemany(
+            f"INSERT OR REPLACE INTO xqzg_status ({col_names}) VALUES ({placeholders})", data)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 同步时间戳：双后端兼容 upsert，按日期分区避免固定键 1062
+        meta_key = f"last_sync_xqzg_{file_path.replace('/', '')}" if file_path else "last_sync_xqzg"
+        _upsert_sync_meta(conn, meta_key, now)
     return len(data)
 
 
@@ -1146,33 +1196,33 @@ def save_kd(rows: list, file_path: str = "") -> int:
         file_path: 日期路径，如 "2026/08/02"；仅替换该日期的数据
     """
     conn = _get_conn()
-    _probe_status_ext_cols(conn, "kd_status")
-    # 只删除该日期的数据，保留其他日期
-    conn.execute("DELETE FROM kd_status WHERE file_path = ?", (file_path,))
-    all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
-    placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
-    col_names = "id, file_path, " + ", ".join(all_fields)
-    # 获取当前最大 id，续接编号
-    max_id = conn.execute("SELECT MAX(id) FROM kd_status").fetchone()[0] or 0
-    data = []
-    for idx, item in enumerate(rows, max_id + 1):
-        row_vals = [idx, file_path]
-        for f in STATUS_FIELDS:
-            row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
-        for f in KD_EXTRA_FIELDS:
-            val = item.get(f)
-            if f in KD_FILE_FIELDS:
-                row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
-            else:
-                row_vals.append(str(val if val is not None else ""))
-        data.append(tuple(row_vals))
-    conn.executemany(
-        f"INSERT OR REPLACE INTO kd_status ({col_names}) VALUES ({placeholders})", data)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
-    # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新同日期会 1062）
-    _upsert_sync_meta(conn, meta_key, now)
-    conn.commit()
+    with _batch_transaction(conn):
+        _probe_status_ext_cols(conn, "kd_status")
+        # 只删除该日期的数据，保留其他日期
+        conn.execute("DELETE FROM kd_status WHERE file_path = ?", (file_path,))
+        all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
+        placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
+        col_names = "id, file_path, " + ", ".join(all_fields)
+        # 获取当前最大 id，续接编号
+        max_id = conn.execute("SELECT MAX(id) FROM kd_status").fetchone()[0] or 0
+        data = []
+        for idx, item in enumerate(rows, max_id + 1):
+            row_vals = [idx, file_path]
+            for f in STATUS_FIELDS:
+                row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
+            for f in KD_EXTRA_FIELDS:
+                val = item.get(f)
+                if f in KD_FILE_FIELDS:
+                    row_vals.append(json.dumps(val if isinstance(val, list) else [], ensure_ascii=False))
+                else:
+                    row_vals.append(str(val if val is not None else ""))
+            data.append(tuple(row_vals))
+        conn.executemany(
+            f"INSERT OR REPLACE INTO kd_status ({col_names}) VALUES ({placeholders})", data)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        meta_key = f"last_sync_kd_{file_path.replace('/', '')}"
+        # 同步时间戳：双后端兼容 upsert（MySQL 下重复刷新同日期会 1062）
+        _upsert_sync_meta(conn, meta_key, now)
     inserted = len(data)
     # 保存后顺手清理 60 天前的历史分区，避免数据库随天数无限膨胀
     prune_kd_history(_KD_KEEP_DAYS)

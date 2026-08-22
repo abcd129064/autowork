@@ -41,6 +41,7 @@ from qfluentwidgets import (PushButton, PrimaryPushButton, DropDownPushButton,
 
 from core.app_paths import get_app_dir
 from core.conn_logger import conn_logger
+from core.theme_qss import apply_window_qss
 from core.utils import safe_close_transport, cleanup_log_dir, show_info_bar
 from workers.network_workers import SSHConnectWorker
 from windows.ansi_terminal import ANSITerminalWidget
@@ -174,7 +175,6 @@ class SSHTerminalPanel(QWidget):
         bar_layout.addWidget(self._reconnect_label)
         bar_layout.addStretch()
         self._reconnect_btn = PrimaryPushButton("重新连接")
-        setFont(self._reconnect_btn, 11)
         self._reconnect_btn.setFocusPolicy(Qt.NoFocus)
         self._reconnect_btn.setFixedWidth(96)
         self._reconnect_btn.clicked.connect(self._reconnect_clicked)
@@ -773,6 +773,7 @@ class SSHTerminalWindow(QDialog):
 
     def __init__(self, host, port, username, password, log_callback=None, parent=None):
         super().__init__(parent)
+        apply_window_qss(self)
         self.setWindowTitle(f"SSH 终端 - {host}:{port}")
         self.resize(900, 560)
         self._panel = SSHTerminalPanel(

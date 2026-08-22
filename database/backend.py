@@ -20,13 +20,51 @@ import threading
 
 # ==================== MySQL 测试模式开关 ====================
 
+_mysql_settings_cache: dict | None = None
+_mysql_settings_lock = threading.RLock()
+_mysql_settings_generation = 0
+
+
 def is_mysql_test_mode() -> bool:
-    """MySQL 测试模式是否开启（settings.json → mysql_sync.enabled）"""
-    return _load_mysql_settings().get("enabled", False)
+    """MySQL 主库模式是否开启（settings.json → mysql_sync.enabled）。
+
+    此函数位于每次数据库访问的热路径；配置由 ``_load_mysql_settings``
+    进程内缓存，保存 MySQL 配置时必须调用
+    :func:`invalidate_mysql_settings_cache` 使下一次访问重新读取。
+    """
+    return bool(_load_mysql_settings().get("enabled", False))
+
+
+def invalidate_mysql_settings_cache():
+    """使 MySQL 配置缓存与已有线程连接失效。
+
+    配置页成功写入 ``mysql_sync`` 后调用。generation 会递增，
+    ``table_db`` 据此在下一次访问时丢弃该线程的旧连接并按新配置重建。
+    """
+    global _mysql_settings_cache, _mysql_settings_generation
+    with _mysql_settings_lock:
+        _mysql_settings_cache = None
+        _mysql_settings_generation += 1
+
+
+def mysql_settings_generation() -> int:
+    """返回当前 MySQL 配置代次，供连接层判断是否需要重建连接。"""
+    with _mysql_settings_lock:
+        return _mysql_settings_generation
 
 
 def _load_mysql_settings() -> dict:
-    """读取 settings.json 中 mysql_sync 配置节点（敏感字段透明解密）"""
+    """读取缓存的 mysql_sync 配置；首次访问时解密 settings.json 一次。"""
+    global _mysql_settings_cache
+    with _mysql_settings_lock:
+        if _mysql_settings_cache is None:
+            _mysql_settings_cache = _read_mysql_settings()
+        # 调用方不能修改进程缓存，尤其不能意外覆盖密码/开关。
+        return dict(_mysql_settings_cache)
+
+
+def _read_mysql_settings() -> dict:
+    """从 settings.json 读取 mysql_sync 配置节点（敏感字段透明解密）。"""
     # 内联 app_dir 逻辑，避免导入 core 包时触发 PySide6 依赖链
     import sys as _sys
     if getattr(_sys, 'frozen', False):
@@ -112,12 +150,10 @@ class MysqlCursorAdapter:
 
     def executemany(self, sql, seq_params):
         sql = _convert_sql(sql)
-        total = 0
-        for p in seq_params:
-            self._cur.execute(sql, p)
-            if self._cur.rowcount:
-                total += self._cur.rowcount
-        self._rowcount = total
+        # 委托驱动原生 executemany：PyMySQL 会把 INSERT 批次改写为多值
+        # INSERT，避免 Python 循环产生 N 次网络往返。
+        self._cur.executemany(sql, seq_params)
+        self._rowcount = self._cur.rowcount
         return self
 
     def fetchone(self):
@@ -207,6 +243,23 @@ class MysqlConnectionAdapter:
 
     def __init__(self, conn):
         self._conn = conn
+        self._healthy = True
+
+    @property
+    def healthy(self) -> bool:
+        """连接是否仍可复用；一次连接级错误后由 table_db 重建。"""
+        return self._healthy
+
+    def _mark_unhealthy_if_connection_error(self, exc: Exception):
+        """仅在连接级异常后标记失效，避免每次操作额外 ping 一次。"""
+        try:
+            import pymysql
+            connection_errors = (pymysql.err.OperationalError,
+                                 pymysql.err.InterfaceError)
+        except ImportError:
+            return
+        if isinstance(exc, connection_errors):
+            self._healthy = False
 
     def execute(self, sql, params=None) -> MysqlCursorAdapter:
         # SQLite 专有指令静默跳过
@@ -215,23 +268,38 @@ class MysqlConnectionAdapter:
             return MysqlCursorAdapter(self._conn.cursor())
         sql = _convert_sql(sql)
         cur = self._conn.cursor()
-        if params is not None:
-            cur.execute(sql, params)
-        else:
-            cur.execute(sql)
-        return MysqlCursorAdapter(cur)
+        try:
+            if params is not None:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+            return MysqlCursorAdapter(cur)
+        except Exception as exc:
+            self._mark_unhealthy_if_connection_error(exc)
+            cur.close()
+            raise
 
     def executemany(self, sql, seq_params) -> MysqlCursorAdapter:
         sql = _convert_sql(sql)
         cur = self._conn.cursor()
-        total = 0
-        for p in seq_params:
-            cur.execute(sql, p)
-            if cur.rowcount:
-                total += cur.rowcount
-        adapter = MysqlCursorAdapter(cur)
-        adapter._rowcount = total
-        return adapter
+        try:
+            # 保持 PyMySQL 的批量优化路径，禁止退化成逐条 execute。
+            cur.executemany(sql, seq_params)
+            adapter = MysqlCursorAdapter(cur)
+            adapter._rowcount = cur.rowcount
+            return adapter
+        except Exception as exc:
+            self._mark_unhealthy_if_connection_error(exc)
+            cur.close()
+            raise
+
+    def begin(self):
+        """显式开启原子批量写事务（连接默认仍使用 autocommit）。"""
+        try:
+            self._conn.begin()
+        except Exception as exc:
+            self._mark_unhealthy_if_connection_error(exc)
+            raise
 
     def executescript(self, script: str):
         """按分号拆条逐条执行（对应 SQLite executescript）"""
@@ -241,10 +309,18 @@ class MysqlConnectionAdapter:
                 self.execute(stmt)
 
     def commit(self):
-        self._conn.commit()
+        try:
+            self._conn.commit()
+        except Exception as exc:
+            self._mark_unhealthy_if_connection_error(exc)
+            raise
 
     def rollback(self):
-        self._conn.rollback()
+        try:
+            self._conn.rollback()
+        except Exception as exc:
+            self._mark_unhealthy_if_connection_error(exc)
+            raise
 
     def close(self):
         self._conn.close()
