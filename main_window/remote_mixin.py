@@ -24,10 +24,10 @@ except ImportError:
     PARAMIKO_AVAILABLE = False
 
 from workers.network_workers import TCPWorker
-from windows.tunnel.sftp_window import SFTPPanel
-from windows.tunnel.ssh_terminal import SSHTerminalPanel
-from windows.tunnel.rdp_window import RDPPanel
-from windows.tunnel.remote_session_window import RemoteSessionWindow
+from windows.remote_session.sftp_window import SFTPPanel
+from windows.remote_session.ssh_terminal import SSHTerminalPanel
+from windows.remote_session.rdp_window import RDPPanel
+from windows.remote_session.remote_session_window import RemoteSessionWindow
 from p2p import generate_random_port
 from core.frp_remote import get_session_manager, SOURCE_MANUAL, SOURCE_TABLE
 from database import table_db
@@ -193,7 +193,7 @@ class RemoteMixin:
 
     def _open_tunnel_panel(self):
         """打开全局「当前隧道」面板（单例复用，展示所有入口的活跃隧道）"""
-        from windows.tunnel.window import TunnelPanelWindow
+        from windows.remote_session.window import TunnelPanelWindow
         win = self._tunnel_panel_window
         if win is not None:
             try:

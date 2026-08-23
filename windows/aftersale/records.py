@@ -51,6 +51,7 @@ class RecordsPage(QWidget):
         self._export_worker = None
         self._import_worker = None
         self._cycles_loaded = False
+        self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
         self._batch_worker = None
         self._init_ui()
 
@@ -85,8 +86,8 @@ class RecordsPage(QWidget):
         cards_row.setSpacing(10)
         self._card_total = self._make_stats_card(cards_row)
         self._card_unresolved = self._make_stats_card(cards_row)
-        self._card_rate = self._make_stats_card(cards_row)
         self._card_initiative = self._make_stats_card(cards_row)
+        self._card_our_problem = self._make_stats_card(cards_row)
         root.addLayout(cards_row)
 
         # --- 工具栏（与主界面同范式：库版 FlowLayout 换行 + 滚动容器锁高，
@@ -106,55 +107,50 @@ class RecordsPage(QWidget):
         toolbar.setContentsMargins(2, 4, 2, 4)
 
         # 周期筛选（默认当前周期；原生 QComboBox 可靠支持 findData/currentData）
+        # 录入页周期为只读芯片（按发生时间自动归属、不可选），筛选需可选项
+        # 列表（全部/当前/各历史周期），故保持下拉形态不复用录入页组件
         self._cycle_combo = FluentCombo(self)
         self._cycle_combo.setFixedWidth(210)
         self._cycle_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
         toolbar.addWidget(self._cycle_combo)
 
-        # 类型筛选
+        # 类型筛选（与填写录入页同款可编辑下拉：预置可选、可手输）
         self._type_combo = FluentCombo(self)
+        self._type_combo.setEditable(True)
+        self._type_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
         self._type_combo.addItem("全部类型")
         self._type_combo.addItems(aftersale_db.ISSUE_TYPES)
-        self._type_combo.setFixedWidth(130)
+        self._type_combo.setFixedWidth(140)
         self._type_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
+        # 手输时无 index 变化，走防抖搜索（与关键词同一 300ms 防抖）
+        self._type_combo.currentTextChanged.connect(
+            lambda _t: self._search_timer.start())
         toolbar.addWidget(self._type_combo)
 
-        # 是否解决筛选
-        self._resolved_combo = FluentCombo(self)
-        self._resolved_combo.addItem("全部状态", userData="")
-        self._resolved_combo.addItem("未解决", userData="否")
-        self._resolved_combo.addItem("已解决", userData="是")
-        self._resolved_combo.setFixedWidth(130)
-        self._resolved_combo.currentIndexChanged.connect(
-            lambda _i: self._on_filter_changed())
+        # 是否解决筛选（与填写录入页同款分段开关，三态：全部/否/是）
+        self._resolved_seg = YesNoSegment("", self, include_all=True)
+        self._resolved_seg.currentItemChanged.connect(
+            lambda _k: self._on_filter_changed())
         toolbar.addWidget(CaptionLabel("是否解决：", self))
-        toolbar.addWidget(self._resolved_combo)
+        toolbar.addWidget(self._resolved_seg)
 
         # 是否是我们的问题筛选
-        self._our_problem_combo = FluentCombo(self)
-        self._our_problem_combo.addItem("全部", userData="")
-        self._our_problem_combo.addItem("是", userData="是")
-        self._our_problem_combo.addItem("否", userData="否")
-        self._our_problem_combo.setToolTip("是否是我们的问题")
-        self._our_problem_combo.setFixedWidth(130)
-        self._our_problem_combo.currentIndexChanged.connect(
-            lambda _i: self._on_filter_changed())
+        self._our_problem_seg = YesNoSegment("", self, include_all=True)
+        self._our_problem_seg.setToolTip("是否是我们的问题")
+        self._our_problem_seg.currentItemChanged.connect(
+            lambda _k: self._on_filter_changed())
         toolbar.addWidget(CaptionLabel("是否是我们问题：", self))
-        toolbar.addWidget(self._our_problem_combo)
+        toolbar.addWidget(self._our_problem_seg)
 
         # 是否我们主动发起筛选
-        self._initiative_combo = FluentCombo(self)
-        self._initiative_combo.addItem("全部", userData="")
-        self._initiative_combo.addItem("是", userData="是")
-        self._initiative_combo.addItem("否", userData="否")
-        self._initiative_combo.setToolTip("是否我们主动发起")
-        self._initiative_combo.setFixedWidth(130)
-        self._initiative_combo.currentIndexChanged.connect(
-            lambda _i: self._on_filter_changed())
+        self._initiative_seg = YesNoSegment("", self, include_all=True)
+        self._initiative_seg.setToolTip("是否我们主动发起")
+        self._initiative_seg.currentItemChanged.connect(
+            lambda _k: self._on_filter_changed())
         toolbar.addWidget(CaptionLabel("是否主动发起：", self))
-        toolbar.addWidget(self._initiative_combo)
+        toolbar.addWidget(self._initiative_seg)
 
         # 关键词搜索（防抖）
         self._search_edit = SearchLineEdit(self)
@@ -296,13 +292,15 @@ class RecordsPage(QWidget):
     def _current_filters(self) -> dict:
         """汇集当前筛选条件（周期/类型/状态/是否我们主动发起/是否我们的问题/关键词）"""
         cycle = self._cycle_combo.currentData()
+        # 类型可编辑：下拉项与手输文本都按当前文本过滤，「全部类型」/空串不过滤
+        type_text = self._type_combo.currentText().strip()
         return {
             "cycle_start": str(cycle or ""),
-            "issue_type": (self._type_combo.currentText()
-                           if self._type_combo.currentIndex() > 0 else ""),
-            "resolved": self._resolved_combo.currentData() or "",
-            "is_initiative": self._initiative_combo.currentData() or "",
-            "is_our_problem": self._our_problem_combo.currentData() or "",
+            "issue_type": "" if (not type_text or type_text == "全部类型")
+            else type_text,
+            "resolved": self._resolved_seg.value(),
+            "is_initiative": self._initiative_seg.value(),
+            "is_our_problem": self._our_problem_seg.value(),
             "keyword": self._search_edit.text().strip(),
         }
 
@@ -335,8 +333,12 @@ class RecordsPage(QWidget):
             "MySQL 恢复可用时会自动切回并合并兜底增量")
 
     def _on_refresh(self):
-        """手动刷新：重建周期选项并重查（多人协作看到他人新数据）"""
+        """手动刷新：重建周期选项并重查（多人协作看到他人新数据）
+
+        完成后弹 infobar 提示刷新结果（成功显示条数，失败显示原因）。
+        """
         self._cycles_loaded = False
+        self._manual_refresh = True
         self._load_cycles_then_data()
 
     def refresh_async(self):
@@ -375,7 +377,7 @@ class RecordsPage(QWidget):
         # 当前周期仅在库中确实存在该周期数据时才出现（不额外新建库中不存在的周期）
         if current in cycles:
             self._cycle_combo.addItem(
-                f"当前周期 {aftersale_db.cycle_label(current)}", userData=current)
+                f" {aftersale_db.cycle_label(current)}", userData=current)
             cycles.remove(current)
         self._cycle_combo.addItem("全部周期", userData="")
         for cs in cycles:
@@ -420,43 +422,58 @@ class RecordsPage(QWidget):
         else:
             self._lbl_cycle.setText("周期: 全部")
             self._lbl_overview.setText("概览 · 全部周期")
+        if self._manual_refresh:
+            # 手动点击刷新后的完成反馈（筛选/翻页/静默刷新不弹）
+            self._manual_refresh = False
+            show_info_bar(f"已刷新 · 共 {total} 条记录", "success",
+                          title="刷新", parent=self, duration=2500)
 
     def _on_load_error(self, msg):
         self._lbl_stats.setText(f"查询失败: {msg}")
         self._update_source_label()
+        if self._manual_refresh:
+            self._manual_refresh = False
+            show_info_bar(f"刷新失败: {msg}", "error",
+                          title="刷新", parent=self, duration=4000)
 
     # ---------- 概览指标卡 ----------
 
     def _update_overview(self, stats: dict):
-        """统计 → 四张指标卡（本周期记录/未解决/已解决率/主动发起）"""
+        """统计 → 四张指标卡（售后总数/未解决/主动发起占比/我方问题占比）"""
         total = int(stats.get("total") or 0)
+        resolved = int(stats.get("resolved") or 0)
         unresolved = int(stats.get("unresolved") or 0)
-        rate = int(stats.get("rate") or 0)
         initiative = int(stats.get("initiative") or 0)
+        our_problem = int(stats.get("our_problem") or 0)
+        base = "font-size: 24px; font-weight: 500; background: transparent;"
 
         _card, _lbl, num, sub = self._card_total
+        _lbl.setText("售后总数")
         num.setText(str(total))
-        num.setStyleSheet("font-size: 24px; font-weight: 500; background: transparent;")
-        sub.setText(f"已解决 {stats.get('resolved', 0)} 条")
+        num.setStyleSheet(base)
+        sub.setText(f"已解决 {resolved} · 未解决 {unresolved}")
 
         _card, _lbl, num, sub = self._card_unresolved
+        _lbl.setText("未解决")
         num.setText(str(unresolved))
         # 未解决为 0 时用常规字色，有积压时用危险红提醒
         color = SEMANTIC["danger"] if unresolved > 0 else ""
-        base = "font-size: 24px; font-weight: 500; background: transparent;"
         num.setStyleSheet(base + (f" color: {color};" if color else ""))
-        sub.setText("待处理" if unresolved else "无积压")
-
-        _card, _lbl, num, sub = self._card_rate
-        num.setText(f"{rate}%")
-        num.setStyleSheet(base + (f" color: {SEMANTIC['success']};" if rate >= 90 else ""))
-        sub.setText("已解决率")
+        sub.setText(f"待处理有 {unresolved} 条" if unresolved else "全部已处理")
 
         _card, _lbl, num, sub = self._card_initiative
+        _lbl.setText("主动发起")
         init_rate = int(round(initiative * 100 / total)) if total else 0
-        num.setText(str(initiative))
+        num.setText(f"{init_rate}%")
         num.setStyleSheet(base)
-        sub.setText(f"主动发起 · 占 {init_rate}%")
+        sub.setText(f"我们发起的售后有 {initiative} 条")
+
+        _card, _lbl, num, sub = self._card_our_problem
+        _lbl.setText("我方问题")
+        our_rate = int(round(our_problem * 100 / total)) if total else 0
+        num.setText(f"{our_rate}%")
+        num.setStyleSheet(base)
+        sub.setText(f"我们的问题有 {our_problem} 条")
 
         self._lbl_stats.setText(f"共 {total} 条")
 
@@ -543,6 +560,9 @@ class RecordsPage(QWidget):
         finally:
             self._table.setUpdatesEnabled(True)
             self._table.blockSignals(False)
+        # 刷新时 cellWidget 定位可能残留陈旧偏移（行内按钮整列下沉 8px），
+        # 延迟重排让 Qt 在事件循环中按最新布局重新定位所有 cellWidget
+        QTimer.singleShot(0, self._table.scheduleDelayedItemsLayout)
         self._sync_batch_bar()
 
     def _make_ops_cell(self, row: int, rec: dict) -> QWidget:

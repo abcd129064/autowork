@@ -150,7 +150,7 @@ def test_windows_no_bare_sqlite_connect():
     sqlite3.connect（源码断言）"""
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ("management/table_page.py", "tunnel/forensic_report.py"):
+    for name in ("management/table_page.py", "remote_session/forensic_report.py"):
         with open(os.path.join(root, "windows", name),
                   "r", encoding="utf-8") as f:
             src = f.read()

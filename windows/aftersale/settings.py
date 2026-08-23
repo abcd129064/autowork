@@ -32,7 +32,7 @@ from windows.aftersale.common import *  # noqa: F401,F403
 # ==================== 周期设置页 ====================
 
 class CycleSettingsPage(QWidget):
-    """周期设置卡片：统计周期模式（周二起默认 / 自然周 / 自定义起始日+天数），保存即生效
+    """周期设置卡片：统计周期模式（周二起默认 / 自然周 / 自定义 / 自然月），保存即生效
 
     saved 信号：保存成功后发出，供设置面板通知记录页刷新周期下拉
     """
@@ -65,8 +65,10 @@ class CycleSettingsPage(QWidget):
         self._rb_tue = RadioButton("周二 ~ 周一（原默认，每周二开始）", card)
         self._rb_mon = RadioButton("周一 ~ 周日（自然周）", card)
         self._rb_custom = RadioButton("自定义（指定起始日与周期天数）", card)
+        self._rb_month = RadioButton("自然月（按月统计，每月 1 号起）", card)
         self._rb_tue.setChecked(True)
-        for rb in (self._rb_tue, self._rb_mon, self._rb_custom):
+        for rb in (self._rb_tue, self._rb_mon, self._rb_custom,
+                   self._rb_month):
             vbox.addWidget(rb)
         self._rb_custom.toggled.connect(self._on_custom_toggled)
 
@@ -115,6 +117,7 @@ class CycleSettingsPage(QWidget):
         self._rb_tue.setChecked(mode == "tue")
         self._rb_mon.setChecked(mode == "mon")
         self._rb_custom.setChecked(mode == "custom")
+        self._rb_month.setChecked(mode == "month")
         start = str(cfg.get("start") or "")
         d = QDate.fromString(start, "yyyy-MM-dd")
         if d.isValid():
@@ -128,6 +131,8 @@ class CycleSettingsPage(QWidget):
             mode = "mon"
         elif self._rb_custom.isChecked():
             mode = "custom"
+        elif self._rb_month.isChecked():
+            mode = "month"
         else:
             mode = "tue"
         aftersale_db.save_cycle_mode({
@@ -165,7 +170,7 @@ class SettingsPage(QWidget):
         self.cycle_page = CycleSettingsPage(content)
         cl.addWidget(self.cycle_page)
 
-        # 数据库设置卡片（原 MySQL 设置，仅同步售后记录）
+        # 数据库设置卡片
         self.mysql_card = MysqlSyncCard(content, sync_scope="aftersale")
         self.mysql_card.load()
         cl.addWidget(self.mysql_card)

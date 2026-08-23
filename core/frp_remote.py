@@ -535,14 +535,14 @@ class RemoteSessionManager(QObject):
         title_snk = f"{table_id}（{snk}）" if table_id else snk
         try:
             if kind == "ssh":
-                from windows.tunnel.ssh_terminal import SSHTerminalPanel
+                from windows.remote_session.ssh_terminal import SSHTerminalPanel
                 panel = SSHTerminalPanel(
                     host, port, username, password,
                     log_callback=lambda msg: None,
                     server_name=title_snk,
                 )
             elif kind == "sftp":
-                from windows.tunnel.sftp_window import SFTPPanel
+                from windows.remote_session.sftp_window import SFTPPanel
                 # snk 会话：本地初始目录 = videos_dir/{球桌号}（不存在自动创建）
                 local_dir = None
                 videos_dir = str(settings.get("videos_dir") or "").strip()
@@ -556,7 +556,7 @@ class RemoteSessionManager(QObject):
                     default_local_path=local_dir,
                 )
             else:  # rdp
-                from windows.tunnel.rdp_window import RDPPanel
+                from windows.remote_session.rdp_window import RDPPanel
                 panel = RDPPanel(
                     host, port, username, password,
                     server_name=title_snk,
@@ -658,7 +658,7 @@ class RemoteSessionManager(QObject):
 
     def ensure_session_window(self):
         """获取或创建全局远程会话标签容器窗口（单例复用）"""
-        from windows.tunnel.remote_session_window import RemoteSessionWindow
+        from windows.remote_session.remote_session_window import RemoteSessionWindow
         win = self._session_window
         if win is not None:
             try:

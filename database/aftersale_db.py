@@ -71,10 +71,10 @@ _EXPORT_HEADERS = (
 
 # ==================== 周期计算（可配置模式） ====================
 
-# 周期模式：tue=周二起(默认) / mon=自然周(周一起) / custom=自定义起始日+周期天数
+# 周期模式：tue=周二起(默认) / mon=自然周(周一起) / custom=自定义起始日+周期天数 / month=自然月
 CYCLE_MODE_DEFAULT = {"type": "tue", "start": "", "span": 7}
 _CYCLE_KEY = "aftersale_cycle"
-_VALID_TYPES = ("tue", "mon", "custom")
+_VALID_TYPES = ("tue", "mon", "custom", "month")
 
 
 def load_cycle_mode() -> dict:
@@ -134,8 +134,14 @@ def save_cycle_mode(mode: dict) -> dict:
 
 
 def cycle_span_days() -> int:
-    """当前模式周期天数：tue/mon 固定 7 天，custom 取配置值（≥1）"""
+    """当前模式周期天数：tue/mon 固定 7 天，custom 取配置值（≥1），
+    month 取当月天数（自然月）"""
+    import calendar
+
     mode = load_cycle_mode()
+    if mode["type"] == "month":
+        now = datetime.now()
+        return calendar.monthrange(now.year, now.month)[1]
     if mode["type"] == "custom":
         try:
             return max(1, int(mode.get("span") or 7))
@@ -151,8 +157,11 @@ def cycle_start_of(dt: datetime) -> str:
     - tue（默认）：周二开始周一结束，days_since_tue=(weekday-1)%7
     - mon（自然周）：周一开始周日结束，days_since_mon=weekday
     - custom：从配置起始日起每 span 天一个周期，历史周期向过去对齐
+    - month：自然月，当月 1 号为起始日
     """
     mode = load_cycle_mode()
+    if mode.get("type") == "month":
+        return dt.replace(day=1).strftime("%Y/%m/%d")
     if mode["type"] == "mon":
         start = dt - timedelta(days=dt.weekday())
     elif mode["type"] == "custom":
@@ -179,11 +188,14 @@ def _parse_occurred(occurred: str):
 
 
 def cycle_label(cycle_start: str) -> str:
-    """周期展示标签：'08/19 - 08/25'（起始日 + 周期天数-1 天，custom 按配置 span）"""
+    """周期展示标签：周模式 '08/19 - 08/25'（起始日 + 周期天数-1，custom 按配置 span）；
+    month 模式 '2026-08'（自然月）"""
     try:
         start = datetime.strptime(str(cycle_start).strip(), "%Y/%m/%d")
     except (ValueError, TypeError):
         return str(cycle_start or "")
+    if load_cycle_mode().get("type") == "month":
+        return f"{start:%Y}-{start:%m}"
     end = start + timedelta(days=cycle_span_days() - 1)
     return f"{start:%m/%d} - {end:%m/%d}"
 
@@ -195,6 +207,7 @@ def _record_cycle(occurred_at: str, created_at: str):
 
     两者均无返回 None。列表筛选、统计、下拉选项、导出全部经此函数归属，
     保证四处口径一致；不依赖冗余落库的 cycle_start 字段。
+    归属按当前周期配置（含 month 自然月）。
     """
     for raw in (occurred_at, created_at):
         dt = _parse_occurred(raw)
@@ -450,8 +463,8 @@ def query_with_stats(page_no: int, page_size: int, keyword: str = "",
     周期按记录时间动态归属（与列表同规则），保证列表与统计一一对应；
     stats 统计不带 resolved/is_initiative/is_our_problem 筛选（否则
     已解决/未解决计数退化），返回 {total, resolved, unresolved,
-    initiative, rate}：initiative 为「我方主动发起」条数，rate 为
-    已解决率（整数百分比）。
+    initiative, our_problem, rate}：initiative 为「我方主动发起」条数，
+    our_problem 为「属我方问题」条数，rate 为已解决率（整数百分比）。
     """
     total, rows = query_page(page_no, page_size, keyword, cycle_start,
                              issue_type, resolved, is_initiative,
@@ -459,20 +472,21 @@ def query_with_stats(page_no: int, page_size: int, keyword: str = "",
     conn = _conn()
     where, params = _build_where(keyword, issue_type, "")
     cur = conn.execute(
-        f"SELECT occurred_at, created_at, resolved, is_initiative "
-        f"FROM aftersale_records{where}", params)
+        f"SELECT occurred_at, created_at, resolved, is_initiative, "
+        f"is_our_problem FROM aftersale_records{where}", params)
     recs = [dict(zip(("occurred_at", "created_at", "resolved",
-                      "is_initiative"), r))
+                      "is_initiative", "is_our_problem"), r))
             for r in cur.fetchall()]
     if cycle_start:
         recs = [r for r in recs if _match_cycle(r, cycle_start)]
     n_all = len(recs)
     n_resolved = sum(1 for r in recs if r["resolved"] == "是")
     n_init = sum(1 for r in recs if r["is_initiative"] == "是")
+    n_our = sum(1 for r in recs if r["is_our_problem"] == "是")
     rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
     stats = {"total": n_all, "resolved": n_resolved,
              "unresolved": n_all - n_resolved,
-             "initiative": n_init, "rate": rate}
+             "initiative": n_init, "our_problem": n_our, "rate": rate}
     return total, rows, stats
 
 

@@ -108,7 +108,43 @@ def test_cycle_label_invalid_passthrough(set_cycle):
     assert adb.cycle_label("") == ""
 
 
-# ==================== _record_cycle ====================
+# ==================== month 模式（自然月） ====================
+
+MONTH = {"type": "month", "start": "", "span": 7}
+
+
+def test_cycle_start_of_month(set_cycle):
+    """自然月归属：当月 1 号为周期起点（type=month 配置生效）"""
+    set_cycle(MONTH)
+    assert adb.cycle_start_of(_d("2026-08-15")) == "2026/08/01"
+    assert adb.cycle_start_of(_d("2026-08-01")) == "2026/08/01"
+    assert adb.cycle_start_of(_d("2026-07-31")) == "2026/07/01"
+
+
+def test_cycle_label_month(set_cycle):
+    """自然月标签：'2026-08'（年月），不受周 span 影响"""
+    set_cycle(MONTH)
+    assert adb.cycle_label("2026/08/01") == "2026-08"
+    assert adb.cycle_label("2026/12/01") == "2026-12"
+    set_cycle(TUE)
+    assert adb.cycle_label("2026/08/01") != "2026-08"  # 周口径仍为区间标签
+
+
+def test_record_cycle_month(set_cycle):
+    """记录归属自然月：优先 occurred_at，缺失回退 created_at"""
+    set_cycle(MONTH)
+    assert adb._record_cycle("2026-08-19 10:00:00", "2026-08-20") == "2026/08/01"
+    assert adb._record_cycle("", "2026-07-20") == "2026/07/01"
+    assert adb._record_cycle("", "") is None
+
+
+def test_cycle_span_days_month(set_cycle):
+    """自然月天数：当月天数（cycle_label 结束日/录入页周期芯片使用）"""
+    set_cycle(MONTH)
+    assert adb.cycle_span_days() >= 28  # 任意月份 28~31 天
+
+
+# ==================== 周期归属（统一按发生时间动态计算） ====================
 
 def test_record_cycle_prefers_occurred(set_cycle):
     set_cycle(TUE)

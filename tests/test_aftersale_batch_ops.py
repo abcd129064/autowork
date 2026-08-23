@@ -4,7 +4,7 @@
 覆盖售后面板「一键标记已解决 / 批量操作 / 概览指标卡」落地后新增的数据层：
 - mark_resolved_batch：最小化更新，仅改 resolved 与 updated_at
 - delete_records：按 id 批量删除
-- query_with_stats：stats 增加 initiative（主动发起数）与 rate（已解决率）
+- query_with_stats：stats 增加 initiative（主动发起数）、our_problem（我方问题数）与 rate（已解决率）
 
 隔离方式同 test_health_alerts_sync：tmp SQLite + monkeypatch，
 不触碰真实 tables.db；周期模式固定为周二起保证归属确定性。
@@ -113,6 +113,7 @@ def test_query_with_stats_extended_keys(db):
     assert stats["resolved"] == 3
     assert stats["unresolved"] == 1
     assert stats["initiative"] == 1
+    assert stats["our_problem"] == 4  # _seed 固定 is_our_problem='是'
     assert stats["rate"] == 75  # 3/4 → 75%
 
 
@@ -125,7 +126,7 @@ def test_query_with_stats_rate_rounds(db):
 def test_query_with_stats_empty_table(db):
     _t, _r, stats = adb.query_with_stats(1, 50)
     assert stats == {"total": 0, "resolved": 0, "unresolved": 0,
-                     "initiative": 0, "rate": 0}
+                     "initiative": 0, "our_problem": 0, "rate": 0}
 
 
 def test_query_with_stats_resolved_filter_keeps_rate(db):

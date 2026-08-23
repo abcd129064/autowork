@@ -264,12 +264,17 @@ class YesNoSegment(SegmentedWidget):
 
     对外暴露 value()/setValue(str)，读写口径与旧 FluentCombo 的
     currentText 一致（"是"/"否"），collect/set_values 无感知。
+    include_all=True 时追加「全部」段（value() 返回空串），供筛选
+    场景复用同一组件，默认保持二值。
     """
 
     _DEFAULT = "否"
 
-    def __init__(self, default=_DEFAULT, parent=None):
+    def __init__(self, default=_DEFAULT, parent=None, include_all=False):
         super().__init__(parent)
+        self._include_all = include_all
+        if include_all:
+            self.addItem("", "全部")
         self.addItem("否", "否")
         self.addItem("是", "是")
         self.setCurrentItem(default)
@@ -278,7 +283,7 @@ class YesNoSegment(SegmentedWidget):
         self._restyle()
 
     def _restyle(self):
-        """选中「是」时整段染成功绿（Fluent 语义色），「否」保持默认灰"""
+        """选中「是」时整段染成功绿（Fluent 语义色），「否」/「全部」保持默认灰"""
         val = self.value()
         ok = SEMANTIC["success"]
         if val == "是":
@@ -292,11 +297,20 @@ class YesNoSegment(SegmentedWidget):
 
     def value(self) -> str:
         key = self.currentRouteKey()
-        return key if key in ("是", "否") else self._DEFAULT
+        if key in ("是", "否"):
+            return key
+        if self._include_all and key == "":
+            return ""
+        return self._DEFAULT
 
     def setValue(self, text):
         t = str(text or "").strip()
-        self.setCurrentItem(t if t in ("是", "否") else self._DEFAULT)
+        if self._include_all and t == "":
+            self.setCurrentItem("")
+        elif t in ("是", "否"):
+            self.setCurrentItem(t)
+        else:
+            self.setCurrentItem(self._DEFAULT)
 
 
 def _field_label(text, required=False, parent=None) -> QLabel:

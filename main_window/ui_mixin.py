@@ -1177,7 +1177,7 @@ class UIMixin:
 
     def _on_open_conn_diag(self):
         """打开连接诊断面板（非模态独立窗口，单例：已打开则激活）"""
-        from windows.tunnel.conn_diag_panel import ConnDiagPanel
+        from windows.remote_session.conn_diag_panel import ConnDiagPanel
         if not hasattr(self, '_conn_diag') or self._conn_diag is None:
             self._conn_diag = ConnDiagPanel()
             self._conn_diag.destroyed.connect(

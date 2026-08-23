@@ -176,6 +176,83 @@ def test_query_with_stats_our_problem_filter(db):
     assert stats["resolved"] == 1
 
 
+# ==================== 自然月模式（type=month 配置） ====================
+
+MONTH = {"type": "month", "start": "", "span": 7}
+
+
+def _seed_months(db):
+    """插入跨月记录：2026-07 两条 + 2026-08 一条（tue 模式下各属不同周周期）"""
+    sl = sqlite3.connect(db)
+    for i, (occ, initiative, our_problem, resolved) in enumerate([
+            ("2026-07-05", "是", "是", "是"),
+            ("2026-07-20", "否", "否", "否"),
+            ("2026-08-10", "是", "否", "是")]):
+        sl.execute(
+            "INSERT INTO aftersale_records "
+            "(created_at, occurred_at, creator, issue_type, table_no, "
+            "room_name, region, problem, cause, resolved, is_initiative, "
+            "is_our_problem, solution, resolver, response_time, snk_code, "
+            "device_code, cycle_start) "
+            "VALUES (?, ?, 'tester', '硬件问题', ?, ?, '', '问题X', '', "
+            "?, ?, ?, '', '', '', '', '', '')",
+            (occ + " 10:00:00", occ, f"T{i}", f"room{i}",
+             resolved, initiative, our_problem))
+    sl.commit()
+    sl.close()
+
+
+def test_query_with_stats_month_mode(db, monkeypatch):
+    """自然月模式：列表与统计均按自然月归属过滤（type=month 配置生效）"""
+    monkeypatch.setattr(adb, "load_cycle_mode", lambda: dict(MONTH))
+    _seed_months(db)
+    # 2026-07：两条
+    total, rows, stats = adb.query_with_stats(
+        1, 50, cycle_start="2026/07/01")
+    assert total == 2 and len(rows) == 2
+    assert stats["total"] == 2
+    assert stats["resolved"] == 1
+    # 2026-08：一条
+    total, rows, stats = adb.query_with_stats(
+        1, 50, cycle_start="2026/08/01")
+    assert total == 1 and len(rows) == 1
+    assert stats["total"] == 1
+
+
+def test_query_page_month_mode_isolated_from_week(db):
+    """口径隔离：周模式查询不命中 month 的 cycle_start（防止混用）"""
+    _seed_months(db)
+    total, rows, _ = adb.query_with_stats(
+        1, 50, cycle_start="2026/07/01")
+    assert total == 0  # tue 口径下 7/01 不是周期起点
+
+
+def test_get_cycle_options_month(db, monkeypatch):
+    """自然月模式选项：返回有数据的自然月（每月 1 号，降序）"""
+    monkeypatch.setattr(adb, "load_cycle_mode", lambda: dict(MONTH))
+    _seed_months(db)
+    assert adb.get_cycle_options() == ["2026/08/01", "2026/07/01"]
+    # 周口径不受影响：tue 模式各记录归属 06/30、07/14、08/04 周期
+    monkeypatch.setattr(adb, "load_cycle_mode", lambda: dict(TUE))
+    assert adb.get_cycle_options() == ["2026/08/04", "2026/07/14",
+                                       "2026/06/30"]
+
+
+def test_export_xlsx_month_mode(db, tmp_path, monkeypatch):
+    """自然月导出：周期筛选按自然月，周期列显示月份标签"""
+    pytest.importorskip("openpyxl")
+    monkeypatch.setattr(adb, "load_cycle_mode", lambda: dict(MONTH))
+    _seed_months(db)
+    out = str(tmp_path / "out_month.xlsx")
+    n = adb.export_xlsx(out, cycle_start="2026/07/01")
+    assert n == 2
+    from openpyxl import load_workbook
+    wb = load_workbook(out, data_only=True)
+    ws = wb["售后记录"]
+    labels = [ws.cell(row=r, column=14).value for r in (2, 3)]
+    assert labels == ["2026-07", "2026-07"]  # 周期列显示月份标签
+
+
 # ==================== export_xlsx 透传 ====================
 
 def test_export_xlsx_filters_passthrough(db, tmp_path):

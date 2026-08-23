@@ -69,10 +69,10 @@ class MysqlSyncCard(CardWidget):
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
         scope_name = "售后记录" if self.sync_scope == "aftersale" else "运维业务数据"
-        card_title = "数据库设置（MySQL）" if self.sync_scope == "aftersale" else "MySQL 远程同步"
+        card_title = "数据库设置" if self.sync_scope == "aftersale" else "服务器SQL 同步"
         vbox.addWidget(BodyLabel(card_title, self))
         vbox.addWidget(CaptionLabel(
-            f"开启后 MySQL 完全替代本地 SQLite，应用实时读写远程数据库；"
+            f"开启后 服务器SQL 完全替代本地 SQLite，应用实时读写远程数据库；"
             f"关闭则回到本地 SQLite。同步范围：{scope_name}", self))
 
         # 开关行
@@ -90,7 +90,7 @@ class MysqlSyncCard(CardWidget):
         form = QFormLayout()
         form.setSpacing(8)
         self._edit_host = LineEdit(self)
-        self._edit_host.setPlaceholderText("MySQL 服务器 IP")
+        self._edit_host.setPlaceholderText("远程SQL 服务器 IP")
         form.addRow("服务器地址:", self._edit_host)
         self._edit_port = LineEdit(self)
         self._edit_port.setPlaceholderText("端口号（默认 3306）")
@@ -102,7 +102,7 @@ class MysqlSyncCard(CardWidget):
         self._edit_pass.setPlaceholderText("密码")
         form.addRow("密码:", self._edit_pass)
         self._edit_db = LineEdit(self)
-        self._edit_db.setPlaceholderText("数据库名（默认 autowork）")
+        self._edit_db.setPlaceholderText("数据库名")
         form.addRow("数据库:", self._edit_db)
         vbox.addLayout(form)
 
@@ -110,7 +110,7 @@ class MysqlSyncCard(CardWidget):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
         self._btn_test = PushButton(FluentIcon.LINK, "测试连接", self)
-        self._btn_test.setToolTip("用当前表单配置尝试连接 MySQL")
+        self._btn_test.setToolTip("用当前表单配置尝试连接远程SQL")
         self._btn_test.clicked.connect(self._on_test)
         btn_row.addWidget(self._btn_test)
         self._btn_save = PushButton(FluentIcon.SAVE, "保存配置", self)
@@ -161,9 +161,9 @@ class MysqlSyncCard(CardWidget):
             # 数据库访问时按新配置重建连接，避免继续使用旧 host/账号。
             backend.invalidate_mysql_settings_cache()
             if cfg["enabled"]:
-                hint = "已启用 MySQL，应用将直接读写远程数据库"
+                hint = "已启用 远程SQL，将直接读写服务器SQL"
             else:
-                hint = "已关闭 MySQL，应用将使用本地 SQLite"
+                hint = "已关闭 远程SQL，将使用本地SQLite"
             show_info_bar(f"配置已写入 settings.json，即时生效；{hint}",
                           "success",
                           title="已保存", parent=self, duration=3000)
