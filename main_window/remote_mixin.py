@@ -10,7 +10,7 @@ from PySide6.QtCore import QTimer, Qt, QStringListModel
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (QFormLayout, QWidget, QHBoxLayout,
                                QCompleter, QLineEdit)
-from qfluentwidgets import (SearchLineEdit, FluentIcon,
+from qfluentwidgets import (EditableComboBox, FluentIcon,
                             PushButton as FluentPushButton,
                             CaptionLabel)
 
@@ -328,7 +328,12 @@ class RemoteMixin:
         self._p2p_picking = False         # 选中回填时抑制 textChanged 重弹候选
         self._p2p_table_map = {}          # 候选显示文本 -> 球桌行 dict（选中时反查）
 
-        self._p2p_table_search = SearchLineEdit(self.ui.p2p_panel)
+        # 需求17：「从球桌库选择」改用 qfluentwidgets EditableComboBox（LineEdit
+        # 子类，视觉与其它可编辑下拉统一）；候选弹层仍走下方 QCompleter 机制
+        # （EditableComboBox 的 items 不承载候选：ComboBoxBase.clear 会清空文本、
+        # addItem 首项会改写文本，不适合输入即查库的场景，故 items 保持为空，
+        # 下拉菜单不展开，输入候选完全由 completer popup 提供）。
+        self._p2p_table_search = EditableComboBox(self.ui.p2p_panel)
         self._p2p_table_search.setObjectName(u"p2p_table_search")
         self._p2p_table_search.setPlaceholderText("从球桌库选择")
         self._p2p_table_search.setClearButtonEnabled(True)
@@ -546,6 +551,12 @@ class RemoteMixin:
             # 在 picking 标志仍有效时被忽略），随后清空输入框防残留长文本
             # 触发延时重弹旧候选——连续选择时误点已添加项即由此产生；
             # 已选结果由右侧「已选」标签展示，清空后直接可输下一个关键词
+            # 需求17：EditableComboBox 回车时库内部 _onReturnPressed 会把输入
+            # 文本加入 items，这里清掉防下拉菜单残留（文本由 _finish_table_pick 清空）
+            try:
+                self._p2p_table_search.items.clear()
+            except Exception:
+                pass
             QTimer.singleShot(0, self._finish_table_pick)
 
     def _finish_table_pick(self):

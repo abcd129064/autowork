@@ -14,7 +14,7 @@ import logging
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QFontMetrics, QImage, QPixmap, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QApplication, QTabWidget, QTableWidgetItem,
+                               QApplication, QStackedWidget, QTableWidgetItem,
                                QTreeWidgetItem, QListWidgetItem, QDialog,
                                QFileDialog)
 
@@ -1170,10 +1170,25 @@ class TestPage(QWidget):
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        self.tabs = QTabWidget(self)
-        self.tabs.setDocumentMode(True)
-        self.icon_tab = _IconGalleryTab(self.tabs)
-        self.widget_tab = _WidgetGalleryTab(self.tabs)
-        self.tabs.addTab(self.icon_tab, "图标库")
-        self.tabs.addTab(self.widget_tab, "控件测试")
-        root.addWidget(self.tabs)
+        root.setSpacing(0)
+        # 页面切换用 Pivot（页签导航）+ QStackedWidget（内容堆栈）替换原生 QTabWidget，
+        # 与设置对话框（settings_dialog）的 Pivot 分页模式一致，观感贴合 Fluent 风格
+        self.pivot = Pivot(self)
+        self.pivot.addItem(routeKey="icon", text="图标库",
+                           onClick=lambda *_: self._switch_page("icon"))
+        self.pivot.addItem(routeKey="widget", text="控件测试",
+                           onClick=lambda *_: self._switch_page("widget"))
+        self.stack = QStackedWidget(self)
+        self.icon_tab = _IconGalleryTab(self.stack)
+        self.widget_tab = _WidgetGalleryTab(self.stack)
+        self.stack.addWidget(self.icon_tab)
+        self.stack.addWidget(self.widget_tab)
+        root.addWidget(self.pivot)
+        root.addWidget(self.stack, 1)
+        self.pivot.setCurrentItem("icon")
+
+    def _switch_page(self, key):
+        """Pivot 页签切换：同步高亮与内容堆栈"""
+        self.pivot.setCurrentItem(key)
+        self.stack.setCurrentWidget(
+            self.icon_tab if key == "icon" else self.widget_tab)

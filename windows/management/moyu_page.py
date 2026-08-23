@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QApplication,
     QTextEdit, QDialog, QPushButton, QCheckBox, QTextBrowser, QTreeWidgetItem,
     QFileDialog, QToolTip, QFrame, QListWidget, QListWidgetItem, QAbstractScrollArea,
-    QTabWidget)
+    QStackedWidget)
 from PySide6.QtCore import (Qt, QItemSelectionModel, QDate, QPoint, QPropertyAnimation,
     QEasingCurve, QTimer, QEvent, QThread, Signal, QRectF, QSize, QDateTime)
 from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QPalette, QCursor,
@@ -25,7 +25,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
     Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
     FluentWindow, NavigationItemPosition, ProgressBar, TitleLabel,
-    BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
+    BodyLabel, CaptionLabel, CalendarPicker, Pivot, PasswordLineEdit, ScrollArea,
     CardWidget, setCustomStyleSheet, qconfig, isDarkTheme, MessageBox, TreeWidget,
     MessageBoxBase, MenuAnimationType, SwitchButton)
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
@@ -69,24 +69,42 @@ class GamePage(QWidget):
         box = QVBoxLayout(container)
         box.setContentsMargins(10, 6, 10, 10)
 
-        self.tabs = QTabWidget(container)
-        self.tabs.setDocumentMode(True)
-        self.game_2048 = Game2048Widget(self.tabs)
-        # 隐藏「贪吃蛇」入口：实例和页签一并注释，恢复时取消下方两行即可
-        # self.game_snake = SnakeWidget(self.tabs)
-        # self.tabs.addTab(self.game_snake, "贪吃蛇")
-        self.reader = MoyuReaderWidget(self.tabs)
-        self.tabs.addTab(self.reader, "小说阅读")
-        self.tabs.addTab(self.game_2048, "2048")
-        box.addWidget(self.tabs)
+        # 页面切换用 Pivot + QStackedWidget 替换原生 QTabWidget（与组件测试页 TestPage 一致）
+        self.pivot = Pivot(container)
+        self.pivot.addItem(routeKey="reader", text="小说阅读",
+                           onClick=lambda *_: self._switch_game("reader"))
+        self.pivot.addItem(routeKey="2048", text="2048",
+                           onClick=lambda *_: self._switch_game("2048"))
+        self.stack = QStackedWidget(container)
+        self.reader = MoyuReaderWidget(self.stack)
+        self.game_2048 = Game2048Widget(self.stack)
+        # 隐藏「贪吃蛇」入口：实例和页签一并注释，恢复时取消下方三行即可
+        # self.game_snake = SnakeWidget(self.stack)
+        # self.stack.addWidget(self.game_snake)
+        # self.pivot.addItem(routeKey="snake", text="贪吃蛇",
+        #                    onClick=lambda *_: self._switch_game("snake"))
+        self.stack.addWidget(self.reader)
+        self.stack.addWidget(self.game_2048)
+        self.pivot.setCurrentItem("reader")
+        box.addWidget(self.pivot)
+        box.addWidget(self.stack, 1)
 
         area.setWidget(container)
         layout.addWidget(area)
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.stack.currentChanged.connect(self._on_tab_changed)
+
+    def _switch_game(self, key):
+        """Pivot 页签切换：同步高亮与内容堆栈"""
+        self.pivot.setCurrentItem(key)
+        page = {"reader": self.reader, "2048": self.game_2048}.get(key)
+        if page is None:
+            page = getattr(self, "game_snake", None)
+        if page is not None:
+            self.stack.setCurrentWidget(page)
 
     def _on_tab_changed(self, index):
         """页签切换：游戏控件取键盘焦点；贪吃蛇切走暂停、切回恢复"""
-        current = self.tabs.widget(index)
+        current = self.stack.widget(index)
         snake = getattr(self, "game_snake", None)
         if snake is not None:
             if current is snake:
