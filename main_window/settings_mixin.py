@@ -37,6 +37,10 @@ class SettingsMixin:
         "shortcut_open_daily": "Ctrl+L",
         "shortcut_open_config": "Ctrl+,",
         "shortcut_p2p_panel": "F9",
+        # 需求21：新面板快捷入口（数字键区分三个面板，无系统占用）
+        "shortcut_ledger_panel": "Ctrl+1",     # 跑视频面板
+        "shortcut_aftersale_panel": "Ctrl+2",  # 售后面板
+        "shortcut_table_panel": "Ctrl+3",      # 运维管理面板
     }
     # 默认主题强调色（青色，与早期硬编码 setThemeColor("#00BCD4") 一致）
     DEFAULT_THEME_COLOR = "#00BCD4"
@@ -132,6 +136,12 @@ class SettingsMixin:
             "shortcut_open_daily": settings.get("shortcut_open_daily", self.DEFAULT_SHORTCUTS["shortcut_open_daily"]),
             "shortcut_open_config": settings.get("shortcut_open_config", self.DEFAULT_SHORTCUTS["shortcut_open_config"]),
             "shortcut_p2p_panel": settings.get("shortcut_p2p_panel", self.DEFAULT_SHORTCUTS["shortcut_p2p_panel"]),
+            "shortcut_ledger_panel": settings.get(
+                "shortcut_ledger_panel", self.DEFAULT_SHORTCUTS["shortcut_ledger_panel"]),
+            "shortcut_aftersale_panel": settings.get(
+                "shortcut_aftersale_panel", self.DEFAULT_SHORTCUTS["shortcut_aftersale_panel"]),
+            "shortcut_table_panel": settings.get(
+                "shortcut_table_panel", self.DEFAULT_SHORTCUTS["shortcut_table_panel"]),
         }
 
     def _init_shortcuts(self):
@@ -177,6 +187,16 @@ class SettingsMixin:
         s_p2p = QShortcut(QKeySequence(sc["shortcut_p2p_panel"]), self)
         s_p2p.activated.connect(self.ui.p2p_btn.toggle)
         self._shortcuts.append(s_p2p)
+        # 需求21：新面板快捷入口（跑视频/售后/运维，打开函数在 UIMixin/主类）
+        s_ledger = QShortcut(QKeySequence(sc["shortcut_ledger_panel"]), self)
+        s_ledger.activated.connect(self._on_open_ledger)
+        self._shortcuts.append(s_ledger)
+        s_aftersale = QShortcut(QKeySequence(sc["shortcut_aftersale_panel"]), self)
+        s_aftersale.activated.connect(self._on_open_aftersale)
+        self._shortcuts.append(s_aftersale)
+        s_table = QShortcut(QKeySequence(sc["shortcut_table_panel"]), self)
+        s_table.activated.connect(self._on_open_table_panel)
+        self._shortcuts.append(s_table)
 
     def _on_pause_shortcut(self):
         """暂停/恢复快捷键：焦点在输入框时不触发，避免打字误触"""

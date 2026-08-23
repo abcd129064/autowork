@@ -376,9 +376,12 @@ class RecordsPage(QWidget):
         current = aftersale_db.current_cycle_start()
         cycles = list(cycle_starts or [])
         # 当前周期仅在库中确实存在该周期数据时才出现（不额外新建库中不存在的周期）
+        # 注意：项文本不可带前导空格——qfluentwidgets ComboBox 菜单点击用
+        # findText(i.text().lstrip()) 匹配 index，带空格项会失配返回 -1，
+        # 触发 setCurrentIndex(-1) 清空文字且 currentData() 变 None（查全部数据）。
         if current in cycles:
             self._cycle_combo.addItem(
-                f" {aftersale_db.cycle_label(current)}", userData=current)
+                aftersale_db.cycle_label(current), userData=current)
             cycles.remove(current)
         self._cycle_combo.addItem("全部周期", userData="")
         for cs in cycles:
