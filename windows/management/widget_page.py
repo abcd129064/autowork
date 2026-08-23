@@ -3,7 +3,7 @@
 
 TestPage 内含两个页签：
 - 图标库（_IconGalleryTab）：FluentIcon 全量 175 个图标，搜索过滤，点击复制枚举名
-- 控件测试（_WidgetGalleryTab）：QFluentWidgets 常用控件按类别分组展示，均可直接交互
+功能- 控件测试（_WidgetGalleryTab）：QFluentWidgets 常用控件按类别分组展示，均可直接交互
 
 布局说明：每个控件条目（_ControlItem）采用「控件在上、名称标签在下」的垂直布局，
 宽度自适应内容，避免控件与标签横向挤压重叠；名称过长时中间省略 + tooltip 全名。
@@ -244,12 +244,9 @@ class _SettingsDemoDialog(QDialog):
         scroll = ScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        container = QWidget()
-        container.setStyleSheet("QWidget { background: transparent; }")
-        scroll.setWidget(container)
         root.addWidget(scroll)
 
-        group = SettingCardGroup("通用", container)
+        group = SettingCardGroup("通用", None)
         bool_item = ConfigItem("Demo", "AutoPlay", True, BoolValidator())
         opt_item = OptionsConfigItem("Demo", "PlayMode", "YYDS",
                                      OptionsValidator(["YYDS", "Yes"]))
@@ -301,6 +298,7 @@ class _WidgetGalleryTab(QWidget):
         v.addWidget(self._group_card("容器 Containers", self._fill_containers, container))
         v.addWidget(self._group_card("导航 Navigation", self._fill_navigation, container))
         v.addWidget(self._group_card("日期 Date & Time", self._fill_datetime, container))
+        v.addWidget(self._group_card("窗口 & 设置 Windows", self._fill_windows, container))
         v.addStretch(1)
 
     def _group_card(self, title, fill_fn, parent):
@@ -670,6 +668,64 @@ class _WidgetGalleryTab(QWidget):
         tip = StateToolTip("执行中", "正在演示 StateToolTip…", self.window())
         tip.show()
         QTimer.singleShot(2500, tip.hide)
+
+    # ------------------------------ 窗口 & 设置组 ------------------------------
+    def _fill_windows(self, flow, card):
+        """窗口级/重组件：嵌入控件墙会撑坏布局，改为点击按钮弹出真实示例"""
+        add = flow.addWidget
+        add(_ControlItem(self._demo_btn("SettingCard 设置", FluentIcon.SETTING,
+                                        self._show_settings_demo, card),
+                         "SettingCard 示例", card))
+        add(_ControlItem(self._demo_btn("ComboBoxSettingCard", FluentIcon.MUSIC,
+                                        self._show_settings_demo, card),
+                         "ComboBoxSettingCard", card))
+        add(_ControlItem(self._demo_btn("SplashScreen 启动屏", FluentIcon.PALETTE,
+                                        self._show_splash_demo, card),
+                         "SplashScreen", card))
+        add(_ControlItem(self._demo_btn("FluentWindow 窗口", FluentIcon.HOME,
+                                        self._show_fluent_window, card),
+                         "FluentWindow", card))
+        add(_ControlItem(self._demo_btn("SplitFluentWindow", FluentIcon.CALENDAR,
+                                        self._show_split_window, card),
+                         "SplitFluentWindow", card))
+
+    @staticmethod
+    def _demo_btn(text, icon, handler, parent):
+        btn = PushButton(text, parent)
+        btn.setIcon(icon.qicon())
+        btn.clicked.connect(handler)
+        return btn
+
+    def _show_settings_demo(self):
+        _SettingsDemoDialog(self.window()).exec()
+
+    def _show_splash_demo(self):
+        win = _DemoFluentWindow()
+        win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
+        _DEMO_WINDOWS.append(win)
+        splash = SplashScreen(FluentIcon.DOCUMENT.qicon(), win)
+        splash.show()
+
+        def _finish():
+            try:
+                splash.finish()
+                win.showMaximized()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(1500, _finish)
+
+    def _show_fluent_window(self):
+        win = _DemoFluentWindow()
+        win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
+        _DEMO_WINDOWS.append(win)
+        win.show()
+
+    def _show_split_window(self):
+        win = _DemoSplitWindow()
+        win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
+        _DEMO_WINDOWS.append(win)
+        win.show()
 
 
 class TestPage(QWidget):
