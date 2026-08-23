@@ -12,10 +12,11 @@ TestPage 内含两个页签：
 import logging
 
 from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QFontMetrics, QImage, QPixmap, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QTabWidget, QTableWidgetItem,
-                               QTreeWidgetItem, QListWidgetItem, QDialog)
+                               QTreeWidgetItem, QListWidgetItem, QDialog,
+                               QFileDialog)
 
 from qfluentwidgets import (FluentIcon, SearchLineEdit, ScrollArea, TitleLabel,
     SubtitleLabel, LargeTitleLabel, DisplayLabel, StrongBodyLabel, BodyLabel,
@@ -43,7 +44,12 @@ from qfluentwidgets import (FluentIcon, SearchLineEdit, ScrollArea, TitleLabel,
     SwitchSettingCard, ComboBoxSettingCard, OptionsSettingCard,
     RangeSettingCard, PushSettingCard, HyperlinkCard, ColorSettingCard,
     ConfigItem, OptionsConfigItem, RangeConfigItem, OptionsValidator,
-    RangeValidator, BoolValidator, ColorConfigItem, qconfig)
+    RangeValidator, BoolValidator, ColorConfigItem, qconfig,
+    ImageLabel, IconInfoBadge, TableView, SingleDirectionScrollArea,
+    SegmentedToolWidget, SegmentedToggleToolWidget, CommandBar, CommandBarView,
+    CheckableMenu, SystemTrayMenu, TeachingTip, PopupTeachingTip, Flyout,
+    TeachingTipView, FlyoutView, ToolTipFilter, Dialog, ColorDialog,
+    MessageDialog, MessageBoxBase, FlipView, AdaptiveFlowLayout, NavigationInterface)
 from qfluentwidgets.components.layout.flow_layout import FlowLayout
 
 from core.utils import show_info_bar
@@ -268,6 +274,240 @@ class _SettingsDemoDialog(QDialog):
         scroll.setWidget(group)
 
 
+class _MediaPlayerDialog(QDialog):
+    """多媒体播放器示例：基于 OpenCV 逐帧渲染 + QTimer。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("多媒体播放器示例")
+        self.resize(680, 500)
+
+        # 延迟导入，避免拖慢控件测试页加载
+        import cv2
+        import numpy as np
+        self._cv = cv2
+        self._np = np
+
+        self._cap = None            # VideoCapture；None 表示演示动画模式
+        self._playing = False
+        self._fps = 25.0
+        self._frame_count = 0
+        self._syncing = False
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._next_frame)
+
+        self._build_ui()
+        self._use_demo()
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+        root.addWidget(TitleLabel("多媒体播放", self))
+        root.addWidget(CaptionLabel(
+            "qfluentwidgets 已移除 VideoWidget/MediaPlayBar；", self))
+
+        self._screen = QLabel(self)
+        self._screen.setMinimumSize(560, 315)
+        self._screen.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._screen.setStyleSheet(
+            "background: #101418; border-radius: 8px; color: #8a8a8a; font-size: 13px;")
+        self._screen.setText("未加载媒体")
+        root.addWidget(self._screen)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self._play_btn = ToolButton(FluentIcon.PLAY, self)
+        self._play_btn.setFixedSize(36, 36)
+        self._play_btn.setToolTip("播放 / 暂停")
+        self._play_btn.clicked.connect(self._toggle_play)
+        bar.addWidget(self._play_btn)
+
+        self._stop_btn = ToolButton(self._stop_icon(), self)
+        self._stop_btn.setFixedSize(36, 36)
+        self._stop_btn.setToolTip("停止并回到起点")
+        self._stop_btn.clicked.connect(self._stop)
+        bar.addWidget(self._stop_btn)
+
+        self._open_btn = PushButton("打开视频", self)
+        self._open_btn.clicked.connect(self._open_file)
+        bar.addWidget(self._open_btn)
+
+        self._time_lbl = CaptionLabel("00:00 / 00:00", self)
+        bar.addWidget(self._time_lbl)
+        bar.addStretch(1)
+
+        self._slider = Slider(Qt.Orientation.Horizontal, self)
+        self._slider.setRange(0, 0)
+        self._slider.setFixedHeight(20)
+        self._slider.sliderPressed.connect(self._on_slider_press)
+        self._slider.sliderReleased.connect(self._on_slider_release)
+        bar.addWidget(self._slider, 1)
+        root.addLayout(bar)
+
+    @staticmethod
+    def _stop_icon():
+        for name in ("CANCEL", "STOP", "DELETE", "REMOVE"):
+            if hasattr(FluentIcon, name):
+                return getattr(FluentIcon, name).qicon()
+        return FluentIcon.PLAY.qicon()
+
+    # ------------------------------------------------------------------ 源
+    def _use_demo(self):
+        """切换到内置演示动画（无需媒体文件）"""
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+        self._fps = 20.0
+        self._frame_count = 0
+        self._playing = True
+        self._slider.blockSignals(True)
+        self._slider.setRange(0, 0)
+        self._slider.setValue(0)
+        self._slider.blockSignals(False)
+        self._timer.start(int(1000 / self._fps))
+        self._update_play_icon()
+
+    def _open_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择视频文件", "",
+            "视频 (*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.ts)")
+        if not path:
+            return
+        cap = self._cv.VideoCapture(path)
+        if not cap.isOpened():
+            show_info_bar("无法打开该视频文件（可能缺少解码器）", "error",
+                          title="多媒体播放", parent=self)
+            return
+        if self._cap is not None:
+            self._cap.release()
+        self._cap = cap
+        total = int(cap.get(self._cv.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(self._cv.CAP_PROP_FPS)
+        self._fps = fps if fps and fps > 0 else 25.0
+        self._frame_count = 0
+        self._slider.blockSignals(True)
+        self._slider.setRange(0, max(total - 1, 0))
+        self._slider.setValue(0)
+        self._slider.blockSignals(False)
+        self._playing = True
+        if not self._timer.isActive():
+            self._timer.start(int(1000 / self._fps))
+        self._update_play_icon()
+
+    # ------------------------------------------------------------------ 播放
+    def _toggle_play(self):
+        self._playing = not self._playing
+        if self._playing and not self._timer.isActive():
+            self._timer.start(int(1000 / self._fps))
+        self._update_play_icon()
+
+    def _stop(self):
+        self._playing = False
+        if self._cap is not None:
+            self._cap.set(self._cv.CAP_PROP_POS_FRAMES, 0)
+        self._frame_count = 0
+        self._slider.blockSignals(True)
+        self._slider.setValue(0)
+        self._slider.blockSignals(False)
+        self._update_play_icon()
+
+    def _next_frame(self):
+        if not self._playing:
+            return
+        cv = self._cv
+        if self._cap is not None:
+            ret, frame = self._cap.read()
+            if not ret:
+                # 循环播放
+                self._cap.set(cv.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = self._cap.read()
+                if not ret:
+                    self._stop()
+                    return
+            self._frame_count += 1
+            if not self._syncing:
+                self._slider.blockSignals(True)
+                self._slider.setValue(self._frame_count)
+                self._slider.blockSignals(False)
+        else:
+            frame = self._gen_demo_frame()
+            self._frame_count += 1
+        self._show_frame(frame)
+        self._update_time()
+
+    def _gen_demo_frame(self):
+        cv, np = self._cv, self._np
+        W, H = 640, 360
+        t = self._frame_count
+        frame = np.zeros((H, W, 3), dtype=np.uint8)
+        frame[:] = (18, 26, 34)
+        x = int((t * 6) % (W + 140)) - 70
+        cv.rectangle(frame, (x, H // 2 - 40), (x + 80, H // 2 + 40), (66, 159, 0), -1)
+        cv.rectangle(frame, (10, 10), (W - 10, 46), (40, 50, 60), -1)
+        # cv2 的 Hershey 字体不支持中文，故用英文叠加文字
+        cv.putText(frame, f"QWidgets media demo - frame {t}", (20, 36),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv.LINE_AA)
+        return frame
+
+    def _show_frame(self, frame):
+        rgb = self._cv.cvtColor(frame, self._cv.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+        img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+        self._screen.setPixmap(QPixmap.fromImage(img))
+
+    # ------------------------------------------------------------------ 控制
+    def _update_play_icon(self):
+        try:
+            icon = FluentIcon.PAUSE.qicon() if self._playing else FluentIcon.PLAY.qicon()
+        except AttributeError:
+            icon = FluentIcon.PLAY.qicon()
+        self._play_btn.setIcon(icon)
+
+    def _update_time(self):
+        fps = self._fps if self._fps > 0 else 25.0
+        cur = int(self._frame_count / fps)
+        if self._cap is None:
+            total = cur  # 演示模式下总时长随帧推进
+        else:
+            total = int(self._slider.maximum() / fps) if self._slider.maximum() > 0 else cur
+        self._time_lbl.setText(f"{cur // 60:02d}:{cur % 60:02d} / {total // 60:02d}:{total % 60:02d}")
+
+    def _on_slider_press(self):
+        self._syncing = True
+
+    def _on_slider_release(self):
+        self._syncing = False
+        pos = self._slider.value()
+        if self._cap is not None:
+            self._cap.set(self._cv.CAP_PROP_POS_FRAMES, pos)
+        self._frame_count = pos
+
+    def closeEvent(self, event):
+        if self._cap is not None:
+            self._cap.release()
+        self._timer.stop()
+        super().closeEvent(event)
+
+
+class _DemoMessageBox(MessageBoxBase):
+    """MessageBoxBase 基类示例：自定义内容的消息框"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.titleLabel = SubtitleLabel("MessageBoxBase 示例", self)
+        self.contentLabel = BodyLabel(
+            "这是基于 MessageBoxBase 自定义的消息框，可自由定制内容。", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.contentLabel)
+        self.yesButton.setText("确定")
+        self.cancelButton.setText("取消")
+        self.widget.setMinimumWidth(360)
+
+
 class _WidgetGalleryTab(QWidget):
     """页签2：QFluentWidgets 常用控件分组展示（可直接交互）"""
 
@@ -299,6 +539,11 @@ class _WidgetGalleryTab(QWidget):
         v.addWidget(self._group_card("导航 Navigation", self._fill_navigation, container))
         v.addWidget(self._group_card("日期 Date & Time", self._fill_datetime, container))
         v.addWidget(self._group_card("窗口 & 设置 Windows", self._fill_windows, container))
+        v.addWidget(self._group_card("菜单 & 命令 Menus & Commands", self._fill_menus, container))
+        v.addWidget(self._group_card("提示 & 弹层 Tips & Flyout", self._fill_tips, container))
+        v.addWidget(self._group_card("对话框 Dialogs", self._fill_dialogs, container))
+        v.addWidget(self._group_card("翻页 & 布局 Flip & Layout", self._fill_flip_layout, container))
+        v.addWidget(self._group_card("多媒体 Multimedia", self._fill_media, container))
         v.addStretch(1)
 
     def _group_card(self, title, fill_fn, parent):
@@ -473,6 +718,12 @@ class _WidgetGalleryTab(QWidget):
         add(_ControlItem(DotInfoBadge(card), "DotInfoBadge", card, 50))
         add(_ControlItem(AvatarWidget("S", card), "AvatarWidget", card))
         add(_ControlItem(IconWidget(FluentIcon.BRUSH, card), "IconWidget", card))
+        il = ImageLabel(card)
+        pm = QPixmap(88, 56)
+        pm.fill(QColor("#009faa"))
+        il.setImage(pm)
+        add(_ControlItem(il, "ImageLabel", card, 96))
+        add(_ControlItem(IconInfoBadge(card), "IconInfoBadge", card, 60))
 
         # 进度类
         bar = ProgressBar(card)
@@ -597,6 +848,20 @@ class _WidgetGalleryTab(QWidget):
         # 滚动/平滑滚动（静态展示）
         add(_ControlItem(self._mini_scroll(card), "SmoothScrollArea", card, 168))
 
+        tv = TableView(card)
+        tv.setFixedSize(168, 88)
+        add(_ControlItem(tv, "TableView", card, 168))
+
+        scd = SingleDirectionScrollArea(card)
+        scd.setFixedSize(160, 64)
+        inner = QWidget()
+        ilay = QVBoxLayout(inner)
+        ilay.setContentsMargins(8, 8, 8, 8)
+        for i in range(3):
+            ilay.addWidget(BodyLabel(f"单向滚动 {i}", inner))
+        scd.setWidget(inner)
+        add(_ControlItem(scd, "SingleDirectionScrollArea", card, 168))
+
     @staticmethod
     def _mini_card(cls, text, parent):
         w = cls(parent)
@@ -639,6 +904,18 @@ class _WidgetGalleryTab(QWidget):
         pivot.setFixedWidth(240)
         add(_ControlItem(pivot, "Pivot", card, 260))
 
+        seg_tools = SegmentedToolWidget(card)
+        for i in range(3):
+            seg_tools.addItem(f"tool{i}", f"工具 {i + 1}")
+        seg_tools.setFixedWidth(200)
+        add(_ControlItem(seg_tools, "SegmentedToolWidget", card, 220))
+
+        seg_tog = SegmentedToggleToolWidget(card)
+        for i in range(3):
+            seg_tog.addItem(f"tog{i}", f"切换 {i + 1}")
+        seg_tog.setFixedWidth(200)
+        add(_ControlItem(seg_tog, "SegmentedToggleToolWidget", card, 220))
+
     # ------------------------------ 日期组 ------------------------------
     def _fill_datetime(self, flow, card):
         add = flow.addWidget
@@ -648,6 +925,115 @@ class _WidgetGalleryTab(QWidget):
         add(_ControlItem(DateEdit(card), "DateEdit", card, 148))
         add(_ControlItem(TimeEdit(card), "TimeEdit", card, 148))
         add(_ControlItem(DateTimeEdit(card), "DateTimeEdit", card, 190))
+
+    # ------------------------------ 菜单 & 命令组 ------------------------------
+    def _fill_menus(self, flow, card):
+        add = flow.addWidget
+        cb = CommandBar(card)
+        cb.addAction(Action(FluentIcon.COPY, "复制"))
+        cb.addAction(Action(FluentIcon.CUT, "剪切"))
+        cb.addAction(Action(FluentIcon.SAVE, "保存"))
+        cb.setFixedWidth(180)
+        add(_ControlItem(cb, "CommandBar", card, 200))
+
+        cbv = CommandBarView(card)
+        cbv.addAction(Action(FluentIcon.FOLDER, "文件夹"))
+        cbv.addAction(Action(FluentIcon.DOCUMENT, "文档"))
+        cbv.setFixedWidth(180)
+        add(_ControlItem(cbv, "CommandBarView", card, 200))
+
+        rm_btn = PushButton("RoundMenu", card)
+        rm = RoundMenu("菜单", rm_btn.parent())
+        rm.addAction(Action(FluentIcon.COPY, "复制"))
+        rm.addAction(Action(FluentIcon.CUT, "剪切"))
+        rm_btn.clicked.connect(
+            lambda: rm.exec(rm_btn.mapToGlobal(rm_btn.rect().bottomLeft())))
+        add(_ControlItem(rm_btn, "RoundMenu", card, 136))
+
+        cm_btn = PushButton("CheckableMenu", card)
+        cm = CheckableMenu("可勾选菜单", cm_btn.parent())
+        for txt, ic in (("复制", FluentIcon.COPY), ("剪切", FluentIcon.CUT),
+                        ("保存", FluentIcon.SAVE)):
+            a = Action(ic, txt)
+            a.setCheckable(True)
+            cm.addAction(a)
+        cm_btn.clicked.connect(
+            lambda: cm.exec(cm_btn.mapToGlobal(cm_btn.rect().bottomLeft())))
+        add(_ControlItem(cm_btn, "CheckableMenu", card, 136))
+
+        stm_btn = PushButton("SystemTrayMenu", card)
+        stm = SystemTrayMenu("托盘菜单", stm_btn.parent())
+        stm.addAction(Action(FluentIcon.HOME, "托盘项"))
+        stm_btn.clicked.connect(
+            lambda: stm.exec(stm_btn.mapToGlobal(stm_btn.rect().bottomLeft())))
+        add(_ControlItem(stm_btn, "SystemTrayMenu", card, 136))
+
+    # ------------------------------ 提示 & 弹层组 ------------------------------
+    def _fill_tips(self, flow, card):
+        add = flow.addWidget
+        tt = PushButton("TeachingTip", card)
+        tt.clicked.connect(lambda: self._show_teaching_tip(tt))
+        add(_ControlItem(tt, "TeachingTip", card, 136))
+
+        pt = PushButton("PopupTeachingTip", card)
+        pt.clicked.connect(lambda: self._show_popup_tip(pt))
+        add(_ControlItem(pt, "PopupTeachingTip", card, 160))
+
+        fy = PushButton("Flyout", card)
+        fy.clicked.connect(lambda: self._show_flyout(fy))
+        add(_ControlItem(fy, "Flyout", card, 136))
+
+        tf = PushButton("ToolTipFilter", card)
+        tf.setToolTip("悬停查看 ToolTipFilter 显示的提示")
+        ToolTipFilter(tf, showDelay=100)
+        add(_ControlItem(tf, "ToolTipFilter", card, 136))
+
+    # ------------------------------ 对话框组 ------------------------------
+    def _fill_dialogs(self, flow, card):
+        add = flow.addWidget
+        db = PushButton("Dialog", card)
+        db.clicked.connect(self._show_dialog)
+        add(_ControlItem(db, "Dialog", card, 128))
+
+        cb = PushButton("ColorDialog", card)
+        cb.clicked.connect(self._show_color_dialog)
+        add(_ControlItem(cb, "ColorDialog", card, 128))
+
+        mb = PushButton("MessageBoxBase", card)
+        mb.clicked.connect(self._show_message_box_base)
+        add(_ControlItem(mb, "MessageBoxBase", card, 140))
+
+    # ------------------------------ 翻页 & 布局组 ------------------------------
+    def _fill_flip_layout(self, flow, card):
+        add = flow.addWidget
+        fv = FlipView(card)
+        imgs = []
+        for c in ("#e63946", "#457b9d", "#2a9d8f", "#e9c46a"):
+            pm = QPixmap(120, 72)
+            pm.fill(QColor(c))
+            imgs.append(pm)
+        fv.addImages(imgs)
+        fv.setFixedSize(140, 88)
+        add(_ControlItem(fv, "FlipView", card, 150))
+
+        add(_ControlItem(self._hint("FlipImageDelegate：FlipView 的图标委托", card),
+                         "FlipImageDelegate", card, 220))
+        add(_ControlItem(self._hint("FlowLayout 流式布局", card),
+                         "FlowLayout", card, 220))
+        add(_ControlItem(self._hint("AdaptiveFlowLayout 自适应流式布局", card),
+                         "AdaptiveFlowLayout", card, 220))
+        add(_ControlItem(self._hint("NavigationInterface 导航接口", card),
+                         "NavigationInterface", card, 220))
+
+    # ------------------------------ 多媒体组 ------------------------------
+    def _fill_media(self, flow, card):
+        add = flow.addWidget
+        mp = PushButton("打开媒体播放器", card)
+        mp.clicked.connect(self._open_media_player)
+        add(_ControlItem(mp, "MediaPlayer", card, 180))
+        add(_ControlItem(
+            self._hint("VideoWidget / MediaPlayBar", card),
+            "Multimedia", card, 220))
 
     # ------------------------------ 交互演示 ------------------------------
     def _show_message_box(self):
@@ -726,6 +1112,46 @@ class _WidgetGalleryTab(QWidget):
         win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
         _DEMO_WINDOWS.append(win)
         win.show()
+
+    # ------------------------------ 新增组件交互演示 ------------------------------
+    @staticmethod
+    def _hint(text, parent, w=220):
+        lbl = QLabel(text, parent)
+        lbl.setWordWrap(True)
+        lbl.setFixedWidth(w)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return lbl
+
+    def _show_teaching_tip(self, anchor):
+        view = TeachingTipView("教学提示", "这是一条 TeachingTip 提示",
+                               FluentIcon.INFO, isClosable=False)
+        tip = TeachingTip(view, anchor, duration=2200, isDeleteOnClose=True)
+        tip.show()
+
+    def _show_popup_tip(self, anchor):
+        view = TeachingTipView("弹出教学", "PopupTeachingTip 弹出提示",
+                               FluentIcon.INFO, isClosable=False)
+        tip = PopupTeachingTip(view, anchor, duration=2200, isDeleteOnClose=True)
+        tip.show()
+
+    def _show_flyout(self, anchor):
+        view = FlyoutView("飞出面", "这是一条 Flyout 内容", FluentIcon.INFO, isClosable=False)
+        Flyout.make(view, anchor, parent=anchor)
+
+    def _show_dialog(self):
+        dlg = Dialog("示例对话框", "这是 qfluentwidgets 的 Dialog。", self.window())
+        dlg.yesButton.setText("确定")
+        dlg.cancelButton.setText("取消")
+        dlg.exec()
+
+    def _show_color_dialog(self):
+        ColorDialog(QColor("#009faa"), "选择颜色", self.window()).exec()
+
+    def _show_message_box_base(self):
+        _DemoMessageBox(self.window()).exec()
+
+    def _open_media_player(self):
+        _MediaPlayerDialog(self.window()).exec()
 
 
 class TestPage(QWidget):
