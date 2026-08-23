@@ -8,6 +8,7 @@
 不触碰真实 tables.db；MySQL 开关强制关闭保证走 SQLite 方言。
 """
 import sqlite3
+from datetime import datetime
 
 import pytest
 
@@ -196,8 +197,8 @@ def test_export_xlsx_sheets_and_rows(db, tmp_path):
     assert set(wb.sheetnames) == set(ldb.CATEGORIES)  # 四分类分 sheet
     ws = wb["问题"]
     headers = [c.value for c in ws[1]]
-    assert headers == ["类别", "球房", "视频名", "帧数", "描述",
-                       "复现", "新程序", "备注", "署名"]  # 与在线模板同结构
+    assert headers == ["日期", "类别", "球房", "视频名", "帧数", "描述",
+                       "复现", "新程序", "备注", "署名"]  # 与在线模板同结构+日期列
     assert ws.max_row == 2  # 表头 + 1 条问题记录
 
 
@@ -210,3 +211,113 @@ def test_export_xlsx_single_category(db, tmp_path):
     wb = load_workbook(out)
     assert wb.sheetnames == ["使用"]
     assert wb["使用"].max_row == 2
+
+
+# ==================== 按天统计日期过滤（需求5/7：按视频日期 occurred_at） ====================
+
+def _set_created_at(db, rid, ts):
+    """直接改 created_at 与 occurred_at（insert_record 默认把 occurred_at 填当天，
+    日期过滤按 occurred_at 优先，须同步改才能命中目标日期）"""
+    sl = sqlite3.connect(db)
+    sl.execute("UPDATE ledger_records SET created_at=?, occurred_at=? WHERE id=?",
+               (ts, str(ts)[:10], rid))
+    sl.commit()
+    sl.close()
+
+
+def test_insert_record_occurred_at_default_today(db):
+    """occurred_at 缺省取当天；显式传入则保留（需求7：看昨天的视频可指定）"""
+    rid = ldb.insert_record(_rec(video_name="d1"))
+    sl = sqlite3.connect(db)
+    occ = sl.execute("SELECT occurred_at FROM ledger_records WHERE id=?",
+                     (rid,)).fetchone()[0]
+    sl.close()
+    assert occ == datetime.now().strftime("%Y-%m-%d")
+    # 显式指定昨天
+    rid2 = ldb.insert_record(_rec(video_name="d2", occurred_at="2026-08-23"))
+    sl = sqlite3.connect(db)
+    occ2 = sl.execute("SELECT occurred_at FROM ledger_records WHERE id=?",
+                      (rid2,)).fetchone()[0]
+    sl.close()
+    assert occ2 == "2026-08-23"
+
+
+def test_query_page_date_range(db):
+    """日期过滤：按视频日期 occurred_at 按天范围（含边界 00:00:00 / 23:59:59）"""
+    r1 = ldb.insert_record(_rec(video_name="d1", occurred_at="2026-08-22"))
+    r2 = ldb.insert_record(_rec(video_name="d2", occurred_at="2026-08-23"))
+    r3 = ldb.insert_record(_rec(video_name="d3", occurred_at="2026-08-24"))
+    # 单日：当天 00:00:00 ~ 23:59:59 命中
+    total, rows = ldb.query_page(1, 50, date_from="2026-08-23",
+                                 date_to="2026-08-23")
+    assert total == 1 and rows[0]["video_name"] == "d2"
+    # 区间：跨 3 天全中
+    total, rows = ldb.query_page(1, 50, date_from="2026-08-22",
+                                 date_to="2026-08-24")
+    assert total == 3
+    # 只给下界：22 日起含 23/24
+    total, rows = ldb.query_page(1, 50, date_from="2026-08-23")
+    assert total == 2
+    # 只给上界：23 日止含 22
+    total, rows = ldb.query_page(1, 50, date_to="2026-08-23")
+    assert total == 2
+    # 空范围（无匹配日期）
+    total, rows = ldb.query_page(1, 50, date_from="2020-01-01",
+                                 date_to="2020-01-02")
+    assert total == 0
+
+
+def test_query_page_date_range_fallback_created_at(db):
+    """COALESCE 回退：旧库 occurred_at 为空时按 created_at 过滤（兼容历史数据）"""
+    r1 = ldb.insert_record(_rec(video_name="d1"))
+    r2 = ldb.insert_record(_rec(video_name="d2"))
+    sl = sqlite3.connect(db)
+    sl.execute("UPDATE ledger_records SET occurred_at='' WHERE id=?", (r1,))
+    sl.execute("UPDATE ledger_records SET occurred_at='' WHERE id=?", (r2,))
+    sl.execute("UPDATE ledger_records SET created_at='2026-08-22 09:00:00' "
+               "WHERE id=?", (r1,))
+    sl.execute("UPDATE ledger_records SET created_at='2026-08-23 09:00:00' "
+               "WHERE id=?", (r2,))
+    sl.commit()
+    sl.close()
+    total, rows = ldb.query_page(1, 50, date_from="2026-08-22",
+                                 date_to="2026-08-22")
+    assert total == 1 and rows[0]["id"] == r1
+
+
+def test_query_page_date_range_combined_with_category(db):
+    """日期 + 分类组合过滤"""
+    r1 = ldb.insert_record(_rec(category="问题", kind="遮挡问题",
+                                occurred_at="2026-08-22"))
+    r2 = ldb.insert_record(_rec(category="精度", kind="轻贴:不动",
+                                occurred_at="2026-08-23"))
+    total, rows = ldb.query_page(1, 50, category="问题",
+                                 date_from="2026-08-22",
+                                 date_to="2026-08-23")
+    assert total == 1 and rows[0]["id"] == r1
+
+
+# ==================== 复现筛选（需求6：是/否 SegmentedWidget） ====================
+
+def test_query_page_repro_filter(db):
+    """repro 精确过滤：是/否（旧描述文本不入「是」，空 repro 不入「否」）"""
+    ldb.insert_record(_rec(category="精度", kind="轻贴:不动", repro="是"))
+    ldb.insert_record(_rec(category="精度", kind="薄边:不动", repro="否"))
+    ldb.insert_record(_rec(category="精度", kind="同时击中", repro=""))
+    ldb.insert_record(_rec(category="精度", kind="白球微动",
+                           repro="旧版文本描述"))  # 历史数据兼容
+    total, rows = ldb.query_page(1, 50, repro="是")
+    assert total == 1 and rows[0]["kind"] == "轻贴:不动"
+    total, rows = ldb.query_page(1, 50, repro="否")
+    assert total == 1 and rows[0]["kind"] == "薄边:不动"
+    # repro 空串 = 不过滤
+    total, rows = ldb.query_page(1, 50)
+    assert total == 4
+
+
+def test_query_page_repro_combined_with_category(db):
+    """复现 + 分类组合过滤"""
+    r1 = ldb.insert_record(_rec(category="精度", kind="轻贴:不动", repro="是"))
+    ldb.insert_record(_rec(category="问题", kind="遮挡问题", repro="是"))
+    total, rows = ldb.query_page(1, 50, category="精度", repro="是")
+    assert total == 1 and rows[0]["id"] == r1

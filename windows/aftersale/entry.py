@@ -112,13 +112,15 @@ class EntryPage(QWidget):
         self._scroll = scroll
 
         # 必填进度联动：任一必填控件变化即重算
+        # （需求13：region/problem 已为 EditableComboBox（LineEdit 子类），
+        # 手输触发 textChanged；currentIndexChanged 保留）
         f = self.form
         for sig in (f.type_combo.currentTextChanged,
                     f.table_no_edit.textChanged,
                     f.room_edit.textChanged,
-                    f.region_combo.editTextChanged,
+                    f.region_combo.textChanged,
                     f.region_combo.currentIndexChanged,
-                    f.problem_combo.editTextChanged,
+                    f.problem_combo.textChanged,
                     f.problem_combo.currentIndexChanged):
             try:
                 sig.connect(self._update_required_progress)

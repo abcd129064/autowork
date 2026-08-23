@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
-    QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication,
+    QListWidgetItem, QFileDialog, QApplication,
     QDialog, QPushButton as _QPushButton, QGridLayout)
 from PySide6.QtCore import Qt, QTimer, QThread, QPointF, QDate, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
@@ -16,7 +16,8 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     ScrollArea, CardWidget, MessageBox, MessageBoxBase, CheckBox,
     FluentWindow, NavigationItemPosition, MenuAnimationType,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
-    SpinBox, SegmentedWidget, ProgressBar, FlowLayout)
+    SpinBox, SegmentedWidget, ProgressBar, FlowLayout, ComboBox,
+    EditableComboBox)
 
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
@@ -106,19 +107,19 @@ class RecordsPage(QWidget):
         toolbar.setVerticalSpacing(6)
         toolbar.setContentsMargins(2, 4, 2, 4)
 
-        # 周期筛选（默认当前周期；原生 QComboBox 可靠支持 findData/currentData）
+        # 周期筛选（默认当前周期；qfluentwidgets ComboBox 支持 findData/currentData，
+        # 需求9 统一为 QFluentWidgets 组件；userData 周期值经 addItem 传入）
         # 录入页周期为只读芯片（按发生时间自动归属、不可选），筛选需可选项
         # 列表（全部/当前/各历史周期），故保持下拉形态不复用录入页组件
-        self._cycle_combo = FluentCombo(self)
+        self._cycle_combo = ComboBox(self)
         self._cycle_combo.setFixedWidth(210)
         self._cycle_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
         toolbar.addWidget(self._cycle_combo)
 
-        # 类型筛选（与填写录入页同款可编辑下拉：预置可选、可手输）
-        self._type_combo = FluentCombo(self)
-        self._type_combo.setEditable(True)
-        self._type_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        # 类型筛选（与填写录入页同款 EditableComboBox：预置可选、可手输；
+        # 需求13 替换 FluentCombo 原生 QComboBox 为 qfluentwidgets 组件）
+        self._type_combo = EditableComboBox(self)
         self._type_combo.addItem("全部类型")
         self._type_combo.addItems(aftersale_db.ISSUE_TYPES)
         self._type_combo.setFixedWidth(140)

@@ -6,10 +6,9 @@ from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
-    QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication,
+    QListWidgetItem, QFileDialog, QApplication,
     QDialog, QPushButton as _QPushButton, QGridLayout)
-from PySide6.QtCore import Qt, QTimer, QThread, QPointF, QDate, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QFont
+from PySide6.QtCore import Qt, QTimer, QThread, QDate, Signal
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, RoundMenu, Action,
     LineEdit, PlainTextEdit, BodyLabel, CaptionLabel, TitleLabel,
@@ -31,8 +30,8 @@ from windows.mysql_sync_card import MysqlSyncCard
 # 引入（含下划线辅助名，故显式列出 __all__）
 __all__ = [
     "_FIXED_ROW_HEIGHT", "_popup_ani_type", "_default_creator",
-    "_COMBO_QSS_TMPL", "_EDIT_LINEEDIT_QSS_TMPL", "_CAND_LIST_QSS_TMPL",
-    "_accent_hex", "_style_cand_list", "FluentCombo", "_hex_rgba",
+    "_CAND_LIST_QSS_TMPL",
+    "_accent_hex", "_style_cand_list", "_hex_rgba",
     "_SectionCard", "YesNoSegment", "_field_label", "_inline_error",
     "TABLE_COLUMNS", "_COL_CHECK", "_YES_NO_COLORS", "_badge_label",
     "_ROW_BTN_TMPL", "_row_btn", "_PREVIEW_COLUMNS", "_PREVIEW_WIDTHS",
@@ -63,45 +62,9 @@ def _default_creator() -> str:
 
 # ==================== Fluent 统一下拉框样式 ====================
 
-# 下拉框主体 QSS 模板（深浅主题各填一套显式色值）
-_COMBO_QSS_TMPL = """
-QComboBox {{
-    background-color: {bg};
-    border: 1px solid {border};
-    border-radius: 4px;
-    padding: 3px 30px 3px 11px;
-    color: {text};
-    min-height: 26px;
-}}
-QComboBox:hover {{ border-color: {border_hover}; }}
-QComboBox:focus, QComboBox:on {{ border-color: {accent}; }}
-QComboBox:editable {{ padding-right: 30px; }}
-QComboBox:disabled {{ color: {text_disabled}; background-color: {bg_disabled}; }}
-QComboBox::drop-down {{
-    subcontrol-origin: padding;
-    subcontrol-position: center right;
-    width: 26px;
-    border: none;
-}}
-QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
-QComboBox QAbstractItemView {{
-    background-color: {popup_bg};
-    border: 1px solid {border};
-    border-radius: 4px;
-    color: {text};
-    selection-background-color: {accent};
-    selection-color: #ffffff;
-    outline: none;
-    padding: 2px;
-}}
-"""
-
-# 可编辑下拉框内部 QLineEdit：去掉自带边框，与外框融为一体
-_EDIT_LINEEDIT_QSS_TMPL = (
-    "QLineEdit {{ border: none; background: transparent; padding: 0;"
-    " color: {text}; selection-background-color: {accent};"
-    " selection-color: #ffffff; }}"
-)
+# 注：FluentCombo 及 _COMBO_QSS_TMPL/_EDIT_LINEEDIT_QSS_TMPL 已于 2026-08-24
+# 需求13 删除——全部下拉已换 qfluentwidgets ComboBox/EditableComboBox，
+# 原生 QComboBox 样式不再需要。下方保留桌号候选列表样式（仍在用）。
 
 # 桌号候选列表 QSS（与下拉框同风格：圆角边框 + 主题背景 + 强调色选中）
 _CAND_LIST_QSS_TMPL = """
@@ -150,79 +113,8 @@ def _style_cand_list(widget):
     widget.setStyleSheet(_CAND_LIST_QSS_TMPL.format(**c))
 
 
-class FluentCombo(_QComboBox):
-    """原生 QComboBox + Fluent 统一样式（主题自适应 + 自绘下拉箭头）
-
-    用原生控件是因为 qfluentwidgets 的 ComboBox 是按钮式下拉，不支持
-    setEditable/findData。此类补齐 Fluent 外观，保证与面板内其它
-    qfluentwidgets 输入控件（LineEdit/SearchLineEdit）视觉一致。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(33)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._arrow_color = QColor("#616161")
-        self._err = False  # 字段级校验错误态（红框）
-        self._apply_theme()
-        try:
-            qconfig.themeChanged.connect(self._apply_theme)
-        except Exception:
-            pass
-
-    def setError(self, on: bool):
-        """字段校验错误态：红框提示；主题切换重应用样式时保留"""
-        self._err = bool(on)
-        self._apply_theme()
-
-    def _apply_theme(self):
-        """按当前主题应用显式色值（不依赖 palette，主题切换后重应用）"""
-        dark = isDarkTheme()
-        accent = _accent_hex()
-        if dark:
-            c = dict(bg="#2b2b2b", border="#484848", border_hover="#5c5c5c",
-                     text="#e8eaed", text_disabled="#6f6f6f",
-                     bg_disabled="#262626", popup_bg="#2f2f2f", accent=accent)
-            self._arrow_color = QColor("#a8adb4")
-        else:
-            c = dict(bg="#fdfdfd", border="#c9c9c9", border_hover="#a6a6a6",
-                     text="#1f1f1f", text_disabled="#a0a0a0",
-                     bg_disabled="#f2f2f2", popup_bg="#ffffff", accent=accent)
-            self._arrow_color = QColor("#616161")
-        self._colors = c  # 缓存当前主题色，供 setEditable 后补 lineEdit 样式
-        qss = _COMBO_QSS_TMPL.format(**c)
-        if self._err:  # 错误态追加红框（同选择器后置规则胜出）
-            qss += "QComboBox { border-color: %s; }" % SEMANTIC["danger"]
-        self.setStyleSheet(qss)
-        self._style_lineedit()
-        self.update()
-
-    def _style_lineedit(self):
-        """给可编辑态的内部 QLineEdit 去边框样式（非编辑态无 lineEdit 则跳过）"""
-        le = self.lineEdit()
-        if le is not None:
-            le.setStyleSheet(_EDIT_LINEEDIT_QSS_TMPL.format(**self._colors))
-
-    def setEditable(self, editable):
-        """启用编辑后内部 QLineEdit 才创建，需补应用 Fluent 样式"""
-        super().setEditable(editable)
-        if editable:
-            self._style_lineedit()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        # 自绘 Fluent 下拉箭头（右侧居中 chevron，QSS 已隐藏默认箭头）
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx = self.width() - 17
-        cy = self.height() / 2
-        pen = QPen(self._arrow_color, 1.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        p.drawPolyline([QPointF(cx - 4.5, cy - 2.2), QPointF(cx, cy + 2.4),
-                        QPointF(cx + 4.5, cy - 2.2)])
-        p.end()
+# 注：FluentCombo 类已于 2026-08-24 需求13 删除——全部下拉已换
+# qfluentwidgets ComboBox/EditableComboBox，原生 QComboBox 包装不再需要。
 
 
 def _hex_rgba(hex_color: str, alpha: int) -> str:

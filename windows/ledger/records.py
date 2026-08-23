@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-"""跑视频面板：记录与统计页（指标卡 + 筛选/分页 + 行内编辑/删除 + 署名统计 + 导出）"""
-from PySide6.QtCore import Qt, QTimer
+"""跑视频面板：记录与统计页（指标卡 + 日期/分类/类别/署名筛选 + 分页 + 编辑/删除 + 统计/导出）
+
+需求5（按天统计）：工具栏新增日期筛选区（模式下拉 + 起止日期控件），
+指标卡与列表同口径联动；实现参照售后面板周期筛选范式。
+"""
+from datetime import datetime, timedelta
+
+from PySide6.QtCore import Qt, QTimer, QDate
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QHeaderView, QAbstractItemView, QFileDialog,
-                               QDialog, QComboBox as _QComboBox)
+                               QDialog)
 
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
                             ToolButton, FluentIcon, TitleLabel, CaptionLabel,
-                            BodyLabel, CardWidget, MessageBox, MessageBoxBase)
+                            BodyLabel, CardWidget, MessageBox, MessageBoxBase,
+                            ZhDatePicker, ComboBox, EditableComboBox)
 
 from core.design_tokens import SEMANTIC
 from core.flow_widgets import FlowToolbarScrollArea
@@ -74,9 +81,14 @@ class SignerStatsDialog(MessageBoxBase):
 
     def __init__(self, stats: list, parent=None):
         super().__init__(parent)
-        self.titleLabel.setText("署名统计")
-        self.contentLabel.setText(
-            "每人 问题/未复现/精度/使用 计数与总和（与在线模板「计数」sheet 同口径）")
+        # MessageBoxBase 无 titleLabel/contentLabel（那是 MessageBox 子类的属性，
+        # 见 sftp_window 注释：qfluentwidgets 1.11+ 已移除），与其他子类一致自建标题
+        self.titleLabel = TitleLabel("署名统计", self)
+        self.contentLabel = CaptionLabel(
+            "每人 问题/未复现/精度/使用 计数与总和"
+            "（与在线模板「计数」sheet 同口径）", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.contentLabel)
         table = TableWidget(self)
         table.setColumnCount(6)
         table.setHorizontalHeaderLabels(
@@ -157,7 +169,7 @@ class RecordsPage(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         toolbar_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        toolbar_scroll.setMaximumHeight(96)
+        toolbar_scroll.setMaximumHeight(132)  # 需求5：新增日期区后允许多行换行
         toolbar_widget = QWidget(self)
         toolbar_scroll.setWidget(toolbar_widget)
         from qfluentwidgets import FlowLayout
@@ -166,8 +178,42 @@ class RecordsPage(QWidget):
         toolbar.setVerticalSpacing(6)
         toolbar.setContentsMargins(2, 4, 2, 4)
 
-        # 分类筛选
-        self._cat_combo = FluentCombo(self)
+        # --- 日期筛选（需求5：按天统计，仿售后面板周期筛选范式） ---
+        # 模式：全部日期/今天/一周/一个月/自定义；前三种由基准日期控件
+        # 驱动（默认当天，可翻看昨天/前天等历史日期），自定义显示结束日期。
+        toolbar.addWidget(CaptionLabel("日期：", self))
+        self._date_mode_combo = ComboBox(self)  # QFluentWidgets 原生（需求9）
+        self._date_mode_combo.addItems(
+            ["全部日期", "今天", "一周", "一个月", "自定义"])
+        self._date_mode_combo.setFixedWidth(110)
+        self._date_mode_combo.currentIndexChanged.connect(
+            lambda _i: self._on_date_mode_changed())
+        toolbar.addWidget(self._date_mode_combo)
+        self._date_from = ZhDatePicker(self)
+        self._date_from.setDate(QDate.currentDate())  # 默认当天
+        self._date_from.setFixedWidth(125)
+        self._date_from.dateChanged.connect(
+            lambda _d: self._on_filter_changed())
+        toolbar.addWidget(self._date_from)
+        self._date_to = ZhDatePicker(self)
+        self._date_to.setDate(QDate.currentDate())
+        self._date_to.setFixedWidth(125)
+        self._date_to.dateChanged.connect(
+            lambda _d: self._on_filter_changed())
+        self._date_to.setVisible(False)  # 仅自定义模式显示
+        toolbar.addWidget(self._date_to)
+
+        # --- 复现筛选（需求6：售后面板同款 SegmentedWidget，三态 全部/否/是） ---
+        # 与售后面板「是否解决：」筛选同范式：CaptionLabel 前缀 + YesNoSegment。
+        self._repro_seg = YesNoSegment("", self, include_all=True)
+        self._repro_seg.setToolTip("是否复现")
+        self._repro_seg.currentItemChanged.connect(
+            lambda _k: self._on_filter_changed())
+        toolbar.addWidget(CaptionLabel("复现：", self))
+        toolbar.addWidget(self._repro_seg)
+
+        # 分类筛选（qfluentwidgets ComboBox，需求9；非可编辑用库原生组件）
+        self._cat_combo = ComboBox(self)
         self._cat_combo.addItem("全部分类")
         self._cat_combo.addItems(ledger_db.CATEGORIES)
         self._cat_combo.setFixedWidth(130)
@@ -175,10 +221,9 @@ class RecordsPage(QWidget):
             lambda _i: self._on_cat_changed())
         toolbar.addWidget(self._cat_combo)
 
-        # 类别筛选（随分类联动候选）
-        self._kind_combo = FluentCombo(self)
-        self._kind_combo.setEditable(True)
-        self._kind_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        # 类别筛选（随分类联动候选；需求12：EditableComboBox 替代 FluentCombo，
+        # 可编辑手输 + 下拉候选，全量 qfluentwidgets 组件）
+        self._kind_combo = EditableComboBox(self)
         self._kind_combo.addItem("全部类别")
         self._kind_combo.setFixedWidth(170)
         self._kind_combo.currentIndexChanged.connect(
@@ -187,8 +232,8 @@ class RecordsPage(QWidget):
             lambda _t: self._search_timer.start())
         toolbar.addWidget(self._kind_combo)
 
-        # 署名筛选
-        self._signer_combo = FluentCombo(self)
+        # 署名筛选（qfluentwidgets ComboBox，需求9；findText 兼容）
+        self._signer_combo = ComboBox(self)
         self._signer_combo.addItem("全部署名")
         self._signer_combo.setFixedWidth(110)
         self._signer_combo.currentIndexChanged.connect(
@@ -208,12 +253,12 @@ class RecordsPage(QWidget):
         toolbar.addWidget(self._btn_stats)
 
         self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出 xlsx", self)
-        self._btn_export.setToolTip("按分类分 sheet 导出（结构与在线模板一致）")
+        self._btn_export.setToolTip("按分类分 sheet 导出")
         self._btn_export.clicked.connect(self._on_export)
         toolbar.addWidget(self._btn_export)
 
         self._btn_refresh = PushButton(FluentIcon.SYNC, "刷新", self)
-        self._btn_refresh.setToolTip("重新查询数据库（多人协作看新数据）")
+        self._btn_refresh.setToolTip("重新查询数据库")
         self._btn_refresh.clicked.connect(self._on_refresh)
         toolbar.addWidget(self._btn_refresh)
 
@@ -290,7 +335,7 @@ class RecordsPage(QWidget):
         elif backend.get_state() == backend.STATE_ONLINE:
             text, color = "数据源: MySQL", SEMANTIC["success"]
         else:
-            text, color = ("数据源: 本地 SQLite（MySQL 不可用，降级兜底）",
+            text, color = ("MySQL 不可用，降级兜底 数据源: 本地 SQLite，",
                            SEMANTIC["warning"])
         self._lbl_source.setText(text)
         self._lbl_source.setStyleSheet(f"color: {color};")
@@ -304,12 +349,49 @@ class RecordsPage(QWidget):
         cat = self._cat_combo.currentText().strip()
         kind = self._kind_combo.currentText().strip()
         signer = self._signer_combo.currentText().strip()
+        date_from, date_to = self._date_range()
         return {
             "category": "" if cat == "全部分类" else cat,
             "kind": "" if kind == "全部类别" else kind,
             "signer": "" if signer == "全部署名" else signer,
             "keyword": self._search_edit.text().strip(),
+            "date_from": date_from,
+            "date_to": date_to,
+            "repro": self._repro_seg.value(),  # 全部→"" / 否 / 是
         }
+
+    def _on_date_mode_changed(self):
+        """日期模式切换：仅「自定义」显示结束日期控件，随后重查"""
+        self._date_to.setVisible(
+            self._date_mode_combo.currentText() == "自定义")
+        self._on_filter_changed()
+
+    def _date_range(self) -> tuple:
+        """按日期模式与基准日期计算 (date_from, date_to)；空串表示不过滤
+
+        需求5：默认「今天」；基准日期可翻看昨天/前天等历史日期；
+        - 全部日期：不过滤
+        - 今天：基准日期当天
+        - 一周：基准日期前推 6 天（共 7 天）
+        - 一个月：基准日期所在自然月
+        - 自定义：起止日期控件（倒置时自动交换）
+        """
+        mode = self._date_mode_combo.currentText()
+        if mode == "全部日期":
+            return "", ""
+        d = self._date_from.date.toPython()  # QDate 属性 → datetime.date
+        if mode == "自定义":
+            d2 = self._date_to.date.toPython()  # QDate 属性 → datetime.date
+            if d2 < d:
+                d, d2 = d2, d
+            return d.isoformat(), d2.isoformat()
+        if mode == "一周":
+            return (d - timedelta(days=6)).isoformat(), d.isoformat()
+        if mode == "一个月":
+            import calendar
+            last = calendar.monthrange(d.year, d.month)[1]
+            return d.replace(day=1).isoformat(), d.replace(day=last).isoformat()
+        return d.isoformat(), d.isoformat()  # 今天
 
     def _on_search_input(self, _text):
         self._search_timer.start()
@@ -332,12 +414,20 @@ class RecordsPage(QWidget):
             self._kind_combo.blockSignals(True)
             self._kind_combo.clear()
             self._kind_combo.addItem("全部类别")
-            self._kind_combo.addItems(list(cands or ()))
+            cands = list(cands or ())
+            self._kind_combo.addItems(cands)
             if cur:
-                self._kind_combo.setEditText(cur)
+                self._kind_combo.setText(cur)  # EditableComboBox 用 setText 回填
             else:
                 self._kind_combo.setCurrentIndex(0)
             self._kind_combo.blockSignals(False)
+            # 手输补全提示（EditableComboBox 为 LineEdit 子类，需显式挂补全器）
+            try:
+                from PySide6.QtWidgets import QCompleter
+                self._kind_combo.setCompleter(
+                    QCompleter(["全部类别"] + cands, self._kind_combo))
+            except Exception:
+                pass
             self._on_filter_changed()
 
         if not category:
@@ -380,27 +470,43 @@ class RecordsPage(QWidget):
         self._worker = AftersaleDBWorker(
             ledger_db.query_page, self._page_no, self._page_size,
             filters["keyword"], filters["category"],
-            filters["kind"], filters["signer"])
+            filters["kind"], filters["signer"],
+            filters["date_from"], filters["date_to"],
+            filters["repro"])
         self._worker.result_ready.connect(self._on_loaded)
         self._worker.error.connect(self._on_load_error)
         self._worker.start()
-        # 指标卡（全库口径：分类计数不受筛选影响）
-        self._stats_worker = AftersaleDBWorker(self._count_by_category)
+        # 指标卡（需求5：与列表同口径，按日期范围计数）
+        self._stats_worker = AftersaleDBWorker(
+            self._count_by_category, filters["date_from"], filters["date_to"])
         self._stats_worker.result_ready.connect(self._on_stats_loaded)
         self._stats_worker.error.connect(lambda _m: None)
         self._stats_worker.start()
 
     @staticmethod
-    def _count_by_category() -> dict:
-        """全库分类计数（指标卡数据源）"""
+    def _count_by_category(date_from: str = "", date_to: str = "") -> dict:
+        """分类计数（指标卡数据源）；日期范围按视频日期 occurred_at 过滤
+        （需求7；COALESCE 兼容旧库 occurred_at 为空回退 created_at，与
+        ledger_db._build_where 同口径，保证指标卡与列表一致）"""
         from database import table_db
         conn = table_db.get_conn()
+        where, params = [], []
+        if date_from:
+            where.append("substr(COALESCE(NULLIF(occurred_at, ''), created_at),"
+                         " 1, 10) >= ?")
+            params.append(str(date_from).strip())
+        if date_to:
+            where.append("substr(COALESCE(NULLIF(occurred_at, ''), created_at),"
+                         " 1, 10) <= ?")
+            params.append(str(date_to).strip())
+        sql = "SELECT category, COUNT(*) FROM ledger_records"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " GROUP BY category"
         counts = {"total": 0}
         for c in ledger_db.CATEGORIES:
             counts[c] = 0
-        for cat, n in conn.execute(
-                "SELECT category, COUNT(*) FROM ledger_records "
-                "GROUP BY category").fetchall():
+        for cat, n in conn.execute(sql, params).fetchall():
             counts[str(cat or "")] = int(n or 0)
             counts["total"] += int(n or 0)
         return counts
@@ -588,7 +694,7 @@ class RecordsPage(QWidget):
         self._export_worker = AftersaleDBWorker(ledger_db.export_xlsx, path)
         self._export_worker.result_ready.connect(
             lambda n: show_info_bar(
-                f"已导出 {n} 条（按分类分 sheet，结构与在线模板一致）",
+                f"已导出 {n} 条",
                 "success", title="导出成功", parent=self, duration=3000))
         self._export_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="导出失败",

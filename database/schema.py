@@ -272,6 +272,9 @@ TABLE_COLUMNS = {
         ColumnDef("new_program", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("remark", "TEXT", "TEXT", "''", None),
         ColumnDef("signer", "TEXT", "VARCHAR(64)", "''", "''"),
+        # 视频/记录日期（需求7：用户看昨天的视频时手动指定，默认当天；
+        # 与 aftersale_records.occurred_at 同语义，按天统计据此过滤）
+        ColumnDef("occurred_at", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
@@ -423,6 +426,11 @@ MIGRATIONS: dict = {
                         "LONGTEXT", None),
         ColumnMigration("kd_status", "file_path", "TEXT", "''",
                         "VARCHAR(64)", "''"),
+    ],
+    "ledger_records": [
+        # 视频/记录日期（需求7）：与 aftersale_records.occurred_at 同语义
+        ColumnMigration("ledger_records", "occurred_at", "TEXT", "''",
+                        "VARCHAR(32)", "''"),
     ],
 }
 

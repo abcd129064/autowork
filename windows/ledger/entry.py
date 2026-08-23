@@ -41,7 +41,7 @@ class EntryPage(QWidget):
         head_l.setSpacing(2)
         head_l.addWidget(TitleLabel("填写录入", self))
         head_l.addWidget(CaptionLabel(
-            "字段与在线模板一致，提交后写入数据库（MySQL 开启时即服务器），"
+            "提交后写入数据库，"
             "多人协作刷新可见", self))
         head.addLayout(head_l)
         head.addStretch(1)
@@ -91,10 +91,11 @@ class EntryPage(QWidget):
         root.addWidget(scroll, 1)
         self._scroll = scroll
 
-        # 必填进度联动
+        # 必填进度联动（需求12：kind_combo 已为 EditableComboBox（LineEdit 子类），
+        # 手输触发 textChanged 而非 QComboBox 的 editTextChanged）
         f = self.form
         for sig in (f.kind_combo.currentTextChanged,
-                    f.kind_combo.editTextChanged,
+                    f.kind_combo.textChanged,
                     f.room_edit.textChanged):
             try:
                 sig.connect(self._update_required_progress)
@@ -104,8 +105,8 @@ class EntryPage(QWidget):
     # ---------- 必填进度 ----------
 
     def _update_required_progress(self, *_a):
-        """必填进度：3 项（分类/类别/球房）实时刷新"""
-        bad = self.form.validate()
+        """必填进度：3 项（分类/类别/球房）实时刷新（静默校验，不显示红框）"""
+        bad = self.form.validate(show_errors=False)
         done = 3 - len(bad)
         self._prog.setValue(done)
         if not bad:

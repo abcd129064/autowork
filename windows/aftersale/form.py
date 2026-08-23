@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
-    QListWidgetItem, QFileDialog, QComboBox as _QComboBox, QApplication,
+    QListWidgetItem, QFileDialog, QApplication,
     QDialog, QPushButton as _QPushButton, QGridLayout)
 from PySide6.QtCore import Qt, QTimer, QThread, QPointF, QDate, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
@@ -16,7 +16,8 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     ScrollArea, CardWidget, MessageBox, MessageBoxBase, CheckBox,
     FluentWindow, NavigationItemPosition, MenuAnimationType,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
-    SpinBox, SegmentedWidget, ProgressBar, FlowLayout)
+    SpinBox, SegmentedWidget, ProgressBar, FlowLayout,
+    EditableComboBox)
 
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
@@ -64,10 +65,9 @@ class AftersaleForm(QWidget):
         col_type = QVBoxLayout()
         col_type.setSpacing(3)
         col_type.addWidget(_field_label("问题类型", True, self))
-        # 与「问题描述-问题」同规格：可编辑下拉 + NoInsert（可选预置也可手输）
-        self.type_combo = FluentCombo(self)
-        self.type_combo.setEditable(True)
-        self.type_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        # 与「问题描述-问题」同规格：EditableComboBox（可选预置也可手输，
+        # 需求13 替换 FluentCombo 原生 QComboBox 为 qfluentwidgets 组件）
+        self.type_combo = EditableComboBox(self)
         self.type_combo.addItems(aftersale_db.ISSUE_TYPES)
         self.type_combo.setFixedWidth(320)
         col_type.addWidget(self.type_combo)
@@ -143,9 +143,7 @@ class AftersaleForm(QWidget):
         reg_col = QVBoxLayout()
         reg_col.setSpacing(3)
         reg_col.addWidget(_field_label("地区", True, self))
-        self.region_combo = FluentCombo(self)
-        self.region_combo.setEditable(True)
-        self.region_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        self.region_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.region_combo.addItems(aftersale_db.REGIONS_PRESET)
         self.region_combo.setFixedWidth(160)
         reg_col.addWidget(self.region_combo)
@@ -182,9 +180,7 @@ class AftersaleForm(QWidget):
         sec3 = _SectionCard("问题描述", self)
         v3 = sec3.content_layout
         v3.addWidget(_field_label("问题", True, self))
-        self.problem_combo = FluentCombo(self)
-        self.problem_combo.setEditable(True)
-        self.problem_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        self.problem_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.problem_combo.setFixedWidth(320)
         v3.addWidget(self.problem_combo)
         self._err_problem = _inline_error("必填项未填写", self)
@@ -229,18 +225,14 @@ class AftersaleForm(QWidget):
         col_res = QVBoxLayout()
         col_res.setSpacing(5)
         col_res.addWidget(_field_label("解决人", False, self))
-        self.resolver_combo = FluentCombo(self)
-        self.resolver_combo.setEditable(True)
-        self.resolver_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        self.resolver_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.resolver_combo.setFixedWidth(220)
         col_res.addWidget(self.resolver_combo)
         res_row.addLayout(col_res)
         col_resp = QVBoxLayout()
         col_resp.setSpacing(5)
         col_resp.addWidget(_field_label("响应时间", False, self))
-        self.response_combo = FluentCombo(self)
-        self.response_combo.setEditable(True)
-        self.response_combo.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        self.response_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.response_combo.addItems(aftersale_db.RESPONSE_TIME_PRESET)
         self.response_combo.setFixedWidth(220)
         col_resp.addWidget(self.response_combo)
@@ -254,17 +246,22 @@ class AftersaleForm(QWidget):
     # ---------- 候选值加载 ----------
 
     def load_candidates(self, cands: dict):
-        """填充动态候选（问题/解决人/地区），保留用户已输入文本"""
+        """填充动态候选（问题/解决人/地区），保留用户已输入文本；
+        需求13：EditableComboBox 为 LineEdit 子类，重建补全器以支持手输提示"""
         cur_problem = self.problem_combo.currentText().strip()
+        problems = list(cands.get("problems", []))
         self.problem_combo.clear()
-        self.problem_combo.addItems(cands.get("problems", []))
+        self.problem_combo.addItems(problems)
         if cur_problem:
-            self.problem_combo.setEditText(cur_problem)
+            self.problem_combo.setText(cur_problem)
+        self._set_completer(self.problem_combo, problems)
         cur_resolver = self.resolver_combo.currentText().strip()
+        resolvers = list(cands.get("resolvers", []))
         self.resolver_combo.clear()
-        self.resolver_combo.addItems(cands.get("resolvers", []))
+        self.resolver_combo.addItems(resolvers)
         if cur_resolver:
-            self.resolver_combo.setEditText(cur_resolver)
+            self.resolver_combo.setText(cur_resolver)
+        self._set_completer(self.resolver_combo, resolvers)
         # 地区：预置 + 历史新增合并
         cur_region = self.region_combo.currentText().strip()
         regions = list(aftersale_db.REGIONS_PRESET)
@@ -274,7 +271,17 @@ class AftersaleForm(QWidget):
         self.region_combo.clear()
         self.region_combo.addItems(regions)
         if cur_region:
-            self.region_combo.setEditText(cur_region)
+            self.region_combo.setText(cur_region)
+        self._set_completer(self.region_combo, regions)
+
+    @staticmethod
+    def _set_completer(combo, items: list):
+        """给 EditableComboBox 挂手输补全器（LineEdit 子类无内置补全）"""
+        try:
+            from PySide6.QtWidgets import QCompleter
+            combo.setCompleter(QCompleter(items, combo))
+        except Exception:
+            pass
 
     # ---------- 球房搜索与带出 ----------
 
@@ -287,7 +294,7 @@ class AftersaleForm(QWidget):
         # 地区：仅当当前文本是上次带出的城市时联动清空（手填/改过的地区保留）
         if (self._last_city and
                 self.region_combo.currentText().strip() == self._last_city):
-            self.region_combo.setEditText("")
+            self.region_combo.setText("")
             self._last_city = ""
         if not self._search_kw:
             self._hide_candidates()
@@ -350,12 +357,12 @@ class AftersaleForm(QWidget):
         self._search_kw = room.strip()
         city = str(row.get("city") or "").strip()
         if city:
-            self.region_combo.setEditText(city)
+            self.region_combo.setText(city)
             self._last_city = city
         elif self.region_combo.currentText().strip() == self._last_city:
             # 新球桌城市未知（老库未采集）：清掉上一桌带出的残留城市，
             # 避免换球房后地区仍显示旧城市；手填的地区不受影响
-            self.region_combo.setEditText("")
+            self.region_combo.setText("")
             self._last_city = ""
         self._set_linked(True, row)
 
@@ -386,7 +393,7 @@ class AftersaleForm(QWidget):
 
     def set_values(self, rec: dict):
         """编辑模式：用已有记录填充表单"""
-        self.type_combo.setCurrentText(str(rec.get("issue_type") or ""))
+        self.type_combo.setText(str(rec.get("issue_type") or ""))  # setText 回显
         occurred = str(rec.get("occurred_at") or "").strip()
         occ_d = QDate.fromString(occurred, "yyyy-MM-dd")
         if occ_d.isValid():
@@ -397,15 +404,15 @@ class AftersaleForm(QWidget):
         self.room_edit.setText(room)
         self.room_edit.blockSignals(False)
         self._search_kw = room.strip()
-        self.region_combo.setEditText(str(rec.get("region") or ""))
-        self.problem_combo.setEditText(str(rec.get("problem") or ""))
+        self.region_combo.setText(str(rec.get("region") or ""))
+        self.problem_combo.setText(str(rec.get("problem") or ""))
         self.cause_edit.setPlainText(str(rec.get("cause") or ""))
         self.resolved_combo.setValue(rec.get("resolved") or "是")
         self.is_initiative_combo.setValue(rec.get("is_initiative") or "否")
         self.is_our_problem_combo.setValue(rec.get("is_our_problem") or "是")
         self.solution_edit.setPlainText(str(rec.get("solution") or ""))
-        self.resolver_combo.setEditText(str(rec.get("resolver") or ""))
-        self.response_combo.setEditText(str(rec.get("response_time") or ""))
+        self.resolver_combo.setText(str(rec.get("resolver") or ""))
+        self.response_combo.setText(str(rec.get("response_time") or ""))
         self.creator_edit.setText(str(rec.get("creator") or ""))
         self._snk_code = str(rec.get("snk_code") or "")
         self._last_city = ""  # 编辑回填不参与城市联动
@@ -477,15 +484,15 @@ class AftersaleForm(QWidget):
         self.table_no_edit.clear()
         self.cause_edit.clear()
         self.solution_edit.clear()
-        self.problem_combo.setEditText("")
-        self.resolver_combo.setEditText("")
-        self.response_combo.setEditText("")
+        self.problem_combo.setText("")
+        self.resolver_combo.setText("")
+        self.response_combo.setText("")
         self.resolved_combo.setValue("是")
         self.is_initiative_combo.setValue("否")
         self.is_our_problem_combo.setValue("是")
         self.type_combo.setCurrentIndex(-1)
         self.occurred_picker.setDate(QDate.currentDate())  # 默认当日
-        self.region_combo.setEditText("")
+        self.region_combo.setText("")
         self._snk_code = ""
         self._last_city = ""
         self._set_linked(False)

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """跑视频面板包内共享符号（列定义 + 复用的 Fluent UI 工厂）
 
-UI 工厂（FluentCombo/_SectionCard/_row_btn/_badge_label 等）复用
+UI 工厂（_SectionCard/_row_btn/_badge_label 等）复用
 windows.aftersale.common 的现成实现（经 __all__ 导出，口径一致）；
 本模块只定义跑视频自身的常量：表格列、分类、类别候选。
 """
 from windows.aftersale.common import (  # noqa: F401,F403
     _FIXED_ROW_HEIGHT, _popup_ani_type, _default_creator,
-    _hex_rgba, FluentCombo, _SectionCard, YesNoSegment,
+    _hex_rgba, _SectionCard, YesNoSegment,
     _field_label, _inline_error, _badge_label, _row_btn, _ROW_BTN_TMPL,
 )
 
@@ -16,7 +16,7 @@ from database import ledger_db
 __all__ = [
     "TABLE_COLUMNS", "_COL_OPS", "CATEGORY_ACCENTS", "_category_badge",
     "_FIXED_ROW_HEIGHT", "_popup_ani_type", "_default_creator",
-    "_hex_rgba", "FluentCombo", "_SectionCard", "YesNoSegment",
+    "_hex_rgba", "_SectionCard", "YesNoSegment",
     "_field_label", "_inline_error", "_badge_label", "_row_btn",
     "_ROW_BTN_TMPL",
 ]

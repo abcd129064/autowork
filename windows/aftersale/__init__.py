@@ -2,7 +2,7 @@
 """售后面板拆分包（原 windows/aftersale_panel.py 2275 行单体拆出）
 
 模块划分（按页面/职责，逻辑未改动）：
-- common.py   : 常量/QSS 模板/工具函数/通用小组件（FluentCombo/YesNoSegment/
+- common.py   : 常量/QSS 模板/工具函数/通用小组件（YesNoSegment/
                 表格行内控件工厂）+ 表格列定义
 - form.py     : AftersaleForm 共享表单（录入页与编辑弹窗复用）
 - entry.py    : EntryPage 填写录入页
@@ -16,7 +16,7 @@ windows.aftersale import *``），main_window/ui_mixin 等既有引用路径不�
 """
 
 from windows.aftersale.common import (  # noqa: F401
-    FluentCombo, YesNoSegment, TABLE_COLUMNS,
+    YesNoSegment, TABLE_COLUMNS,
 )
 from windows.aftersale.form import AftersaleForm  # noqa: F401
 from windows.aftersale.entry import EntryPage  # noqa: F401
@@ -31,7 +31,7 @@ from windows.aftersale.window import AftersalePanelWindow  # noqa: F401
 
 __all__ = [
     # common（公开常量/组件）
-    "TABLE_COLUMNS", "FluentCombo", "YesNoSegment",
+    "TABLE_COLUMNS", "YesNoSegment",
     # form
     "AftersaleForm",
     # entry

@@ -466,7 +466,8 @@ def _ensure_mysql_tables(conn):
     # json.loads(None) 兼容）。表可能尚未创建时 SHOW COLUMNS 抛错，
     # 跳过该表由 DDL 兜底（与历史行为一致）。
     for table in ("billiard_tables", "aftersale_records",
-                  "xqzg_status", "kd_status", "health_alerts"):
+                  "xqzg_status", "kd_status", "health_alerts",
+                  "ledger_records"):
         try:
             exist = {r[0] for r in conn.execute(f"SHOW COLUMNS FROM {table}")}
         except Exception:
