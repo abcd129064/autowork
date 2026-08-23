@@ -278,6 +278,7 @@ def _ensure_initialized(conn):
     # 在下方单独处理。
     _migrate_sqlite_add_columns(conn, "aftersale_records")
     _migrate_sqlite_add_columns(conn, "ledger_records")
+    _migrate_sqlite_add_columns(conn, "health_alerts")
     _migrate_sqlite_add_columns(conn, "kd_status")
     _migrate_sqlite_add_columns(conn, "xqzg_status")
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建
@@ -465,7 +466,7 @@ def _ensure_mysql_tables(conn):
     # json.loads(None) 兼容）。表可能尚未创建时 SHOW COLUMNS 抛错，
     # 跳过该表由 DDL 兜底（与历史行为一致）。
     for table in ("billiard_tables", "aftersale_records",
-                  "xqzg_status", "kd_status"):
+                  "xqzg_status", "kd_status", "health_alerts"):
         try:
             exist = {r[0] for r in conn.execute(f"SHOW COLUMNS FROM {table}")}
         except Exception:
@@ -783,7 +784,11 @@ _CREATE_HEALTH_ALERT_SQL = schema.to_sqlite_ddl("health_alerts")
 
 
 def _filter_alert_items(rows) -> list:
-    """过滤出有效告警条目，返回 [(name, roomName, onlineStatusName, health), ...]
+    """过滤出有效告警条目，返回
+    [(name, roomName, onlineStatusName, health, device_code), ...]
+
+    device_code 取球桌数据的 code 字段（xqzg update_health 接口入参），
+    「已处理」时按此码调接口将服务端健康度重置为 4000。
 
     排除规则（与同步语义一致）：
     - name 为空或 health 无法解析为数字；
@@ -813,6 +818,7 @@ def _filter_alert_items(rows) -> list:
             str(item.get("roomName") or ""),
             str(item.get("onlineStatusName") or ""),
             h,
+            str(item.get("code") or "").strip(),
         )
     return list(items.values())
 
@@ -848,32 +854,34 @@ def sync_health_alerts(rows: list) -> int:
             "SELECT name, resolved_health FROM health_alerts").fetchall()
     }
     inserts, updates_keep, updates_clear = [], [], []
-    for name, room, status, h in items:
+    for name, room, status, h, code in items:
         if name not in existing:
-            inserts.append((name, room, status, h, now))
+            inserts.append((name, room, status, h, code, now))
             continue
         resolved = existing[name]
         if resolved is not None and abs(h - float(resolved)) > 1e-9:
             # 已处理但 health 变化：仍异常 → 清除标记重新展示
             # （默认值/脏数据已在过滤阶段排除）
-            updates_clear.append((room, status, h, now, name))
+            updates_clear.append((room, status, h, code, now, name))
         else:
             # 未处理 / 已处理且 health 未变：只刷新基础字段，
             # resolved_health 保持原值（NULL 或处理时快照）
-            updates_keep.append((room, status, h, now, name))
+            updates_keep.append((room, status, h, code, now, name))
     if inserts:
         conn.executemany(
             "INSERT INTO health_alerts "
-            "(name, roomName, onlineStatusName, health, resolved_health, updated_at) "
-            "VALUES (?, ?, ?, ?, NULL, ?)", inserts)
+            "(name, roomName, onlineStatusName, health, device_code, "
+            "resolved_health, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?)", inserts)
     if updates_keep:
         conn.executemany(
             "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
-            "health=?, updated_at=? WHERE name=?", updates_keep)
+            "health=?, device_code=?, updated_at=? WHERE name=?", updates_keep)
     if updates_clear:
         conn.executemany(
             "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
-            "health=?, resolved_health=NULL, updated_at=? WHERE name=?",
+            "health=?, device_code=?, resolved_health=NULL, updated_at=? "
+            "WHERE name=?",
             updates_clear)
     if seen:
         # seen 为空说明本轮没有有效告警，跳过 DELETE——否则 NOT IN () 拼出
@@ -904,19 +912,21 @@ def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
     """
     upsert_sql = (
         "INSERT INTO health_alerts "
-        "(name, roomName, onlineStatusName, health, resolved_health, updated_at) "
-        "VALUES (?, ?, ?, ?, NULL, ?) "
+        "(name, roomName, onlineStatusName, health, device_code, "
+        "resolved_health, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL, ?) "
         "ON DUPLICATE KEY UPDATE "
         "roomName = VALUES(roomName), "
         "onlineStatusName = VALUES(onlineStatusName), "
         "health = VALUES(health), "
+        "device_code = VALUES(device_code), "
         "resolved_health = IF(resolved_health IS NOT NULL AND "
         "ABS(VALUES(health) - resolved_health) < 0.000000001, "
         "resolved_health, NULL), "
         "updated_at = VALUES(updated_at)"
     )
-    params = [(name, room, status, h, now)
-              for name, room, status, h in _filter_alert_items(rows)]
+    params = [(name, room, status, h, code, now)
+              for name, room, status, h, code in _filter_alert_items(rows)]
     if params:
         conn.executemany(upsert_sql, params)
     seen = {p[0] for p in params}
@@ -935,10 +945,12 @@ def query_health_alerts() -> list:
 
     ① 空闲且严重异常（health>5000）；② 健康度异常（4000<health<=5000）；
     ③ 其余严重异常；同级按 health 降序。
+    返回行含 device_code（xqzg update_health 入参，供「已处理」重置用）。
     """
     conn = _get_conn()
     cur = conn.execute(
-        "SELECT name, roomName, onlineStatusName, health FROM health_alerts "
+        "SELECT name, roomName, onlineStatusName, health, device_code "
+        "FROM health_alerts "
         "WHERE resolved_health IS NULL ORDER BY "
         "CASE WHEN onlineStatusName='空闲' AND health > ? THEN 0 "
         "     WHEN health <= ? THEN 1 ELSE 2 END, "

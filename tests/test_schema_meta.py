@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS health_alerts (
     onlineStatusName TEXT DEFAULT '',
     health          REAL DEFAULT 0,
     resolved_health REAL,
+    device_code     TEXT DEFAULT '',
     updated_at      TEXT DEFAULT ''
 );
 """,
@@ -302,6 +303,7 @@ GOLDEN_MYSQL_DDL = {
             onlineStatusName VARCHAR(255) DEFAULT '',
             health           DOUBLE DEFAULT 0,
             resolved_health  DOUBLE,
+            device_code      VARCHAR(255) DEFAULT '',
             updated_at       VARCHAR(32) DEFAULT ''
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,

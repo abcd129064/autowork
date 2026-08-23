@@ -550,6 +550,113 @@ class MigrateImageWorker(QThread):
             self.error.emit(f"迁移失败: {e}")
 
 
+# ==================== 健康度重置（xqzg update_health） ====================
+
+API1_UPDATE_HEALTH_URL = f"{API1_BASE}/api/snooker_om/update_health/"
+
+
+class HealthUpdateWorker(QThread):
+    """异步重置设备健康度：POST xqzg /api/snooker_om/update_health/
+
+    逐台把服务端健康度写为 4000（接口默认值，等于「清零」告警）；
+    Session + CSRF 认证（与 MigrateImageWorker 的 xqzg 路径一致），
+    401/403 自动重登重试一次。
+
+    成功判定：HTTP 200 且响应体 code == 200（业务成功，响应形如
+    {"code": 200, "msg": "成功", "data": {...}}）；只看状态码会假成功。
+
+    Signals:
+        result_ready(list, list): (成功球桌名列表, 失败列表
+            [(球桌名, 失败描述), ...])
+        error(str): 账号未配置 / 登录失败等整体错误
+    """
+    result_ready = Signal(list, list)
+    error = Signal(str)
+
+    def __init__(self, pairs, parent=None):
+        """pairs: [(name, device_code), ...]，name 为球桌号仅用于失败提示"""
+        super().__init__(parent)
+        self.pairs = [(str(n or "").strip(), str(c or "").strip())
+                      for n, c in (pairs or [])]
+        creds = _load_api_credentials()
+        api1_cfg = creds.get("api1", {})
+        self.username = api1_cfg.get("username", "")
+        self.password = api1_cfg.get("password", "")
+
+    def _login(self):
+        """登录获取 session（与 SnookerOmFetchWorker 同款），失败返回 None"""
+        session = requests.Session()
+        try:
+            resp = session.post(API1_LOGIN_URL, json={
+                "username": self.username,
+                "password": self.password,
+            }, timeout=15)
+            if resp.status_code == 200:
+                return session
+        except requests.exceptions.RequestException:
+            pass
+        return None
+
+    def _post_update(self, session, device_code) -> tuple:
+        """单台 POST update_health，返回 (ok, err)；err='SESSION' 表示需重登"""
+        # Django CSRF：HTTPS 下校验 Referer；POST 需带 X-CSRFToken
+        headers = {
+            "Referer": f"{API1_BASE}/",
+            "X-CSRFToken": session.cookies.get("csrftoken") or "",
+        }
+        try:
+            resp = session.post(API1_UPDATE_HEALTH_URL,
+                                json={"device_code": device_code, "health": 4000},
+                                headers=headers, timeout=20)
+            if resp.status_code in (401, 403):
+                return False, "SESSION"
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code}"
+            data = resp.json()
+            if isinstance(data, dict) and data.get("code") == 200:
+                return True, ""
+            return False, str(data.get("msg") or "接口返回失败")[:160]
+        except requests.exceptions.Timeout:
+            return False, "请求超时"
+        except requests.exceptions.RequestException:
+            return False, "网络连接失败"
+        except ValueError:
+            return False, "响应解析失败"
+
+    def run(self):
+        """登录 → 逐台重置 → 汇总 (成功名单, 失败列表)；无设备码直接计失败"""
+        try:
+            if not self.username or not self.password:
+                self.error.emit("接口1账号密码未配置，请在 settings.json 的 api_credentials.api1 中填写")
+                return
+            session = self._login()
+            if session is None:
+                self.error.emit("接口1登录失败，请检查账号密码")
+                return
+            ok_names, fails = [], []
+            for name, code in self.pairs:
+                if not code:
+                    fails.append((name, "无设备码（球桌库未匹配到设备）"))
+                    continue
+                ok, err = self._post_update(session, code)
+                if err == "SESSION":
+                    # Session 过期：重登后重试一次；重登失败保留旧 session
+                    # 继续后续设备（勿把 session 置 None，否则后续全崩）
+                    new_session = self._login()
+                    if new_session is None:
+                        fails.append((name, "会话过期且重新登录失败"))
+                        continue
+                    session = new_session
+                    ok, err = self._post_update(session, code)
+                if ok:
+                    ok_names.append(name)
+                else:
+                    fails.append((name, err or "未知错误"))
+            self.result_ready.emit(ok_names, fails)
+        except Exception as e:
+            self.error.emit(f"重置健康度失败: {e}")
+
+
 # ==================== 登录测试（管理设置页「测试连接」用） ====================
 
 class LoginTestWorker(QThread):

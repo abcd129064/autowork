@@ -58,11 +58,12 @@ from windows.management.device_page import FileListPanel, DevicePage
 from windows.management.settings_page import AdminSettingsPage
 from windows.management.health_page import TrendPage, HealthPage
 from windows.management.moyu_page import GamePage
+from windows.management.widget_page import TestPage
 
 # ==================== 主窗口 ====================
 
 class ManagementPanelWindow(FluentWindow):
-    """运维管理面板：FluentWindow + 左侧导航 + 六个功能页面（球桌/设备/健康度/趋势/设置/小游戏）"""
+    """运维管理面板：FluentWindow + 左侧导航 + 七个功能页面（球桌/设备/健康度/趋势/设置/组件测试/小游戏）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,15 +84,17 @@ class ManagementPanelWindow(FluentWindow):
         self.game_page.setObjectName("gamePage")
         self.settings_page = AdminSettingsPage(self)
         self.settings_page.setObjectName("adminSettingsPage")
+        self.test_page = TestPage(self)
+        self.test_page.setObjectName("testPage")
 
         # 注册导航
         self.addSubInterface(self.table_page, FluentIcon.LIBRARY, "球桌管理")
         self.addSubInterface(self.device_page, FluentIcon.IOT, "设备状态")
         # 隐藏「健康趋势」页导航入口，恢复时取消下行注释即可
-        # （TrendPage 实例仍会构建但无导航入口，不会被展示；closeEvent 清理不受影响）
-        # self.addSubInterface(self.trend_page, FluentIcon.PIE_SINGLE, "健康趋势")
+        # self.addSubInterface(self.trend_page, FluentIcon.CHECKBOX, "健康趋势")
         self.addSubInterface(self.health_page, FluentIcon.PIE_SINGLE, "设备健康度管理")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "管理设置")
+        self.addSubInterface(self.test_page, FluentIcon.VIEW, "组件测试")
         self.addSubInterface(self.game_page, FluentIcon.GAME, "小游戏")
 
         # 导航亚克力与「性能选项」联动：关闭 perf_acrylic 后不再强制开启，
@@ -163,13 +166,14 @@ class ManagementPanelWindow(FluentWindow):
                 pass
 
         for page in (self.table_page, dev, self.trend_page,
-                     self.settings_page):
+                     self.health_page, self.settings_page):
             for attr in ("_worker", "_migrate_worker", "_refresh_worker",
                          "_test_worker", "_upload_worker", "_query_worker",
                          "_save_worker", "_meta_worker", "_export_worker",
                          "_time_worker", "_backfill_worker", "_backfill_save_worker",
                          "_alerts_worker", "_cand_worker", "_trend_worker",
-                         "_rank_worker", "_hourly_worker"):
+                         "_rank_worker", "_hourly_worker", "_fetch_worker",
+                         "_health_worker", "_mark_worker", "_sync_worker"):
                 _detach(getattr(page, attr, None))
         # 收集 Worker（不同设备可并行，列表管理）
         for worker in list(getattr(dev, "_collect_workers", [])):

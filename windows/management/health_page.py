@@ -38,8 +38,9 @@ from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import launch_sibling_app, show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
-                                  LoginTestWorker, get_active_api_source,
-                                  CATEGORY_DIRS)
+                                  LoginTestWorker, HealthUpdateWorker,
+                                  get_active_api_source, CATEGORY_DIRS)
+from workers.aftersale_worker import AftersaleDBWorker
 from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     clip_base_name, date_from_base,
                                     resolve_device_dir,
@@ -598,7 +599,8 @@ class HealthPage(QWidget):
     阈值判定（基准 4000）：4000 为接口默认值视为空值不算异常；
     4000~5000 健康度异常；>5000 严重异常需立即处理；>40 万为脏数据排除。
     排序：① 空闲且严重异常；② 健康度异常（4000~5000）；③ 其余严重异常。
-    勾选+「已处理」：处理时记录当时 health；后续刷新 health 未变化不再展示，
+    勾选+「已处理」：调用 xqzg update_health 将服务端健康度重置为 4000，
+    成功后在本地记录当时 health；后续刷新 health 未变化不再展示，
     变化且仍异常则重新展示（变化后 <4000 自动消失）。
     """
 
@@ -608,6 +610,10 @@ class HealthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._fetch_worker = None
+        self._health_worker = None
+        self._mark_worker = None
+        self._sync_worker = None
+        self._rows = []
         self._init_ui()
 
         self._fetch_timer = QTimer(self)
@@ -645,7 +651,7 @@ class HealthPage(QWidget):
         hint = CaptionLabel(
             "基准 4000；>4000~5000 为健康度异常；"
             ">5000 为严重异常。"
-            "勾选条目后点「已处理」，health 未变化则不再展示；"
+            "勾选条目后点「已处理」，调用 xqzg 接口将健康度重置为 4000；"
             "使用服务器 MySQL 时，他人标记的已处理在同步后自动对齐", self)
         layout.addWidget(hint)
 
@@ -676,7 +682,8 @@ class HealthPage(QWidget):
         btn_row.addStretch(1)
         self._btn_resolved = PrimaryPushButton("已处理", self)
         self._btn_resolved.setEnabled(False)
-        self._btn_resolved.setToolTip("将勾选的告警标记为已处理（记录当前 health 值）")
+        self._btn_resolved.setToolTip(
+            "通过 xqzg 接口将勾选设备健康度重置为 4000，并标记已处理")
         self._btn_resolved.clicked.connect(self._on_resolved_clicked)
         btn_row.addWidget(self._btn_resolved)
         layout.addLayout(btn_row)
@@ -690,6 +697,7 @@ class HealthPage(QWidget):
         except Exception as e:
             self._lbl_sync.setText(f"查询失败: {e}")
             return
+        self._rows = rows
         self._table.setRowCount(0)
         for r in rows:
             h = float(r.get("health") or 0)
@@ -749,16 +757,26 @@ class HealthPage(QWidget):
         self._fetch_worker.start()
 
     def _on_fetch_ok(self, rows):
-        """拉取完成：同步告警表后刷新展示（失败仅提示不弹窗）"""
+        """拉取完成：后台同步告警表（DB 断连不阻塞 UI），完成后刷新展示"""
         self._btn_sync.setEnabled(True)
-        try:
-            count = table_db.sync_health_alerts(rows)
-        except Exception as e:
-            self._lbl_sync.setText(f"同步失败: {e}")
-            return
+        if self._sync_worker is not None and self._sync_worker.isRunning():
+            return  # 上一轮同步未完成，跳过（下一轮拉取再补）
+        self._sync_worker = AftersaleDBWorker(
+            table_db.sync_health_alerts, rows)
+        self._sync_worker.result_ready.connect(self._on_sync_done)
+        self._sync_worker.error.connect(self._on_sync_fail)
+        self._sync_worker.start()
+
+    def _on_sync_done(self, count):
+        """同步落库完成：刷新展示"""
         now = QDateTime.currentDateTime().toString("HH:mm:ss")
         self._lbl_sync.setText(f"数据获取于 {now} · {count} 条异常")
         self._refresh_display()
+
+    def _on_sync_fail(self, msg):
+        """同步失败（如 MySQL 断连）：先刷新旧数据，再提示失败原因"""
+        self._refresh_display()
+        self._lbl_sync.setText(f"同步失败: {str(msg).split(chr(10))[0]}")
 
     def _on_fetch_fail(self, msg):
         """拉取失败：状态栏提示错误首行"""
@@ -768,12 +786,82 @@ class HealthPage(QWidget):
     # ---------- 处理交互 ----------
 
     def _on_resolved_clicked(self):
-        """「已处理」：记录勾选条目当时的 health 值，后续未变化不再展示"""
+        """「已处理」：调用 xqzg update_health 将勾选设备健康度重置为 4000
+
+        设备码取告警表 device_code（球桌库 code 字段）；成功后本地标记
+        已处理（记录当时 health，后续未变化不再展示），失败保留告警。
+        """
         names = [cb.property("alert_name")
                  for cb in self._iter_checkboxes() if cb.isChecked()]
         if not names:
             return
-        n = table_db.mark_health_alerts_resolved(names)
-        show_info_bar(f"已标记 {n} 条告警为已处理", "success",
-                      title="已处理", parent=self, duration=2500)
+        if self._health_worker is not None and self._health_worker.isRunning():
+            show_info_bar("正在处理中，请稍候", "warning",
+                          title="处理中", parent=self, duration=2000)
+            return
+        if self._mark_worker is not None and self._mark_worker.isRunning():
+            show_info_bar("正在标记已处理，请稍候", "warning",
+                          title="处理中", parent=self, duration=2000)
+            return
+        code_map = {str(r.get("name") or ""): str(r.get("device_code") or "")
+                    for r in self._rows}
+        pairs = [(n, code_map.get(n, "")) for n in names]
+        if not MessageBox("重置健康度",
+                          f"将对勾选的 {len(pairs)} 台设备调用 xqzg 接口，"
+                          f"将健康度重置为 4000（默认值），确认处理？",
+                          self.window()).exec():
+            return
+        self._btn_resolved.setEnabled(False)
+        self._btn_resolved.setText("处理中…")
+        self._health_worker = HealthUpdateWorker(pairs, self)
+        self._health_worker.result_ready.connect(self._on_health_reset_ok)
+        self._health_worker.error.connect(self._on_health_reset_fail)
+        self._health_worker.start()
+
+    def _on_health_reset_ok(self, ok_names, fails):
+        """重置完成：成功者后台标记已处理（DB 断连不阻塞 UI），再汇总提示
+
+        本地标记放到 AftersaleDBWorker 后台线程：MySQL 断连时 pymysql
+        抛出的 OperationalError 不会穿透 Qt 主线程槽（否则按钮卡在
+        「处理中…」且界面无响应）；标记失败仍收尾提示，下次 DB 操作
+        由 _get_conn 自动降级本地库，业务不中断。
+        """
+        self._health_worker = None
+        self._btn_resolved.setText("已处理")
+        if ok_names:
+            self._mark_worker = AftersaleDBWorker(
+                table_db.mark_health_alerts_resolved, ok_names)
+            self._mark_worker.result_ready.connect(
+                lambda _n: self._finish_health_reset(ok_names, fails))
+            self._mark_worker.error.connect(
+                lambda m: self._finish_health_reset(ok_names, fails, db_err=m))
+            self._mark_worker.start()
+        else:
+            self._finish_health_reset([], fails)
+
+    def _finish_health_reset(self, ok_names, fails, db_err=None):
+        """标记落库后收尾：刷新展示 + 汇总提示（DB 标记失败也恢复界面）"""
         self._refresh_display()
+        if db_err:
+            show_info_bar(
+                f"接口已重置 {len(ok_names)} 台，但本地标记失败（{db_err}）",
+                "warning", title="已处理（标记失败）",
+                parent=self, duration=6000)
+        elif fails:
+            detail = "；".join(f"{n}: {e}" for n, e in fails[:5])
+            if len(fails) > 5:
+                detail += f"；…等共 {len(fails)} 台失败"
+            show_info_bar(f"成功 {len(ok_names)} 台；失败 {len(fails)} 台：{detail}",
+                          "warning", title="部分重置失败",
+                          parent=self, duration=6000)
+        else:
+            show_info_bar(f"已重置 {len(ok_names)} 台设备健康度为 4000",
+                          "success", title="处理完成", parent=self, duration=2500)
+
+    def _on_health_reset_fail(self, msg):
+        """整体失败（账号未配置/登录失败等）：恢复按钮并提示"""
+        self._health_worker = None
+        self._btn_resolved.setText("已处理")
+        self._update_resolved_enabled()
+        show_info_bar(str(msg), "error", title="重置失败",
+                      parent=self, duration=4000)

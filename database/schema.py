@@ -225,6 +225,9 @@ TABLE_COLUMNS = {
         ColumnDef("onlineStatusName", "TEXT", "VARCHAR(255)", "''", "''"),
         ColumnDef("health", "REAL", "DOUBLE", "0", "0"),
         ColumnDef("resolved_health", "REAL", "DOUBLE"),
+        # device_code：xqzg update_health 接口入参（billiard_tables.code），
+        # 点击「已处理」时按此码调接口将服务端健康度重置为 4000
+        ColumnDef("device_code", "TEXT", "VARCHAR(255)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
     "aftersale_records": [
@@ -351,6 +354,11 @@ MIGRATIONS: dict = {
         ColumnMigration("billiard_tables", "code", "TEXT", "''",
                         "VARCHAR(255)", "''"),
         ColumnMigration("billiard_tables", "city", "TEXT", "''",
+                        "VARCHAR(255)", "''"),
+    ],
+    "health_alerts": [
+        # 旧库补 device_code（xqzg update_health 接口入参，见 TABLE_COLUMNS）
+        ColumnMigration("health_alerts", "device_code", "TEXT", "''",
                         "VARCHAR(255)", "''"),
     ],
     "aftersale_records": [

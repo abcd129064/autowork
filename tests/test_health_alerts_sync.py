@@ -24,6 +24,7 @@ CREATE TABLE health_alerts (
     onlineStatusName TEXT DEFAULT '',
     health          REAL DEFAULT 0,
     resolved_health REAL,
+    device_code     TEXT DEFAULT '',
     updated_at      TEXT DEFAULT ''
 )
 """
@@ -170,14 +171,27 @@ class _FakeMysqlConn:
         pass
 
 
+def test_sync_stores_and_queries_device_code(monkeypatch, tmp_path):
+    """device_code（球桌 code 字段）随同步落库，查询链路透出供「已处理」用"""
+    _setup_sqlite(monkeypatch, tmp_path)
+    table_db.sync_health_alerts(
+        [{"name": "A", "health": 4500, "roomName": "R1",
+          "onlineStatusName": "空闲", "code": "CODE-A"},
+         {"name": "B", "health": 6000, "roomName": "R2",
+          "onlineStatusName": "忙碌"}])          # 无 code → 空串
+    rows = {r["name"]: r for r in table_db.query_health_alerts()}
+    assert rows["A"]["device_code"] == "CODE-A"
+    assert rows["B"]["device_code"] == ""
+
+
 def test_mysql_sync_batches_upsert():
     """MySQL 路径：过滤后一次 executemany，upsert 语义保留"""
     conn = _FakeMysqlConn(unresolved=2)
     rows = [
         {"name": "A", "health": 4500, "roomName": "R1",
-         "onlineStatusName": "空闲"},
+         "onlineStatusName": "空闲", "code": "CODE-A"},
         {"name": "B", "health": 6000, "roomName": "R2",
-         "onlineStatusName": "忙碌"},
+         "onlineStatusName": "忙碌", "code": "CODE-B"},
         {"name": "C", "health": 100},              # 正常 → 过滤
         {"name": "D", "health": 4200, "roomName": "公司测试"},  # 过滤
     ]
@@ -190,8 +204,10 @@ def test_mysql_sync_batches_upsert():
     sql, params = conn.batch
     assert "ON DUPLICATE KEY UPDATE" in sql
     assert "resolved_health = IF(" in sql
+    assert "device_code = VALUES(device_code)" in sql
     assert [p[0] for p in params] == ["A", "B"]
-    assert all(len(p) == 5 and p[4] == "2026-08-23 02:00:00" for p in params)
+    assert [p[4] for p in params] == ["CODE-A", "CODE-B"]
+    assert all(len(p) == 6 and p[5] == "2026-08-23 02:00:00" for p in params)
 
     # DELETE 清理与最终 COUNT 各一次
     assert len(conn.executes) == 2
@@ -219,7 +235,7 @@ def test_filter_dedupes_same_name_last_wins():
         {"name": "A", "health": 4500, "roomName": "R1",
          "onlineStatusName": "空闲"},
         {"name": "A", "health": 6000, "roomName": "R1",
-         "onlineStatusName": "忙碌"},
+         "onlineStatusName": "忙碌", "code": "CODE-A"},
     ])
     assert len(items) == 1
-    assert items[0] == ("A", "R1", "忙碌", 6000.0)
+    assert items[0] == ("A", "R1", "忙碌", 6000.0, "CODE-A")

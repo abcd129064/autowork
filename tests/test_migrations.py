@@ -153,6 +153,10 @@ _OLD_SCHEMA = {
         "untreated_count", "operation_count", "accuracy_count",
         "already_count", "rubbish_count", "error_rate",
     },
+    "health_alerts": {
+        "name", "roomName", "onlineStatusName", "health",
+        "resolved_health", "updated_at",
+    },
 }
 
 

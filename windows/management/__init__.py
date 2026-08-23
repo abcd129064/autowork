@@ -10,8 +10,8 @@
 - settings_page.py : AdminSettingsPage 管理设置
 - health_page.py   : TrendPage 健康趋势 + HealthPage 设备健康度
 - moyu_page.py     : GamePage 小游戏
+- widget_page.py   : TestPage 组件测试（FluentIcon 图标库 + 控件墙）
 - window.py        : ManagementPanelWindow 主窗口（FluentWindow 组装）
-
 windows/management_panel.py 保留为 re-export shim（``from
 windows.management import *``），main_window/ui_mixin 等既有引用路径不变。
 """
@@ -26,6 +26,7 @@ from windows.management.device_page import FileListPanel, DevicePage  # noqa: F4
 from windows.management.settings_page import AdminSettingsPage  # noqa: F401
 from windows.management.health_page import TrendPage, HealthPage  # noqa: F401
 from windows.management.moyu_page import GamePage  # noqa: F401
+from windows.management.widget_page import TestPage  # noqa: F401
 from windows.management.window import ManagementPanelWindow  # noqa: F401
 
 __all__ = [
@@ -38,7 +39,7 @@ __all__ = [
     "DeviceFilesDialog", "UploadListDialog",
     # 页面
     "TablePage", "FileListPanel", "DevicePage", "AdminSettingsPage",
-    "TrendPage", "HealthPage", "GamePage",
+    "TrendPage", "HealthPage", "GamePage", "TestPage",
     # 主窗口
     "ManagementPanelWindow",
 ]
