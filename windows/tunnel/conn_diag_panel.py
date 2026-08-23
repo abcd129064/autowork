@@ -611,7 +611,7 @@ class ConnDiagPanel(QDialog):
 
 
 if __name__ == '__main__':
-    # 独立调试：python -m windows.conn_diag_panel
+    # 独立调试：python -m windows.tunnel.conn_diag_panel
     import sys
     import json
     import os
@@ -621,8 +621,9 @@ if __name__ == '__main__':
     def _debug_theme_color():
         """调试入口读取 settings.json 主题强调色（与主程序入口一致）"""
         try:
-            p = os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "settings.json")
+            # 模块由 windows/ 下移至 windows/tunnel/，需多上溯一层到项目根目录
+            p = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))), "settings.json")
             with open(p, "r", encoding="utf-8") as f:
                 return json.load(f).get("theme_color", "#00BCD4")
         except Exception:

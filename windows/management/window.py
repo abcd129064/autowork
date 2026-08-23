@@ -46,8 +46,9 @@ from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     fuzzy_match_device_dir, norm_device_suffix)
 from database import table_db
 from windows.mysql_sync_card import MysqlSyncCard
-from windows.moyu_widgets import Game2048Widget, SnakeWidget, MoyuReaderWidget
-from windows.image_viewer import is_image_file
+from windows.management.moyu_widgets import (Game2048Widget, SnakeWidget,
+                                                  MoyuReaderWidget)
+from windows.management.image_viewer import is_image_file
 
 logger = logging.getLogger(__name__)
 

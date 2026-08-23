@@ -1284,7 +1284,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
     def _connect_sftp_download_signal(self):
         """A1: 连接 SFTP 下载完成全局信号（延迟 import，避免潜在循环依赖）"""
         try:
-            from windows.sftp_window import GLOBAL_SIGNALS
+            from windows.tunnel.sftp_window import GLOBAL_SIGNALS
         except Exception as e:
             self._append_log(f"[警告] SFTP 下载联动信号连接失败: {e}")
             return

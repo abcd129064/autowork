@@ -947,7 +947,7 @@ MySQL 开启时实时读写远程库（本地 SQLite 仅作降级兜底），不
 
 ### ForensicReportPanel（SSH 故障取证包）
 
-`windows/forensic_report.py`：SSH 连接失败时一键生成诊断取证包（模块级函数 + `ForensicWorker` 后台线程）。
+`windows/tunnel/forensic_report.py`：SSH 连接失败时一键生成诊断取证包（模块级函数 + `ForensicWorker` 后台线程）。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
@@ -972,7 +972,7 @@ MySQL 开启时实时读写远程库（本地 SQLite 仅作降级兜底），不
 
 ### ImageViewerDialog
 
-`windows/image_viewer.py`：设备状态图片查看卡片对话框（左右键翻页，支持分类迁移）。
+`windows/management/image_viewer.py`：设备状态图片查看卡片对话框（左右键翻页，支持分类迁移）。
 
 ```python
 ImageViewerDialog(entries, index, file_path, device_code, device_page,

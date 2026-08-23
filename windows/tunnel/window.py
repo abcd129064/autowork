@@ -1,17 +1,6 @@
 # -*- coding: utf-8 -*-
-"""全局「当前隧道」面板
+"""window 模块（从 windows/tunnel_panel.py 拆出，逻辑未改动）"""
 
-展示统一远程会话中心（RemoteSessionManager）中所有活跃 visitor：
-serverName / 关联球桌 / 本地端口 / 创建来源 / 最近使用 / 断开连接 / 删除 snk。
-
-入口：主窗口远程面板顶部「当前隧道」按钮。
-- 「断开连接」：仅 frpc 运行中生效（未启动时只提示，绝不自动拉起 frpc），
-  先优雅关闭该隧道上的 SSH/SFTP/RDP 会话再移除 visitor 释放端口；
-  SFTP 传输中时先弹二次确认，确认后才中断传输并断开。
-- 「删除 snk」：从注册表与持久化配置中彻底移除该隧道（frpc 未运行时
-  也可执行，同样不会启动 frpc）。
-注册表或 frpc 状态变化时自动刷新，无需手动更新。
-"""
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QTableWidgetItem,
                                QHeaderView, QAbstractItemView, QWidget)
@@ -293,3 +282,15 @@ class TunnelPanelWindow(FramelessWindow):
         self.refresh()  # 显式即时刷新兜底
         show_info_bar("已断开全部隧道", "success", title="全部断开",
                       parent=self, duration=3000)
+
+
+if __name__ == "__main__":
+    import sys
+    import core.acrylic_patch  # noqa: F401
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    win = TunnelPanelWindow()
+    win.show()
+    sys.exit(app.exec())

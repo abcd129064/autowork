@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """T04 直读旁路收敛到双后端测试
 
-table_panel / forensic_report 不再裸连 SQLite，统一经 table_db 双后端 API。
+旧 table_panel 已删除；management/table_page / forensic_report 不再裸连 SQLite，统一经 table_db 双后端 API。
 本文件覆盖新增/复用的读侧函数（纯 SQLite 模式行为），并验证它们都走
 _get_conn 双后端路由（主模式即读 MySQL）。UI 文件本身依赖 PySide6，
 由 py_compile + 源码断言覆盖。
@@ -146,10 +146,11 @@ def test_read_functions_route_through_get_conn(monkeypatch, tmp_path):
 
 
 def test_windows_no_bare_sqlite_connect():
-    """table_panel / forensic_report 不再裸 sqlite3.connect（源码断言）"""
+    """旧 table_panel 已删除；management/table_page 与 forensic_report 不再裸
+    sqlite3.connect（源码断言）"""
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ("table_panel.py", "forensic_report.py"):
+    for name in ("management/table_page.py", "tunnel/forensic_report.py"):
         with open(os.path.join(root, "windows", name),
                   "r", encoding="utf-8") as f:
             src = f.read()

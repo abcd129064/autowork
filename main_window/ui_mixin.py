@@ -1129,7 +1129,7 @@ class UIMixin:
 
     def _on_add_table_record(self):
         """手动添加球桌记录（API 失效时的兜底录入入口）"""
-        from windows.table_panel import AddRecordDialog
+        from windows.management.dialogs import AddRecordDialog
         from database import table_db
         dlg = AddRecordDialog(self)
         if not dlg.exec():
@@ -1177,7 +1177,7 @@ class UIMixin:
 
     def _on_open_conn_diag(self):
         """打开连接诊断面板（非模态独立窗口，单例：已打开则激活）"""
-        from windows.conn_diag_panel import ConnDiagPanel
+        from windows.tunnel.conn_diag_panel import ConnDiagPanel
         if not hasattr(self, '_conn_diag') or self._conn_diag is None:
             self._conn_diag = ConnDiagPanel()
             self._conn_diag.destroyed.connect(

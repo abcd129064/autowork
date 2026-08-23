@@ -44,8 +44,8 @@ from core.conn_logger import conn_logger
 from core.theme_qss import apply_window_qss
 from core.utils import safe_close_transport, cleanup_log_dir, show_info_bar
 from workers.network_workers import SSHConnectWorker
-from windows.ansi_terminal import ANSITerminalWidget
-from windows.forensic_report import ForensicWorker
+from windows.tunnel.ansi_terminal import ANSITerminalWidget
+from windows.tunnel.forensic_report import ForensicWorker
 
 # 模块级强引用集合：防止窗口关闭后 Python GC 回收仍在运行的 QThread 导致崩溃
 _pending_workers: set = set()

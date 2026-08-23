@@ -113,22 +113,19 @@ autowork/
 │   └── tables.db              #   SQLite 数据库文件
 │
 ├── windows/                   # 独立窗口层
-│   ├── management_panel.py    #   运维管理面板（球桌/设备/健康度/设置/小游戏六页）
+│   ├── management_panel.py    #   运维管理面板（re-export shim）
+│   ├── management/            #   运维管理面板拆分包（页面/对话框/摸鱼控件）
 │   ├── aftersale_panel.py     #   售后面板（填写录入/记录统计/设置三页）
 │   ├── mysql_sync_card.py     #   MySQL 同步配置卡片（运维/售后面板共用）
-│   ├── forensic_report.py     #   SSH 故障取证报告面板（含 AI 分析）
-│   ├── image_viewer.py        #   图片预览查看器（翻页/分类迁移）
 │   ├── port_fake.py           #   端口占用模拟器（真实监听指定端口）
 │   ├── single_video_dialog.py #   单杆视频参数对话框（工具菜单）
-│   ├── table_panel.py         #   球桌面板（旧版，仅 AddRecordDialog 仍被引用）
 │   ├── sftp_window.py         #   SFTP 双面板文件管理窗口
 │   ├── ssh_terminal.py        #   SSH 终端窗口（ANSI 渲染）
 │   ├── ansi_terminal.py       #   ANSI 虚拟终端控件
 │   ├── rdp_window.py          #   RDP 远程桌面嵌入窗口
 │   ├── remote_session_window.py # 远程会话窗口（frpc 日志/隧道状态）
 │   ├── tunnel_panel.py        #   当前隧道面板
-│   ├── conn_diag_panel.py     #   连接诊断面板
-│   └── moyu_widgets.py        #   摸鱼阅读器（内置小游戏/网页抓取）
+│   └── conn_diag_panel.py     #   连接诊断面板
 │
 ├── main_window/               # 主窗口层（Mixin 拆分）
 │   ├── main_window.py         #   MainWindow 主类（组合所有 Mixin）

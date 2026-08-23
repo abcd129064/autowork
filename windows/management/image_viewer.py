@@ -21,6 +21,7 @@ from qfluentwidgets import (
     PushButton, ToolButton, FluentIcon, BodyLabel, CaptionLabel,
     setCustomStyleSheet, RoundMenu, Action)
 
+from core.theme_qss import apply_window_qss
 from workers.table_worker import API2_BASE, CATEGORY_DIRS
 
 # 图片扩展名（.bin/版本等非图片条目不启用预览）

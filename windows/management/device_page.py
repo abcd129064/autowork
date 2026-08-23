@@ -46,8 +46,9 @@ from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     fuzzy_match_device_dir, norm_device_suffix)
 from database import table_db
 from windows.mysql_sync_card import MysqlSyncCard
-from windows.moyu_widgets import Game2048Widget, SnakeWidget, MoyuReaderWidget
-from windows.image_viewer import is_image_file
+from windows.management.moyu_widgets import (Game2048Widget, SnakeWidget,
+                                                  MoyuReaderWidget)
+from windows.management.image_viewer import is_image_file
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,7 @@ class FileListPanel(QWidget):
         rows = sorted({it.row() for it in self._list.selectedItems()})
         if not rows or not (0 <= rows[0] < len(self._entries)):
             return
-        from windows.image_viewer import ImageViewerDialog
+        from windows.management.image_viewer import ImageViewerDialog
         dlg = self._preview_dlg
         if dlg is not None and dlg.isVisible():
             # 复用打开中的查看器：同步最新条目快照并跳转，避免窗口堆叠

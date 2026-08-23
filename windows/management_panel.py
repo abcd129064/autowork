@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""运维管理面板（re-export shim，用户决策 3）
+"""运维管理面板（re-export shim）
 
 原 4483 行单体文件已按页面/职责拆分为 ``windows/management/`` 包：
 - common.py / dialogs.py / table_page.py / device_page.py /
