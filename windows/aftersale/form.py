@@ -122,7 +122,7 @@ class AftersaleForm(QWidget):
         room_col.setSpacing(3)
         room_col.addWidget(_field_label("球房", True, self))
         self.room_edit = SearchLineEdit(self)
-        self.room_edit.setPlaceholderText("输入球房名搜索球桌，如 BaoClub")
+        self.room_edit.setPlaceholderText("输入球房名搜索球桌")
         self.room_edit.setFixedWidth(320)
         self.room_edit.textChanged.connect(self._on_room_text_changed)
         self.room_edit.clearSignal.connect(self._hide_candidates)

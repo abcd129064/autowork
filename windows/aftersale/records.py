@@ -154,7 +154,7 @@ class RecordsPage(QWidget):
 
         # 关键词搜索（防抖）
         self._search_edit = SearchLineEdit(self)
-        self._search_edit.setPlaceholderText("搜索球房 / 问题 / 填写人")
+        self._search_edit.setPlaceholderText("搜索")
         self._search_edit.setFixedWidth(180)
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
@@ -165,7 +165,7 @@ class RecordsPage(QWidget):
         toolbar.addWidget(self._btn_import)
 
         self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出 xlsx", self)
-        self._btn_export.setToolTip("按当前筛选条件导出 xlsx（按类型分 Sheet + 统计图表）")
+        self._btn_export.setToolTip("按当前筛选条件导出 xlsx")
         self._btn_export.clicked.connect(self._on_export)
         toolbar.addWidget(self._btn_export)
 
