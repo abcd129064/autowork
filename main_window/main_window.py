@@ -1075,17 +1075,25 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """收集当前球桌会话上下文（供跑视频面板填写录入页预填）。
 
         球房取当前选中设备代码；视频名取第二列当前日志文件名；
-        帧数取帧输入框（默认 400）；署名取 settings newlog_target_name。
+        帧数取当前选中日志行解析出的 frame_id（on_log_selected 已写入
+        self.current_frame，与日志行同步）；未选中日志行时回退帧偏移
+        输入框（默认 400）。署名取 settings newlog_target_name。
         分类默认「问题」（主界面入口通常记问题，面板内可修改）。
         """
         device_code = (self.ui.id_list.currentItem().text()
                        if self.ui.id_list.currentItem() else "")
         video_item = self.ui.local_video_list.currentItem()
         video_name = video_item.text() if video_item else ""
-        try:
-            frame = str(int(self.ui.input_frame.text().strip() or 400))
-        except ValueError:
-            frame = "400"
+        # 需求3：帧数与当前选中的日志行同步——优先取 on_log_selected 解析的
+        # frame_id（点击日志行后 current_frame 即该行帧数）；从未点击时回退
+        # input_frame 帧偏移输入框（其默认 400，此前误将偏移当帧数预填）。
+        if self.current_frame is not None:
+            frame = str(int(self.current_frame))
+        else:
+            try:
+                frame = str(int(self.ui.input_frame.text().strip() or 400))
+            except ValueError:
+                frame = "400"
         sig = ""
         try:
             from core.app_paths import get_app_dir

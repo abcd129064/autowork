@@ -157,6 +157,11 @@ _OLD_SCHEMA = {
         "name", "roomName", "onlineStatusName", "health",
         "resolved_health", "updated_at",
     },
+    "ledger_records": {
+        "id", "category", "kind", "room_name", "video_name", "frame",
+        "description", "repro", "new_program", "remark", "signer",
+        "created_at", "updated_at",  # 缺 occurred_at（需求7 待补列）
+    },
 }
 
 

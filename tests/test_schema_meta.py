@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS ledger_records (
     new_program TEXT DEFAULT '',
     remark TEXT DEFAULT '',
     signer TEXT DEFAULT '',
+    occurred_at TEXT DEFAULT '',
     created_at TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
@@ -346,6 +347,7 @@ GOLDEN_MYSQL_DDL = {
             new_program VARCHAR(32) DEFAULT '',
             remark TEXT,
             signer VARCHAR(64) DEFAULT '',
+            occurred_at VARCHAR(32) DEFAULT '',
             created_at VARCHAR(32) DEFAULT '',
             updated_at VARCHAR(32) DEFAULT '',
             INDEX idx_ledger_category (category),

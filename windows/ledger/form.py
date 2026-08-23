@@ -2,18 +2,18 @@
 """跑视频表单（录入页与编辑弹窗复用）
 
 字段与在线模板.xlsx 数据 sheet 对齐：分类（sheet 名）→ 类别 → 球房 →
-视频名 → 帧数 → 描述 → 复现（精度/使用）→ 新程序 → 备注 → 署名。
-分类切换时类别候选联动（模板解析预置 + 库中历史自由输入），
-「复现」输入仅在 精度/使用 分类显示。
+视频名 → 帧数 → 日期 → 描述 → 复现（是/否，需求6）→ 新程序 → 备注 → 署名。
+分类切换时类别候选联动（模板解析预置 + 库中历史自由输入）。
+「日期」为视频日期（需求7：看昨天的视频可指定昨天，默认当天）。
 """
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QDate
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QComboBox as _QComboBox)
 
 from qfluentwidgets import (LineEdit, PlainTextEdit, ScrollArea, CardWidget,
                             PrimaryPushButton, PushButton, BodyLabel,
                             CaptionLabel, FluentIcon, TableWidget,
-                            ProgressBar)
+                            ProgressBar, ZhDatePicker, ComboBox)
 
 from core.design_tokens import SEMANTIC
 from core.utils import show_info_bar
@@ -46,7 +46,7 @@ class LedgerForm(QWidget):
         col_cat = QVBoxLayout()
         col_cat.setSpacing(3)
         col_cat.addWidget(_field_label("分类", True, self))
-        self.category_combo = FluentCombo(self)
+        self.category_combo = ComboBox(self)  # QFluentWidgets 原生（需求9）
         self.category_combo.addItems(ledger_db.CATEGORIES)
         self.category_combo.setFixedWidth(130)
         self.category_combo.currentTextChanged.connect(
@@ -97,6 +97,15 @@ class LedgerForm(QWidget):
         self.frame_edit.setFixedWidth(80)
         col_frame.addWidget(self.frame_edit)
         row2.addLayout(col_frame)
+        # 日期：视频日期（需求7）——默认当天，看昨天的视频可翻到昨天再提交
+        col_date = QVBoxLayout()
+        col_date.setSpacing(3)
+        col_date.addWidget(_field_label("日期", False, self))
+        self.date_edit = ZhDatePicker(self)
+        self.date_edit.setDate(QDate.currentDate())
+        self.date_edit.setFixedWidth(125)
+        col_date.addWidget(self.date_edit)
+        row2.addLayout(col_date)
         row2.addStretch(1)
         sec1.content_layout.addLayout(row2)
         root.addWidget(sec1)
@@ -104,34 +113,52 @@ class LedgerForm(QWidget):
         # ---------- 板块二：描述与备注 ----------
         sec2 = _SectionCard("描述与备注", self)
         v2 = sec2.content_layout
-        v2.addWidget(_field_label("描述", False, self))
+        # 描述 / 备注：并排（70% / 30%，需求8；参照售后面板「发生原因/解决方案」
+        # 等宽等高多行文本框并排范式，本处以 7:3 stretch 分配宽度）
+        txt_desc = QHBoxLayout()
+        txt_desc.setSpacing(14)
+        col_desc = QVBoxLayout()
+        col_desc.setSpacing(5)
+        col_desc.addWidget(_field_label("描述", False, self))
         self.desc_edit = PlainTextEdit(self)
         self.desc_edit.setFixedHeight(64)
         self.desc_edit.setPlaceholderText("问题现象/使用场景描述")
-        v2.addWidget(self.desc_edit)
+        col_desc.addWidget(self.desc_edit)
+        txt_desc.addLayout(col_desc, 7)
+        col_remark = QVBoxLayout()
+        col_remark.setSpacing(5)
+        col_remark.addWidget(_field_label("备注", False, self))
+        # 需求8：备注与描述并排等高（多行文本框，参照售后面板并排范式）
+        self.remark_edit = PlainTextEdit(self)
+        self.remark_edit.setFixedHeight(64)
+        self.remark_edit.setPlaceholderText("备注")
+        col_remark.addWidget(self.remark_edit)
+        txt_desc.addLayout(col_remark, 3)
+        v2.addLayout(txt_desc)
         self._repro_label = _field_label("复现", False, self)
-        v2.addWidget(self._repro_label)
-        self.repro_edit = PlainTextEdit(self)
-        self.repro_edit.setFixedHeight(56)
-        self.repro_edit.setPlaceholderText("复现步骤/精度现象（仅精度/使用分类）")
-        v2.addWidget(self.repro_edit)
+        # 需求6：复现为「是/否」选择（售后面板同款 SegmentedWidget，默认「否」）；
+        # 需求7：恒显（不再按分类隐藏，用户反馈录入界面需始终可见）
+        self.repro_seg = YesNoSegment("否", self)
+        self.repro_seg.setFixedWidth(150)
+        repro_row = QHBoxLayout()
+        repro_row.setSpacing(10)
+        repro_row.addWidget(self._repro_label)
+        repro_row.addWidget(self.repro_seg)
+        repro_row.addStretch(1)
+        v2.addLayout(repro_row)
+        # 行：新程序 / 署名（备注已上移与描述并排，需求8）
         txt_row = QHBoxLayout()
         txt_row.setSpacing(16)
         col_new = QVBoxLayout()
         col_new.setSpacing(3)
         col_new.addWidget(_field_label("新程序", False, self))
-        self.new_program_combo = FluentCombo(self)
-        self.new_program_combo.addItems(["是", "否"])
+        self.new_program_combo = ComboBox(self)  # QFluentWidgets 原生（需求9）
+        # 需求4：新程序默认「否」——选项顺序 否/是，index 0 即默认值，
+        # clear_form 的 setCurrentIndex(0) 与 set_values 的 setCurrentText 均兼容
+        self.new_program_combo.addItems(["否", "是"])
         self.new_program_combo.setFixedWidth(90)
         col_new.addWidget(self.new_program_combo)
         txt_row.addLayout(col_new)
-        col_remark = QVBoxLayout()
-        col_remark.setSpacing(3)
-        col_remark.addWidget(_field_label("备注", False, self))
-        self.remark_edit = LineEdit(self)
-        self.remark_edit.setPlaceholderText("备注")
-        col_remark.addWidget(self.remark_edit)
-        txt_row.addLayout(col_remark, 1)
         col_signer = QVBoxLayout()
         col_signer.setSpacing(3)
         col_signer.addWidget(_field_label("署名", False, self))
@@ -140,6 +167,7 @@ class LedgerForm(QWidget):
         self.signer_edit.setFixedWidth(120)
         col_signer.addWidget(self.signer_edit)
         txt_row.addLayout(col_signer)
+        txt_row.addStretch(1)
         v2.addLayout(txt_row)
         root.addWidget(sec2)
 
@@ -149,13 +177,10 @@ class LedgerForm(QWidget):
     # ---------- 分类联动 ----------
 
     def _on_category_changed(self, category: str):
-        """分类切换：类别候选联动 + 「复现」输入仅在 精度/使用 显示"""
+        """分类切换：类别候选联动（复现选择恒显，见需求7）"""
         if not category:
             return
         self._load_kind_candidates(category)
-        show_repro = category in ("精度", "使用")
-        self._repro_label.setVisible(show_repro)
-        self.repro_edit.setVisible(show_repro)
 
     def _load_kind_candidates(self, category: str):
         """异步拉取类别候选（模板预置 + 历史自由输入），保留用户已输入文本"""
@@ -214,10 +239,12 @@ class LedgerForm(QWidget):
             "room_name": self.room_edit.text().strip(),
             "video_name": self.video_edit.text().strip(),
             "frame": frame,
+            # 日期：视频日期（需求7），ZhDatePicker.date 为 QDate 属性
+            "occurred_at": self.date_edit.date.toString("yyyy-MM-dd"),
             "description": self.desc_edit.toPlainText().strip(),
-            "repro": self.repro_edit.toPlainText().strip(),
+            "repro": self.repro_seg.value().strip(),
             "new_program": self.new_program_combo.currentText().strip(),
-            "remark": self.remark_edit.text().strip(),
+            "remark": self.remark_edit.toPlainText().strip(),
             "signer": self.signer_edit.text().strip(),
         }
 
@@ -227,8 +254,9 @@ class LedgerForm(QWidget):
         self.room_edit.clear()
         self.video_edit.clear()
         self.frame_edit.clear()
+        self.date_edit.setDate(QDate.currentDate())  # 日期重置当天
         self.desc_edit.clear()
-        self.repro_edit.clear()
+        self.repro_seg.setValue("否")  # 复现默认「否」（seg 无 clear，回默认）
         self.new_program_combo.setCurrentIndex(0)
         self.remark_edit.clear()
 
@@ -257,10 +285,18 @@ class LedgerForm(QWidget):
         self.room_edit.setText(str(record.get("room_name") or ""))
         self.video_edit.setText(str(record.get("video_name") or ""))
         self.frame_edit.setText(str(record.get("frame") or ""))
+        # 日期回显：occurred_at（YYYY-MM-DD 或带时间），非法/空回退当天
+        occ = str(record.get("occurred_at") or "")[:10]
+        qd = QDate.fromString(occ, "yyyy-MM-dd")
+        if qd.isValid():
+            self.date_edit.setDate(qd)
+        else:
+            self.date_edit.setDate(QDate.currentDate())
         self.desc_edit.setPlainText(str(record.get("description") or ""))
-        self.repro_edit.setPlainText(str(record.get("repro") or ""))
+        # 复现：历史数据为描述文本（旧版文本框遗留）时 setValue 回退「否」
+        self.repro_seg.setValue(str(record.get("repro") or ""))
         np_ = str(record.get("new_program") or "")
         if np_ in ("是", "否"):
             self.new_program_combo.setCurrentText(np_)
-        self.remark_edit.setText(str(record.get("remark") or ""))
+        self.remark_edit.setPlainText(str(record.get("remark") or ""))
         self.signer_edit.setText(str(record.get("signer") or ""))

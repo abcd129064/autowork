@@ -1744,6 +1744,10 @@ class UIMixin:
         self._apply_global_font()
         # setTheme 会重置控件内部 QSS，重新强制工具栏单选按钮行高
         self._enforce_toolbar_radio_height()
+        # qfluentwidgets 全局按钮 QSS 的 min-height 在 show polish 时才把 minimumHeight 覆盖回 35/45；
+        # 构造时 _apply_theme 执行尚早，故用 singleShot(0) 排队到事件循环，在 show/主题重 polish 之后
+        # 再强制按钮 32px，min=max=32、geometry 被 clamp 到 32，底部不再露 1-2px 背景带。
+        QTimer.singleShot(0, self._enforce_toolbar_button_height)
 
     def _enforce_toolbar_radio_height(self):
         """工具栏 RadioButton 固定 32px 行高（与按钮中线对齐）。
@@ -1754,6 +1758,29 @@ class UIMixin:
                    self.ui.input_frame_set,
                    self.ui.input_frame_custom):
             setCustomStyleSheet(rb, qss, qss)
+
+    def _enforce_toolbar_button_height(self):
+        """工具栏 qfluentwidgets 按钮/输入控件固定 32px 行高（与 RadioButton 中线对齐）。
+
+        qfluentwidgets 全局按钮 QSS 的 min-height 会在 polish 时把 minimumHeight 覆盖
+        为 35，而 setupUi 里 setFixedHeight(32) 只设了 maximumHeight=32，形成
+        min(35)>max(32) 矛盾，sizeHint=35 被 FlowLayout 用 sizeHint 拉伸，按钮底部
+        1-2px 露出背景色（即用户观察到的“被挡 1-2px”）。
+
+        _apply_theme() 在 setTheme()+setStyleSheet() 完成 polish 之后调用本方法，此时
+        重新 setFixedHeight(32) 不会再被 QSS 覆盖，min=max=32、geometry 被 clamp 到
+        32，按钮底部与同行的 32px 控件（RadioButton/LineEdit）完全平齐、无背景带外露。"""
+        for name in ("write_table", "btn_write_table", "choose_exe",
+                     "open_daily", "start", "pause_btn", "start_three_btn",
+                     "btn_aftersale", "table_panel_btn", "p2p_btn",
+                     "date", "input_frame"):
+            w = getattr(self.ui, name, None)
+            if w is None:
+                continue
+            try:
+                w.setFixedHeight(32)
+            except Exception:
+                pass
 
     def _load_qss(self, theme_name):
         """从 styles/ 目录加载 QSS 文件，找不到时返回空字符串。

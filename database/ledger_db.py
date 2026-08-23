@@ -50,10 +50,11 @@ KIND_CANDIDATES = {
 }
 
 # 记录字段（与建表 DDL 一致）
+# occurred_at：视频/记录日期（需求7，用户看昨天的视频时指定，默认当天）
 RECORD_FIELDS = (
     "category", "kind", "room_name", "video_name", "frame",
     "description", "repro", "new_program", "remark", "signer",
-    "created_at", "updated_at",
+    "occurred_at", "created_at", "updated_at",
 )
 
 # 跑视频业务键（多用户共享去重/合并定位用）：SQLite 与 MySQL 两侧 id
@@ -68,11 +69,12 @@ _SEARCH_FIELDS = (
 )
 
 # 导出表头（与在线模板数据 sheet 对齐；精度/使用 多「复现」列）。
-# 分类（category）由 sheet 名表达，不占列。
+# 分类（category）由 sheet 名表达，不占列；「日期」为系统附加列（occurred_at）。
 _EXPORT_HEADERS = (
-    ("kind", "类别"), ("room_name", "球房"), ("video_name", "视频名"),
-    ("frame", "帧数"), ("description", "描述"), ("repro", "复现"),
-    ("new_program", "新程序"), ("remark", "备注"), ("signer", "署名"),
+    ("occurred_at", "日期"), ("kind", "类别"), ("room_name", "球房"),
+    ("video_name", "视频名"), ("frame", "帧数"), ("description", "描述"),
+    ("repro", "复现"), ("new_program", "新程序"), ("remark", "备注"),
+    ("signer", "署名"),
 )
 
 
@@ -95,6 +97,10 @@ def insert_record(record: dict) -> int:
     # created_at / updated_at 由服务端统一维护，调用方传入值忽略
     vals[cols.index("created_at")] = now
     vals[cols.index("updated_at")] = now
+    # 视频日期 occurred_at：调用方可指定（看昨天的视频填昨天），
+    # 缺省取当天（需求7，按天统计据此过滤）
+    if not vals[cols.index("occurred_at")].strip():
+        vals[cols.index("occurred_at")] = now[:10]
     cur = conn.execute(
         f"INSERT INTO ledger_records ({', '.join(cols)}) "
         f"VALUES ({', '.join(['?'] * len(cols))})", vals)
@@ -137,8 +143,17 @@ def delete_record(record_id: int) -> bool:
 # ==================== 查询 ====================
 
 def _build_where(keyword: str = "", category: str = "",
-                 kind: str = "", signer: str = "") -> tuple:
-    """构造 WHERE 子句与参数列表（SQLite 占位符 ?，MySQL 侧由 backend 自动转换）"""
+                 kind: str = "", signer: str = "",
+                 date_from: str = "", date_to: str = "",
+                 repro: str = "") -> tuple:
+    """构造 WHERE 子句与参数列表（SQLite 占位符 ?，MySQL 侧由 backend 自动转换）
+
+    date_from/date_to：按视频日期 occurred_at 过滤（需求7 按天统计；
+    COALESCE 兼容旧库 occurred_at 为空的历史记录回退 created_at）。
+    取前 10 位（YYYY-MM-DD）做日期串比较：occurred_at 存纯日期、
+    created_at 存完整时间两种格式均兼容；date_from/date_to 传纯日期。
+    repro：是否复现精确过滤（"是"/"否"；空串不过滤，需求6）。
+    """
     where, params = [], []
     if category:
         where.append("category = ?")
@@ -149,6 +164,17 @@ def _build_where(keyword: str = "", category: str = "",
     if signer:
         where.append("signer = ?")
         params.append(signer)
+    if repro:
+        where.append("repro = ?")
+        params.append(str(repro).strip())
+    if date_from:
+        where.append("substr(COALESCE(NULLIF(occurred_at, ''), created_at),"
+                     " 1, 10) >= ?")
+        params.append(str(date_from).strip())
+    if date_to:
+        where.append("substr(COALESCE(NULLIF(occurred_at, ''), created_at),"
+                     " 1, 10) <= ?")
+        params.append(str(date_to).strip())
     kw = str(keyword or "").strip()
     if kw:
         like = " OR ".join(f"{f} LIKE ?" for f in _SEARCH_FIELDS)
@@ -159,10 +185,17 @@ def _build_where(keyword: str = "", category: str = "",
 
 
 def query_page(page_no: int, page_size: int, keyword: str = "",
-               category: str = "", kind: str = "", signer: str = "") -> tuple:
-    """分页查询跑视频记录，返回 (total, rows)；rows 为 dict 列表（含 id）"""
+               category: str = "", kind: str = "", signer: str = "",
+               date_from: str = "", date_to: str = "",
+               repro: str = "") -> tuple:
+    """分页查询跑视频记录，返回 (total, rows)；rows 为 dict 列表（含 id）
+
+    date_from/date_to 按视频日期 occurred_at 过滤（需求7，"" 表示不过滤）；
+    repro 是否复现精确过滤（需求6，"" 表示不过滤）。
+    """
     conn = table_db.get_conn()
-    where, params = _build_where(keyword, category, kind, signer)
+    where, params = _build_where(keyword, category, kind, signer,
+                                 date_from, date_to, repro)
     total = conn.execute(
         f"SELECT COUNT(*) FROM ledger_records{where}", params).fetchone()[0]
     offset = max(0, int(page_no) - 1) * int(page_size)

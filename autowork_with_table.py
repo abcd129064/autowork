@@ -193,6 +193,21 @@ def _make_section_label(text, parent=None):
     return lbl
 
 
+def _fit_toolbar_qf(c):
+    """工具栏 qfluentwidgets 控件初始化时声明 32px 行高（setFixedHeight）。
+
+    注意：此处只是声明——qfluentwidgets 全局按钮 QSS 的 min-height 会在 polish 时把
+    minimumHeight 覆盖回 35/45，形成 min>max 矛盾，被 FlowLayout 用 sizeHint 拉伸，
+    按钮底部 1-2px 露出背景色（用户观察到的“被挡 1-2px”）。
+
+    真正的强制在 main_window.ui_mixin._apply_theme() 中通过
+    _enforce_toolbar_button_height() 完成——它在 QSS polish 之后重新 setFixedHeight(32)，
+    此时 min=max=32、geometry 被 clamp 到 32，按钮底部与 32px 控件完全平齐、无背景带。
+    """
+    c.setFixedHeight(32)
+    return c
+
+
 class _ToolbarRadioButton(RadioButton):
     """工具栏专用单选按钮：强制 32px 行高，与 Fluent 按钮中线对齐。
     通过 setCustomStyleSheet 将高度 QSS 注册到 qfluentwidgets 主题管理器，
@@ -251,6 +266,10 @@ class Ui_MainWindow(object):
 
         # 主垂直布局: 工具栏 + 三区域内容
         self.verticalLayout_2 = QVBoxLayout(self.centralwidget)
+        # 工具栏与下方列表区域之间保留 10px 间距（旧值 0 → 6 时视觉上仍不明显）：
+        # 0 使工具栏底部与列表顶部完全贴合，高 DPI 下按钮底部与列表控件顶部的
+        # 圆角边框在视觉上“贴合/重合”。工具栏自身底部还有 6px 内边距，
+        # 故按钮底部到列表顶部实际间隔 = 6(内边距) + 10(spacing) = 16px
         self.verticalLayout_2.setSpacing(0)
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
         self.verticalLayout_2.setContentsMargins(0, 0, 0, 0)
@@ -336,7 +355,7 @@ class Ui_MainWindow(object):
         self.date = CalendarPicker(self.row1_left)
         self.date.setObjectName(u"date")
         self.date.setMinimumWidth(150)
-        self.date.setFixedHeight(32)
+        _fit_toolbar_qf(self.date)
         self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
 
@@ -352,14 +371,14 @@ class Ui_MainWindow(object):
 
         self.write_table = FluentPushButton(self.row1_left)
         self.write_table.setObjectName(u"write_table")
-        self.write_table.setFixedHeight(32)
+        _fit_toolbar_qf(self.write_table)  # 强制 32px 行高，避免 min35>max32 底部露背景
         self.horizontalLayout.addWidget(self.write_table)
 
         # 写入表格：布局调整 — 从第二行移至第一行「打开目录」右侧
         self.btn_write_table = FluentPushButton(
             FluentIcon.DOWNLOAD, "跑视频面板", self.row1_left)
         self.btn_write_table.setObjectName(u"btn_write_table")
-        self.btn_write_table.setFixedHeight(32)
+        _fit_toolbar_qf(self.btn_write_table)
         self.btn_write_table.setToolTip("打开跑视频面板并预填当前球桌会话")
         self.horizontalLayout.addWidget(self.btn_write_table)
 
@@ -414,7 +433,7 @@ class Ui_MainWindow(object):
         self.choose_exe = _create_combo_box(self.row2_left)
         self.choose_exe.setObjectName(u"choose_exe")
         self.choose_exe.setMinimumWidth(145)
-        self.choose_exe.setFixedHeight(32)
+        _fit_toolbar_qf(self.choose_exe)
         self.horizontalLayout2.addWidget(self.choose_exe)
 
         # 帧控制（_ToolbarRadioButton 强制 32px 行高与按钮中线对齐）
@@ -439,23 +458,23 @@ class Ui_MainWindow(object):
 
         self.open_daily = FluentPushButton(self.row2_left)
         self.open_daily.setObjectName(u"open_daily")
-        self.open_daily.setFixedHeight(32)
+        _fit_toolbar_qf(self.open_daily)
         self.horizontalLayout2.addWidget(self.open_daily)
 
         self.start = PrimaryPushButton(self.row2_left)
         self.start.setObjectName(u"start")
-        self.start.setFixedHeight(32)
+        _fit_toolbar_qf(self.start)
         self.horizontalLayout2.addWidget(self.start)
 
         self.pause_btn = FluentPushButton(self.row2_left)
         self.pause_btn.setObjectName(u"pause_btn")
         self.pause_btn.setText("暂停")
-        self.pause_btn.setFixedHeight(32)
+        _fit_toolbar_qf(self.pause_btn)
         self.horizontalLayout2.addWidget(self.pause_btn)
 
         self.start_three_btn = FluentPushButton(self.row2_left)
         self.start_three_btn.setObjectName(u"start_three_btn")
-        self.start_three_btn.setFixedHeight(32)
+        _fit_toolbar_qf(self.start_three_btn)
         self.horizontalLayout2.addWidget(self.start_three_btn)
 
         # 右侧入口组：售后面板 / 运维面板（球桌管理） / 远程
@@ -469,19 +488,19 @@ class Ui_MainWindow(object):
         self.btn_aftersale = FluentPushButton(
             FluentIcon.EDIT, "售后面板", self.row2_right)
         self.btn_aftersale.setObjectName(u"btn_aftersale")
-        self.btn_aftersale.setFixedHeight(32)
+        _fit_toolbar_qf(self.btn_aftersale)
         self.btn_aftersale.setToolTip("打开售后面板（售后记录登记与统计）")
         self.row2_right_layout.addWidget(self.btn_aftersale)
 
         self.table_panel_btn = PrimaryPushButton(self.row2_right)
         self.table_panel_btn.setObjectName(u"table_panel_btn")
-        self.table_panel_btn.setFixedHeight(32)
+        _fit_toolbar_qf(self.table_panel_btn)
         self.row2_right_layout.addWidget(self.table_panel_btn)
 
         self.p2p_btn = ToggleButton(self.row2_right)
         self.p2p_btn.setObjectName(u"p2p_btn")
         self.p2p_btn.setMaximumWidth(72)
-        self.p2p_btn.setFixedHeight(32)
+        _fit_toolbar_qf(self.p2p_btn)
         self.row2_right_layout.addWidget(self.p2p_btn)
 
         self.row2_hbox.addWidget(self.row2_right, 0)
