@@ -36,6 +36,9 @@ def _use_db(monkeypatch, db):
     monkeypatch.setattr(table_db, "DB_PATH", db)
     monkeypatch.setattr(table_db, "_conn", None)
     monkeypatch.setattr(table_db, "_initialized", True)
+    # 环境隔离：settings.json 的 mysql_sync.enabled=true 时 _get_conn 会走
+    # MySQL 分支读真实库，使 DB_PATH/_conn 的 monkeypatch 失效；强制纯 SQLite 模式
+    monkeypatch.setattr(table_db.backend, "is_mysql_test_mode", lambda: False)
 
 
 # ==================== get_latest_kd_status_by_code ====================

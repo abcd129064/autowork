@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem, QSplitter)
-from PySide6.QtCore import Slot, QTimer, Qt, QDate, QProcess, QThread, Signal
+from PySide6.QtCore import Slot, QTimer, Qt, QDate, QDateTime, QProcess, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QTextCharFormat
 from qfluentwidgets import (FluentTitleBar,
     MessageBoxBase, BodyLabel, ComboBox)
@@ -32,6 +32,19 @@ def _match_log_rule(line, rules):
         if r["regex"].search(line):
             return r["color"], r["name"], r["notify"]
     return None, None, False
+
+
+class _DbSettingsDialog(MessageBoxBase):
+    """数据库设置对话框：内嵌 MysqlSyncCard（启用/连接/测试/保存一体）"""
+
+    def __init__(self, card, parent=None):
+        super().__init__(parent)
+        self._card = card
+        self.viewLayout.addWidget(card)
+        self.yesButton.setText("关闭")
+        self.yesButton.setVisible(False)
+        self.cancelButton.setText("关闭")
+        self.widget.setMinimumWidth(460)
 
 
 class _LogLoadWorker(QThread):
@@ -101,6 +114,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 构建 UI（centralwidget 挂到 vBoxLayout 内）
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        # 台账面板单例（延迟创建，与售后面板同模式）
+        self._ledger_panel = None
 
         # 设置窗口标题（显示在 Fluent 标题栏上）
         self.setWindowTitle("AutoWork - 自动化工作工具")
@@ -242,27 +257,96 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._show_info_bar(f"MySQL 周备份完成：{msg}", "success", duration=3000)
 
     def _init_backend_state_monitor(self):
-        """后端状态轮询：降级/恢复时提示用户"""
+        """后端状态轮询：降级/恢复时提示用户，并同步更新右侧数据库状态标签"""
         from database import backend
         self._last_backend_state = backend.get_state()
         self._backend_state_timer = QTimer(self)
         self._backend_state_timer.setInterval(3000)
         self._backend_state_timer.timeout.connect(self._poll_backend_state)
         self._backend_state_timer.start()
+        # 系统时间标签：每秒刷新（右侧信息组）
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(1000)
+        self._clock_timer.timeout.connect(self._refresh_clock)
+        self._clock_timer.start()
+        self._refresh_clock()
+        self._refresh_db_status_text()
+
+    def _refresh_clock(self):
+        """工具栏右侧时间标签：按系统时间刷新 HH:mm:ss"""
+        try:
+            self.ui.time_label.setText(
+                QDateTime.currentDateTime().toString("HH:mm:ss"))
+        except Exception:
+            pass
+
+    def _refresh_db_status_text(self):
+        """数据库状态标签：MySQL 在线 / SQLite 兜底（跟随后端状态）"""
+        from database import backend
+        label = self.ui.db_status_label
+        if backend.get_state() == backend.STATE_ONLINE:
+            label.setText("数据库: MySQL 在线")
+            label.setStyleSheet("color: #1D9E75;")
+        else:
+            label.setText("数据库: SQLite 兜底")
+            label.setStyleSheet("color: #BA7517;")
 
     def _poll_backend_state(self):
-        """轮询后端状态，变化时提示"""
+        """轮询后端状态，变化时提示并刷新右侧标签"""
         from database import backend
         cur = backend.get_state()
-        if cur == self._last_backend_state:
+        if cur != self._last_backend_state:
+            prev = self._last_backend_state
+            self._last_backend_state = cur
+            if cur == backend.STATE_DEGRADED:
+                self._show_info_bar("MySQL 不可用，已切换本地 SQLite 兜底",
+                                    "warning", duration=5000)
+            elif cur == backend.STATE_ONLINE and prev == backend.STATE_DEGRADED:
+                self._show_info_bar("MySQL 已恢复在线", "success", duration=3000)
+            self._refresh_db_status_text()
+
+    def _db_test_cfg(self) -> dict:
+        """从 settings 读取 mysql_sync 连接配置（敏感字段透明解密）"""
+        try:
+            from core.secrets import decrypt_settings
+            raw = self._load_settings()
+            if isinstance(raw, dict) and "mysql_sync" in raw:
+                dec = decrypt_settings(raw)
+                return dict(dec.get("mysql_sync") or {})
+            return dict(raw.get("mysql_sync") or {})
+        except Exception:
+            return {}
+
+    def _on_db_status_clicked(self):
+        """左键点击数据库状态：后台测试 MySQL 连通性并提示"""
+        if getattr(self, "_db_test_worker", None) and self._db_test_worker.isRunning():
+            self._show_info_bar("已有测试进行中，请稍候", "warning", duration=2000)
             return
-        prev = self._last_backend_state
-        self._last_backend_state = cur
-        if cur == backend.STATE_DEGRADED:
-            self._show_info_bar("MySQL 不可用，已切换本地 SQLite 兜底",
-                                "warning", duration=5000)
-        elif cur == backend.STATE_ONLINE and prev == backend.STATE_DEGRADED:
-            self._show_info_bar("MySQL 已恢复在线", "success", duration=3000)
+        cfg = self._db_test_cfg()
+        from workers.mysql_sync_worker import MysqlTestWorker
+        self._db_test_worker = MysqlTestWorker(cfg, self)
+        self._db_test_worker.finished.connect(self._on_db_test_done)
+        self._db_test_worker.start()
+        self._append_log("[数据库] 正在测试连接...")
+
+    def _on_db_test_done(self, ok, msg):
+        self._refresh_db_status_text()
+        if ok:
+            self._append_log(f"[数据库] 连接成功: {msg}")
+            self._show_info_bar(msg, "success", title="MySQL 连接成功",
+                                duration=3000)
+        else:
+            self._append_log(f"[数据库] 连接失败: {msg}")
+            self._show_info_bar(msg, "error", title="MySQL 连接失败",
+                                duration=4000)
+
+    def _on_open_db_settings(self):
+        """右键点击数据库状态：打开数据库设置对话框（复用 MysqlSyncCard）"""
+        from windows.mysql_sync_card import MysqlSyncCard
+        card = MysqlSyncCard(self, sync_scope="ops")
+        card.load()
+        dlg = _DbSettingsDialog(card, self)
+        dlg.exec()
 
     def connect_signals(self):
         """连接信号和槽"""
@@ -274,6 +358,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.ui.pause_btn.clicked.connect(self._on_pause_clicked)
         # 球桌管理面板入口
         self.ui.table_panel_btn.clicked.connect(lambda: QTimer.singleShot(0, self._on_open_table_panel))
+        # 售后面板入口（右侧入口组）
+        self.ui.btn_aftersale.clicked.connect(
+            lambda: QTimer.singleShot(0, self._on_open_aftersale))
+        # 数据库状态标签：左键测连通性 / 右键进数据库设置
+        self.ui.db_status_label.leftClicked.connect(self._on_db_status_clicked)
+        self.ui.db_status_label.rightClicked.connect(
+            lambda: QTimer.singleShot(0, self._on_open_db_settings))
         # 列表项选择事件
         self.ui.id_list.currentItemChanged.connect(self._on_id_current_changed)
         self.ui.local_video_list.currentItemChanged.connect(self._on_video_current_changed)
@@ -305,6 +396,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         # 启动三端按钮
         self.ui.start_three_btn.clicked.connect(self.on_start_three_clicked)
+
+        # 写入台账按钮（打开台账面板并预填当前球桌会话，表单确认后入库）
+        self.ui.btn_write_table.clicked.connect(self._on_open_ledger)
 
         # 帧数输入框回车确认：恢复焦点到原位，便于空格直接播放
         self.ui.input_frame.returnPressed.connect(self._on_frame_input_confirmed)
@@ -974,6 +1068,67 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
         os.startfile(device_dir)
         self._append_log(f"[打开目录] {device_dir}")
+
+    # ==================== 写入台账 ====================
+
+    def _current_ledger_context(self) -> dict:
+        """收集当前球桌会话上下文（供台账面板填写录入页预填）。
+
+        球房取当前选中设备代码；视频名取第二列当前日志文件名；
+        帧数取帧输入框（默认 400）；署名取 settings newlog_target_name。
+        分类默认「问题」（主界面入口通常记问题，面板内可修改）。
+        """
+        device_code = (self.ui.id_list.currentItem().text()
+                       if self.ui.id_list.currentItem() else "")
+        video_item = self.ui.local_video_list.currentItem()
+        video_name = video_item.text() if video_item else ""
+        try:
+            frame = str(int(self.ui.input_frame.text().strip() or 400))
+        except ValueError:
+            frame = "400"
+        sig = ""
+        try:
+            from core.app_paths import get_app_dir
+            import json
+            with open(os.path.join(get_app_dir(), "settings.json"),
+                      "r", encoding="utf-8") as f:
+                sig = str(json.load(f).get("newlog_target_name", "") or "")
+        except Exception:
+            pass
+        return {
+            "category": "问题",
+            "room_name": device_code,
+            "video_name": video_name,
+            "frame": frame,
+            "signer": sig,
+        }
+
+    @Slot()
+    def _on_open_ledger(self):
+        """写入台账：打开台账面板并预填当前球桌会话（表单确认后入库）
+
+        替代旧的「保存对话框 + 本地 xlsx 追加」流程：数据经
+        ledger_db 双后端路由写入（MySQL 开启时即服务器），面板内
+        可编辑字段、筛选/分页/统计，多人协作刷新可见。
+        """
+        if not self.ui.id_list.currentItem():
+            self._append_log("[提示] 请先选择设备代码")
+            self._show_info_bar("请先选择设备代码", "warning")
+            return
+        from windows.ledger_panel import LedgerPanelWindow
+        if not hasattr(self, '_ledger_panel') or self._ledger_panel is None:
+            # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上
+            self._ledger_panel = LedgerPanelWindow()
+            self._ledger_panel.destroyed.connect(
+                lambda: setattr(self, '_ledger_panel', None))
+        self._ledger_panel.show()
+        self._ledger_panel.raise_()
+        self._ledger_panel.activateWindow()
+        ctx = self._current_ledger_context()
+        self._ledger_panel.open_entry_with_context(ctx)
+        self._append_log(
+            f"[写入台账] 已打开台账面板并预填会话: 球房={ctx['room_name']} "
+            f"视频={ctx['video_name']} 帧={ctx['frame']}")
 
     @Slot()
     def _open_config_file(self, name: str):

@@ -165,6 +165,25 @@ CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
 CREATE INDEX IF NOT EXISTS idx_aftersale_table_no
     ON aftersale_records(table_no);
 """,
+    "ledger_records": """
+CREATE TABLE IF NOT EXISTS ledger_records (
+    id INTEGER PRIMARY KEY,
+    category TEXT DEFAULT '',
+    kind TEXT DEFAULT '',
+    room_name TEXT DEFAULT '',
+    video_name TEXT DEFAULT '',
+    frame TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    repro TEXT DEFAULT '',
+    new_program TEXT DEFAULT '',
+    remark TEXT DEFAULT '',
+    signer TEXT DEFAULT '',
+    created_at TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_category ON ledger_records(category, id);
+CREATE INDEX IF NOT EXISTS idx_ledger_signer ON ledger_records(signer);
+""",
 }
 
 # ==================== GOLDEN 基线：MySQL DDL（复制自 backend.MYSQL_DDL） ====================
@@ -312,6 +331,25 @@ GOLDEN_MYSQL_DDL = {
             INDEX idx_aftersale_table_no (table_no)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    "ledger_records": """
+        CREATE TABLE IF NOT EXISTS ledger_records (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            category VARCHAR(32) DEFAULT '',
+            kind VARCHAR(255) DEFAULT '',
+            room_name VARCHAR(255) DEFAULT '',
+            video_name VARCHAR(512) DEFAULT '',
+            frame VARCHAR(32) DEFAULT '',
+            description TEXT,
+            repro TEXT,
+            new_program VARCHAR(32) DEFAULT '',
+            remark TEXT,
+            signer VARCHAR(64) DEFAULT '',
+            created_at VARCHAR(32) DEFAULT '',
+            updated_at VARCHAR(32) DEFAULT '',
+            INDEX idx_ledger_category (category),
+            INDEX idx_ledger_signer (signer)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 }
 
 
@@ -320,12 +358,12 @@ def normalize(sql: str) -> str:
     return re.sub(r"\s+", " ", sql.strip())
 
 
-def test_table_names_cover_all_eight_tables():
-    """TABLE_NAMES 覆盖全部 8 张双方言表"""
+def test_table_names_cover_all_nine_tables():
+    """TABLE_NAMES 覆盖全部 9 张双方言表"""
     assert schema.TABLE_NAMES == [
         "billiard_tables", "sync_meta", "xqzg_status", "kd_status",
         "submission_log", "device_mapping", "health_alerts",
-        "aftersale_records",
+        "aftersale_records", "ledger_records",
     ]
     assert set(schema.TABLE_NAMES) == set(GOLDEN_SQLITE_DDL) == set(GOLDEN_MYSQL_DDL)
 
@@ -372,6 +410,11 @@ def test_sqlite_ddl_aftersale_records():
         GOLDEN_SQLITE_DDL["aftersale_records"])
 
 
+def test_sqlite_ddl_ledger_records():
+    assert normalize(schema.to_sqlite_ddl("ledger_records")) == normalize(
+        GOLDEN_SQLITE_DDL["ledger_records"])
+
+
 # ==================== MySQL 方言逐表等价 ====================
 
 def test_mysql_ddl_billiard_tables():
@@ -412,6 +455,11 @@ def test_mysql_ddl_health_alerts():
 def test_mysql_ddl_aftersale_records():
     assert normalize(schema.to_mysql_ddl("aftersale_records")) == normalize(
         GOLDEN_MYSQL_DDL["aftersale_records"])
+
+
+def test_mysql_ddl_ledger_records():
+    assert normalize(schema.to_mysql_ddl("ledger_records")) == normalize(
+        GOLDEN_MYSQL_DDL["ledger_records"])
 
 
 # ==================== 漂移修复回归 ====================

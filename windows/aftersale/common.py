@@ -266,6 +266,9 @@ class YesNoSegment(SegmentedWidget):
     currentText 一致（"是"/"否"），collect/set_values 无感知。
     include_all=True 时追加「全部」段（value() 返回空串），供筛选
     场景复用同一组件，默认保持二值。
+    三态统一库默认外观：旧版选「是」时主动 setStyleSheet 染语义绿底，
+    但 SegmentedItem 选中态是库 paintEvent 硬画（QSS 选择器不生效），
+    实际只剩整条绿矩形底、观感像 bug，已移除染色逻辑。
     """
 
     _DEFAULT = "否"
@@ -279,21 +282,6 @@ class YesNoSegment(SegmentedWidget):
         self.addItem("是", "是")
         self.setCurrentItem(default)
         self.setFixedHeight(30)
-        self.currentItemChanged.connect(lambda _k: self._restyle())
-        self._restyle()
-
-    def _restyle(self):
-        """选中「是」时整段染成功绿（Fluent 语义色），「否」/「全部」保持默认灰"""
-        val = self.value()
-        ok = SEMANTIC["success"]
-        if val == "是":
-            self.setStyleSheet(
-                f"SegmentedWidget {{ background: {_hex_rgba(ok, 16)}; }}"
-                f"SegmentedItem {{ background: transparent; color: {ok}; }}"
-                f"SegmentedItem[selected=true] {{ background: {ok};"
-                " color: #ffffff; border-radius: 4px; }")
-        else:
-            self.setStyleSheet("")
 
     def value(self) -> str:
         key = self.currentRouteKey()

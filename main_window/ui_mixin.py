@@ -1551,6 +1551,11 @@ class UIMixin:
             self._save_settings(new_data)
             self._reload_settings_cache()
             self._load_paths()
+            # SQL 同步分区被打开过：让 backend 各线程按新配置重建连接
+            # （与卡片内「保存配置」等效，避免继续使用旧 host/账号/开关）
+            if getattr(dlg, "_sql_built", False):
+                from database import backend
+                backend.invalidate_mysql_settings_cache()
             # 日志高亮规则即时生效：notify/颜色/正则改动无需重启
             # （_log_rules 是渲染与通知共用的编译结果，不刷新则旧规则仍生效）
             self._log_rules = _compile_log_rules(

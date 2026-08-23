@@ -213,6 +213,10 @@ _CREATE_MAPPING_SQL = schema.to_sqlite_ddl("device_mapping")
 
 _CREATE_AFTERSALE_SQL = schema.to_sqlite_ddl("aftersale_records")
 
+# ==================== 台账记录表（台账/问题记录面板，双后端） ====================
+
+_CREATE_LEDGER_SQL = schema.to_sqlite_ddl("ledger_records")
+
 # 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
 # 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
 # 反序列化大量 JSON 带来的 CPU/内存开销
@@ -267,11 +271,13 @@ def _ensure_initialized(conn):
     conn.executescript(_CREATE_MAPPING_SQL)
     conn.executescript(_CREATE_HEALTH_ALERT_SQL)
     conn.executescript(_CREATE_AFTERSALE_SQL)
+    conn.executescript(_CREATE_LEDGER_SQL)
     # 迁移：旧库按 schema.MIGRATIONS 注册表补列（列级元数据单一来源）。
     # 简单补列表（aftersale_records / kd_status / xqzg_status）统一走
     # _migrate_sqlite_add_columns；billiard_tables 因带回填/FTS 副作用
     # 在下方单独处理。
     _migrate_sqlite_add_columns(conn, "aftersale_records")
+    _migrate_sqlite_add_columns(conn, "ledger_records")
     _migrate_sqlite_add_columns(conn, "kd_status")
     _migrate_sqlite_add_columns(conn, "xqzg_status")
     # 迁移修复：若 billiard_tables 被误改为新字段（缺少 name 列），DROP 重建

@@ -69,6 +69,7 @@ class SettingsDialog(MessageBoxBase):
     _SECTIONS = [
         ("paths", "路径配置"),
         ("remote", "远程连接"),
+        ("sql", "SQL 同步"),
         ("upload", "收集与上传"),
         ("ai", "API Key"),
         ("log_rules", "日志高亮"),
@@ -189,6 +190,14 @@ class SettingsDialog(MessageBoxBase):
                        lambda cfg: list(cfg.get("log_highlight_rules",
                                                 _DEFAULT_LOG_RULES))))
 
+        # SQL 同步（1项，嵌套字典）—— 复用 MysqlSyncCard 表单（运维业务数据）
+        # widget_fn 返回 self 当分区已构建：reader 从卡片收集表单值，
+        # 未构建时回退原始配置（与 frpc/ai_api_keys 同一特殊模式）
+        items.append(("mysql_sync", "sql",
+                       lambda s: getattr(s, '_sql_built', False) and s or None,
+                       lambda s: s._mysql_card._collect_cfg(),
+                       lambda cfg: dict(cfg.get("mysql_sync", {}) or {})))
+
         # 外观（3项）
         items.append(("font_size", "appearance",
                        lambda s: getattr(s, '_spin_font_size', None),
@@ -224,6 +233,7 @@ class SettingsDialog(MessageBoxBase):
         self._pages = {}       # key -> 占位页 widget
         self._frpc_built = False  # FRPC 分区是否已构建
         self._ai_built = False    # AI 分析分区是否已构建
+        self._sql_built = False   # SQL 同步分区是否已构建
 
         # Pivot 分页导航 + 页面堆栈（页面控件首次切入时才创建）
         self.pivot = Pivot(self)
@@ -353,6 +363,21 @@ class SettingsDialog(MessageBoxBase):
 
         self.main_layout.addLayout(frpc_form)
         self._frpc_built = True
+
+    # ---------- SQL 同步（复用 MysqlSyncCard，与运维/售后面板同一组件） ----------
+    def _build_sql_section(self, cfg):
+        """SQL 同步分区：内嵌 MysqlSyncCard（启用开关 + 连接表单 + 测试/保存）
+
+        保存走统一「保存」按钮（collect 收集 mysql_sync 配置，密码 DPAPI
+        加密落盘）；卡片内「保存配置」按钮保留，两路径都写同一配置键。
+        """
+        from windows.mysql_sync_card import MysqlSyncCard
+
+        card = MysqlSyncCard(self, sync_scope="ops")
+        card.load()
+        self._mysql_card = card
+        self.main_layout.addWidget(card)
+        self._sql_built = True
 
     # ---------- 收集与上传 ----------
     def _build_upload_section(self, cfg):

@@ -24,6 +24,7 @@ from datetime import datetime
 
 from database import aftersale_db
 from database import backend
+from database import ledger_db
 from database.sqlite_io import read_sqlite_table
 from database.table_db import DB_PATH
 
@@ -114,6 +115,53 @@ def merge_aftersale(mysql_conn, progress_cb=None) -> int:
     mysql_conn.commit()
     if progress_cb:
         progress_cb(f"aftersale: 新增 {inserted}，更新 {updated}，跳过 {skipped}")
+    return inserted + updated
+
+
+def merge_ledger(mysql_conn, progress_cb=None) -> int:
+    """台账 LWW 合并：按业务键匹配，updated_at 较新者覆盖较旧者
+
+    与 merge_aftersale 同套路，业务键为 ledger_db.RECORD_KEY_COLS。
+    """
+    cols = tuple(ledger_db.RECORD_FIELDS) + ("updated_at",)
+    rows = _read_rows_as_tuples("ledger_records", cols)
+    if not rows:
+        return 0
+    key_cols = ledger_db.RECORD_KEY_COLS
+    cols_str = ", ".join(f"`{c}`" for c in cols)
+    ph = ", ".join(["%s"] * len(cols))
+    insert_sql = (f"INSERT INTO `ledger_records` ({cols_str}) "
+                  f"VALUES ({ph})")
+    non_key = [c for c in cols if c not in key_cols]
+    set_str = ", ".join(f"`{c}` = %s" for c in non_key)
+    key_where = " AND ".join(f"`{c}` = %s" for c in key_cols)
+    update_sql = (f"UPDATE `ledger_records` SET {set_str} "
+                  f"WHERE {key_where}")
+    sel_sql = (f"SELECT updated_at FROM `ledger_records` "
+               f"WHERE {key_where} LIMIT 1")
+    inserted = updated = skipped = 0
+    with mysql_conn.cursor() as cur:
+        for r in rows:
+            d = dict(zip(cols, r))
+            keys = [d[c] for c in key_cols]
+            cur.execute(sel_sql, keys)
+            exist = cur.fetchone()
+            local_ts = _parse_dt(d.get("updated_at"))
+            if exist:
+                remote_ts = _parse_dt(exist[0] if isinstance(exist, tuple)
+                                      else exist.get("updated_at"))
+                if local_ts > remote_ts:
+                    vals = [d[c] for c in non_key] + keys
+                    cur.execute(update_sql, vals)
+                    updated += 1
+                else:
+                    skipped += 1  # MySQL 较新，不覆盖
+            else:
+                cur.execute(insert_sql, [d[c] for c in cols])
+                inserted += 1
+    mysql_conn.commit()
+    if progress_cb:
+        progress_cb(f"ledger: 新增 {inserted}，更新 {updated}，跳过 {skipped}")
     return inserted + updated
 
 
@@ -216,6 +264,7 @@ def merge_back(progress_cb=None) -> tuple:
     try:
         n = 0
         n += merge_aftersale(mysql_conn, progress_cb)
+        n += merge_ledger(mysql_conn, progress_cb)
         n += merge_device_mapping(mysql_conn, progress_cb)
         n += merge_ops_tables(mysql_conn, progress_cb)
         return True, f"合并完成，共 {n} 条", n

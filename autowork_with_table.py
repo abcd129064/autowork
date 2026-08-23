@@ -8,7 +8,7 @@
 
 from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QEvent, QLocale,
     QMetaObject, QObject, QPoint, QRect,
-    QSize, QTime, QTimer, QUrl, Qt)
+    QSize, QTime, QTimer, QUrl, Qt, Signal)
 from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QFont, QFontDatabase, QGradient, QIcon,
     QImage, QKeySequence, QLinearGradient, QPainter,
@@ -203,6 +203,28 @@ class _ToolbarRadioButton(RadioButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         setCustomStyleSheet(self, self._HEIGHT_QSS, self._HEIGHT_QSS)
+        # 圆圈圆心跟随 32px 中线：qfluentwidgets RadioButton 的 indicatorPos
+        # 硬编码 QPoint(11, 12)（默认 24px 高度的中线），强制 32px 高后文本
+        # 靠 AlignVCenter 居中而圆圈仍停在 y=12 偏上；覆写为 16 使圆圈垂直居中
+        self.indicatorPos = QPoint(11, 16)
+
+
+class _ClickableLabel(QLabel):
+    """可点击 QLabel：leftClicked/rightClicked 信号，供数据库状态等控件使用"""
+
+    leftClicked = Signal()
+    rightClicked = Signal()
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.leftClicked.emit()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.rightClicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 from core.flow_widgets import FlowToolbarScrollArea as _FlowScrollArea
@@ -279,102 +301,191 @@ class Ui_MainWindow(object):
 
         self.toolbar_widget = QWidget()
         self.toolbar_widget.setObjectName(u"toolbar_widget")
-        self.horizontalLayout = FlowLayout(self.toolbar_widget)
+        # 两行工具栏：每行 = 行容器(QHBoxLayout)，左侧 FlowLayout 容器可伸缩换行，
+        # 右侧固定贴右。注意 FlowLayout 只能作为 widget 的直接 layout，
+        # 不能嵌套进 QHBoxLayout（eventFilter 析构会访问已删 item 崩溃）
+        self.toolbar_vbox = QVBoxLayout(self.toolbar_widget)
+        self.toolbar_vbox.setContentsMargins(10, 6, 10, 6)
+        # 两行行距归零：旧值 6px 叠加 FlowLayout 默认 9px 内边距，使两层控件
+        # 之间出现 6-8px（视觉更大）的多余间隙；归零后两行控件紧贴无额外间距
+        self.toolbar_vbox.setSpacing(0)
+
+        # ============ 第一行：左侧 刷新/日期/目录/写入表格 + 右侧 时间/数据库状态 ============
+        self.row1_container = QWidget(self.toolbar_widget)
+        self.row1_container.setObjectName(u"row1_container")
+        self.row1_hbox = QHBoxLayout(self.row1_container)
+        self.row1_hbox.setContentsMargins(0, 0, 0, 0)
+        self.row1_hbox.setSpacing(8)
+
+        self.row1_left = QWidget(self.row1_container)
+        self.row1_left.setObjectName(u"row1_left")
+        self.horizontalLayout = FlowLayout(self.row1_left)
         self.horizontalLayout.setObjectName(u"horizontalLayout")
+        # FlowLayout 默认 9px 内边距归零：行高从 50 收回 32，控件填满整行
+        # 自然垂直居中，行上下不再留白（左右箭头等不再受行内留白影响偏移）
+        self.horizontalLayout.setContentsMargins(0, 0, 0, 0)
         self.horizontalLayout.setHorizontalSpacing(6)
         self.horizontalLayout.setVerticalSpacing(6)
-        self.horizontalLayout.setContentsMargins(10, 6, 10, 6)
+        self.row1_hbox.addWidget(self.row1_left, 1)
 
-        # --- 组1: 文件操作 ---
-        self.flush = ToolButton(FluentIcon.SYNC, self.toolbar_widget)
+        self.flush = ToolButton(FluentIcon.SYNC, self.row1_left)
         self.flush.setObjectName(u"flush")
         self.flush.setFixedSize(32, 32)
         self.horizontalLayout.addWidget(self.flush)
 
-        self.date = CalendarPicker(self.toolbar_widget)
+        self.date = CalendarPicker(self.row1_left)
         self.date.setObjectName(u"date")
         self.date.setMinimumWidth(150)
+        self.date.setFixedHeight(32)
         self.date.setDate(QDate(2000, 10, 7))
         self.horizontalLayout.addWidget(self.date)
 
         # 日期步进键（复用运维面板 DevicePage 模式：前一天/后一天）
-        self.date_prev = ToolButton(FluentIcon.LEFT_ARROW, self.toolbar_widget)
+        self.date_prev = ToolButton(FluentIcon.LEFT_ARROW, self.row1_left)
         self.date_prev.setObjectName(u"date_prev")
         self.date_prev.setFixedSize(26, 32)
         self.horizontalLayout.addWidget(self.date_prev)
-        self.date_next = ToolButton(FluentIcon.RIGHT_ARROW, self.toolbar_widget)
+        self.date_next = ToolButton(FluentIcon.RIGHT_ARROW, self.row1_left)
         self.date_next.setObjectName(u"date_next")
         self.date_next.setFixedSize(26, 32)
         self.horizontalLayout.addWidget(self.date_next)
 
-        self.table_panel_btn = PrimaryPushButton(self.toolbar_widget)
-        self.table_panel_btn.setObjectName(u"table_panel_btn")
-        self.horizontalLayout.addWidget(self.table_panel_btn)
-
-        self.write_table = FluentPushButton(self.toolbar_widget)
+        self.write_table = FluentPushButton(self.row1_left)
         self.write_table.setObjectName(u"write_table")
+        self.write_table.setFixedHeight(32)
         self.horizontalLayout.addWidget(self.write_table)
 
-        # 「配置」按钮已迁移至第二行菜单栏「配置」下拉菜单，此处不再创建
+        # 写入表格：布局调整 — 从第二行移至第一行「打开目录」右侧
+        self.btn_write_table = FluentPushButton(
+            FluentIcon.DOWNLOAD, "跑视频面板", self.row1_left)
+        self.btn_write_table.setObjectName(u"btn_write_table")
+        self.btn_write_table.setFixedHeight(32)
+        self.btn_write_table.setToolTip("打开跑视频面板并预填当前球桌会话")
+        self.horizontalLayout.addWidget(self.btn_write_table)
 
-        self.horizontalLayout.addWidget(_make_separator(vertical=True))
+        # 右侧信息组：系统时间 + 数据库连接状态（布局调整 — 与入口组对调至第一行；
+        # 左键测试连通性，右键进数据库设置）
+        self.row1_right = QWidget(self.row1_container)
+        self.row1_right.setObjectName(u"row1_right")
+        self.row1_right_layout = QHBoxLayout(self.row1_right)
+        self.row1_right_layout.setContentsMargins(0, 0, 0, 0)
+        self.row1_right_layout.setSpacing(8)
+        self.time_label = _ClickableLabel("--:--:--", self.row1_right)
+        self.time_label.setObjectName(u"time_label")
+        self.time_label.setFixedHeight(32)
+        self.time_label.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        self.row1_right_layout.addWidget(self.time_label)
 
-        # --- 组2: 程序配置 ---
-        self.label_2 = QLabel(self.toolbar_widget)
+        self.db_status_label = _ClickableLabel(
+            "数据库: 检查中", self.row1_right)
+        self.db_status_label.setObjectName(u"db_status_label")
+        self.db_status_label.setFixedHeight(32)
+        self.db_status_label.setToolTip("左键：测试数据库连通性；右键：打开数据库设置")
+        self.row1_right_layout.addWidget(self.db_status_label)
+
+        self.row1_hbox.addWidget(self.row1_right, 0)
+        self.toolbar_vbox.addWidget(self.row1_container)
+
+        # ============ 第二行：左侧 程序/帧控/播放 + 右侧 售后面板/球桌管理/远程 ============
+        self.row2_container = QWidget(self.toolbar_widget)
+        self.row2_container.setObjectName(u"row2_container")
+        self.row2_hbox = QHBoxLayout(self.row2_container)
+        self.row2_hbox.setContentsMargins(0, 0, 0, 0)
+        self.row2_hbox.setSpacing(8)
+
+        self.row2_left = QWidget(self.row2_container)
+        self.row2_left.setObjectName(u"row2_left")
+        self.horizontalLayout2 = FlowLayout(self.row2_left)
+        self.horizontalLayout2.setObjectName(u"horizontalLayout2")
+        # 同第一行：默认 9px 内边距归零，行高收回 32，帧前/帧后等控件垂直居中
+        self.horizontalLayout2.setContentsMargins(0, 0, 0, 0)
+        self.horizontalLayout2.setHorizontalSpacing(6)
+        self.horizontalLayout2.setVerticalSpacing(6)
+        self.row2_hbox.addWidget(self.row2_left, 1)
+
+        self.label_2 = QLabel(self.row2_left)
         self.label_2.setObjectName(u"label_2")
         self.label_2.setFixedHeight(32)
         self.label_2.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         setFont(self.label_2, 11)
-        self.horizontalLayout.addWidget(self.label_2)
+        self.horizontalLayout2.addWidget(self.label_2)
 
-        self.choose_exe = _create_combo_box(self.toolbar_widget)
+        self.choose_exe = _create_combo_box(self.row2_left)
         self.choose_exe.setObjectName(u"choose_exe")
         self.choose_exe.setMinimumWidth(145)
-        self.horizontalLayout.addWidget(self.choose_exe)
+        self.choose_exe.setFixedHeight(32)
+        self.horizontalLayout2.addWidget(self.choose_exe)
 
         # 帧控制（_ToolbarRadioButton 强制 32px 行高与按钮中线对齐）
-        self.input_frame_before = _ToolbarRadioButton(self.toolbar_widget)
+        self.input_frame_before = _ToolbarRadioButton(self.row2_left)
         self.input_frame_before.setObjectName(u"input_frame_before")
         self.input_frame_before.setChecked(True)
-        self.horizontalLayout.addWidget(self.input_frame_before)
+        self.horizontalLayout2.addWidget(self.input_frame_before)
 
-        self.input_frame_set = _ToolbarRadioButton(self.toolbar_widget)
+        self.input_frame_set = _ToolbarRadioButton(self.row2_left)
         self.input_frame_set.setObjectName(u"input_frame_set")
-        self.horizontalLayout.addWidget(self.input_frame_set)
+        self.horizontalLayout2.addWidget(self.input_frame_set)
 
-        self.input_frame_custom = _ToolbarRadioButton(self.toolbar_widget)
+        self.input_frame_custom = _ToolbarRadioButton(self.row2_left)
         self.input_frame_custom.setObjectName(u"input_frame_custom")
-        self.horizontalLayout.addWidget(self.input_frame_custom)
+        self.horizontalLayout2.addWidget(self.input_frame_custom)
 
-        self.input_frame = FluentLineEdit(self.toolbar_widget)
+        self.input_frame = FluentLineEdit(self.row2_left)
         self.input_frame.setObjectName(u"input_frame")
         self.input_frame.setFixedWidth(75)
-        self.horizontalLayout.addWidget(self.input_frame)
+        self.input_frame.setFixedHeight(32)
+        self.horizontalLayout2.addWidget(self.input_frame)
 
-        self.horizontalLayout.addWidget(_make_separator(vertical=True))
-
-        # --- 组3: 播放控制 ---
-        self.open_daily = FluentPushButton(self.toolbar_widget)
+        self.open_daily = FluentPushButton(self.row2_left)
         self.open_daily.setObjectName(u"open_daily")
-        self.horizontalLayout.addWidget(self.open_daily)
+        self.open_daily.setFixedHeight(32)
+        self.horizontalLayout2.addWidget(self.open_daily)
 
-        self.start = PrimaryPushButton(self.toolbar_widget)
+        self.start = PrimaryPushButton(self.row2_left)
         self.start.setObjectName(u"start")
-        self.horizontalLayout.addWidget(self.start)
+        self.start.setFixedHeight(32)
+        self.horizontalLayout2.addWidget(self.start)
 
-        self.pause_btn = FluentPushButton(self.toolbar_widget)
+        self.pause_btn = FluentPushButton(self.row2_left)
         self.pause_btn.setObjectName(u"pause_btn")
         self.pause_btn.setText("暂停")
-        self.horizontalLayout.addWidget(self.pause_btn)
+        self.pause_btn.setFixedHeight(32)
+        self.horizontalLayout2.addWidget(self.pause_btn)
 
-        self.start_three_btn = FluentPushButton(self.toolbar_widget)
+        self.start_three_btn = FluentPushButton(self.row2_left)
         self.start_three_btn.setObjectName(u"start_three_btn")
-        self.horizontalLayout.addWidget(self.start_three_btn)
+        self.start_three_btn.setFixedHeight(32)
+        self.horizontalLayout2.addWidget(self.start_three_btn)
 
-        self.p2p_btn = ToggleButton(self.toolbar_widget)
+        # 右侧入口组：售后面板 / 运维面板（球桌管理） / 远程
+        # （布局调整 — 与第一行信息组对调，从第一行移至第二行）
+        self.row2_right = QWidget(self.row2_container)
+        self.row2_right.setObjectName(u"row2_right")
+        self.row2_right_layout = QHBoxLayout(self.row2_right)
+        self.row2_right_layout.setContentsMargins(0, 0, 0, 0)
+        self.row2_right_layout.setSpacing(6)
+
+        self.btn_aftersale = FluentPushButton(
+            FluentIcon.EDIT, "售后面板", self.row2_right)
+        self.btn_aftersale.setObjectName(u"btn_aftersale")
+        self.btn_aftersale.setFixedHeight(32)
+        self.btn_aftersale.setToolTip("打开售后面板（售后记录登记与统计）")
+        self.row2_right_layout.addWidget(self.btn_aftersale)
+
+        self.table_panel_btn = PrimaryPushButton(self.row2_right)
+        self.table_panel_btn.setObjectName(u"table_panel_btn")
+        self.table_panel_btn.setFixedHeight(32)
+        self.row2_right_layout.addWidget(self.table_panel_btn)
+
+        self.p2p_btn = ToggleButton(self.row2_right)
         self.p2p_btn.setObjectName(u"p2p_btn")
         self.p2p_btn.setMaximumWidth(72)
-        self.horizontalLayout.addWidget(self.p2p_btn)
+        self.p2p_btn.setFixedHeight(32)
+        self.row2_right_layout.addWidget(self.p2p_btn)
+
+        self.row2_hbox.addWidget(self.row2_right, 0)
+        self.toolbar_vbox.addWidget(self.row2_container)
 
         self.toolbar_scroll.setWidget(self.toolbar_widget)
         self.verticalLayout_2.addWidget(self.toolbar_scroll)
@@ -647,6 +758,8 @@ class Ui_MainWindow(object):
         self.pause_btn.setText(QCoreApplication.translate("MainWindow", u"暂停", None))
         self.start_three_btn.setText(QCoreApplication.translate("MainWindow", u"启动三端", None))
         self.p2p_btn.setText(QCoreApplication.translate("MainWindow", u"远程", None))
+        self.btn_write_table.setText(QCoreApplication.translate("MainWindow", u"跑视频面板", None))
+        self.btn_aftersale.setText(QCoreApplication.translate("MainWindow", u"售后面板", None))
     # retranslateUi
 
     # ================================================================

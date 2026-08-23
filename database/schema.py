@@ -60,6 +60,7 @@ TABLE_NAMES: List[str] = [
     "device_mapping",
     "health_alerts",
     "aftersale_records",
+    "ledger_records",
 ]
 
 # MySQL 保留字列：生成 MySQL DDL 时列名需加反引号（与 backend 转换器
@@ -251,6 +252,26 @@ TABLE_COLUMNS = {
         ColumnDef("cycle_start", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
+    # 台账记录（台账/问题记录面板，双后端）：字段来源 在线模板.xlsx 的
+    # 问题/未复现/精度/使用 四个数据 sheet（sheet 名即 category 分类；
+    # 精度/使用 多一列「复现」）。description/repro/remark 为长文本，
+    # MySQL TEXT 不允许 DEFAULT 子句（与 aftersale_records 口径一致）。
+    "ledger_records": [
+        ColumnDef("id", "INTEGER", "INT", sqlite_extra="PRIMARY KEY",
+                  mysql_extra="AUTO_INCREMENT PRIMARY KEY"),
+        ColumnDef("category", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("kind", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("room_name", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("video_name", "TEXT", "VARCHAR(512)", "''", "''"),
+        ColumnDef("frame", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("description", "TEXT", "TEXT", "''", None),
+        ColumnDef("repro", "TEXT", "TEXT", "''", None),
+        ColumnDef("new_program", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("remark", "TEXT", "TEXT", "''", None),
+        ColumnDef("signer", "TEXT", "VARCHAR(64)", "''", "''"),
+        ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
+    ],
 }
 
 # ==================== 索引元数据（单一来源） ====================
@@ -274,6 +295,13 @@ TABLE_INDEXES = {
                  "idx_aftersale_cycle", ("cycle_start",)),
         IndexDef("idx_aftersale_table_no", ("table_no",),
                  "idx_aftersale_table_no", ("table_no",)),
+    ],
+    "ledger_records": [
+        # 分类筛选与署名统计（模板「计数」sheet 按署名汇总四分类）
+        IndexDef("idx_ledger_category", ("category", "id"),
+                 "idx_ledger_category", ("category",)),
+        IndexDef("idx_ledger_signer", ("signer",),
+                 "idx_ledger_signer", ("signer",)),
     ],
 }
 

@@ -1,0 +1,92 @@
+# -*- coding: utf-8 -*-
+"""台账面板：设置页（默认署名 + 数据库设置）
+
+默认署名读写 settings.json 的 newlog_target_name（与主界面
+NewLog 批量整理共用同一键，_default_creator 预填口径一致）；
+数据库卡片复用 MysqlSyncCard（sync_scope="ledger"，仅推台账记录）。
+"""
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+
+from qfluentwidgets import (ScrollArea, CardWidget, BodyLabel, CaptionLabel,
+                            LineEdit, PushButton, FluentIcon)
+
+from core.utils import show_info_bar
+from windows.mysql_sync_card import (MysqlSyncCard, _load_settings,
+                                     _save_settings)
+
+
+class SignerSettingsCard(CardWidget):
+    """默认署名卡片：台账/售后表单署名预填值，保存到 settings.json"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(8)
+        vbox.addWidget(BodyLabel("默认署名", self))
+        vbox.addWidget(CaptionLabel(
+            "填写录入页「署名」栏的预填值；与主界面视频/日志批量整理的"
+            "筛选署名共用同一配置，两处保持一致", self))
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.sign_edit = LineEdit(self)
+        self.sign_edit.setPlaceholderText("如：沈喆")
+        self.sign_edit.setFixedWidth(200)
+        row.addWidget(self.sign_edit)
+        self._btn_save = PushButton(FluentIcon.SAVE, "保存", self)
+        self._btn_save.setToolTip("写入 settings.json，下一次打开表单即生效")
+        self._btn_save.setFixedHeight(33)
+        self._btn_save.clicked.connect(self._on_save)
+        row.addWidget(self._btn_save)
+        row.addStretch(1)
+        vbox.addLayout(row)
+
+    def load(self):
+        """回显当前默认署名（外部改动后进入页面刷新最新值）"""
+        self.sign_edit.setText(
+            str(_load_settings().get("newlog_target_name", "") or ""))
+
+    def _on_save(self):
+        _save_settings({"newlog_target_name": self.sign_edit.text().strip()})
+        show_info_bar("默认署名已保存，填写录入页将自动预填",
+                      "success", title="默认署名", parent=self, duration=3000)
+
+
+class SettingsPage(QWidget):
+    """设置面板：默认署名 + 数据库设置（MySQL 同步，仅推台账记录）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        content = QWidget(self)
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(24, 20, 24, 20)
+        cl.setSpacing(14)
+
+        # 默认署名卡片
+        self.signer_card = SignerSettingsCard(content)
+        self.signer_card.load()
+        cl.addWidget(self.signer_card)
+
+        # 数据库设置卡片（MySQL 开关/连接/测试；scope 文案为台账记录）
+        self.mysql_card = MysqlSyncCard(content, sync_scope="ledger")
+        self.mysql_card.load()
+        cl.addWidget(self.mysql_card)
+        cl.addStretch(1)
+
+        scroll = ScrollArea(self)
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }")
+        root.addWidget(scroll)
+
+    def showEvent(self, event):
+        """进入设置面板回显最新配置（导航信号部分版本缺失，用 Qt 原生事件兜底）"""
+        super().showEvent(event)
+        self.signer_card.load()
+        self.mysql_card.load()

@@ -53,7 +53,8 @@ class MysqlSyncCard(CardWidget):
     """MySQL 同步配置卡片（运维/售后面板共用）
 
     Args:
-        sync_scope: "ops" 推 5 张运维业务表；"aftersale" 只推售后记录
+        sync_scope: "ops" 推 5 张运维业务表；"aftersale" 只推售后记录；
+            "ledger" 只推台账记录（仅影响说明文案，开关/连接配置共用）
     """
 
     def __init__(self, parent=None, sync_scope: str = "ops"):
@@ -68,8 +69,14 @@ class MysqlSyncCard(CardWidget):
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
-        scope_name = "售后记录" if self.sync_scope == "aftersale" else "运维业务数据"
-        card_title = "数据库设置" if self.sync_scope == "aftersale" else "服务器SQL 同步"
+        # 同步范围文案：ops 运维业务数据；aftersale 售后记录；ledger 台账记录
+        _SCOPE_NAMES = {
+            "ops": "运维业务数据",
+            "aftersale": "售后记录",
+            "ledger": "台账记录",
+        }
+        scope_name = _SCOPE_NAMES.get(self.sync_scope, "运维业务数据")
+        card_title = "数据库设置" if self.sync_scope != "ops" else "服务器SQL 同步"
         vbox.addWidget(BodyLabel(card_title, self))
         vbox.addWidget(CaptionLabel(
             f"开启后 服务器SQL 完全替代本地 SQLite，应用实时读写远程数据库；"
