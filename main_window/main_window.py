@@ -57,7 +57,6 @@ class _LogLoadWorker(QThread):
         self.path = path
         self.rules = rules
         self.tail_bytes = tail_bytes
-
     def run(self):
         """读日志尾部 → 逐行匹配高亮规则 → loaded 信号回传（异常走 error）"""
         try:
@@ -91,6 +90,32 @@ class _LogLoadWorker(QThread):
             self.loaded.emit(lines_data, len(lines_data), truncated, size_mb)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class _KdStatusQueryWorker(QThread):
+    """后台反查 kd 记录分类（C6 正向，需求19）
+
+    原实现主线程同步调 table_db.find_kd_file_status：MySQL 空闲连接被
+    服务器断开（wait_timeout / 网络抖动）后，pymysql 查询会阻塞至
+    read_timeout(60s) 才抛 2013，界面假死。移入后台线程后即使慢/失败
+    也不卡 UI；结果经 done 信号回主线程更新状态栏。
+    """
+    done = Signal(object)  # info dict；查询失败/未命中传 None
+
+    def __init__(self, device_code, date_str, clip_base, parent=None):
+        super().__init__(parent)
+        self._device_code = device_code
+        self._date_str = date_str
+        self._clip_base = clip_base
+
+    def run(self):
+        try:
+            from database import table_db
+            info = table_db.find_kd_file_status(
+                self._device_code, self._date_str, self._clip_base)
+        except Exception:
+            info = None
+        self.done.emit(info)
 
 
 class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindowBase):
@@ -1238,35 +1263,39 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
     def _update_kd_record_status(self, device_code, log_filename):
         """C6 正向：选中日志时用时间戳前缀反查 kd_status 文件分类并展示
 
-        kd 照片与本地日志共享时间戳前缀（clip_base_name 机制），单分区
-        单设备 LIKE 预筛毫秒级，同步执行即可；任何异常静默降级不影响
-        日志加载主流程。
+        kd 照片与本地日志共享时间戳前缀（clip_base_name 机制）。反查走
+        后台线程（需求19）：MySQL 空闲断连时主线程同步查询会阻塞至
+        read_timeout 造成界面假死，后台执行后任何异常只影响该次状态展示。
         """
         try:
             from workers.collect_worker import clip_base_name
-            from database import table_db
             base = clip_base_name(log_filename)
             if not base:
                 return
             date_str = self._get_selected_date_str()
-            t0 = time.perf_counter()
-            info = table_db.find_kd_file_status(device_code, date_str, base)
-            cost_ms = (time.perf_counter() - t0) * 1000
-            if cost_ms > 50:
-                self._append_log(f"[提示] kd 记录反查耗时 {cost_ms:.0f}ms，建议转后台执行")
-            if info:
-                cn = info.get("category_cn") or info.get("category") or ""
-                accent = self._KD_STATUS_ACCENTS.get(info.get("category"))
-                self._show_kd_status_message(f"对应 kd 记录：已标【{cn}】", accent)
-                if accent:
-                    # 已标精度/问题：InfoBar 醒目提示
-                    self._show_info_bar(
-                        f"对应 kd 记录：已标【{cn}】（{info.get('file_name')}）",
-                        "warning", title="kd 记录", duration=3500)
-            else:
-                self._show_kd_status_message("未找到对应 kd 记录")
+            self._kd_status_worker = _KdStatusQueryWorker(
+                device_code, date_str, base, self)
+            self._kd_status_worker.done.connect(self._on_kd_status_queried)
+            self._kd_status_worker.start()
         except Exception as e:
-            self._append_log(f"[警告] kd 记录反查失败: {e}")
+            self._append_log(f"[警告] kd 记录反查启动失败: {e}")
+
+    def _on_kd_status_queried(self, info):
+        """kd 反查结果回主线程：状态栏展示（含耗时提示与醒目分类）"""
+        try:
+            if not info:
+                self._show_kd_status_message("未找到对应 kd 记录")
+                return
+            cn = info.get("category_cn") or info.get("category") or ""
+            accent = self._KD_STATUS_ACCENTS.get(info.get("category"))
+            self._show_kd_status_message(f"对应 kd 记录：已标【{cn}】", accent)
+            if accent:
+                # 已标精度/问题：InfoBar 醒目提示
+                self._show_info_bar(
+                    f"对应 kd 记录：已标【{cn}】（{info.get('file_name')}）",
+                    "warning", title="kd 记录", duration=3500)
+        except Exception as e:
+            self._append_log(f"[警告] kd 记录反查结果处理失败: {e}")
 
     def _show_kd_status_message(self, msg, accent=None, timeout=6000):
         """状态栏显示 kd 反查结果；accent 非空时临时醒目着色，超时恢复"""
