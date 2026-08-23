@@ -1025,7 +1025,7 @@ TABLE_COLUMNS = (
     ("problem", "问题", 220),   # Interactive 列，初始宽度 220，可拖拽调宽
     ("resolved", "状态", 92),
     ("response_time", "响应", 110),
-    ("ops", "操作", 168),
+    ("ops", "操作", 168),   # stretch 拉伸列：初始 168，自动填满面板剩余宽度（按钮靠左）
 )
 _COL_CHECK = 0  # 勾选列列号
 
@@ -1249,6 +1249,7 @@ class RecordsPage(QWidget):
         self._resolved_combo.setFixedWidth(130)
         self._resolved_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
+        toolbar.addWidget(CaptionLabel("是否解决：", self))
         toolbar.addWidget(self._resolved_combo)
 
         # 是否是我们的问题筛选
@@ -1260,6 +1261,7 @@ class RecordsPage(QWidget):
         self._our_problem_combo.setFixedWidth(130)
         self._our_problem_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
+        toolbar.addWidget(CaptionLabel("是我们的问题：", self))
         toolbar.addWidget(self._our_problem_combo)
 
         # 是否我们主动发起筛选
@@ -1271,6 +1273,7 @@ class RecordsPage(QWidget):
         self._initiative_combo.setFixedWidth(130)
         self._initiative_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
+        toolbar.addWidget(CaptionLabel("是否我们主动发起：", self))
         toolbar.addWidget(self._initiative_combo)
 
         # 关键词搜索（防抖）
@@ -1330,8 +1333,9 @@ class RecordsPage(QWidget):
         self._table.itemChanged.connect(self._on_item_changed)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        # 全部列保持 Interactive：列宽由用户拖拽独立控制，不设 Stretch 拉伸列
-        header.setStretchLastSection(False)
+        # 其他列保持 Interactive（可拖拽调宽）；最后一列（操作）stretch 拉伸填满
+        # 剩余宽度，使表格铺满面板右侧不留白；操作列按钮仍靠左（addStretch 在右）。
+        header.setStretchLastSection(True)
         self._table.setColumnWidth(_COL_CHECK, 36)
         for i, (_k, _h, w) in enumerate(TABLE_COLUMNS):
             self._table.setColumnWidth(_COL_CHECK + 1 + i, w)

@@ -3,7 +3,7 @@
 
 职责：
 - insert_record / update_record / delete_record：售后记录增删改
-- query_page / query_with_stats：筛选 + 分页 + 统计（周期/类型/状态/关键词）
+- query_page / query_with_stats：筛选 + 分页 + 统计（周期/类型/状态/主动发起/我方问题/关键词）
 - get_cycle_options：周期下拉选项（库中记录实际归属的周期）
 - get_field_candidates：问题/解决人/地区动态候选
 - export_xlsx：按筛选条件导出（表头与 售后问题汇总8月.xlsx 对齐）
