@@ -86,7 +86,7 @@ class GamePage(QWidget):
         self.stack.addWidget(self.reader)
         self.stack.addWidget(self.game_2048)
         self.pivot.setCurrentItem("reader")
-        box.addWidget(self.pivot)
+        box.addWidget(self.pivot, 0, Qt.AlignmentFlag.AlignLeft)
         box.addWidget(self.stack, 1)
 
         area.setWidget(container)

@@ -1001,6 +1001,10 @@ class UIMixin:
             ("查看CPP日志", "shortcut_open_daily", sc["shortcut_open_daily"]),
             ("打开配置", "shortcut_open_config", sc["shortcut_open_config"]),
             ("P2P面板", "shortcut_p2p_panel", sc["shortcut_p2p_panel"]),
+            # 需求21：新面板快捷入口
+            ("跑视频面板", "shortcut_ledger_panel", sc["shortcut_ledger_panel"]),
+            ("售后面板", "shortcut_aftersale_panel", sc["shortcut_aftersale_panel"]),
+            ("运维面板", "shortcut_table_panel", sc["shortcut_table_panel"]),
         ]
         dlg = ShortcutDialog(self, fields)
         dlg.yesButton.setText("确定")

@@ -21,23 +21,24 @@
 - **设备状态**：对接 kd / xqzg 双接口，数据源可切换，按日期分区查看设备状态；总数/正常/操作列点击可查看文件清单，双击/右键预览图片（左右键翻页，支持分类迁移）
 - **设备健康度管理**：基于接口 `health` 字段的健康度异常告警（每 30 分钟自动拉取，阈值 4000/5000/40 万），支持标记已处理，异常恢复后自动重新告警
 - **图片迁移**：点击总数/正常/操作单元格右侧滑出文件列表，点击文件选择目标分类（问题/精度/使用/废弃）即可在服务器上移动图片
+- **控件测试**：FluentIcon 图标库（搜索过滤、点击复制枚举名）+ qfluentwidgets 控件墙（按钮/输入/日期/弹窗分组演示，可直接交互）
 - **管理设置**：配置双接口 API 账号密码、选择启用数据源、测试连接
 - **小游戏**：摸鱼中心（2048/贪吃蛇等）
 
 ### 跑视频面板（主界面「跑视频面板」按钮打开）
 - **会话预填**：打开面板自动带入当前球桌会话（球房/视频名/帧数/署名），未选设备也可打开（球房预填空，面板内手填），表单确认后提交
-- **字段对齐在线模板**：分类（问题/未复现/精度/使用）→ 类别 → 球房 → 视频名 → 帧数 → 描述 → 复现（仅精度/使用）→ 新程序 → 备注 → 署名，类别候选预置模板历史取值 + 自由输入
+- **字段对齐在线模板**：分类（问题/未复现/精度/使用）→ 类别 → 球房 → 视频名 → 帧数 → 日期 → 描述/备注 → 复现 → 新程序 → 署名，类别候选预置模板历史取值 + 自由输入；复现/新程序为是/否开关，日期为视频日期（默认当天可翻历史）
 - **填写录入**：必填进度（分类/类别/球房）+ 分类联动类别候选，提交即入库
-- **记录与统计**：四分类指标卡 + 分类/类别/署名/关键词筛选 + 分页 + 编辑/删除 + 按署名统计（模板「计数」sheet 的电子版）+ 按分类分 sheet 导出 xlsx（结构与在线模板一致，仅作线下汇报用）
+- **记录与统计**：四分类指标卡 + 日期/分类/类别/署名/复现筛选（按天统计：全部/今天/一周/一月/自定义）+ 分页 + 编辑/删除 + 按署名统计（模板「计数」sheet 的电子版）+ 按分类分 sheet 导出 xlsx（结构与在线模板一致，仅作线下汇报用）
 - **多后端存储**：与售后同一条双后端路由——MySQL 开启时读写直接落服务器，多人协作刷新可见；MySQL 不可用自动降级本地 SQLite，恢复后自动合并回 MySQL
 - **设置**：默认署名配置 + 数据库设置（复用 MysqlSyncCard，同步范围为跑视频记录）
 
 ### 售后面板（售后问题登记与统计）
-- **填写录入**：售后问题登记表单（字段对齐售后汇总 Excel），球房输入搜索球桌库自动带出桌号/SNK/地区，发生时间步进补录历史日期
-- **记录与统计**：按周期/类型/状态/关键词筛选 + 分页 + 已解决/未解决统计，支持编辑/删除/导出 xlsx/导入 Excel（导入前预览确认）
+- **填写录入**：售后问题登记表单（字段对齐售后汇总 Excel），球房输入搜索球桌库自动带出桌号/SNK/地区，发生时间步进补录历史日期；「是否我们发起售后」「是否我方问题」两个判定开关参与筛选与统计
+- **记录与统计**：按周期/类型/状态/是否我们发起/是否我方问题/关键词筛选 + 分页 + 已解决/未解决统计，支持编辑/删除/批量标记已解决/批量删除/导出 xlsx/导入 Excel（导入前预览确认）
 - **周期管理**：统计周期可配置（周二起默认/自然周/自定义起始日+天数/自然月），记录按发生时间动态归属周期，列表/统计/周期下拉/导出四处口径一致
 - **多后端存储**：本地 SQLite / 远程 MySQL 双后端，跟随数据库设置开关切换；MySQL 模式下多人各自提交即落库，刷新可见
-- **数据库设置**：MySQL 连接配置、测试连接、立即同步（售后记录按业务键去重推送，不覆盖他人数据）
+- **数据库设置**：MySQL 连接配置、测试连接；启用后直接读写远程库，不可用时自动降级本地 SQLite
 
 ### 远程连接（P2P）
 - **XTCP 模式**：基于 frp 的 P2P 内网穿透，支持多 visitor 管理
@@ -54,7 +55,7 @@
 - **低性能模式**：设置中一键关闭亚克力/动画，低配机器更流畅（`perf_acrylic` / `perf_animation` 运行时即时生效）
 - **日志高亮规则**：设置中可配置多条正则高亮规则（颜色 + 通知开关），日志区实时匹配着色，命中可弹窗提醒
 - **统一提示条**：所有 InfoBar 提示统一走 `core.utils.show_info_bar()`（右下角、标题按类型自动映射），各模块不再各自直调
-- **自定义快捷键**：9 个可配置快捷键
+- **自定义快捷键**：12 个可配置快捷键
 - **设备搜索**：Ctrl+F 实时过滤设备列表
 - **双布局模式**：默认/经典布局一键切换
 - **自动版本号**：基于 git 提交数自动计算（`core/version.py`），标题栏展示 `主.次.提交数`
@@ -66,7 +67,7 @@
 | GUI 框架 | PySide6 (Qt6) + PySide6-Fluent-Widgets |
 | HTTP/API | requests（wechat2-billiard / xqzg / kd 三接口） |
 | 本地数据库 | SQLite3（球桌/设备状态/售后/跑视频记录缓存） |
-| 远程数据库 | MySQL（pymysql，可选双后端 + 镜像同步） |
+| 远程数据库 | MySQL（pymysql，MySQL 主库 + SQLite 兜底，自动降级与合并回写） |
 | Excel 读写 | openpyxl（售后记录导入/导出） |
 | SSH/SFTP | paramiko |
 | P2P 穿透 | frp (frpc) XTCP |
@@ -95,9 +96,12 @@ autowork/
 │   ├── ai_providers.py        #   AI 厂商注册表（六家 OpenAI 兼容接入）
 │   ├── app_paths.py           #   应用路径解析（兼容 PyInstaller）
 │   ├── conn_logger.py         #   连接日志记录器 + Qt 消息处理器
+│   ├── design_tokens.py       #   设计令牌（语义色/间距/字号单一来源）
+│   ├── flow_widgets.py        #   流式工具栏共享组件（FlowToolbarScrollArea）
 │   ├── frp_remote.py          #   frpc 管理、统一远程会话中心（RemoteSessionManager）
 │   ├── perf.py                #   低性能模式开关（亚克力/动画运行时控制）
 │   ├── secrets.py             #   配置加解密（DPAPI，SSH/upload/AI 凭据）
+│   ├── theme_qss.py           #   窗口级 QSS 应用（apply_window_qss/current_accent_hex）
 │   ├── utils.py               #   错误分类、自然排序、统一提示 show_info_bar
 │   └── version.py             #   版本号自动计算（主.次.git提交数）
 │
@@ -105,9 +109,11 @@ autowork/
 │   └── windows_api.py         #   显示设置/窗口嵌入/进程挂起恢复
 │
 ├── workers/                   # 后台线程 Worker 层
-│   ├── aftersale_worker.py    #   售后数据后台 Worker（通用 DB 操作封装）
+│   ├── aftersale_worker.py    #   通用 DB 后台 Worker（售后/跑视频/运维共用，fn 封装）
+│   ├── backup_worker.py       #   周备份 Worker（MySQL → SQLite 兜底基线刷新）
 │   ├── collect_worker.py      #   视频/日志收集与打包上传 Worker（设备状态页）
-│   ├── mysql_sync_worker.py   #   MySQL 同步/测试连接 Worker
+│   ├── merge_back_worker.py   #   兜底增量合并回写 Worker（MySQL 恢复后 LWW）
+│   ├── mysql_sync_worker.py   #   MySQL 连接测试 Worker
 │   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
 │   ├── newlog_worker.py       #   NewLog 批量整理 Worker（日志逐行转发 GUI）
 │   ├── single_video_worker.py #   单杆视频生成 Worker（日志解析 + 计分水印）
@@ -118,7 +124,12 @@ autowork/
 │   ├── table_db.py            #   球桌/设备数据存取（FTS5 搜索、按日期分区）
 │   ├── aftersale_db.py        #   售后记录数据层（周期计算、筛选统计、导入导出）
 │   ├── ledger_db.py           #   跑视频记录数据层（分类筛选统计、署名统计、导出）
-│   ├── mysql_sync.py          #   MySQL 远程镜像同步（SQLite → MySQL 单向推送）
+│   ├── schema.py              #   表结构单一来源（双方言 DDL + 迁移注册表）
+│   ├── merge_back.py          #   兜底增量 LWW 合并回写（恢复后执行）
+│   ├── fallback_backup.py     #   MySQL → SQLite 周备份（兜底基线刷新）
+│   ├── sqlite_io.py           #   SQLite 只读工具（列交集/缺列补位）
+│   ├── mysql_sync_card_logic.py # MysqlSyncCard 入口判定纯函数（无 GUI 依赖）
+│   ├── mysql_sync.py          #   MySQL 连接测试工具（镜像推送已下线，仅保留测试连接）
 │   └── tables.db              #   SQLite 数据库文件
 │
 ├── windows/                   # 独立窗口层
@@ -128,16 +139,10 @@ autowork/
 │   ├── aftersale/             #   售后面板拆分包（页面/对话框/设置）
 │   ├── ledger_panel.py        #   跑视频面板（填写录入/记录统计/设置三页，re-export shim）
 │   ├── ledger/                #   跑视频面板拆分包（表单/页面/设置/窗口）
-│   ├── mysql_sync_card.py     #   MySQL 同步配置卡片（运维/售后/跑视频面板共用）
+│   ├── remote_session/        #   远程会话窗口（SFTP/SSH/RDP/取证/隧道/诊断）
+│   ├── mysql_sync_card.py     #   MySQL 连接配置卡片（运维/售后/跑视频面板共用）
 │   ├── port_fake.py           #   端口占用模拟器（真实监听指定端口）
-│   ├── single_video_dialog.py #   单杆视频参数对话框（工具菜单）
-│   ├── sftp_window.py         #   SFTP 双面板文件管理窗口
-│   ├── ssh_terminal.py        #   SSH 终端窗口（ANSI 渲染）
-│   ├── ansi_terminal.py       #   ANSI 虚拟终端控件
-│   ├── rdp_window.py          #   RDP 远程桌面嵌入窗口
-│   ├── remote_session_window.py # 远程会话窗口（frpc 日志/隧道状态）
-│   ├── tunnel_panel.py        #   当前隧道面板
-│   └── conn_diag_panel.py     #   连接诊断面板
+│   └── single_video_dialog.py #   单杆视频参数对话框（工具菜单）
 │
 ├── main_window/               # 主窗口层（Mixin 拆分）
 │   ├── main_window.py         #   MainWindow 主类（组合所有 Mixin）
@@ -216,6 +221,9 @@ python build_exe.py
 | 打开配置 | `Ctrl+,` | 打开配置文件选择对话框 |
 | P2P面板 | `F9` | 切换远程面板显隐 |
 | 设备搜索 | `Ctrl+F` | 切换设备搜索框 |
+| 跑视频面板 | `Ctrl+1` | 打开跑视频面板（预填当前球桌会话） |
+| 售后面板 | `Ctrl+2` | 打开售后面板（售后记录登记与统计） |
+| 运维管理面板 | `Ctrl+3` | 打开运维管理面板（球桌/设备/健康/设置） |
 
 所有快捷键均可在设置对话框中自定义修改。
 
@@ -254,10 +262,10 @@ python build_exe.py
 上传与 NewLog 批量整理配置（设置 → 收集与上传）：
 
 ```json
-"upload_host": "49.235.34.253",
+"upload_host": "你的上传服务器地址",
 "upload_port": 22,
-"upload_remote_dir": "/lhcos-data/videos",
-"upload_user": "root",
+"upload_remote_dir": "/your/remote/dir",
+"upload_user": "SFTP 账号",
 "upload_pass": "...",
 "newlog_excel_dir": "C:/Users/xxx/Desktop/excel",
 "newlog_out_dir": "C:/Users/xxx/Desktop"
@@ -280,24 +288,23 @@ AI 分析配置（设置 → AI）：
 - `forensic_ai_analysis`：SSH 故障取证报告的 AI 分析开关
 - `ai_api_keys`：各厂商 API Key 字典（DPAPI 加密），未配置时回退官方环境变量
 
-数据库设置（售后面板/运维面板 → 数据库设置，MySQL 双后端与镜像同步）：
+数据库设置（售后面板/跑视频面板/运维面板 → 数据库设置，MySQL 主库 + SQLite 兜底）：
 
 ```json
 "mysql_sync": {
   "enabled": true,
-  "host": "49.235.34.253",
+  "host": "你的 MySQL 服务器地址",
   "port": 3306,
-  "user": "root",
+  "user": "数据库账号",
   "password": "...",
-  "database": "autowork",
-  "auto_sync": true
+  "database": "数据库名"
 }
 ```
 
 - `enabled`：开启后 MySQL 完全替代本地 SQLite，应用直接读写远程数据库；关闭回到本地 SQLite
 - `password`：DPAPI 加密落盘
-- `auto_sync`：每次 API 同步后自动推送到 MySQL
-- 售后记录推送按业务键去重（不覆盖他人数据）；运维数据全量镜像
+- MySQL 不可用时自动降级本地 SQLite（`mark_degraded`），恢复后自动切回并合并兜底增量（`merge_back`）
+- 旧字段 `auto_sync` 为镜像推送机制残留，已不再读取
 
 售后统计周期（售后面板 → 设置 → 统计周期设置）：
 
@@ -313,8 +320,8 @@ frp 服务器配置（设置 → 远程连接）：
 ```json
 "frpc_server": {
   "serverAddr": "...",
-  "serverPort": 7000,
-  "auth_method": "token",
+  "serverPort": .....,
+  "auth_method": ".....",
   "auth_token": "..."
 }
 ```

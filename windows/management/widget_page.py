@@ -1183,7 +1183,7 @@ class TestPage(QWidget):
         self.widget_tab = _WidgetGalleryTab(self.stack)
         self.stack.addWidget(self.icon_tab)
         self.stack.addWidget(self.widget_tab)
-        root.addWidget(self.pivot)
+        root.addWidget(self.pivot, 0, Qt.AlignmentFlag.AlignLeft)
         root.addWidget(self.stack, 1)
         self.pivot.setCurrentItem("icon")
 
