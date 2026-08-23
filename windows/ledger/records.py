@@ -449,6 +449,19 @@ class RecordsPage(QWidget):
             lambda _m: _fill(ledger_db.KIND_CANDIDATES.get(category, ())))
         self._stats_worker.start()
 
+    # ---------- 首次显示自动加载 ----------
+
+    def showEvent(self, event):
+        """首次显示自动加载（需求18：打开「记录与统计」页即查询，无需先点筛选）
+
+        参照售后面板 RecordsPage 的 showEvent 范式；用 _loaded_once 标志保证
+        只在首次显示时加载一次（此后提交/手动刷新/筛选均显式触发 _load）。
+        """
+        super().showEvent(event)
+        if not getattr(self, "_loaded_once", False):
+            self._loaded_once = True
+            self._load()
+
     # ---------- 加载 ----------
 
     def _on_refresh(self):
