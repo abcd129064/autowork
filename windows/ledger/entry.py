@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""台账面板：填写录入页（表单 + 必填进度 + 提交/清空）"""
+"""跑视频面板：填写录入页（表单 + 必填进度 + 提交/清空）"""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
 
@@ -156,7 +156,7 @@ class EntryPage(QWidget):
 
     def _on_saved(self, _new_id):
         self._btn_submit.setEnabled(True)
-        show_info_bar("已提交台账记录（列表页刷新可见）", "success",
+        show_info_bar("已提交跑视频记录（列表页刷新可见）", "success",
                       title="提交成功", parent=self, duration=3000)
         self.form.clear_form()
         self._update_required_progress()
@@ -170,6 +170,6 @@ class EntryPage(QWidget):
     # ---------- 外部入口 ----------
 
     def prefill(self, ctx: dict):
-        """主界面「写入台账」入口：预填当前球桌会话上下文"""
+        """主界面「跑视频面板」入口：预填当前球桌会话上下文"""
         self.form.prefill(ctx)
         self._update_required_progress()

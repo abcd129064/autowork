@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""台账/问题记录面板包
+"""跑视频面板包
 
 模块划分（参照售后面板 windows/aftersale/ 拆包结构）：
 - common.py   : 表格列定义 + 分类徽章 + 复用售后包的 Fluent UI 工厂

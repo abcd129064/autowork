@@ -119,7 +119,7 @@ def merge_aftersale(mysql_conn, progress_cb=None) -> int:
 
 
 def merge_ledger(mysql_conn, progress_cb=None) -> int:
-    """台账 LWW 合并：按业务键匹配，updated_at 较新者覆盖较旧者
+    """跑视频 LWW 合并：按业务键匹配，updated_at 较新者覆盖较旧者
 
     与 merge_aftersale 同套路，业务键为 ledger_db.RECORD_KEY_COLS。
     """

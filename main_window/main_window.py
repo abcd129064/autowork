@@ -114,7 +114,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 构建 UI（centralwidget 挂到 vBoxLayout 内）
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        # 台账面板单例（延迟创建，与售后面板同模式）
+        # 跑视频面板单例（延迟创建，与售后面板同模式）
         self._ledger_panel = None
 
         # 设置窗口标题（显示在 Fluent 标题栏上）
@@ -397,7 +397,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 启动三端按钮
         self.ui.start_three_btn.clicked.connect(self.on_start_three_clicked)
 
-        # 写入台账按钮（打开台账面板并预填当前球桌会话，表单确认后入库）
+        # 跑视频面板按钮（打开面板并预填当前球桌会话，表单确认后入库）
         self.ui.btn_write_table.clicked.connect(self._on_open_ledger)
 
         # 帧数输入框回车确认：恢复焦点到原位，便于空格直接播放
@@ -1069,10 +1069,10 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         os.startfile(device_dir)
         self._append_log(f"[打开目录] {device_dir}")
 
-    # ==================== 写入台账 ====================
+    # ==================== 跑视频面板 ====================
 
     def _current_ledger_context(self) -> dict:
-        """收集当前球桌会话上下文（供台账面板填写录入页预填）。
+        """收集当前球桌会话上下文（供跑视频面板填写录入页预填）。
 
         球房取当前选中设备代码；视频名取第二列当前日志文件名；
         帧数取帧输入框（默认 400）；署名取 settings newlog_target_name。
@@ -1105,16 +1105,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     @Slot()
     def _on_open_ledger(self):
-        """写入台账：打开台账面板并预填当前球桌会话（表单确认后入库）
+        """跑视频：打开跑视频面板并预填当前球桌会话（表单确认后入库）
 
-        替代旧的「保存对话框 + 本地 xlsx 追加」流程：数据经
-        ledger_db 双后端路由写入（MySQL 开启时即服务器），面板内
-        可编辑字段、筛选/分页/统计，多人协作刷新可见。
+        未选设备时也可打开（球房预填空），面板内可手填/修改；
+        数据经 ledger_db 双后端路由写入（MySQL 开启时即服务器），
+        面板内可编辑字段、筛选/分页/统计，多人协作刷新可见。
         """
-        if not self.ui.id_list.currentItem():
-            self._append_log("[提示] 请先选择设备代码")
-            self._show_info_bar("请先选择设备代码", "warning")
-            return
         from windows.ledger_panel import LedgerPanelWindow
         if not hasattr(self, '_ledger_panel') or self._ledger_panel is None:
             # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上
@@ -1127,8 +1123,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         ctx = self._current_ledger_context()
         self._ledger_panel.open_entry_with_context(ctx)
         self._append_log(
-            f"[写入台账] 已打开台账面板并预填会话: 球房={ctx['room_name']} "
-            f"视频={ctx['video_name']} 帧={ctx['frame']}")
+            f"[跑视频] 已打开跑视频面板并预填会话: 球房={ctx['room_name'] or '-'} "
+            f"视频={ctx['video_name'] or '-'} 帧={ctx['frame']}")
 
     @Slot()
     def _open_config_file(self, name: str):

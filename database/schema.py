@@ -252,7 +252,7 @@ TABLE_COLUMNS = {
         ColumnDef("cycle_start", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
-    # 台账记录（台账/问题记录面板，双后端）：字段来源 在线模板.xlsx 的
+    # 跑视频记录（跑视频面板，双后端）：字段来源 在线模板.xlsx 的
     # 问题/未复现/精度/使用 四个数据 sheet（sheet 名即 category 分类；
     # 精度/使用 多一列「复现」）。description/repro/remark 为长文本，
     # MySQL TEXT 不允许 DEFAULT 子句（与 aftersale_records 口径一致）。

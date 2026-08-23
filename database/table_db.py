@@ -213,7 +213,7 @@ _CREATE_MAPPING_SQL = schema.to_sqlite_ddl("device_mapping")
 
 _CREATE_AFTERSALE_SQL = schema.to_sqlite_ddl("aftersale_records")
 
-# ==================== 台账记录表（台账/问题记录面板，双后端） ====================
+# ==================== 跑视频记录表（跑视频面板，双后端） ====================
 
 _CREATE_LEDGER_SQL = schema.to_sqlite_ddl("ledger_records")
 

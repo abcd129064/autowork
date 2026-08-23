@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""台账面板：记录与统计页（指标卡 + 筛选/分页 + 行内编辑/删除 + 署名统计 + 导出）"""
+"""跑视频面板：记录与统计页（指标卡 + 筛选/分页 + 行内编辑/删除 + 署名统计 + 导出）"""
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QHeaderView, QAbstractItemView, QFileDialog,
@@ -20,11 +20,11 @@ from windows.ledger.form import LedgerForm
 
 
 class EditLedgerDialog(QDialog):
-    """台账编辑弹窗：复用 LedgerForm，保存走 ledger_db.update_record"""
+    """跑视频编辑弹窗：复用 LedgerForm，保存走 ledger_db.update_record"""
 
     def __init__(self, record: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑台账记录")
+        self.setWindowTitle("编辑跑视频记录")
         self.resize(720, 520)
         self._record = record
         self._save_worker = None
@@ -132,7 +132,7 @@ class RecordsPage(QWidget):
         head_box.setSpacing(1)
         head_box.addWidget(TitleLabel("记录与统计", self))
         head_box.addWidget(CaptionLabel(
-            "台账问题记录：分类（问题/未复现/精度/使用）与在线模板同口径", self))
+            "跑视频记录：分类（问题/未复现/精度/使用）与在线模板同口径", self))
         head.addLayout(head_box)
         head.addStretch(1)
         self._lbl_source = CaptionLabel("", self)
@@ -553,7 +553,7 @@ class RecordsPage(QWidget):
 
     def _on_delete(self, row):
         box = MessageBox("删除确认",
-                         f"确定删除这条台账记录吗？\n"
+                         f"确定删除这条跑视频记录吗？\n"
                          f"{row.get('category')} / {row.get('kind')} / "
                          f"{row.get('room_name')}", self)
         if not box.exec():
@@ -582,7 +582,7 @@ class RecordsPage(QWidget):
 
     def _on_export(self):
         path, _sel = QFileDialog.getSaveFileName(
-            self, "导出台账", "台账_export.xlsx", "Excel 文件 (*.xlsx)")
+            self, "导出跑视频记录", "跑视频_export.xlsx", "Excel 文件 (*.xlsx)")
         if not path:
             return
         self._export_worker = AftersaleDBWorker(ledger_db.export_xlsx, path)

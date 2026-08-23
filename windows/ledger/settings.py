@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""台账面板：设置页（默认署名 + 数据库设置）
+"""跑视频面板：设置页（默认署名 + 数据库设置）
 
 默认署名读写 settings.json 的 newlog_target_name（与主界面
 NewLog 批量整理共用同一键，_default_creator 预填口径一致）；
-数据库卡片复用 MysqlSyncCard（sync_scope="ledger"，仅推台账记录）。
+数据库卡片复用 MysqlSyncCard（sync_scope="ledger"，仅推跑视频记录）。
 """
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
 
@@ -16,7 +16,7 @@ from windows.mysql_sync_card import (MysqlSyncCard, _load_settings,
 
 
 class SignerSettingsCard(CardWidget):
-    """默认署名卡片：台账/售后表单署名预填值，保存到 settings.json"""
+    """默认署名卡片：跑视频/售后表单署名预填值，保存到 settings.json"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,7 +54,7 @@ class SignerSettingsCard(CardWidget):
 
 
 class SettingsPage(QWidget):
-    """设置面板：默认署名 + 数据库设置（MySQL 同步，仅推台账记录）"""
+    """设置面板：默认署名 + 数据库设置（MySQL 同步，仅推跑视频记录）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,7 +72,7 @@ class SettingsPage(QWidget):
         self.signer_card.load()
         cl.addWidget(self.signer_card)
 
-        # 数据库设置卡片（MySQL 开关/连接/测试；scope 文案为台账记录）
+        # 数据库设置卡片（MySQL 开关/连接/测试；scope 文案为跑视频记录）
         self.mysql_card = MysqlSyncCard(content, sync_scope="ledger")
         self.mysql_card.load()
         cl.addWidget(self.mysql_card)

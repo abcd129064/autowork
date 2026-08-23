@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""台账记录数据层（SQLite / MySQL 双后端，自动跟随 MySQL 测试开关）
+"""跑视频记录数据层（SQLite / MySQL 双后端，自动跟随 MySQL 测试开关）
 
 字段来源：在线模板.xlsx 的问题/未复现/精度/使用 四个数据 sheet
 （sheet 名即 category 分类；公共列 类别|球房|视频名|帧数|描述|新程序|
 备注|署名，精度/使用 多一列「复现」）。
 
 职责：
-- insert_record / update_record / delete_record：台账记录增删改
+- insert_record / update_record / delete_record：跑视频记录增删改
 - query_page：分类/类别/署名/关键词筛选 + 分页
 - stats_by_signer：按署名统计四分类计数（模板「计数」sheet 的电子版）
 - get_kind_candidates：类别候选（模板解析预置 + 库中历史自由输入合并）
@@ -56,7 +56,7 @@ RECORD_FIELDS = (
     "created_at", "updated_at",
 )
 
-# 台账业务键（多用户共享去重/合并定位用）：SQLite 与 MySQL 两侧 id
+# 跑视频业务键（多用户共享去重/合并定位用）：SQLite 与 MySQL 两侧 id
 # 各自增长会撞车，按 (created_at, signer, category, kind, video_name)
 # 判定同一条记录。merge_back 共用此定义（单一来源）。
 RECORD_KEY_COLS = ("created_at", "signer", "category", "kind", "video_name")
@@ -87,7 +87,7 @@ def _clean(value) -> str:
 # ==================== 增删改 ====================
 
 def insert_record(record: dict) -> int:
-    """新增台账记录，返回新记录 id"""
+    """新增跑视频记录，返回新记录 id"""
     conn = table_db.get_conn()
     now = _now_str()
     cols = [c for c in RECORD_FIELDS]
@@ -103,7 +103,7 @@ def insert_record(record: dict) -> int:
 
 
 def update_record(record_id: int, record: dict) -> bool:
-    """更新台账记录（仅允许修改业务字段，分类/时间保留服务端值）"""
+    """更新跑视频记录（仅允许修改业务字段，分类/时间保留服务端值）"""
     conn = table_db.get_conn()
     sets = []
     vals = []
@@ -126,7 +126,7 @@ def update_record(record_id: int, record: dict) -> bool:
 
 
 def delete_record(record_id: int) -> bool:
-    """删除台账记录"""
+    """删除跑视频记录"""
     conn = table_db.get_conn()
     cur = conn.execute("DELETE FROM ledger_records WHERE id = ?",
                        (int(record_id),))
@@ -160,7 +160,7 @@ def _build_where(keyword: str = "", category: str = "",
 
 def query_page(page_no: int, page_size: int, keyword: str = "",
                category: str = "", kind: str = "", signer: str = "") -> tuple:
-    """分页查询台账记录，返回 (total, rows)；rows 为 dict 列表（含 id）"""
+    """分页查询跑视频记录，返回 (total, rows)；rows 为 dict 列表（含 id）"""
     conn = table_db.get_conn()
     where, params = _build_where(keyword, category, kind, signer)
     total = conn.execute(

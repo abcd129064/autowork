@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""台账面板（re-export shim）
+"""跑视频面板（re-export shim）
 
 功能实现在 ``windows/ledger/`` 包：
 - common.py / form.py / entry.py / records.py / settings.py / window.py
