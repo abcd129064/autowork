@@ -26,9 +26,10 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     ScrollArea, CardWidget, MessageBox, MessageBoxBase, CheckBox,
     FluentWindow, NavigationItemPosition, MenuAnimationType,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
-    SpinBox, SegmentedWidget, ProgressBar)
+    SpinBox, SegmentedWidget, ProgressBar, FlowLayout)
 
 from core.design_tokens import SEMANTIC, lighten, darken
+from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import is_acrylic_enabled
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
@@ -1015,21 +1016,30 @@ class EditRecordDialog(MessageBoxBase):
 # ==================== 板块二：记录与统计页 ====================
 
 # 表格展示列（信息整合版：球房+地区+桌号合入「位置」，填写人并入填写时间，
-# 解决人并入响应时间；「是否…」判定字段转入 tooltip，保留全部信息不丢失）。
-# 第 0 列为勾选框（多选/批量操作），不在本定义内。
+# 解决人并入响应时间；是否解决/是否是我们问题/是否主动发起/发生原因直接成列，
+# 完整信息仍保留在行 tooltip）。第 0 列为勾选框（多选/批量操作），不在本定义内。
 TABLE_COLUMNS = (
     ("created_at", "填写时间", 150),
     ("occurred_at", "发生时间", 148),
     ("issue_type", "类型", 90),
     ("location", "位置", 200),
-    ("problem", "问题", 220),   # Interactive 列，初始宽度 220，可拖拽调宽
-    ("resolved", "状态", 92),
+    ("problem", "问题", 200),   # Interactive 列，初始宽度 200，可拖拽调宽
+    ("cause", "发生原因", 180),
+    ("resolved", "解决", 70),
+    ("is_our_problem", "我们问题", 70),
+    ("is_initiative", "主动发起", 70),
     ("response_time", "响应", 110),
     ("ops", "操作", 168),   # stretch 拉伸列：初始 168，自动填满面板剩余宽度（按钮靠左）
 )
 _COL_CHECK = 0  # 勾选列列号
 
-# 状态徽章取值：语义色（红=未解决 / 绿=已解决），徽章底色由运行时加透明度生成
+# 是/否徽章语义色（元组：是 → 前色，否 → 后色）：
+# 是否解决 绿/红、是否是我们问题 橙/灰、是否主动发起 蓝/灰；徽章底色由运行时加透明度生成
+_YES_NO_COLORS = {
+    "resolved": (SEMANTIC["success"], SEMANTIC["danger"]),
+    "is_our_problem": (SEMANTIC["warning"], SEMANTIC["neutral"]),
+    "is_initiative": (SEMANTIC["info"], SEMANTIC["neutral"]),
+}
 
 
 # ---------- 表格行内控件工厂（徽章 / 小按钮） ----------
@@ -1169,8 +1179,9 @@ class RecordsPage(QWidget):
     """记录与统计页：周期概览指标卡 + 筛选/分页/批量操作/一键解决/编辑/删除/导出/导入
 
     表格列经过信息整合（球房+地区+桌号合入「位置」，填写人并入填写时间，
-    解决人并入响应时间），判定字段转入 tooltip；状态以语义徽章呈现，
-    未解决行提供行内一键「标记已解决」。
+    解决人并入响应时间）；是否解决/是否是我们问题/是否主动发起/发生原因
+    直接成列展示（是/否徽章），完整信息保留在行 tooltip；未解决行提供行内
+    一键「标记已解决」。
     """
 
     def __init__(self, parent=None):
@@ -1221,9 +1232,21 @@ class RecordsPage(QWidget):
         self._card_initiative = self._make_stats_card(cards_row)
         root.addLayout(cards_row)
 
-        # --- 工具栏 ---
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        # --- 工具栏（与主界面同范式：库版 FlowLayout 换行 + 滚动容器锁高，
+        #     窄宽自动换行严禁重叠，折行超上限上下滚动） ---
+        toolbar_scroll = FlowToolbarScrollArea(self)
+        toolbar_scroll.setWidgetResizable(True)
+        toolbar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        toolbar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        toolbar_scroll.setMaximumHeight(132)  # 约 3 行控件，超出滚动
+        toolbar_widget = QWidget(self)
+        toolbar_scroll.setWidget(toolbar_widget)
+        toolbar = FlowLayout(toolbar_widget)
+        toolbar.setHorizontalSpacing(6)
+        toolbar.setVerticalSpacing(6)
+        toolbar.setContentsMargins(2, 4, 2, 4)
 
         # 周期筛选（默认当前周期；原生 QComboBox 可靠支持 findData/currentData）
         self._cycle_combo = FluentCombo(self)
@@ -1261,7 +1284,7 @@ class RecordsPage(QWidget):
         self._our_problem_combo.setFixedWidth(130)
         self._our_problem_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
-        toolbar.addWidget(CaptionLabel("是我们的问题：", self))
+        toolbar.addWidget(CaptionLabel("是否是我们问题：", self))
         toolbar.addWidget(self._our_problem_combo)
 
         # 是否我们主动发起筛选
@@ -1273,7 +1296,7 @@ class RecordsPage(QWidget):
         self._initiative_combo.setFixedWidth(130)
         self._initiative_combo.currentIndexChanged.connect(
             lambda _i: self._on_filter_changed())
-        toolbar.addWidget(CaptionLabel("是否我们主动发起：", self))
+        toolbar.addWidget(CaptionLabel("是否主动发起：", self))
         toolbar.addWidget(self._initiative_combo)
 
         # 关键词搜索（防抖）
@@ -1282,8 +1305,6 @@ class RecordsPage(QWidget):
         self._search_edit.setFixedWidth(180)
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
-
-        toolbar.addStretch(1)
 
         self._btn_import = PushButton(FluentIcon.ADD, "导入 Excel", self)
         self._btn_import.setToolTip("一次性导入 售后问题汇总 xlsx 历史数据")
@@ -1300,7 +1321,7 @@ class RecordsPage(QWidget):
         self._btn_refresh.clicked.connect(self._on_refresh)
         toolbar.addWidget(self._btn_refresh)
 
-        root.addLayout(toolbar)
+        root.addWidget(toolbar_scroll)
 
         # 搜索防抖定时器
         self._search_timer = QTimer(self)
@@ -1603,7 +1624,7 @@ class RecordsPage(QWidget):
             f"响应时间: {rec.get('response_time') or ''}")
 
     def _populate(self, rows):
-        """行数据 → 表格：勾选列 + 双行信息整合列 + 状态徽章 + 行内操作按钮"""
+        """行数据 → 表格：勾选列 + 双行信息整合列 + 是/否徽章三列 + 行内操作按钮"""
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
@@ -1642,12 +1663,13 @@ class RecordsPage(QWidget):
                         f = QFont(cell.font())
                         f.setPointSizeF(10.5)
                         cell.setFont(f)
-                    elif key == "resolved":
-                        # 状态徽章（setCellWidget 承载，该格不设 item）
-                        is_yes = str(item.get("resolved") or "") == "是"
+                    elif key in _YES_NO_COLORS:
+                        # 是/否徽章（setCellWidget 承载，该格不设 item）
+                        is_yes = str(item.get(key) or "") == "是"
+                        yes_c, no_c = _YES_NO_COLORS[key]
                         badge = _badge_label(
-                            "已解决" if is_yes else "未解决",
-                            SEMANTIC["success"] if is_yes else SEMANTIC["danger"],
+                            "是" if is_yes else "否",
+                            yes_c if is_yes else no_c,
                             self._table.viewport())
                         self._table.setCellWidget(r, col, badge)
                         continue
