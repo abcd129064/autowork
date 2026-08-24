@@ -1,375 +1,207 @@
 # -*- coding: utf-8 -*-
-"""统计图表共享模块（matplotlib FigureCanvasQTAgg 内嵌）
+"""统计图表模块（pygwalker 独立窗口）
 
-售后/跑视频面板共用的统计图表页：builder 返回 list[dict] 聚合数据，
-由 matplotlib 在主线程同步渲染成 Figure（零 GPU 合成、零 DirectComposition，
-与 FluentWindowBase 的 Mica DWM backdrop 物理兼容）。
+售后/跑视频面板「记录与统计」页的统计图表入口：后台聚合原始记录为
+pandas DataFrame，经 pygwalker 生成单文件 HTML，在系统浏览器（独立窗口）
+打开。本模块提供无 UI 宿主 StatsOpener，由记录页按钮触发。
 
-方案 B 重写背景：上一轮 QWebEngineView 路线（即使设 --disable-direct-composition）
-在 PySide6 6.11 下不仅没救 Mica，还引入了导航栏变黑 + WebEngine viewport 异常
-导致图表挤压到 ~100px 宽。matplotlib 走 QPainter 软件绘制，与 Mica 无任何
-GPU/DComp 冲突，物理上不可能产生黑屏/退色问题。代价是失去 ECharts 交互
-（tooltip/图例点击），保留 NavigationToolbar 缩放/拖动/另存为。
+方案 C 背景（演进记录）：
+- 方案 A（QWebEngineView 内嵌 ECharts）：WebEngine GPU/DComp 合成与
+  FluentWindowBase 的 Mica backdrop 冲突，实测失败（黑屏/导航栏变黑）。
+- 方案 B（matplotlib FigureCanvas）：纯 QPainter 无冲突，但静态图视觉
+  不达预期、无拖拽分析。
+- 方案 C（pygwalker）：Tableau 式自助探索（ECharts 底层）。桌面内嵌必须
+  QWebEngineView（重现 A 冲突），故采用独立窗口——pyg.to_html 生成单文件
+  HTML + 系统浏览器打开，主窗口零 WebEngine 副作用，Mica 不受影响。
 """
-from collections import defaultdict
+import json
+import os
+import tempfile
+import threading
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from PySide6.QtCore import QObject, Signal
 
-from qfluentwidgets import isDarkTheme, qconfig
+from qfluentwidgets import isDarkTheme
 
 
-def _theme_colors(dark: bool) -> dict:
-    """统计图表统一配色：文字/坐标轴/分割线/图表区背景/系列 6 色/成功/中性。
+class StatsOpener(QObject):
+    """pygwalker 独立窗口打开器（无 UI 宿主，由记录页按钮触发）。
 
-    系列色浅深色共用（蓝/绿/橙/红/紫/青），对比度足够；bg 与 design_tokens
-    同源（深色 #2a2a2a / 浅色 #f5f5f5）。
+    builder: 无参函数，返回 pandas.DataFrame（原始记录，pygwalker 自助分析）。
+    kind: 'aftersale' / 'ledger'（临时文件前缀）。
+    finished(bool, str): 打开成功/失败信号（后台线程 emit，Qt 自动回主线程）。
     """
-    return {
-        "text": "#e8eaed" if dark else "#1f1f1f",
-        "axis": "#9aa0a6" if dark else "#888888",
-        "split": "#666666" if dark else "#cccccc",
-        "bg": "#2a2a2a" if dark else "#f5f5f5",
-        # 6 色系列：蓝/绿/橙/红/紫/青（饼/柱/线通用）
-        "series": ["#4a90e2", "#50c878", "#f5a623", "#cf4452", "#9b59b6", "#1abc9c"],
-        "success": "#50c878",
-        "neutral": "#888888",
-    }
 
-
-class ChartPage(QWidget):
-    """统计图表页：matplotlib FigureCanvas + NavigationToolbar 渲染聚合数据。
-
-    builder: 无参函数，返回 list[dict] 聚合数据（每个 dict 含 kind/title/data 等）。
-    kind: 'aftersale' 或 'ledger'，分派到对应 _render_* 方法。
-    showEvent 首次显示才 _ensure_canvas（避免窗口构造时即创建 matplotlib 资源）。
-    主题切换通过 qconfig.themeChanged 重渲（不重新查询数据）。
-    """
+    finished = Signal(bool, str)
 
     def __init__(self, builder, kind, parent=None):
         super().__init__(parent)
         self._builder = builder
         self._kind = kind
-        self._data = []
         self._worker = None
-        self._figure = None
-        self._canvas = None
-        self._toolbar = None
-        self._loaded_once = False
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
-        # 占位：canvas 创建前显示加载提示
-        self._placeholder = QLabel("图表加载中…", self)
-        self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color:#888;font-family:Microsoft YaHei;")
-        lay.addWidget(self._placeholder)
-        # 主题切换重渲
-        try:
-            qconfig.themeChanged.connect(self._reapply)
-        except Exception:
-            pass
+        self._data = None
+        self._pyg = None   # 主线程延迟导入（后台线程 import 会与 Qt GUI 冲突卡死）
 
-    def _ensure_canvas(self):
-        """懒创建 matplotlib FigureCanvas + NavigationToolbar（首次进入统计页时）。"""
-        if self._canvas is not None:
+    def open_analysis(self):
+        """后台聚合 DataFrame → pygwalker HTML → 浏览器打开。"""
+        if self._worker is not None and self._worker.isRunning():
             return
-        import matplotlib
-        matplotlib.use("QtAgg")
-        # 中文字体配置：Windows 优先 Microsoft YaHei（系统自带），
-        # 兜底 DejaVu Sans（matplotlib 默认）。offscreen 冒烟环境无 YaHei
-        # 会触发 glyph missing warning，但不影响 Figure 生成。
-        import matplotlib.pyplot as plt
-        plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
-        plt.rcParams["axes.unicode_minus"] = False
-        from matplotlib.backends.backend_qtagg import (
-            FigureCanvasQTAgg, NavigationToolbar2QT)
-        from matplotlib.figure import Figure
-        self._figure = Figure(figsize=(7, 9), dpi=100, tight_layout=True)
-        self._canvas = FigureCanvasQTAgg(self._figure)
-        # 替换占位
-        self.layout().removeWidget(self._placeholder)
-        self._placeholder.setParent(None)
-        self._placeholder.deleteLater()
-        self._placeholder = None
-        self.layout().addWidget(self._canvas)
-        self._toolbar = NavigationToolbar2QT(self._canvas, self)
-        self.layout().addWidget(self._toolbar)
-
-    def _reapply(self, _theme=None):
-        """主题切换后按当前主题重渲染（已加载数据不重新查询）。"""
-        if self._canvas is not None and self._data:
-            self._render(self._data)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._loaded_once:
-            self._loaded_once = True
-            self._ensure_canvas()
-            self.load()
-
-    def load(self):
         from workers.aftersale_worker import AftersaleDBWorker
         self._worker = AftersaleDBWorker(self._builder)
         self._worker.result_ready.connect(self._on_loaded)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
-    def _on_loaded(self, data):
-        self._data = list(data or [])
-        if self._canvas is not None:
-            self._render(self._data)
+    def _on_loaded(self, df):
+        self._data = df
+        # isDarkTheme 只能主线程读取（后台线程访问 Qt 全局会阻塞）
+        dark = isDarkTheme()
+        if self._pyg is None:
+            import pygwalker as pyg  # 主线程导入（后台线程 import 会卡 Qt GUI）
+            self._pyg = pyg
+        # pyg.to_html 生成 2~3MB HTML 需数秒，放后台线程避免卡 UI
+        threading.Thread(target=self._gen_and_open, args=(df, dark),
+                         daemon=True).start()
+
+    def _gen_and_open(self, df, dark):
+        """pygwalker 生成单文件 HTML → 系统浏览器打开（独立窗口）。
+
+        后台线程运行：只做纯计算（to_html/写文件/webbrowser），
+        不访问任何 Qt GUI 对象；UI 状态经 finished 信号回主线程。
+        """
+        try:
+            if df is None or (hasattr(df, "empty") and df.empty):
+                raise ValueError("没有可分析的记录数据")
+            spec = _build_default_spec(self._kind)
+            html = self._pyg.to_html(df, appearance="dark" if dark else "light",
+                                     spec=spec)
+            fd, path = tempfile.mkstemp(
+                suffix=".html", prefix=f"autowork_{self._kind}_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(html)
+            url = "file:///" + path.replace("\\", "/")
+            import webbrowser
+            webbrowser.open(url)
+            self.finished.emit(
+                True, "已打开统计图表窗口。拖拽字段即可分析，"
+                      "关闭浏览器标签页即结束。")
+        except Exception as e:
+            self.finished.emit(False, f"生成统计页面失败：{e}")
 
     def _on_error(self, msg):
-        if self._figure is None or self._canvas is None:
-            return
-        self._figure.clear()
-        ax = self._figure.add_subplot(111)
-        ax.set_axis_off()
-        c = _theme_colors(isDarkTheme())
-        self._figure.patch.set_facecolor(c["bg"])
-        ax.text(0.5, 0.5, f"统计加载失败：{msg}",
-                ha="center", va="center",
-                color="#cf4452", fontsize=12)
-        self._canvas.draw_idle()
-
-    def _render(self, data):
-        if self._kind == "aftersale":
-            self._render_aftersale(data)
-        elif self._kind == "ledger":
-            self._render_ledger(data)
-
-    # ==================== 售后 4 图 ====================
-
-    def _render_aftersale(self, data):
-        """售后 4 图：解决率趋势 / 类型分布 / 地区 TOP10 / 我方问题·主动发起双饼。"""
-        self._figure.clear()
-        c = _theme_colors(isDarkTheme())
-        bg = c["bg"]
-        self._figure.patch.set_facecolor(bg)
-        n = max(1, len(data))
-        for i, chart in enumerate(data, 1):
-            ax = self._figure.add_subplot(n, 1, i)
-            ax.set_facecolor(bg)
-            self._style_axes(ax, c)
-            kind = chart.get("kind")
-            if kind == "line":
-                ax.plot(chart["x"], chart["y"],
-                        color=c["series"][0], marker="o", linewidth=2)
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-                ax.set_ylabel("%", color=c["axis"])
-                ax.set_ylim(0, 100)
-                ax.grid(True, color=c["split"], linewidth=0.5)
-                for label in ax.get_xticklabels():
-                    label.set_rotation(30)
-                    label.set_ha("right")
-            elif kind == "pie":
-                labels = [str(k) for k, _ in chart["data"]]
-                values = [v for _, v in chart["data"]]
-                colors = c["series"][:len(values)]
-                ax.pie(values, labels=labels, colors=colors,
-                       autopct="%1.0f%%",
-                       textprops={"color": c["text"], "fontsize": 9},
-                       wedgeprops={"edgecolor": bg, "linewidth": 1})
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-            elif kind == "barh":
-                labels = chart["labels"]
-                values = chart["values"]
-                y_pos = list(range(len(labels)))
-                ax.barh(y_pos, values, color=c["series"][0])
-                ax.set_yticks(y_pos)
-                ax.set_yticklabels(labels, color=c["axis"], fontsize=9)
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-                ax.invert_yaxis()
-                ax.grid(True, axis="x", color=c["split"], linewidth=0.5)
-            elif kind == "pie_pair":
-                ax.set_axis_off()
-                inset_axes = [ax.inset_axes([0.0, 0.0, 0.45, 1.0]),
-                              ax.inset_axes([0.55, 0.0, 0.45, 1.0])]
-                for sub_ax, (name, items) in zip(inset_axes, chart["pairs"]):
-                    values = [v for _, v in items]
-                    sub_ax.pie(values, labels=["是", "否"],
-                               colors=[c["success"], c["neutral"]],
-                               autopct="%1.0f%%",
-                               textprops={"color": c["text"], "fontsize": 9},
-                               wedgeprops={"edgecolor": bg, "linewidth": 1})
-                    sub_ax.set_title(name, color=c["text"], fontsize=10)
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-        self._canvas.draw_idle()
-
-    # ==================== 跑视频 3 图 ====================
-
-    def _render_ledger(self, data):
-        """跑视频 3 图：四分类趋势 / 分类占比 / 署名工作量 TOP15 stacked。"""
-        self._figure.clear()
-        c = _theme_colors(isDarkTheme())
-        bg = c["bg"]
-        self._figure.patch.set_facecolor(bg)
-        n = max(1, len(data))
-        for i, chart in enumerate(data, 1):
-            ax = self._figure.add_subplot(n, 1, i)
-            ax.set_facecolor(bg)
-            self._style_axes(ax, c)
-            kind = chart.get("kind")
-            if kind == "line_multi":
-                for j, ser in enumerate(chart["series"]):
-                    ax.plot(chart["x"], ser["values"],
-                            color=c["series"][j % len(c["series"])],
-                            marker="o", linewidth=1.5, label=ser["name"])
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-                ax.legend(loc="upper left", frameon=False, fontsize=9,
-                          labelcolor=c["text"])
-                ax.grid(True, color=c["split"], linewidth=0.5)
-                for label in ax.get_xticklabels():
-                    label.set_rotation(30)
-                    label.set_ha("right")
-            elif kind == "pie":
-                labels = [str(k) for k, _ in chart["data"]]
-                values = [v for _, v in chart["data"]]
-                colors = c["series"][:len(values)]
-                ax.pie(values, labels=labels, colors=colors,
-                       autopct="%1.0f%%",
-                       textprops={"color": c["text"], "fontsize": 9},
-                       wedgeprops={"edgecolor": bg, "linewidth": 1})
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-            elif kind == "bar_stacked":
-                labels = chart["labels"]
-                bottoms = [0] * len(labels)
-                for j, ser in enumerate(chart["series"]):
-                    ax.bar(labels, ser["values"], bottom=bottoms,
-                           color=c["series"][j % len(c["series"])],
-                           label=ser["name"])
-                    bottoms = [b + v for b, v in zip(bottoms, ser["values"])]
-                ax.set_title(chart["title"], color=c["text"],
-                             fontsize=12, loc="left")
-                ax.legend(loc="upper right", frameon=False, fontsize=9,
-                          labelcolor=c["text"])
-                ax.tick_params(axis="x", colors=c["axis"], labelsize=8)
-                for label in ax.get_xticklabels():
-                    label.set_rotation(30)
-                    label.set_ha("right")
-                ax.grid(True, axis="y", color=c["split"], linewidth=0.5)
-        self._canvas.draw_idle()
-
-    @staticmethod
-    def _style_axes(ax, c):
-        """统一 axes 边框/刻度颜色。"""
-        ax.tick_params(axis="both", colors=c["axis"], labelsize=9)
-        for spine in ax.spines.values():
-            spine.set_color(c["axis"])
-            spine.set_linewidth(0.8)
-
-    def refresh(self):
-        """手动刷新：重新查询并渲染（canvas 未创建时等下次 showEvent 再加载）。"""
-        self._data = []
-        if self._canvas is not None:
-            self.load()
+        self.finished.emit(False, f"数据加载失败：{msg}")
 
 
-# ==================== 售后统计 ====================
+# ==================== 字段中文映射 + 预置图表 spec ====================
 
-def _aftersale_options() -> list:
-    """售后统计聚合数据（4 图：line/pie/barh/pie_pair），返回 list[dict]。
+# 数据库列名 → 中文展示名（pygwalker 自助分析直接显示中文字段）
+_AFTERSALE_CN = {
+    "created_at": "填写时间", "occurred_at": "发生时间", "creator": "填写人",
+    "issue_type": "类型", "table_no": "桌号", "room_name": "球房",
+    "region": "地区", "problem": "问题", "cause": "发生原因",
+    "resolved": "是否解决", "solution": "解决方案", "resolver": "解决人",
+    "response_time": "响应时间", "snk_code": "SNK编码", "device_code": "设备编码",
+    "cycle_start": "周期", "updated_at": "更新时间",
+    "is_initiative": "是否主动发起", "is_our_problem": "是否我方问题",
+}
+_LEDGER_CN = {
+    "category": "分类", "kind": "类别", "room_name": "球房",
+    "video_name": "视频名", "frame": "帧数", "description": "描述",
+    "repro": "复现", "new_program": "新程序", "remark": "备注",
+    "signer": "署名", "created_at": "填写时间", "occurred_at": "日期",
+    "updated_at": "更新时间",
+}
 
-    数据经 aftersale_db.query_page 拉全量 + Python 侧聚合（双后端兼容）。
+
+def _gw_fld(name: str, analytic: str, agg: str = "") -> dict:
+    """Graphic Walker 字段描述（fid = 列名，pygwalker 0.5.x 约定）。"""
+    semantic = "temporal" if name in ("日期", "发生时间") else "nominal"
+    f = {"dragId": f"d_{name}", "fid": name, "name": name,
+         "semanticType": semantic, "analyticType": analytic}
+    if agg:
+        f["aggName"] = agg
+    return f
+
+
+def _gw_measure_count(dim_name: str) -> dict:
+    """度量：按 dim_name 计数的 count 表达式（fid 虚拟避免与 dim 字段重复）。
+
+    Graphic Walker spec 不允许同一字段同时出现在 dim 和 mea；用 expression
+    让 mea 引用真实字段做 count，fid 用虚拟 'gw_count_fid' 规避冲突。
     """
+    return {"dragId": f"m_{dim_name}", "fid": "gw_count_fid",
+            "name": "计数", "semanticType": "quantitative",
+            "analyticType": "measure", "aggName": "count",
+            "expression": {"op": "count", "fid": dim_name}}
+
+
+def _build_default_spec(kind: str) -> str:
+    """默认预置图表 spec（打开即有图表，无需手动拖拽）。
+
+    charts: (图表名, 几何类型, 维度列, 可选颜色列)；measures 用 count 聚合。
+    字段 fid = 中文列名（df.rename 后），与 pygwalker raw_fields 一致。
+    """
+    if kind == "aftersale":
+        charts = [
+            ("问题类型分布", "bar", "类型"),
+            ("地区分布", "bar", "地区"),
+            ("解决率趋势", "line", "发生时间", "是否解决"),
+            ("我方问题/主动发起占比", "pie", "是否我方问题"),
+        ]
+    else:
+        charts = [
+            ("分类占比", "pie", "分类"),
+            ("四分类趋势", "line", "日期", "分类"),
+            ("署名工作量", "bar", "署名"),
+        ]
+    config = []
+    for i, (name, geom, dim, *rest) in enumerate(charts):
+        color = rest[0] if rest else None
+        encodings = {
+            "dimensions": [_gw_fld(dim, "dimension")],
+            "measures": [_gw_measure_count(dim)],
+            "color": [_gw_fld(color, "dimension")] if color else [],
+            "filters": [],
+        }
+        config.append({
+            "visId": f"chart{i}", "name": name,
+            "encodings": encodings,
+            "config": {"defaultAggregated": True, "geoms": [geom],
+                       "stack": "stack"},
+        })
+    return json.dumps(
+        {"version": "0.5.0", "config": config,
+         "chart_map": {}, "workflow_list": []},
+        ensure_ascii=False)
+
+
+# ==================== 数据源（pygwalker 自助分析 DataFrame） ====================
+
+def _aftersale_options() -> object:
+    """售后记录 DataFrame（pygwalker 自助分析数据源）。
+
+    返回 aftersale_records 全量行；pygwalker 拖拽字段自行聚合出图，
+    不再预定义 4+3 图（交互式探索替代静态图表）。
+    """
+    import pandas as pd
     from database import aftersale_db
 
     _, rows = aftersale_db.query_page(1, 100000)
-
-    # 1) 解决率趋势（按 occurred_at 日期，回退 created_at）
-    by_date = defaultdict(lambda: [0, 0])
-    for r in rows:
-        d = str(r.get("occurred_at") or r.get("created_at") or "")[:10]
-        if not d:
-            continue
-        by_date[d][0] += 1
-        if str(r.get("resolved") or "") == "是":
-            by_date[d][1] += 1
-    dates = sorted(by_date)
-    total_s = [by_date[d][0] for d in dates]
-    res_s = [by_date[d][1] for d in dates]
-    rate = [round(b / a * 100) if a else 0 for a, b in zip(total_s, res_s)]
-    chart1 = {"kind": "line", "title": "售后解决率趋势",
-              "x": dates, "y": rate}
-
-    # 2) 问题类型分布
-    cnt = defaultdict(int)
-    for r in rows:
-        cnt[str(r.get("issue_type") or "未填")] += 1
-    chart2 = {"kind": "pie", "title": "问题类型分布",
-              "data": list(cnt.items())}
-
-    # 3) 地区 TOP10
-    reg = defaultdict(int)
-    for r in rows:
-        reg[str(r.get("region") or "未填")] += 1
-    reg_top = sorted(reg.items(), key=lambda x: -x[1])[:10]
-    chart3 = {"kind": "barh", "title": "地区分布 TOP10",
-              "labels": [k for k, _ in reg_top],
-              "values": [v for _, v in reg_top]}
-
-    # 4) 我方问题 / 主动发起 双饼
-    n = len(rows) or 1
-    our = sum(1 for r in rows if str(r.get("is_our_problem") or "") == "是")
-    ini = sum(1 for r in rows if str(r.get("is_initiative") or "") == "是")
-    chart4 = {"kind": "pie_pair", "title": "我方问题 / 主动发起占比",
-              "pairs": [
-                  ("我方问题", [("是", our), ("否", n - our)]),
-                  ("主动发起", [("是", ini), ("否", n - ini)]),
-              ]}
-
-    return [chart1, chart2, chart3, chart4]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    return df.rename(columns={k: v for k, v in _AFTERSALE_CN.items()
+                              if k in df.columns})
 
 
-# ==================== 跑视频统计 ====================
-
-def _ledger_options() -> list:
-    """跑视频统计聚合数据（3 图：line_multi/pie/bar_stacked），返回 list[dict]。
-
-    数据经 ledger_db.query_page 拉全量 + ledger_db.stats_by_signer 取署名统计。
-    """
+def _ledger_options() -> object:
+    """跑视频记录 DataFrame（pygwalker 自助分析数据源）。"""
+    import pandas as pd
     from database import ledger_db
 
     _, rows = ledger_db.query_page(1, 100000)
-    cats = ["问题", "未复现", "精度", "使用"]
-
-    # 1) 四分类趋势
-    by_date_cat = defaultdict(lambda: defaultdict(int))
-    for r in rows:
-        d = str(r.get("occurred_at") or r.get("created_at") or "")[:10]
-        if not d:
-            continue
-        by_date_cat[d][str(r.get("category") or "未填")] += 1
-    dates = sorted(by_date_cat)
-    chart1 = {
-        "kind": "line_multi", "title": "四分类记录趋势",
-        "x": dates,
-        "series": [
-            {"name": cat, "values": [by_date_cat[d].get(cat, 0) for d in dates]}
-            for cat in cats
-        ],
-    }
-
-    # 2) 分类占比
-    dist = defaultdict(int)
-    for r in rows:
-        dist[str(r.get("category") or "未填")] += 1
-    chart2 = {"kind": "pie", "title": "分类占比", "data": list(dist.items())}
-
-    # 3) 署名工作量 TOP15（stacked by cats）
-    signers_raw = ledger_db.stats_by_signer() or []
-    signers = sorted(signers_raw, key=lambda s: -(s.get("total") or 0))[:15]
-    chart3 = {
-        "kind": "bar_stacked", "title": "署名工作量 TOP15",
-        "labels": [s.get("signer") or "未署名" for s in signers],
-        "series": [{"name": cat, "values": [s.get(cat, 0) for s in signers]}
-                   for cat in cats],
-    }
-
-    return [chart1, chart2, chart3]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    return df.rename(columns={k: v for k, v in _LEDGER_CN.items()
+                              if k in df.columns})

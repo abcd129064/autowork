@@ -31,7 +31,6 @@ from windows.aftersale.common import *  # noqa: F401,F403
 from windows.aftersale.entry import EntryPage
 from windows.aftersale.records import RecordsPage
 from windows.aftersale.settings import SettingsPage
-from windows.stat_charts import ChartPage, _aftersale_options
 
 # ==================== 售后面板窗口 ====================
 
@@ -52,12 +51,6 @@ class AftersalePanelWindow(FluentWindow):
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
 
-        # 统计图表页：matplotlib FigureCanvas + NavigationToolbar（懒加载，
-        # 首次进入才创建 matplotlib 资源；零 GPU 合成/零 DComp 与 Mica 物理兼容）
-        self.stat_page = ChartPage(_aftersale_options, "aftersale", self)
-        self.stat_page.setObjectName("aftersaleStatPage")
-        self.addSubInterface(self.stat_page, FluentIcon.PIE_SINGLE, "统计")
-
         # 设置面板：统计周期设置 + 数据库设置（原 MySQL 设置）
         self.settings_page = SettingsPage(self)
         self.settings_page.setObjectName("aftersaleSettingsPage")
@@ -77,7 +70,6 @@ class AftersalePanelWindow(FluentWindow):
         """周期设置保存成功：记录页重建周期下拉并重查，统计页刷新（新周期立即生效）"""
         self.records_page._cycles_loaded = False
         self.records_page._load_cycles_then_data()
-        self.stat_page.refresh()
 
     def _on_nav_changed(self, current, _pre=None):
         """导航切换：进入设置面板时刷新数据库配置表单（showEvent 已兜底，此处兼容旧信号）"""
@@ -119,7 +111,7 @@ class AftersalePanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
-        for page in (self.entry_page, self.records_page, self.stat_page):
+        for page in (self.entry_page, self.records_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))

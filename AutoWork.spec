@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 # ---- 沙箱环境兼容：禁用 PyInstaller 隔离子进程 ----
 # 当前终端沙箱禁止 CreatePipe（WinError 5），isolated 子进程无法启动；
@@ -58,6 +58,13 @@ qfw_hiddenimports = [
     m for m in collect_submodules('qfluentwidgets')
     if 'multimedia' not in m
 ]
+
+# ---- pygwalker 统计图表（windows/stat_charts.py 延迟 import） ----
+# pyg.to_html 需要包内 HTML 模板与 graphic-walker 前端资源，
+# collect_data_files 收集；collect_submodules 防延迟 import 漏检。
+# 体积影响：pygwalker + pandas + graphic-walker 前端 ~+60MB（体积换交互）
+pygwalker_datas = collect_data_files('pygwalker')
+pygwalker_hiddenimports = collect_submodules('pygwalker')
 
 # ---- conda 环境适配 ----
 # conda 安装的 PySide6 不自带 Qt 二进制（无 PySide6/Qt6/bin），
@@ -129,20 +136,14 @@ a = Analysis(
         # 注意：settings.json / frpc.exe / frpc_xtcp.toml 由 build_exe.py
         # 构建后复制到 dist 根目录（exe 旁边），不放入 datas；
         # autowork_with_table.py / p2p.py 已被 import 追踪编译进 PYZ，无需重复打包
-    ] + _conda_datas,
+    ] + pygwalker_datas + _conda_datas,
     hiddenimports=[
         'PySide6.QtWidgets',
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtSvg',
         'PySide6.QtSvgWidgets',
-        # 统计图表页 matplotlib（windows/stat_charts.py 延迟 import，
-        # PyInstaller 静态分析无法发现，显式声明；matplotlib 后端 QtAgg 依赖
-        # 的 PySide6.QtWidgets 等已在上方声明，绑包体积主要来自 numpy/matplotlib
-        # 本体 ~30MB，与 WebEngine 方案相比节省 ~150MB DLL + WebEngine 资源）
-        'matplotlib',
-        'matplotlib.backends.backend_qtagg',
-        'matplotlib.figure',
+        'pandas',
         'paramiko',
         'cryptography',
         'bcrypt',
@@ -157,7 +158,7 @@ a = Analysis(
         # 单杆视频（tools/single_shot_video.py 延迟导入，显式声明保险）
         'cv2',
         'numpy',
-    ] + qfw_hiddenimports,
+    ] + pygwalker_hiddenimports + qfw_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

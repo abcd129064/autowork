@@ -24,6 +24,7 @@ from workers.aftersale_worker import AftersaleDBWorker
 
 from windows.ledger.common import *  # noqa: F401,F403
 from windows.ledger.form import LedgerForm
+from windows.stat_charts import StatsOpener, _ledger_options
 
 
 class EditLedgerDialog(QDialog):
@@ -131,6 +132,9 @@ class RecordsPage(QWidget):
         self._del_worker = None
         self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
         self._init_ui()
+        # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
+        self._stats_opener = StatsOpener(_ledger_options, "ledger", self)
+        self._stats_opener.finished.connect(self._on_stats_finished)
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -261,6 +265,14 @@ class RecordsPage(QWidget):
         self._btn_refresh.setToolTip("重新查询数据库")
         self._btn_refresh.clicked.connect(self._on_refresh)
         toolbar.addWidget(self._btn_refresh)
+
+        # pygwalker 自助分析入口（浏览器独立窗口，拖拽字段出图）
+        self._btn_stats_chart = PushButton(
+            FluentIcon.HISTORY, "统计图表", self)
+        self._btn_stats_chart.setToolTip(
+            "打开 pygwalker 自助分析窗口（浏览器独立窗口，拖拽字段出图）")
+        self._btn_stats_chart.clicked.connect(self._on_open_stats_chart)
+        toolbar.addWidget(self._btn_stats_chart)
 
         root.addWidget(toolbar_scroll)
 
@@ -463,6 +475,16 @@ class RecordsPage(QWidget):
             self._load()
 
     # ---------- 加载 ----------
+
+    def _on_open_stats_chart(self):
+        """打开 pygwalker 自助分析窗口（浏览器独立窗口）。"""
+        self._btn_stats_chart.setEnabled(False)
+        self._stats_opener.open_analysis()
+
+    def _on_stats_finished(self, ok, msg):
+        self._btn_stats_chart.setEnabled(True)
+        show_info_bar(msg, message_type="success" if ok else "error",
+                      parent=self)
 
     def _on_refresh(self):
         """手动刷新：重查数据 + 署名选项 + 指标卡，完成弹 infobar"""

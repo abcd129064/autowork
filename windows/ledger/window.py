@@ -18,7 +18,6 @@ from core.perf import is_acrylic_enabled
 from windows.ledger.entry import EntryPage
 from windows.ledger.records import RecordsPage
 from windows.ledger.settings import SettingsPage
-from windows.stat_charts import ChartPage, _ledger_options
 
 
 class LedgerPanelWindow(FluentWindow):
@@ -39,15 +38,8 @@ class LedgerPanelWindow(FluentWindow):
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY,
                              "记录与统计")
 
-        # 统计图表页：matplotlib FigureCanvas + NavigationToolbar（懒加载，
-        # 首次进入才创建 matplotlib 资源；零 GPU 合成/零 DComp 与 Mica 物理兼容）
-        self.stat_page = ChartPage(_ledger_options, "ledger", self)
-        self.stat_page.setObjectName("ledgerStatPage")
-        self.addSubInterface(self.stat_page, FluentIcon.PIE_SINGLE, "统计")
-
-        # 提交成功后记录页静默刷新，统计页刷新（不弹 infobar）
+        # 提交成功后记录页静默刷新（不弹 infobar）
         self.entry_page.saved.connect(self.records_page.refresh_async)
-        self.entry_page.saved.connect(self.stat_page.refresh)
 
         self.settings_page = SettingsPage(self)
         self.settings_page.setObjectName("ledgerSettingsPage")
@@ -93,7 +85,7 @@ class LedgerPanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
-        for page in (self.entry_page, self.records_page, self.stat_page):
+        for page in (self.entry_page, self.records_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))

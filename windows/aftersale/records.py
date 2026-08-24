@@ -30,6 +30,7 @@ from windows.mysql_sync_card import MysqlSyncCard
 
 from windows.aftersale.common import *  # noqa: F401,F403
 from windows.aftersale.dialogs import EditRecordDialog, ImportPreviewDialog
+from windows.stat_charts import StatsOpener, _aftersale_options
 
 # ==================== 板块二：记录与统计页 ====================
 
@@ -55,6 +56,9 @@ class RecordsPage(QWidget):
         self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
         self._batch_worker = None
         self._init_ui()
+        # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
+        self._stats_opener = StatsOpener(_aftersale_options, "aftersale", self)
+        self._stats_opener.finished.connect(self._on_stats_finished)
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -174,6 +178,14 @@ class RecordsPage(QWidget):
         self._btn_refresh.setToolTip("重新查询数据库")
         self._btn_refresh.clicked.connect(self._on_refresh)
         toolbar.addWidget(self._btn_refresh)
+
+        # pygwalker 自助分析入口（浏览器独立窗口，拖拽字段出图）
+        self._btn_stats_chart = PushButton(
+            FluentIcon.HISTORY, "统计图表", self)
+        self._btn_stats_chart.setToolTip(
+            "打开 pygwalker 自助分析窗口（浏览器独立窗口，拖拽字段出图）")
+        self._btn_stats_chart.clicked.connect(self._on_open_stats_chart)
+        toolbar.addWidget(self._btn_stats_chart)
 
         root.addWidget(toolbar_scroll)
 
@@ -332,6 +344,16 @@ class RecordsPage(QWidget):
         self._lbl_source.setToolTip(
             "关闭 MySQL 后自动读写本地 SQLite；"
             "MySQL 恢复可用时会自动切回并合并兜底增量")
+
+    def _on_open_stats_chart(self):
+        """打开 pygwalker 自助分析窗口（浏览器独立窗口）。"""
+        self._btn_stats_chart.setEnabled(False)
+        self._stats_opener.open_analysis()
+
+    def _on_stats_finished(self, ok, msg):
+        self._btn_stats_chart.setEnabled(True)
+        show_info_bar(msg, message_type="success" if ok else "error",
+                      parent=self)
 
     def _on_refresh(self):
         """手动刷新：重建周期选项并重查（多人协作看到他人新数据）
