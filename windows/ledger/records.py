@@ -477,9 +477,9 @@ class RecordsPage(QWidget):
     # ---------- 加载 ----------
 
     def _on_open_stats_chart(self):
-        """打开 pygwalker 自助分析窗口（浏览器独立窗口）。"""
+        """打开 pygwalker 自助分析窗口。"""
         self._btn_stats_chart.setEnabled(False)
-        self._stats_opener.open_analysis()
+        self._stats_opener.open_analysis(self._current_filters())
 
     def _on_stats_finished(self, ok, msg):
         self._btn_stats_chart.setEnabled(True)

@@ -249,6 +249,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # MySQL 主模式：启动周备份（兜底基线刷新）+ 后端状态监控（降级/恢复提示）
         self._init_fallback_backup()
         self._init_backend_state_monitor()
+        # 数据保留自动清理：xqzg/kd 过期分区 + 其余流水表按大小清理
+        self._init_data_retention()
 
     # ==================== 兜底备份与后端状态监控 ====================
 
@@ -280,6 +282,41 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             self._show_info_bar(f"MySQL 周备份失败：{msg}", "warning", duration=4000)
         elif count > 0:
             self._show_info_bar(f"MySQL 周备份完成：{msg}", "success", duration=3000)
+
+    # ==================== 数据保留自动清理 ====================
+
+    def _init_data_retention(self):
+        """数据保留清理：启动延迟首次检查 + 每 24h 重复（双后端均生效）"""
+        self._cleanup_worker = None
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setInterval(24 * 60 * 60 * 1000)  # 24h
+        self._cleanup_timer.timeout.connect(self._start_cleanup_worker)
+        # 启动后延迟 8s 首次检查，避开启动高峰与周备份（5s）错峰
+        QTimer.singleShot(8000, self._start_cleanup_worker)
+        self._cleanup_timer.start()
+
+    def _start_cleanup_worker(self):
+        """后台执行数据保留清理（单例防并发；配置禁用时跳过）"""
+        try:
+            from database.data_retention import is_enabled
+            if not is_enabled():
+                return
+        except Exception:
+            pass  # 配置读取异常时仍尝试执行
+        if self._cleanup_worker and self._cleanup_worker.isRunning():
+            return
+        from workers.cleanup_worker import CleanupWorker
+        self._cleanup_worker = CleanupWorker(self)
+        self._cleanup_worker.result.connect(self._on_cleanup_result)
+        self._cleanup_worker.start()
+
+    def _on_cleanup_result(self, ok, msg, count):
+        """数据清理结果提示（无实际删除时不打扰用户）"""
+        if not ok:
+            self._show_info_bar(f"数据清理失败：{msg}", "warning", duration=4000)
+        elif count > 0:
+            self._append_log(f"[数据清理] {msg}")
+            self._show_info_bar(f"数据清理完成：{msg}", "success", duration=3000)
 
     def _init_backend_state_monitor(self):
         """后端状态轮询：降级/恢复时提示用户，并同步更新右侧数据库状态标签"""
