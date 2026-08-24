@@ -592,6 +592,17 @@ MysqlTestWorker(cfg, parent=None)
 | `progress` | `Signal(str)` | 阶段进度 |
 | `result` | `Signal(bool, str, int)` | 完成 (ok, message, count) |
 
+## workers/cleanup_worker.py 数据保留清理 Worker
+
+异步执行 `data_retention.run_cleanup`（过期分区删除 + 按大小清理），避免阻塞 UI。由主窗口 `_init_data_retention` 挂载：启动延迟 8s 首次检查 + 每 24h 周期执行，仅在确有删除时提示。
+
+### CleanupWorker
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `progress` | `Signal(str)` | 阶段进度（各表删除行数） |
+| `result` | `Signal(bool, str, int)` | 完成 (ok, message, deleted_count) |
+
 ## workers/merge_back_worker.py 合并回写 Worker
 
 异步执行 `merge_back.merge_back`（MySQL 恢复后 LWW 合并兜底增量），避免阻塞 `_get_conn` 调用方。
@@ -809,6 +820,22 @@ MySQL → SQLite 周备份（兜底基线刷新）：ONLINE 期间每周拉全�
 | `maybe_backup(progress_cb=None)` | 按上次备份时间判断是否到期（≥7 天）再备份 |
 | `is_backup_due()` / `get_last_backup_time()` / `set_last_backup_time(t)` | 到期判断 / 读 / 写上次备份时间（sync_meta） |
 
+### database.data_retention
+
+数据保留自动清理（双后端兼容，纯逻辑层不依赖 PySide6）。两类清理：
+
+- **A 按时间过期清理**：`xqzg_status` / `kd_status` 无独立时间列，日期编码在 `file_path`（`yyyy/MM/dd` 分区，字典序即时间序），按 `file_path < today-age_days` 删除过期分区；`file_path != ''` 防御空串整表误删。每日执行幂等。
+- **B 按大小清理**：范围 `aftersale_records` / `ledger_records` / `submission_log` / `health_alerts`（`device_mapping` 为设备→目录映射不纳入；`billiard_tables` / `sync_meta` 永不清理）。每 `check_interval_days` 天检查一次（`sync_meta.last_size_check` 记录），表大小超过 `max_size_gb` 时按日期桶从最早逐日删除直到低于 `min_size_gb`；最近 `min_keep_days` 天保护期内不删。
+- 表大小统计：MySQL 用 `information_schema.tables`（`data_length + index_length`）；SQLite 用 `dbstat` 虚表（不可用时跳过该表）。
+- 日期桶提取：`substr(COALESCE(NULLIF(occurred_at,''), created_at),1,10)`（与跑视频面板筛选同口径）；`submission_log` 用 `created_at`；`health_alerts` 用 `updated_at`。
+
+配置读取 `settings.json` 的 `data_retention` 节点（缺省回落模块内 `DEFAULT_CONFIG`；`tables` 白名单过滤未知表名）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `run_cleanup(progress_cb=None)` | `(callable?) -> (bool, str, int)` | 执行一轮清理（A + B），返回 (ok, msg, 删除总行数) |
+| `is_enabled()` | `() -> bool` | 总开关（worker 挂载时判断） |
+
 ### database.sqlite_io
 
 SQLite 只读工具（数据层基础设施）：只读、列交集、缺列补 None、表不存在返回空列表。原镜像推送 `_read_sqlite` 的列交集语义由本模块承接。
@@ -988,7 +1015,9 @@ ManagementPanelWindow(parent=None)
 
 ### AftersalePanelWindow（售后面板）
 
-`windows/aftersale_panel.py`：售后面板（qfluentwidgets `FluentWindow` + 左侧导航，风格仿运维管理面板）。由主窗口 `_on_open_aftersale`（单例复用）或运维面板入口打开，支持 `python -m windows.aftersale_panel` 独立调试。数据层 `database/aftersale_db.py`，所有 DB 读写经 `AftersaleDBWorker` 后台线程，UI 零阻塞。
+`windows/aftersale_panel.py`：售后面板（qfluentwidgets `FluentWindow` + 左侧导航，风格仿运维管理面板）。由主窗口 `_on_open_aftersale`（单例复用，**内置窗口**，不拉起外部进程）或运维面板入口打开，支持 `python -m windows.aftersale_panel` 独立调试。数据层 `database/aftersale_db.py`，所有 DB 读写经 `AftersaleDBWorker` 后台线程，UI 零阻塞。
+
+**独立打包（单文件）**：`AfterSale.spec` 用 PyInstaller onefile 模式打包为 `dist/aftersale.exe`，内置全部依赖、独立分发。单文件模式下 `sys._MEIPASS` 为临时解压目录，入口文件顶部会把 `table_db` 的 DB 路径重定向到 exe 旁 `database/tables.db`（首启从 `_MEIPASS` 复制种子库），保证数据持久化；与完整版 AutoWork 的数据相互独立、互不关联。
 
 ```python
 AftersalePanelWindow(parent=None)
@@ -1364,6 +1393,7 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `api_credentials` | object | — | 运维面板 API 配置（见下表） |
 | `mysql_sync` | object | — | MySQL 同步配置（见下表，售后面板/运维面板共用） |
 | `aftersale_cycle` | object | `{type:tue}` | 售后统计周期模式（见下表） |
+| `data_retention` | object | 见下表 | 数据保留自动清理配置（见下表） |
 | `newlog_target_name` | str | — | NewLog 整理署名，同时作为售后面板填写人默认值 |
 | `shortcut_*` | str | 见上表 | 快捷键配置（共 12 项） |
 
@@ -1392,6 +1422,19 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `type` | 周期模式：`tue`（周二起，默认）/ `mon`（自然周）/ `custom`（自定义） |
 | `start` | custom 模式的周期起始日（`yyyy-MM-dd`） |
 | `span` | custom 模式的周期天数（≥1，默认 7） |
+
+**data_retention 子结构**（数据保留自动清理，后台自动执行）：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | 总开关 |
+| `age_days` | `60` | xqzg_status / kd_status 过期分区保留天数 |
+| `check_interval_days` | `60` | 其余流水表的大小检查间隔（天） |
+| `max_size_gb` | `3` | 触发按大小清理的表大小阈值（GB） |
+| `min_size_gb` | `2` | 清理目标：删到低于该值停止（GB） |
+| `min_keep_days` | `30` | 最低保留天数：最近 N 天数据永不删 |
+
+清理范围：A = `xqzg_status` / `kd_status`；B = `aftersale_records` / `ledger_records` / `submission_log` / `health_alerts`（`tables` 白名单可过滤，未知表名忽略）。详见 [database.data_retention](#databasedata_retention)。
 
 ---
 

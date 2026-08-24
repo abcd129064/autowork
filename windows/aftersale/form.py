@@ -70,6 +70,8 @@ class AftersaleForm(QWidget):
         self.type_combo = EditableComboBox(self)
         self.type_combo.addItems(aftersale_db.ISSUE_TYPES)
         self.type_combo.setFixedWidth(320)
+        # 与「问题」控件交互一致：挂手输补全，支持预置可选 + 可手输
+        self._set_completer(self.type_combo, list(aftersale_db.ISSUE_TYPES))
         col_type.addWidget(self.type_combo)
         self._err_type = _inline_error("必填项未填写", self)
         col_type.addWidget(self._err_type)
@@ -180,9 +182,18 @@ class AftersaleForm(QWidget):
         sec3 = _SectionCard("问题描述", self)
         v3 = sec3.content_layout
         v3.addWidget(_field_label("问题", True, self))
+        # 问题行：下拉 + 「常用句」按钮（点击弹窗内条目复制到剪贴板，不自动填入）
+        prob_row = QHBoxLayout()
+        prob_row.setSpacing(8)
         self.problem_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.problem_combo.setFixedWidth(320)
-        v3.addWidget(self.problem_combo)
+        prob_row.addWidget(self.problem_combo)
+        self._btn_phrases = PushButton(FluentIcon.COPY, "常用句", self)
+        self._btn_phrases.setToolTip("常用句（点击条目复制到剪贴板，可添加新句子）")
+        self._btn_phrases.clicked.connect(self._open_quick_phrases)
+        prob_row.addWidget(self._btn_phrases)
+        prob_row.addStretch(1)
+        v3.addLayout(prob_row)
         self._err_problem = _inline_error("必填项未填写", self)
         v3.addWidget(self._err_problem)
         # 发生原因 / 解决方案：等宽等高多行文本框并排（64px ≈ 3 行）
@@ -217,6 +228,10 @@ class AftersaleForm(QWidget):
         seg_row.addWidget(_field_label("是我们的问题", False, self))
         self.is_our_problem_combo = YesNoSegment("是", self)
         seg_row.addWidget(self.is_our_problem_combo)
+        # 重要标记：勾选后「记录与统计」列表中该条显示淡黄色底色，代表比较重要
+        self.is_important_check = CheckBox("重要", self)
+        self.is_important_check.setToolTip("标记为重要售后（记录列表中该条显示淡黄色底色）")
+        seg_row.addWidget(self.is_important_check)
         seg_row.addStretch(1)
         v3.addLayout(seg_row)
         # 解决人 / 响应时间：左右平分两列
@@ -276,12 +291,51 @@ class AftersaleForm(QWidget):
 
     @staticmethod
     def _set_completer(combo, items: list):
-        """给 EditableComboBox 挂手输补全器（LineEdit 子类无内置补全）"""
+        """给 EditableComboBox 挂手输补全器（LineEdit 子类无内置补全）。
+
+        使用包含匹配（MatchContains + 忽略大小写）：输入任意子串也能力命中
+        候选，例如候选「识别反应慢」输入「反应慢」（子串在中间）同样带出，
+        而非仅前缀命中（输入「识别」才行）。
+        """
         try:
             from PySide6.QtWidgets import QCompleter
-            combo.setCompleter(QCompleter(items, combo))
+            c = QCompleter(items, combo)
+            c.setFilterMode(Qt.MatchFlag.MatchContains)
+            c.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            c.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            combo.setCompleter(c)
+            # 限制下拉高度不超过宿主面板：候选随使用量增长（100+ 条）时，
+            # 避免弹出列表撑破当前面板；窗口未 show 时取合理兜底值
+            try:
+                popup = c.popup()
+                avail = int(getattr(combo.window(), "height", lambda: 0)()) or 0
+                max_h = (
+                    max(220, min(440, int(avail * 0.8)))
+                    if avail > 0 else 320)
+                popup.setMaximumHeight(max_h)
+            except Exception:
+                pass
         except Exception:
             pass
+
+    # ---------- 常用句 ----------
+
+    def _open_quick_phrases(self):
+        """打开常用句框：点击条目即复制到剪贴板（非模态，不阻挡售后面板）"""
+        # 延迟导入避免 dialogs.py → form.py 的循环依赖
+        from windows.aftersale.dialogs import QuickPhraseDialog
+        # 关闭上一实例（若仍打开），再新建非模态窗口；保存引用防止被垃圾回收
+        old = getattr(self, "_quick_phrase_dlg", None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        dlg = QuickPhraseDialog(self)
+        self._quick_phrase_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     # ---------- 球房搜索与带出 ----------
 
@@ -410,6 +464,7 @@ class AftersaleForm(QWidget):
         self.resolved_combo.setValue(rec.get("resolved") or "是")
         self.is_initiative_combo.setValue(rec.get("is_initiative") or "否")
         self.is_our_problem_combo.setValue(rec.get("is_our_problem") or "是")
+        self.is_important_check.setChecked(bool(rec.get("is_important")))
         self.solution_edit.setPlainText(str(rec.get("solution") or ""))
         self.resolver_combo.setText(str(rec.get("resolver") or ""))
         self.response_combo.setText(str(rec.get("response_time") or ""))
@@ -431,6 +486,7 @@ class AftersaleForm(QWidget):
             "resolved": self.resolved_combo.value(),
             "is_initiative": self.is_initiative_combo.value(),
             "is_our_problem": self.is_our_problem_combo.value(),
+            "is_important": 1 if self.is_important_check.isChecked() else 0,
             "solution": self.solution_edit.toPlainText().strip(),
             "resolver": self.resolver_combo.currentText().strip(),
             "response_time": self.response_combo.currentText().strip(),
@@ -439,12 +495,13 @@ class AftersaleForm(QWidget):
         }
 
     def _required_map(self):
-        """必填字段 → (取值, 错误控件, 输入控件)，顺序即校验/聚焦顺序"""
+        """必填字段 → (取值, 错误控件, 输入控件)，顺序即校验/聚焦顺序
+
+        桌号为选填（2026-08 需求：允许不填写桌号），不参与必填进度与校验。
+        """
         return [
             ("类型", not self.type_combo.currentText().strip(),
              self._err_type, self.type_combo),
-            ("桌号", not self.table_no_edit.text().strip(),
-             self._err_table, self.table_no_edit),
             ("球房", not self.room_edit.text().strip(),
              self._err_room, self.room_edit),
             ("地区", not self.region_combo.currentText().strip(),
@@ -490,6 +547,7 @@ class AftersaleForm(QWidget):
         self.resolved_combo.setValue("是")
         self.is_initiative_combo.setValue("否")
         self.is_our_problem_combo.setValue("是")
+        self.is_important_check.setChecked(False)
         self.type_combo.setCurrentIndex(-1)
         self.occurred_picker.setDate(QDate.currentDate())  # 默认当日
         self.region_combo.setText("")

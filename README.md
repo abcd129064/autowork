@@ -33,6 +33,12 @@
 - **多后端存储**：与售后同一条双后端路由——MySQL 开启时读写直接落服务器，多人协作刷新可见；MySQL 不可用自动降级本地 SQLite，恢复后自动合并回 MySQL
 - **设置**：默认署名配置 + 数据库设置（复用 MysqlSyncCard，同步范围为跑视频记录）
 
+### 数据保留自动清理（防数据无限增长）
+- **过期清理（每日执行）**：`xqzg_status` / `kd_status` 两表按日期分区（`file_path`=`yyyy/MM/dd`）自动删除超过 60 天的数据
+- **按大小清理（每 60 天检查）**：`aftersale_records` / `ledger_records` / `submission_log` / `health_alerts` 四张流水表，表大小超过 3GB 时从最早日期开始逐日删除，直到小于 2GB；最近 30 天数据受保护不删
+- **双后端生效**：MySQL 主库与本地 SQLite 兜底均执行同一套清理；参数在 `settings.json` 的 `data_retention` 节点配置（见下文）
+- 清理在后台线程执行（启动后延迟 8s 首次检查 + 每 24h 一次），仅在确有删除时提示
+
 ### 售后面板（售后问题登记与统计）
 - **填写录入**：售后问题登记表单（字段对齐售后汇总 Excel），球房输入搜索球桌库自动带出桌号/SNK/地区，发生时间步进补录历史日期；「是否我们发起售后」「是否我方问题」两个判定开关参与筛选与统计
 - **记录与统计**：按周期/类型/状态/是否我们发起/是否我方问题/关键词筛选 + 分页 + 已解决/未解决统计，支持编辑/删除/批量标记已解决/批量删除/导出 xlsx/导入 Excel（导入前预览确认）
@@ -72,7 +78,7 @@
 | SSH/SFTP | paramiko |
 | P2P 穿透 | frp (frpc) XTCP |
 | 远程桌面 | mstsc.exe + Win32 API 窗口嵌入 |
-| 打包 | PyInstaller (onedir) |
+| 打包 | PyInstaller（完整版 onedir + 售后面板单文件 onefile） |
 | 进程管理 | QProcess + ctypes (NtSuspendProcess) |
 | 显示控制 | ctypes (EnumDisplaySettings/ChangeDisplaySettings) |
 
@@ -88,8 +94,10 @@ autowork/
 ├── frpc.exe                   # frp 客户端（P2P 穿透）
 ├── frpc_xtcp.toml             # frp XTCP 连接配置（运行时生成）
 ├── requirements.txt           # Python 依赖
-├── AutoWork.spec              # PyInstaller 打包配置
-├── build_exe.py               # 打包构建脚本
+├── AutoWork.spec              # PyInstaller 打包配置（完整版 onedir）
+├── AfterSale.spec             # PyInstaller 打包配置（售后面板单文件 onefile）
+├── Management.spec            # （历史遗留）运维面板独立打包 spec，已不再构建
+├── build_exe.py               # 打包构建脚本（完整版 + 单文件售后面板）
 │
 ├── core/                      # 基础层（路径、日志、工具函数）
 │   ├── acrylic_patch.py       #   亚克力效果 PIL 替代补丁
@@ -111,6 +119,7 @@ autowork/
 ├── workers/                   # 后台线程 Worker 层
 │   ├── aftersale_worker.py    #   通用 DB 后台 Worker（售后/跑视频/运维共用，fn 封装）
 │   ├── backup_worker.py       #   周备份 Worker（MySQL → SQLite 兜底基线刷新）
+│   ├── cleanup_worker.py      #   数据保留清理 Worker（过期分区 + 按大小清理）
 │   ├── collect_worker.py      #   视频/日志收集与打包上传 Worker（设备状态页）
 │   ├── merge_back_worker.py   #   兜底增量合并回写 Worker（MySQL 恢复后 LWW）
 │   ├── mysql_sync_worker.py   #   MySQL 连接测试 Worker
@@ -122,6 +131,7 @@ autowork/
 ├── database/                  # 数据层（SQLite/MySQL 双后端）
 │   ├── backend.py             #   数据库后端切换层（MySQL 替代 SQLite 路由 + 方言适配）
 │   ├── table_db.py            #   球桌/设备数据存取（FTS5 搜索、按日期分区）
+│   ├── data_retention.py      #   数据保留自动清理（过期分区 + 按大小清理，双后端）
 │   ├── aftersale_db.py        #   售后记录数据层（周期计算、筛选统计、导入导出）
 │   ├── ledger_db.py           #   跑视频记录数据层（分类筛选统计、署名统计、导出）
 │   ├── schema.py              #   表结构单一来源（双方言 DDL + 迁移注册表）
@@ -203,9 +213,16 @@ python main.py
 python build_exe.py
 ```
 
-打包完成后，分发 `dist/AutoWork/` 整个目录到目标机器即可运行。
+打包完成后产出**两个相互独立的分发物**（互不关联，各自数据独立）：
 
-> 构建脚本会自动将 `settings.json` 和 `frpc.exe` 复制到 dist 目录。
+1. **完整版**：分发 `dist/AutoWork/` 整个目录到目标机器运行（`autowork.exe`）。
+   售后面板、运维面板均**内置**在该程序内（打开时不会调用任何外部 exe）。
+2. **单文件售后面板**：分发 `dist/aftersale.exe`（单个 exe，自带全部依赖），
+   无需安装环境即可运行。数据落盘在 exe 旁边的 `database/tables.db`，
+   与完整版的数据相互独立。
+
+> 构建脚本会自动复制 `settings.json` 到两个产物旁，并复制 `frpc.exe` 到完整版目录。
+> 单文件版不包含 P2P/SSH/运维/AI 等主程序功能，仅售后面板。
 
 ## 快捷键
 
@@ -315,6 +332,26 @@ AI 分析配置（设置 → AI）：
 - `type`：`tue`（周二起，默认）/ `mon`（自然周）/ `custom`（自定义起始日+天数）
 - 记录按发生时间动态归属周期，切换模式后列表/统计/周期下拉/导出立即按新规则重新归属
 
+数据保留自动清理（后台自动执行，参数可在 `data_retention` 节点调整）：
+
+```json
+"data_retention": {
+  "enabled": true,
+  "age_days": 60,
+  "check_interval_days": 60,
+  "max_size_gb": 3,
+  "min_size_gb": 2,
+  "min_keep_days": 30
+}
+```
+
+- `enabled`：总开关（关闭后不执行任何清理）
+- `age_days`：`xqzg_status` / `kd_status` 过期分区保留天数（默认 60）
+- `check_interval_days`：其余流水表的大小检查间隔天数（默认 60）
+- `max_size_gb`：触发按大小清理的表大小阈值（默认 3GB）
+- `min_size_gb`：清理目标——删到低于该值停止（默认 2GB）
+- `min_keep_days`：最低保留天数——最近 N 天数据永不删（默认 30，防误删光）
+
 frp 服务器配置（设置 → 远程连接）：
 
 ```json
@@ -344,6 +381,7 @@ frp 服务器配置（设置 → 远程连接）：
 
 - `autowork_with_table.py` 由 `.ui` 文件编译生成，修改界面请编辑 `.ui` 后重新编译
 - P2P 功能需要 `frpc.exe` 与主程序在同一目录下
+- 完整版与单文件售后面板**相互独立**：完整版打开售后面板为内置窗口，不调用外部 exe；两者的售后数据分别存于各自 `database/tables.db`，互不影响
 - 打包排除了 numpy/scipy（避免 MKL DLL 245MB），亚克力效果由 PIL 补丁替代实现
 - 主题样式文件位于 `styles/`，打包时通过 `AutoWork.spec` 的 `datas` 包含
 - 新增模块请遵循单向依赖链，避免循环导入

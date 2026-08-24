@@ -254,6 +254,8 @@ TABLE_COLUMNS = {
         ColumnDef("device_code", "TEXT", "VARCHAR(255)", "''", "''"),
         ColumnDef("cycle_start", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
+        # 重要标记（需求：勾选「重要」后在记录与统计列表该条显示淡黄色底色）
+        ColumnDef("is_important", "INTEGER", "TINYINT", "0", "0"),
     ],
     # 跑视频记录（跑视频面板，双后端）：字段来源 在线模板.xlsx 的
     # 问题/未复现/精度/使用 四个数据 sheet（sheet 名即 category 分类；
@@ -373,6 +375,9 @@ MIGRATIONS: dict = {
                         "VARCHAR(32)", "''"),
         ColumnMigration("aftersale_records", "updated_at", "TEXT", "''",
                         "VARCHAR(32)", "''"),
+        # 重要标记列（SQLite 自动补列；MySQL 上线时人工 ALTER，此处登记幂等兜底）
+        ColumnMigration("aftersale_records", "is_important", "INTEGER", "0",
+                        "TINYINT", "0"),
     ],
     "xqzg_status": [
         ColumnMigration("xqzg_status", "device_code", "TEXT", "''",

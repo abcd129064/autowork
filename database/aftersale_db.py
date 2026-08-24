@@ -43,7 +43,7 @@ RECORD_FIELDS = (
     "created_at", "occurred_at", "creator", "issue_type", "table_no",
     "room_name", "region", "problem", "cause", "resolved",
     "is_initiative", "is_our_problem", "solution", "resolver",
-    "response_time", "snk_code", "device_code", "cycle_start",
+    "response_time", "is_important", "snk_code", "device_code", "cycle_start",
     "updated_at",
 )
 
@@ -131,6 +131,56 @@ def save_cycle_mode(mode: dict) -> dict:
     except Exception:
         pass
     return cfg
+
+
+# ==================== 常用句（售后「问题」字段快捷文本） ====================
+
+_QPC_KEY = "aftersale_quick_phrases"
+# 预置常见问题描述（新库 / 无历史数据时「问题」下拉不为空）
+_QPC_DEFAULT = [
+    "主机没有开机", "遥控器没反应", "程序没了", "不能扫码",
+    "识别不了", "记分牌显示不出来",
+]
+
+
+def load_quick_phrases() -> list:
+    """读取常用句列表（settings.json 持久化，用户新增项置顶）"""
+    import json
+    from core.app_paths import get_app_dir
+
+    try:
+        path = os.path.join(get_app_dir(), "settings.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                v = json.load(f).get(_QPC_KEY)
+            if isinstance(v, list):
+                return [str(x) for x in v if str(x).strip()]
+    except Exception:
+        pass
+    return list(_QPC_DEFAULT)
+
+
+def add_quick_phrase(text: str) -> list:
+    """新增常用句（去重、置顶），写回 settings.json，返回更新后的列表"""
+    import json
+    from core.app_paths import get_app_dir
+
+    phrases = load_quick_phrases()
+    t = str(text or "").strip()
+    if t and t not in phrases:
+        phrases.insert(0, t)
+    path = os.path.join(get_app_dir(), "settings.json")
+    try:
+        data = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data[_QPC_KEY] = phrases
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return phrases
 
 
 def cycle_span_days() -> int:
@@ -278,8 +328,8 @@ def insert_record(record: dict) -> int:
         "(created_at, occurred_at, creator, issue_type, table_no, room_name, "
         "region, problem, cause, resolved, is_initiative, is_our_problem, "
         "solution, resolver, response_time, snk_code, device_code, "
-        "cycle_start, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "cycle_start, updated_at, is_important) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (created_at, occurred,
          str(record.get("creator") or ""),
          str(record.get("issue_type") or ""),
@@ -294,7 +344,8 @@ def insert_record(record: dict) -> int:
          str(record.get("solution") or ""),
          str(record.get("resolver") or ""),
          str(record.get("response_time") or ""),
-         snk, device, cycle, now_str))
+         snk, device, cycle, now_str,
+         int(bool(record.get("is_important"))) ))
     conn.commit()
     return cur.lastrowid
 
@@ -333,7 +384,7 @@ def update_record(record: dict) -> int:
         "table_no=?, room_name=?, region=?, problem=?, cause=?, resolved=?, "
         "is_initiative=?, is_our_problem=?, solution=?, "
         "resolver=?, response_time=?, snk_code=?, device_code=?, cycle_start=?, "
-        "updated_at=? "
+        "updated_at=?, is_important=? "
         "WHERE id=?",
         (occurred,
          str(record.get("creator") or ""),
@@ -349,7 +400,8 @@ def update_record(record: dict) -> int:
          str(record.get("solution") or ""),
          str(record.get("resolver") or ""),
          str(record.get("response_time") or ""),
-         snk, device, cycle, now_str, rec_id))
+         snk, device, cycle, now_str,
+         int(bool(record.get("is_important"))), rec_id))
     conn.commit()
     return cur.rowcount
 

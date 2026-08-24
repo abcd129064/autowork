@@ -87,12 +87,13 @@ class EntryPage(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(10)
         self._prog = ProgressBar(view)
-        self._prog.setRange(0, 5)
+        _total_required = len(self.form._required_map())  # 必填项数随表单联动
+        self._prog.setRange(0, _total_required)
         self._prog.setValue(0)
         self._prog.setTextVisible(False)
         self._prog.setFixedWidth(72)
         bar.addWidget(self._prog)
-        self._prog_text = CaptionLabel("必填项 0/5 已填写", view)
+        self._prog_text = CaptionLabel("必填项 0/%d 已填写" % _total_required, view)
         bar.addWidget(self._prog_text)
         bar.addStretch(1)
         self._btn_clear = PushButton(FluentIcon.DELETE, "清空", view)
@@ -113,10 +114,10 @@ class EntryPage(QWidget):
 
         # 必填进度联动：任一必填控件变化即重算
         # （需求13：region/problem 已为 EditableComboBox（LineEdit 子类），
-        # 手输触发 textChanged；currentIndexChanged 保留）
+        # 手输触发 textChanged；currentIndexChanged 保留。
+        # 桌号 2026-08 改为选填，不再联动进度）
         f = self.form
         for sig in (f.type_combo.currentTextChanged,
-                    f.table_no_edit.textChanged,
                     f.room_edit.textChanged,
                     f.region_combo.textChanged,
                     f.region_combo.currentIndexChanged,
@@ -145,13 +146,14 @@ class EntryPage(QWidget):
             self._cycle_chip.setText("按发生时间自动归属")
 
     def _update_required_progress(self, *_a):
-        """必填进度：n/5 实时刷新；填齐变绿，缺项琥珀色点名"""
+        """必填进度：n/必填总数 实时刷新；填齐变绿，缺项琥珀色点名"""
+        total = len(self.form._required_map())
         bad = [name for name, is_bad, _l, _c in self.form._required_map()
                if is_bad]
-        done = 5 - len(bad)
+        done = total - len(bad)
         self._prog.setValue(done)
         if not bad:
-            self._prog_text.setText("必填项 5/5 已填齐")
+            self._prog_text.setText("必填项 %d/%d 已填齐" % (total, total))
             self._prog_text.setStyleSheet("color: %s;" % SEMANTIC["success"])
             self._prog.setStyleSheet(
                 "QProgressBar { background: %s; border: none;"

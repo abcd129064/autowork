@@ -1,6 +1,33 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+
+# ---- Qt 运行时引导 ----
+# 场景：conda base 激活后，PATH 会注入 conda 自带的 Qt DLL（qtbase/qtwebengine 等，位于
+# <conda>\Library\bin），它们与 PySide6 自带的 Qt 二进制冲突，导致 Qt 平台插件加载失败
+# （qt.qpa.plugin / DLL load failed）。spec 在构建时被 exec，L37 起即 import PySide6，
+# 必须在 import PySide6 之前用 os.add_dll_directory 固定 PySide6 自身的 Qt 搜索路径。
+import importlib.util as _qt_iu
+_qt_handles = []
+try:
+    _qt_spec = _qt_iu.find_spec('PySide6')
+    if _qt_spec is not None:
+        _qt_locs = list(getattr(_qt_spec, 'submodule_search_locations', None) or [])
+        if _qt_locs:
+            _qt_pkg = _qt_locs[0]
+            for _d in (_qt_pkg, os.path.dirname(_qt_pkg),
+                       os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')):
+                if os.path.isdir(_d):
+                    try:
+                        _qt_handles.append(os.add_dll_directory(_d))
+                    except OSError:
+                        pass
+            os.environ['QT_PLUGIN_PATH'] = os.path.join(_qt_pkg, 'plugins')
+            os.environ.setdefault('QT_QPA_PLATFORM_PLUGIN_PATH',
+                                   os.path.join(_qt_pkg, 'plugins', 'platforms'))
+except Exception:
+    pass
+
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 # ---- 沙箱环境兼容：禁用 PyInstaller 隔离子进程 ----
@@ -67,30 +94,38 @@ pygwalker_datas = collect_data_files('pygwalker')
 pygwalker_hiddenimports = collect_submodules('pygwalker')
 
 # ---- conda 环境适配 ----
-# conda 安装的 PySide6 不自带 Qt 二进制（无 PySide6/Qt6/bin），
-# Qt DLL、shiboken6/pyside6 运行时 DLL 及插件均位于
-# {env}/Library/bin 与 {env}/Library/lib/qt6/plugins，
-# PyInstaller 无法自动解析，需显式收集；PyPI 版 PySide6 则跳过。
+# 运行环境是 conda base，但 PySide6 为 PyPI 版（历史修复误装）。两类问题分开处理：
+# 1) Python C 扩展（_ctypes/_sqlite3/pyexpat/PIL/zstandard/cryptography 等）依赖的
+#    运行时原生 DLL 位于 {env}/Library/bin（如 libexpat.dll、ffi.dll、sqlite3.dll），
+#    PyInstaller 无法自动定位该目录，必须无条件显式收集——否则打包版运行时
+#    import 这些模块会 DLL load failed（本次正是 pyexpat 缺 libexpat.dll）。
+# 2) Qt 配套：conda 版 PySide6 的 Qt DLL/插件在 {env}/Library 下需显式收集；
+#    PyPI 版则在包内 Qt6/，由 PyInstaller 的 PySide6 hook 自动处理。
+import sys
 _conda_binaries = []
 _conda_datas = []
-# 用 Qt 自身探测安装前缀（conda 下为 {env}/Library，PyPI 版为包内 Qt6/）
+# 运行时原生库：无论 PySide6 为何种版本，只要 {env}/Library/bin 存在即收集
+_conda_lib_bin = os.path.join(sys.prefix, 'Library', 'bin')
+_conda_run_dlls = {
+    'libcrypto-3-x64.dll', 'libssl-3-x64.dll', 'ffi.dll',
+    'liblzma.dll', 'libexpat.dll', 'libmpdec-4.dll', 'libmpdec.dll',
+    'sqlite3.dll', 'zstd.dll',
+    'libjpeg.dll', 'libpng16.dll', 'libwebp.dll', 'libwebpmux.dll',
+    'libwebpdemux.dll', 'libtiff.dll', 'tiff.dll',
+    'libopenjp2.dll', 'openjp2.dll',
+    'lcms2.dll', 'freetype.dll', 'harfbuzz.dll',
+    'libbz2.dll', 'bz2.dll', 'bzip2.dll',
+}
+if os.path.isdir(_conda_lib_bin):
+    for _f in sorted(os.listdir(_conda_lib_bin)):
+        if _f.lower() in _conda_run_dlls:
+            _conda_binaries.append((os.path.join(_conda_lib_bin, _f), '.'))
+# Qt 二进制 + 插件：仅 conda 版 PySide6（Qt 前缀为 Library）才需从该目录收集
 from PySide6.QtCore import QLibraryInfo as _QLI
 _qt_prefix = _QLI.path(_QLI.PrefixPath).replace('/', os.sep)
 if _qt_prefix and os.path.basename(os.path.normpath(_qt_prefix)) == 'Library':
     _lib_bin = os.path.join(_qt_prefix, 'bin')
     _qt_plugins = os.path.join(_qt_prefix, 'lib', 'qt6', 'plugins')
-    # Qt 核心/模块 DLL + 运行时依赖（OpenSSL、ffi、sqlite 等），按文件名小写匹配
-    _support_dlls = {
-        'libcrypto-3-x64.dll', 'libssl-3-x64.dll', 'ffi.dll',
-        'liblzma.dll', 'libexpat.dll', 'libmpdec-4.dll', 'libmpdec.dll',
-        'sqlite3.dll', 'zstd.dll',
-        'libjpeg.dll', 'libpng16.dll', 'libwebp.dll', 'libwebpmux.dll',
-        'libwebpdemux.dll', 'libtiff.dll', 'tiff.dll',
-        'libopenjp2.dll', 'openjp2.dll',
-        'lcms2.dll', 'freetype.dll', 'harfbuzz.dll',
-        'libbz2.dll', 'bz2.dll', 'bzip2.dll',
-        'shiboken6.cp313-win_amd64.dll', 'pyside6.cp313-win_amd64.dll',
-    }
     # Qt6 DLL 黑名单：项目零引用 WebEngine/QML/Quick/Designer/Pdf 等模块，
     # conda 的 Library/bin 含全套 Qt DLL，无差别收集会引入 ~250MB 无用二进制，
     # 只收集运行时必需的 Core/Gui/Widgets/Svg/Network/OpenGL 等
@@ -100,9 +135,7 @@ if _qt_prefix and os.path.basename(os.path.normpath(_qt_prefix)) == 'Library':
                      'qt6shadertools')
     for _f in sorted(os.listdir(_lib_bin)):
         _low = _f.lower()
-        if _low in _support_dlls:
-            _conda_binaries.append((os.path.join(_lib_bin, _f), '.'))
-        elif _low.startswith('qt6') and _low.endswith('.dll') \
+        if _low.startswith('qt6') and _low.endswith('.dll') \
                 and not _low.startswith(_skip_qt_dlls):
             _conda_binaries.append((os.path.join(_lib_bin, _f), '.'))
     # Qt 插件：放入 PySide6/plugins/<子目录>，PyInstaller 的

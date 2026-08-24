@@ -32,9 +32,10 @@ class EditLedgerDialog(QDialog):
 
     def __init__(self, record: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑跑视频记录")
-        self.resize(720, 520)
         self._record = record
+        self._is_new = not record.get("id")
+        self.setWindowTitle("新增跑视频记录" if self._is_new else "编辑跑视频记录")
+        self.resize(720, 520)
         self._save_worker = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 12)
@@ -61,9 +62,12 @@ class EditLedgerDialog(QDialog):
         if self._save_worker and self._save_worker.isRunning():
             return
         self._btn_save.setEnabled(False)
-        self._save_worker = AftersaleDBWorker(
-            ledger_db.update_record, int(self._record["id"]),
-            self.form.collect())
+        if self._record.get("id"):
+            fn = lambda: ledger_db.update_record(
+                int(self._record["id"]), self.form.collect())
+        else:
+            fn = lambda: ledger_db.insert_record(self.form.collect())
+        self._save_worker = AftersaleDBWorker(fn)
         self._save_worker.result_ready.connect(self._on_saved)
         self._save_worker.error.connect(self._on_save_error)
         self._save_worker.start()
@@ -250,6 +254,11 @@ class RecordsPage(QWidget):
         self._search_edit.setFixedWidth(180)
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
+
+        self._btn_add = PushButton(FluentIcon.ADD, "新增", self)
+        self._btn_add.setToolTip("新增一条跑视频记录（点击直接填写并提交）")
+        self._btn_add.clicked.connect(self._on_add)
+        toolbar.addWidget(self._btn_add)
 
         self._btn_stats = PushButton(FluentIcon.PIE_SINGLE, "署名统计", self)
         self._btn_stats.setToolTip("按署名统计四分类计数（模板「计数」sheet）")
@@ -679,6 +688,14 @@ class RecordsPage(QWidget):
         return w
 
     # ---------- 编辑 / 删除 ----------
+
+    def _on_add(self):
+        """工具栏「+」：唤起填写面板（复用编辑弹窗的 LedgerForm），填写后新增记录"""
+        dlg = EditLedgerDialog({}, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            show_info_bar("已新增记录", "success", title="新增",
+                          parent=self, duration=2500)
+            self._load()
 
     def _on_edit(self, row=None):
         if row is None:

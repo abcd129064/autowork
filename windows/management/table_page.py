@@ -35,7 +35,7 @@ from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
 from core.perf import is_acrylic_enabled, is_animation_enabled
 from core.secrets import decrypt_settings, encrypt_settings
-from core.utils import launch_sibling_app, show_info_bar
+from core.utils import show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
@@ -419,11 +419,8 @@ class TablePage(QWidget):
     def _open_aftersale_for_table(self, table_name):
         """打开售后面板并按桌号预筛选（球桌 → 售后记录反查）
 
-        打包分发场景优先拉起独立 aftersale.exe 并传桌号参数，
-        开发环境或未随包分发时回退内嵌窗口（行为不变）。
+        内置打开（与单文件 aftersale.exe 解耦，不再拉起外部进程）。
         """
-        if launch_sibling_app("aftersale.exe", [f"--table={table_name}"]):
-            return
         from windows.aftersale_panel import AftersalePanelWindow
         win = self.window()
         panel = getattr(win, "_aftersale_panel_ref", None)

@@ -32,6 +32,10 @@ from windows.aftersale.common import *  # noqa: F401,F403
 from windows.aftersale.dialogs import EditRecordDialog, ImportPreviewDialog
 from windows.stat_charts import StatsOpener, _aftersale_options
 
+# 重要标记行底色（浅色=淡黄 / 深色=暗黄）：勾选「重要」后该条在列表中淡黄显示
+_IMPORTANT_BG_LIGHT = QColor(255, 243, 205)
+_IMPORTANT_BG_DARK = QColor(64, 57, 28)
+
 # ==================== 板块二：记录与统计页 ====================
 
 class RecordsPage(QWidget):
@@ -94,6 +98,12 @@ class RecordsPage(QWidget):
         self._card_initiative = self._make_stats_card(cards_row)
         self._card_our_problem = self._make_stats_card(cards_row)
         root.addLayout(cards_row)
+        # 「未解决」卡可点击：一键联动「是否解决=否」筛选，展示未解决条目
+        # （再次点击恢复全部，与筛选条切换一致）
+        unr_card = self._card_unresolved[0]
+        unr_card.setCursor(Qt.CursorShape.PointingHandCursor)
+        unr_card.setToolTip("点击查看未解决条目（再次点击恢复全部）")
+        unr_card.clicked.connect(self._on_unresolved_card_clicked)
 
         # --- 工具栏（与主界面同范式：库版 FlowLayout 换行 + 滚动容器锁高，
         #     窄宽自动换行严禁重叠，折行超上限上下滚动） ---
@@ -164,6 +174,11 @@ class RecordsPage(QWidget):
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
 
+        self._btn_add = PrimaryPushButton(FluentIcon.ADD, "新增", self)
+        self._btn_add.setToolTip("新增一条售后记录（点击直接填写并提交）")
+        self._btn_add.clicked.connect(self._on_add)
+        toolbar.addWidget(self._btn_add)
+
         self._btn_import = PushButton(FluentIcon.ADD, "导入 Excel", self)
         self._btn_import.setToolTip("一次性导入 售后问题汇总 xlsx 历史数据")
         self._btn_import.clicked.connect(self._on_import)
@@ -226,6 +241,11 @@ class RecordsPage(QWidget):
         self._table.setColumnWidth(_COL_CHECK, 36)
         for i, (_k, _h, w) in enumerate(TABLE_COLUMNS):
             self._table.setColumnWidth(_COL_CHECK + 1 + i, w)
+        # 列排序：点击表头升/降序切换（本地对已加载页排序，勾选列不参与）
+        self._sort_col = -1        # 当前排序逻辑列号（-1=未排序）
+        self._sort_asc = True
+        header.setSortIndicatorShown(True)
+        header.sectionClicked.connect(self._on_click_header)
         root.addWidget(self._table, 1)
 
         # --- 分页 + 状态栏 ---
@@ -345,6 +365,14 @@ class RecordsPage(QWidget):
             "关闭 MySQL 后自动读写本地 SQLite；"
             "MySQL 恢复可用时会自动切回并合并兜底增量")
 
+    def _on_unresolved_card_clicked(self):
+        """点击概览「未解决」卡：切到未解决列表（再次点击恢复全部）"""
+        if self._resolved_seg.value() == "否":
+            self._resolved_seg.setValue("")   # 恢复「全部」
+        else:
+            self._resolved_seg.setValue("否")  # 只看未解决
+        self._on_filter_changed()
+
     def _on_open_stats_chart(self):
         """打开 pygwalker 自助分析窗口。"""
         self._btn_stats_chart.setEnabled(False)
@@ -435,6 +463,9 @@ class RecordsPage(QWidget):
     def _on_loaded(self, result):
         total, rows, stats = result
         self._total = total
+        # 保持表头排序状态：筛选/翻页/刷新后按当前排序列重排
+        if self._sort_col >= 0:
+            rows = self._apply_sort(rows)
         self._rows = rows
         self._populate(rows)
         self._update_pager()
@@ -531,12 +562,20 @@ class RecordsPage(QWidget):
             self._table.setRowCount(len(rows))
             for r, item in enumerate(rows):
                 tip = self._row_tooltip(item)
+                # 重要标记：勾选「重要」后该行整体淡黄底色（浅色亮黄 / 深色暗黄随主题）
+                if bool(item.get("is_important")):
+                    _row_bg = (_IMPORTANT_BG_DARK if isDarkTheme()
+                               else _IMPORTANT_BG_LIGHT)
+                else:
+                    _row_bg = None
 
                 # 勾选列（供批量操作）
                 chk = QTableWidgetItem()
                 chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable
                              | Qt.ItemFlag.ItemIsEnabled)
                 chk.setCheckState(Qt.CheckState.Unchecked)
+                if _row_bg is not None:
+                    chk.setBackground(_row_bg)
                 self._table.setItem(r, _COL_CHECK, chk)
 
                 for i, (key, _h, _w) in enumerate(TABLE_COLUMNS):
@@ -571,6 +610,11 @@ class RecordsPage(QWidget):
                             "是" if is_yes else "否",
                             yes_c if is_yes else no_c,
                             self._table.viewport())
+                        if _row_bg is not None:
+                            # 徽章列：底层淡黄 item 承载底色（胶囊保留语义色）
+                            bg_item = QTableWidgetItem("")
+                            bg_item.setBackground(_row_bg)
+                            self._table.setItem(r, col, bg_item)
                         self._table.setCellWidget(r, col, badge)
                         continue
                     elif key == "ops":
@@ -582,6 +626,8 @@ class RecordsPage(QWidget):
                         cell = QTableWidgetItem(val)
                     cell.setToolTip(tip)
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if _row_bg is not None:
+                        cell.setBackground(_row_bg)
                     self._table.setItem(r, col, cell)
         finally:
             self._table.setUpdatesEnabled(True)
@@ -594,6 +640,9 @@ class RecordsPage(QWidget):
     def _make_ops_cell(self, row: int, rec: dict) -> QWidget:
         """操作列容器：未解决行 = [已解决 + 编辑 + 删除]，已解决行 = [编辑 + 删除]（删除常驻）"""
         wrap = QWidget()
+        if bool(rec.get("is_important")):
+            wrap.setStyleSheet(
+                "background: %s;" % ("#40391c" if isDarkTheme() else "#fff3cd"))
         lay = QHBoxLayout(wrap)
         lay.setContentsMargins(4, 0, 4, 0)
         lay.setSpacing(4)
@@ -709,6 +758,52 @@ class RecordsPage(QWidget):
                                     parent=self, duration=4000))
         self._batch_worker.start()
 
+    # ---------- 列排序 ----------
+
+    def _col_key(self, col: int):
+        """逻辑列号 → TABLE_COLUMNS 的数据键；勾选列/越界返回 None"""
+        i = col - _COL_CHECK - 1
+        if 0 <= i < len(TABLE_COLUMNS):
+            return TABLE_COLUMNS[i][0]
+        return None
+
+    def _apply_sort(self, rows):
+        """按当前排序状态对行数据集排序（组合列取主字段拼接比较）"""
+        key = self._col_key(self._sort_col)
+        if key is None:
+            return rows
+
+        def _cmp_val(rec):
+            if key == "location":
+                return " ".join(str(rec.get(k) or "") for k in
+                                 ("room_name", "region", "table_no"))
+            if key == "created_at":
+                return str(rec.get("created_at") or "")
+            if key == "response_time":
+                return str(rec.get("response_time") or "")
+            return str(rec.get(key) or "")
+
+        rows = list(rows)
+        rows.sort(key=_cmp_val, reverse=not self._sort_asc)
+        return rows
+
+    def _on_click_header(self, col: int):
+        """表头点击：首点升序、再点降序（勾选列不参与）"""
+        if col == _COL_CHECK or self._col_key(col) is None:
+            return
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        header = self._table.horizontalHeader()
+        header.setSortIndicator(
+            col, Qt.SortOrder.AscendingOrder if self._sort_asc
+            else Qt.SortOrder.DescendingOrder)
+        if self._rows:
+            self._rows = self._apply_sort(self._rows)
+            self._populate(self._rows)
+
     # ---------- 行内快捷操作 ----------
 
     def _quick_resolve(self, row: int):
@@ -758,6 +853,11 @@ class RecordsPage(QWidget):
         act_edit.triggered.connect(
             lambda _=False: self._on_edit(idx.row()))
         menu.addAction(act_edit)
+        # 复制：按原记录内容新增一条相同记录
+        act_copy = Action(FluentIcon.COPY, "复制", self._table)
+        act_copy.triggered.connect(
+            lambda _=False: self._on_duplicate(idx.row()))
+        menu.addAction(act_copy)
         rec = self._rows[idx.row()] if idx.row() < len(self._rows) else {}
         if str(rec.get("resolved") or "") != "是":
             act_done = Action(FluentIcon.ACCEPT, "标记已解决", self._table)
@@ -770,6 +870,49 @@ class RecordsPage(QWidget):
         menu.addAction(act_del)
         menu.exec_(self._table.viewport().mapToGlobal(pos),
                    aniType=_popup_ani_type())
+
+    def _on_add(self):
+        """工具栏「+」：唤起填写面板（复用编辑弹窗的共享表单），填写后新增记录"""
+        # 空表单 = 新增模式：复用 EditRecordDialog 的 AftersaleForm（含必填校验/收集）
+        dlg = EditRecordDialog({}, self, title="新增售后记录")
+        # 新增弹窗也需动态候选
+        cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
+        cand_worker.result_ready.connect(dlg.form.load_candidates)
+        cand_worker.start()
+        self._edit_cand_worker = cand_worker  # 保活引用
+        if dlg.exec() and getattr(dlg, "collected", None):
+            collected = dlg.collected
+            self._worker = AftersaleDBWorker(
+                aftersale_db.insert_record, collected)
+            self._worker.result_ready.connect(
+                lambda _rid: (show_info_bar("记录已新增", "success",
+                                            title="新增成功", parent=self,
+                                            duration=2000), self._load()))
+            self._worker.error.connect(
+                lambda m: show_info_bar(m, "error", title="新增失败",
+                                        parent=self, duration=4000))
+            self._worker.start()
+
+    def _on_duplicate(self, row: int = -1):
+        """复制当前行：按原记录内容新增一条相同记录（填写时间/周期重算）"""
+        if row < 0:
+            row = self._selected_row()
+        if row < 0 or row >= len(self._rows):
+            return
+        rec = dict(self._rows[row])
+        rec.pop("id", None)
+        rec.pop("created_at", None)    # insert_record 自动取当前填写时间
+        rec.pop("cycle_start", None)   # 周期按发生时间重新归属
+        self._worker = AftersaleDBWorker(aftersale_db.insert_record, rec)
+        self._worker.result_ready.connect(
+            lambda _rid: (show_info_bar("记录已复制并新增", "success",
+                                        title="复制成功", parent=self,
+                                        duration=2000),
+                          self._load()))
+        self._worker.error.connect(
+            lambda m: show_info_bar(m, "error", title="复制失败",
+                                    parent=self, duration=4000))
+        self._worker.start()
 
     def _on_edit(self, row: int = -1):
         if row < 0:

@@ -27,7 +27,6 @@ from core.design_tokens import pt_to_px
 
 from core.app_paths import get_resource_dir
 from core.perf import is_acrylic_enabled, is_animation_enabled
-from core.utils import launch_sibling_app
 from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
     ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
@@ -1149,11 +1148,7 @@ class UIMixin:
         self._append_log("[添加] 手动添加一条球桌记录到本地数据库")
 
     def _on_open_table_panel(self):
-        """打开球桌管理面板：优先拉起独立打包的 management.exe，否则内嵌打开"""
-        # 打包分发场景：同包存在独立 management.exe 时拉起独立进程（数据隔离、互不影响）；
-        # 开发环境或未随包分发时回退内嵌窗口，保证两种形态都可用
-        if launch_sibling_app("management.exe"):
-            return
+        """打开球桌管理面板：内置窗口（与独立 management.exe 解耦，不再拉起外部进程）"""
         from windows.management_panel import ManagementPanelWindow
         if not hasattr(self, '_table_panel') or self._table_panel is None:
             # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上（始终置顶）
@@ -1165,11 +1160,7 @@ class UIMixin:
         self._table_panel.activateWindow()
 
     def _on_open_aftersale(self):
-        """打开售后面板：优先拉起独立打包的 aftersale.exe，否则内嵌打开"""
-        # 打包分发场景：同包存在独立 aftersale.exe 时拉起独立进程；
-        # 开发环境或未随包分发时回退内嵌窗口，保证两种形态都可用
-        if launch_sibling_app("aftersale.exe"):
-            return
+        """打开售后面板：内置窗口（与单文件 aftersale.exe 相互独立，不拉起外部进程）"""
         from windows.aftersale_panel import AftersalePanelWindow
         if not hasattr(self, '_aftersale_panel') or self._aftersale_panel is None:
             self._aftersale_panel = AftersalePanelWindow()

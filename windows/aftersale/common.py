@@ -194,19 +194,26 @@ class YesNoSegment(SegmentedWidget):
 
 
 def _field_label(text, required=False, parent=None) -> QLabel:
-    """字段标签：12px 次级文本色；必填追加红色 * 富文本"""
+    """字段标签：12px 次级文本色；必填追加红色 * 富文本
+
+    深色主题下标签用亮灰（#c5c8ce），浅色主题用深灰（#444b55）。
+    init 即按当前主题设色，避免深色主题下标签呈黑色与背景同色看不清
+    （themeChanged 只在主题「改变」时触发，深色启动时初始样式会失效）。
+    """
     lb = QLabel(parent)
     if required:
         lb.setText(text + ' <span style="color:#cf4452;">*</span>')
     else:
         lb.setText(text)
-    lb.setStyleSheet(
-        "font-size: 12px; color: #444b55; background: transparent;")
+
+    def _apply():
+        lb.setStyleSheet("font-size: 12px; color: %s;"
+            " background: transparent;" % (
+                "#c5c8ce" if isDarkTheme() else "#444b55"))
+
+    _apply()
     try:
-        qconfig.themeChanged.connect(
-            lambda: lb.setStyleSheet("font-size: 12px; color: %s;"
-                " background: transparent;" % (
-                    "#c5c8ce" if isDarkTheme() else "#444b55")))
+        qconfig.themeChanged.connect(lambda: _apply())
     except Exception:
         pass
     return lb

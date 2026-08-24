@@ -18,6 +18,7 @@ main_window/ui_mixin 等既有引用路径（``windows.aftersale_panel.X``）不
 # 固定 PySide6 自身的 Qt 搜索路径，并让其使用自带的插件目录。
 import os as _os
 import importlib.util as _qt_iu
+import sys as _sys
 _qt_handles = []
 try:
     _qt_spec = _qt_iu.find_spec('PySide6')
@@ -37,6 +38,34 @@ try:
                                    _os.path.join(_qt_pkg, 'plugins', 'platforms'))
 except Exception:
     pass
+
+# ---- 单文件打包模式：数据库持久化重定向 ----
+# PyInstaller onefile 下 sys._MEIPASS 为临时解压目录（每次启动重建），
+# table_db 用 __file__ 定位 database/tables.db 会指向临时目录，数据重启即丢。
+# 此处把 DB 重定向到 exe 旁 database/（持久），首启从 _MEIPASS 复制种子库。
+# 必须在 `from windows.aftersale import *` 之前执行——aftersale 包导入会加载
+# table_db 并锁定 DB_PATH（判断特征：onefile 的 _MEIPASS 为 _MEIxxxx 临时目录，
+# onedir 为 _internal，autowork 主程序不受影响）。
+if (getattr(_sys, 'frozen', False)
+        and getattr(_sys, '_MEIPASS', None)
+        and os.path.basename(_sys._MEIPASS).startswith('_MEI')):
+    try:
+        import shutil as _shutil
+        from core.app_paths import get_app_dir as _get_app_dir
+        from database import table_db as _tdb
+        _data_dir = os.path.join(_get_app_dir(), 'database')
+        _db_file = os.path.join(_data_dir, 'tables.db')
+        if not os.path.isfile(_db_file):
+            os.makedirs(_data_dir, exist_ok=True)
+            _seed = os.path.join(_sys._MEIPASS, 'database', 'tables.db')
+            if os.path.isfile(_seed):
+                _shutil.copy2(_seed, _db_file)
+        _tdb._DB_DIR = _data_dir
+        _tdb.DB_PATH = _db_file
+        _tdb._conn = None          # 连接尚未创建，置空保险
+        _tdb._initialized = False  # 确保建表/迁移在 exe 旁新库上执行
+    except Exception:
+        pass  # 重定向失败回退临时库（数据不持久，但应用可启动）
 
 from windows.aftersale import *  # noqa: F401,F403
 from windows.aftersale import __all__ as _aftersale_all
@@ -64,7 +93,7 @@ if __name__ == "__main__":
         except Exception:
             return Theme.LIGHT, "#00BCD4"
 
-    # 支持 --table=桌号 参数：主程序/运维面板拉起独立进程时按桌号预筛选
+    # 支持 --table=桌号 参数：单文件独立分发时可命令行指定桌号预筛选
     _table_arg = next((a.split("=", 1)[1] for a in sys.argv[1:]
                        if a.startswith("--table=")), "")
 
