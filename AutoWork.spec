@@ -126,6 +126,8 @@ a = Analysis(
         ('database/tables.db', 'database'),
         # 单杆视频资源（字体/头像/底图/logo，工具菜单「单杆视频」）
         ('resource', 'resource'),
+        # 统计图表 ECharts 离线资源（stat_charts.py 经 sys._MEIPASS 定位）
+        ('vendor/echarts.min.js', 'vendor'),
         # 注意：settings.json / frpc.exe / frpc_xtcp.toml 由 build_exe.py
         # 构建后复制到 dist 根目录（exe 旁边），不放入 datas；
         # autowork_with_table.py / p2p.py 已被 import 追踪编译进 PYZ，无需重复打包
@@ -136,6 +138,9 @@ a = Analysis(
         'PySide6.QtGui',
         'PySide6.QtSvg',
         'PySide6.QtSvgWidgets',
+        # 统计图表页 WebEngine 渲染（pyecharts + QWebEngineView）
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebEngineCore',
         'paramiko',
         'cryptography',
         'bcrypt',

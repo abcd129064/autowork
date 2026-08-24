@@ -18,6 +18,7 @@ from core.perf import is_acrylic_enabled
 from windows.ledger.entry import EntryPage
 from windows.ledger.records import RecordsPage
 from windows.ledger.settings import SettingsPage
+from windows.stat_charts import ChartPage, _ledger_options
 
 
 class LedgerPanelWindow(FluentWindow):
@@ -37,6 +38,11 @@ class LedgerPanelWindow(FluentWindow):
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY,
                              "记录与统计")
+
+        # 统计图表（pyecharts + WebEngine，首次进入自动加载）
+        self.chart_page = ChartPage(_ledger_options, self)
+        self.chart_page.setObjectName("ledgerChartPage")
+        self.addSubInterface(self.chart_page, FluentIcon.HISTORY, "统计图表")
 
         # 提交成功后记录页静默刷新（不弹 infobar）
         self.entry_page.saved.connect(self.records_page.refresh_async)
@@ -85,7 +91,7 @@ class LedgerPanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
-        for page in (self.entry_page, self.records_page):
+        for page in (self.entry_page, self.records_page, self.chart_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))

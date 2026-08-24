@@ -31,6 +31,7 @@ from windows.aftersale.common import *  # noqa: F401,F403
 from windows.aftersale.entry import EntryPage
 from windows.aftersale.records import RecordsPage
 from windows.aftersale.settings import SettingsPage
+from windows.stat_charts import ChartPage, _aftersale_options
 
 # ==================== 售后面板窗口 ====================
 
@@ -50,6 +51,11 @@ class AftersalePanelWindow(FluentWindow):
 
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
+
+        # 统计图表（pyecharts + WebEngine，首次进入自动加载）
+        self.chart_page = ChartPage(_aftersale_options, self)
+        self.chart_page.setObjectName("aftersaleChartPage")
+        self.addSubInterface(self.chart_page, FluentIcon.HISTORY, "统计图表")
 
         # 设置面板：统计周期设置 + 数据库设置（原 MySQL 设置）
         self.settings_page = SettingsPage(self)
@@ -111,7 +117,7 @@ class AftersalePanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
-        for page in (self.entry_page, self.records_page):
+        for page in (self.entry_page, self.records_page, self.chart_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))
