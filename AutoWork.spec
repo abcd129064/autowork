@@ -136,6 +136,13 @@ a = Analysis(
         'PySide6.QtGui',
         'PySide6.QtSvg',
         'PySide6.QtSvgWidgets',
+        # 统计图表页 matplotlib（windows/stat_charts.py 延迟 import，
+        # PyInstaller 静态分析无法发现，显式声明；matplotlib 后端 QtAgg 依赖
+        # 的 PySide6.QtWidgets 等已在上方声明，绑包体积主要来自 numpy/matplotlib
+        # 本体 ~30MB，与 WebEngine 方案相比节省 ~150MB DLL + WebEngine 资源）
+        'matplotlib',
+        'matplotlib.backends.backend_qtagg',
+        'matplotlib.figure',
         'paramiko',
         'cryptography',
         'bcrypt',
