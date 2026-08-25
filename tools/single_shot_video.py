@@ -179,12 +179,7 @@ class SingleShotVideoServer:
                     logger.error("无法右侧头像文件")
                     return False
 
-                logo = self.load_image_from_url(resource_path("logo.png"), 2)
-                if logo is None:
-                    logger.error("无法logo文件")
-                    return False
-
-                # 头像/logo 统一转 4 通道（灰度先转 RGB），后续按 alpha 叠加
+                # 头像统一转 4 通道（灰度先转 RGB），后续按 alpha 叠加
                 if len(left_avatar.shape) == 2:
                     left_avatar = cv2.cvtColor(left_avatar, cv2.COLOR_GRAY2RGB)
                 if left_avatar.shape[2] == 3:
@@ -195,11 +190,6 @@ class SingleShotVideoServer:
                 if right_avatar.shape[2] == 3:
                     right_avatar = cv2.cvtColor(right_avatar, cv2.COLOR_RGB2RGBA)
 
-                if len(logo.shape) == 2:
-                    logo = cv2.cvtColor(logo, cv2.COLOR_GRAY2RGB)
-                if logo.shape[2] == 3:
-                    logo = cv2.cvtColor(logo, cv2.COLOR_RGB2RGBA)
-
                 # 获取视频的宽、高和帧率
                 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -208,18 +198,14 @@ class SingleShotVideoServer:
                 # 调整头像大小
                 left_avatar = cv2.resize(left_avatar, (32, 32))
                 right_avatar = cv2.resize(right_avatar, (32, 32))
-                logo = cv2.resize(logo, (60, 60))
 
                 avatar_h, avatar_w, avatar_channels = left_avatar.shape
-                logo_h, logo_w, logo_channels = logo.shape
 
-                # 头像/logo 叠放坐标（比分条底图上的固定位）
+                # 头像叠放坐标（比分条底图上的固定位）
                 left_x_offset = 154
                 left_y_offset = 0
                 right_x_offset = 774
                 right_y_offset = 0
-                logo_x_offset = 750
-                logo_y_offset = 480
 
                 # 创建视频输出对象
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 编码格式
@@ -244,7 +230,11 @@ class SingleShotVideoServer:
                     if item['player'] == 0:
                         image = Image.open(resource_path("image_0.png")).convert("RGBA")
                     else:
+                        # 选手1打杆：单杆分画在右端，但底图模板的「新锐计分」固定印在右端，
+                        # 直接叠加会与单杆分重叠；水平翻转模板把「新锐计分」移到左端，
+                        # 让右端留给单杆分，实现顶部左右分居、不再重叠
                         image = Image.open(resource_path("image_1.png")).convert("RGBA")
+                        image = image.transpose(Image.FLIP_LEFT_RIGHT)
                     draw_ = ImageDraw.Draw(image)
 
                     font_0 = ImageFont.truetype(
@@ -387,20 +377,6 @@ class SingleShotVideoServer:
                             else:
                                 frame_with_text[y1:y2, x1:x2] = right_avatar
 
-                            # 叠加 logo
-                            y1, y2 = logo_y_offset, logo_y_offset + logo_h
-                            x1, x2 = logo_x_offset, logo_x_offset + logo_w
-
-                            if logo_channels == 4:
-                                logo_right = logo[:, :, 3] / 255.0
-                                logo_frame = 1.0 - logo_right
-                                for c in range(0, 3):
-                                    frame_with_text[y1:y2, x1:x2, c] = (
-                                            logo_right * logo[:, :, c] +
-                                            logo_frame * frame_with_text[y1:y2, x1:x2, c]
-                                    )
-                            else:
-                                frame_with_text[y1:y2, x1:x2] = logo
                             out.write(frame_with_text)
                         else:
                             continue
