@@ -18,18 +18,19 @@ LOG_PATTERN = re.compile(r"frame_id:(\d+)\s+选手(\d+)\s+进(\d+)球")
 
 
 def extract_break(log_text, start_frame, end_frame, player):
-    """解析日志中的单杆得分区间"""
-    scores = []
-    total = 0
+    """解析日志中的单杆得分区间
 
-    # 起始 0 分占位：输出列表从 0 分起步，前端计分按此对齐渲染
-    scores.append({
-        "score_0": 0,
-        "score_1": 0,
-        "frame_id": start_frame,
-        "score": 0
-    })
+    单杆总分只取决于「区间内实际进球的那位选手」，与界面选中的选手无关：
+    - 先扫描 start~end 帧窗口内的全部进球，统计各选手进球数；
+    - 进球最多的那位即本杆打杆者（single break 通常只有一人击球得分）；
+    - 用该打杆者累加总分并填充对应甲/乙槽位，其余选手进球视为对手回合不混入；
+    - 窗口内无进球时兜底返回传入的 player（0 分）。
+    返回 (total, scores, actual_player)，actual_player 供渲染方向与文件名使用。
+    """
+    from collections import Counter
 
+    # 先收集区间内的进球事件（frame_id, 选手, 进球数）
+    events = []
     for line in log_text.splitlines():
         m = LOG_PATTERN.search(line)
         if not m:
@@ -39,25 +40,43 @@ def extract_break(log_text, start_frame, end_frame, player):
         p = int(m.group(2))
         s = int(m.group(3))
 
-        # 帧窗口过滤：只累计本杆区间内的进球，区间外的帧属于其他回合，
+        # 帧窗口过滤：只统计本杆区间内的进球，区间外的帧属于其他回合，
         # 不滤掉会把别人的分混进本杆总分
         if not (start_frame <= frame_id <= end_frame):
             continue
-        if p != player:
+        events.append((frame_id, p, s))
+
+    # 本杆真实打杆者：区间内进球最多的选手（并列时 most_common 按首现顺序稳定返回）
+    actual_player = player
+    if events:
+        actual_player = Counter(e[1] for e in events).most_common(1)[0][0]
+
+    # 起始 0 分占位：输出列表从 0 分起步，前端计分按此对齐渲染
+    scores = [{
+        "score_0": 0,
+        "score_1": 0,
+        "frame_id": start_frame,
+        "score": 0
+    }]
+
+    total = 0
+    for frame_id, p, s in events:
+        # 只累计打杆者的进球，其余选手的进球属于对手回合，不应混入本杆
+        if p != actual_player:
             continue
 
         total += s
 
-        # score_0/score_1 对应甲/乙两个槽位：只在杆选手一侧填累计分，
+        # score_0/score_1 对应甲/乙两个槽位：只在打杆者一侧填累计分，
         # 对手侧保持 0，比分条才能按左右位置对齐渲染
         scores.append({
-            "score_0": 0 if player == 1 else total,
-            "score_1": total if player == 1 else 0,
+            "score_0": 0 if actual_player == 1 else total,
+            "score_1": total if actual_player == 1 else 0,
             "frame_id": frame_id,
             "score": s
         })
 
-    return total, scores
+    return total, scores, actual_player
 
 
 def generate_json(
@@ -102,11 +121,11 @@ def generate_json(
     logger.info("视频已移动到: %s", dst_video_path)
 
     # 解析单杆
-    total, scores = extract_break(log_text, start_frame, end_frame, player)
+    total, scores, actual_player = extract_break(log_text, start_frame, end_frame, player)
     logger.info("单杆得分: %d", total)
 
     # 计算生成的视频文件名和路径
-    generated_video_name = f"player{player}_single{total}.mp4"
+    generated_video_name = f"player{actual_player}_single{total}.mp4"
     # 从session_code中提取前10位作为日期目录名（例如：20260322230533_HF75QY2CNPE10097102W1 -> 2026032223）
     # 这两条切分规则必须与 single_shot_video.single_shot_video 里的输出目录保持一致，
     # 否则实际生成的视频落不到下面的预期路径，后续上传会找不到文件
@@ -133,11 +152,11 @@ def generate_json(
         "videos": [
             {
                 "text": f"单杆{total}分",
-                "player": player,
+                "player": actual_player,
                 "start_frame": start_frame,
                 "end_frame": end_frame,
                 "scores": scores,
-                "video_name": f"player{player}_single{total}.mp4"
+                "video_name": f"player{actual_player}_single{total}.mp4"
             }
         ]
     }

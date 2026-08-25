@@ -38,6 +38,9 @@ REGIONS_PRESET = ("上海", "云南", "四川", "广东", "新疆", "江苏", "�
 # 响应时间预置档位（Excel 原数据为自由文本，允许自由输入）
 RESPONSE_TIME_PRESET = ("1分钟内", "5分钟内", "30分钟内", "1小时内", "1小时以上")
 
+# 团队默认人员（填写人/解决人候选恒置顶：新库或库中暂无这些人时下拉也不为空）
+_CREW_PRESET = ("张峻涛", "沈喆", "孙跃源", "吴斌", "贺勤")
+
 # 记录字段（与建表 DDL 一致）
 RECORD_FIELDS = (
     "created_at", "occurred_at", "creator", "issue_type", "table_no",
@@ -557,13 +560,69 @@ def get_cycle_options() -> list:
     return sorted(cycles, reverse=True)
 
 
+# ---------------- 上次填写记忆（重新打开面板时恢复填写人/解决人） ----------------
+_LAST_CREATOR_KEY = "aftersale_last_creator"
+_LAST_RESOLVER_KEY = "aftersale_last_resolver"
+
+
+def _load_settings_str(key: str) -> str:
+    """读取 settings.json 中指定字符串键（非空字符串返回，否则空串）"""
+    import json
+    from core.app_paths import get_app_dir
+    try:
+        path = os.path.join(get_app_dir(), "settings.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                v = json.load(f).get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def load_last_creator() -> str:
+    """上次填写的填写人（settings.json，无则空串）"""
+    return _load_settings_str(_LAST_CREATOR_KEY)
+
+
+def load_last_resolver() -> str:
+    """上次填写的解决人（settings.json，无则空串）"""
+    return _load_settings_str(_LAST_RESOLVER_KEY)
+
+
+def save_last_people(creator: str, resolver: str) -> None:
+    """记住本次填写的填写人/解决人，供下次打开面板恢复（非空才写）"""
+    import json
+    from core.app_paths import get_app_dir
+    creator = (creator or "").strip()
+    resolver = (resolver or "").strip()
+    if not creator and not resolver:
+        return
+    try:
+        path = os.path.join(get_app_dir(), "settings.json")
+        data = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        if creator:
+            data[_LAST_CREATOR_KEY] = creator
+        if resolver:
+            data[_LAST_RESOLVER_KEY] = resolver
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def get_field_candidates() -> dict:
-    """动态候选：问题/解决人/地区（按使用频次降序，各取前 60）"""
+    """动态候选：问题/解决人/地区/填写人（按使用频次降序，各取前 60）"""
     conn = _conn()
     out = {}
     for key, field in (("problems", "problem"),
                        ("resolvers", "resolver"),
-                       ("regions", "region")):
+                       ("regions", "region"),
+                       ("creators", "creator")):
         cur = conn.execute(
             f"SELECT {field}, COUNT(*) FROM aftersale_records "
             f"WHERE {field} != '' GROUP BY {field} "
@@ -573,6 +632,15 @@ def get_field_candidates() -> dict:
     if not out["problems"]:
         out["problems"] = ["主机没有开机", "遥控器没反应", "程序没了",
                            "不能扫码", "识别不了", "记分牌显示不出来"]
+    # 填写人/解决人候选合并团队默认人员（恒置顶、去重、保持前 60）
+    for key in ("resolvers", "creators"):
+        seen = set()
+        merged = []
+        for name in list(_CREW_PRESET) + list(out[key]):
+            if name and name not in seen:
+                seen.add(name)
+                merged.append(name)
+        out[key] = merged[:60]
     return out
 
 

@@ -603,18 +603,16 @@ class RecordsPage(QWidget):
                         f.setPointSizeF(10.5)
                         cell.setFont(f)
                     elif key in _YES_NO_COLORS:
-                        # 是/否徽章（setCellWidget 承载，该格不设 item）
                         is_yes = str(item.get(key) or "") == "是"
                         yes_c, no_c = _YES_NO_COLORS[key]
                         badge = _badge_label(
                             "是" if is_yes else "否",
                             yes_c if is_yes else no_c,
                             self._table.viewport())
+                        bg_item = QTableWidgetItem("")
                         if _row_bg is not None:
-                            # 徽章列：底层淡黄 item 承载底色（胶囊保留语义色）
-                            bg_item = QTableWidgetItem("")
                             bg_item.setBackground(_row_bg)
-                            self._table.setItem(r, col, bg_item)
+                        self._table.setItem(r, col, bg_item)
                         self._table.setCellWidget(r, col, badge)
                         continue
                     elif key == "ops":

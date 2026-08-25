@@ -107,9 +107,12 @@ class AftersaleForm(QWidget):
         col_creator = QVBoxLayout()
         col_creator.setSpacing(3)
         col_creator.addWidget(_field_label("填写人", False, self))
-        self.creator_edit = LineEdit(self)
-        self.creator_edit.setText(_default_creator())  # 默认取配置，可改
+        # 填写人：可编辑下拉（默认取配置，可手输；候选由 load_candidates 从历史填充）
+        self.creator_edit = EditableComboBox(self)
+        # 默认优先取「上次填写」，无则取配置，可改
+        self.creator_edit.setText(aftersale_db.load_last_creator() or _default_creator())
         self.creator_edit.setFixedWidth(160)
+        self._set_completer(self.creator_edit, [])  # 候选动态填充，初始空
         col_creator.addWidget(self.creator_edit)
         row1.addLayout(col_creator)
         row1.addStretch(1)
@@ -241,6 +244,9 @@ class AftersaleForm(QWidget):
         col_res.setSpacing(5)
         col_res.addWidget(_field_label("解决人", False, self))
         self.resolver_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
+        # 默认取「上次填写」，重新打开面板时解决人保持不变
+        if aftersale_db.load_last_resolver():
+            self.resolver_combo.setText(aftersale_db.load_last_resolver())
         self.resolver_combo.setFixedWidth(220)
         col_res.addWidget(self.resolver_combo)
         res_row.addLayout(col_res)
@@ -288,6 +294,14 @@ class AftersaleForm(QWidget):
         if cur_region:
             self.region_combo.setText(cur_region)
         self._set_completer(self.region_combo, regions)
+        # 填写人：历史使用频次候选（可手输新增）
+        cur_creator = self.creator_edit.currentText().strip()
+        creators = list(cands.get("creators", []))
+        self.creator_edit.clear()
+        self.creator_edit.addItems(creators)
+        if cur_creator:
+            self.creator_edit.setText(cur_creator)
+        self._set_completer(self.creator_edit, creators)
 
     @staticmethod
     def _set_completer(combo, items: list):
@@ -474,7 +488,11 @@ class AftersaleForm(QWidget):
         self.clear_error()
 
     def collect(self) -> dict:
-        """收集表单值为记录 dict（不含必填校验）"""
+        """收集表单值为记录 dict（不含必填校验）；
+        顺带记住本次填写的填写人/解决人，供下次打开面板恢复"""
+        aftersale_db.save_last_people(
+            self.creator_edit.text().strip(),
+            self.resolver_combo.currentText().strip())
         return {
             "issue_type": self.type_combo.currentText().strip(),
             "occurred_at": self.occurred_picker.date.toString("yyyy-MM-dd"),
@@ -536,13 +554,15 @@ class AftersaleForm(QWidget):
         self.first_error = None
 
     def clear_form(self):
-        """清空表单（保留填写人与下拉候选）"""
+        """清空表单（填写人/解决人恢复为上次填写）"""
         self.room_edit.clear()
         self.table_no_edit.clear()
         self.cause_edit.clear()
         self.solution_edit.clear()
         self.problem_combo.setText("")
-        self.resolver_combo.setText("")
+        # 解决人/填写人保持「上次填写」：清空后与重新打开面板均恢复
+        self.resolver_combo.setText(aftersale_db.load_last_resolver())
+        self.creator_edit.setText(aftersale_db.load_last_creator() or _default_creator())
         self.response_combo.setText("")
         self.resolved_combo.setValue("是")
         self.is_initiative_combo.setValue("否")

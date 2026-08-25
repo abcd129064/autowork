@@ -48,17 +48,17 @@ except Exception:
 # onedir 为 _internal，autowork 主程序不受影响）。
 if (getattr(_sys, 'frozen', False)
         and getattr(_sys, '_MEIPASS', None)
-        and os.path.basename(_sys._MEIPASS).startswith('_MEI')):
+        and _os.path.basename(_sys._MEIPASS).startswith('_MEI')):
     try:
         import shutil as _shutil
         from core.app_paths import get_app_dir as _get_app_dir
         from database import table_db as _tdb
-        _data_dir = os.path.join(_get_app_dir(), 'database')
-        _db_file = os.path.join(_data_dir, 'tables.db')
-        if not os.path.isfile(_db_file):
-            os.makedirs(_data_dir, exist_ok=True)
-            _seed = os.path.join(_sys._MEIPASS, 'database', 'tables.db')
-            if os.path.isfile(_seed):
+        _data_dir = _os.path.join(_get_app_dir(), 'database')
+        _db_file = _os.path.join(_data_dir, 'tables.db')
+        if not _os.path.isfile(_db_file):
+            _os.makedirs(_data_dir, exist_ok=True)
+            _seed = _os.path.join(_sys._MEIPASS, 'database', 'tables.db')
+            if _os.path.isfile(_seed):
                 _shutil.copy2(_seed, _db_file)
         _tdb._DB_DIR = _data_dir
         _tdb.DB_PATH = _db_file
