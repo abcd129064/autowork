@@ -1572,9 +1572,12 @@ class UIMixin:
         dlg.exec()
 
     def _on_perf_options(self):
-        """性能选项对话框：SwitchButton 独立控制亚克力/动画，切换即时生效无需重启"""
+        """性能选项对话框：SwitchButton 独立控制亚克力/动画/表格平滑滚动，切换即时生效无需重启"""
         from core.perf import (is_acrylic_enabled, is_animation_enabled,
-                               set_acrylic_enabled, set_animation_enabled)
+                               set_acrylic_enabled, set_animation_enabled,
+                               is_table_smooth_scroll_enabled,
+                               set_table_smooth_scroll_enabled,
+                               apply_table_smooth_globally)
 
         class PerfOptionsDialog(MessageBoxBase):
             def __init__(self, parent):
@@ -1606,6 +1609,20 @@ class UIMixin:
                 row2.addWidget(self.sw_animation)
                 self.viewLayout.addLayout(row2)
 
+                # 表格平滑滚动开关（全局：影响未单独设置的面板）
+                row3 = QHBoxLayout()
+                lbl3 = BodyLabel("表格平滑滚动", self)
+                lbl3.setToolTip(
+                    "开启后记录列表滚动带动画；关闭走原生滚动更快。\n"
+                    "全局生效；售后面板/跑视频面板可在各自设置里单独覆盖")
+                row3.addWidget(lbl3, 1)
+                self.sw_table_smooth = SwitchButton(self)
+                self.sw_table_smooth.setOnText("开")
+                self.sw_table_smooth.setOffText("关")
+                self.sw_table_smooth.setChecked(is_table_smooth_scroll_enabled())
+                row3.addWidget(self.sw_table_smooth)
+                self.viewLayout.addLayout(row3)
+
         dlg = PerfOptionsDialog(self)
         dlg.yesButton.setText("完成")
         dlg.cancelButton.hide()
@@ -1622,8 +1639,16 @@ class UIMixin:
             state = "开启" if checked else "关闭"
             self._append_log(f"[性能] 弹出动画已{state}（即时生效）")
 
+        def _on_table_smooth_toggled(checked):
+            set_table_smooth_scroll_enabled(checked)
+            state = "开启" if checked else "关闭"
+            self._append_log(f"[性能] 表格平滑滚动已{state}（全局，即时生效）")
+            # 全局变更：刷新所有未单独覆盖的已打开面板表格滚动模式
+            apply_table_smooth_globally()
+
         dlg.sw_acrylic.checkedChanged.connect(_on_acrylic_toggled)
         dlg.sw_animation.checkedChanged.connect(_on_animation_toggled)
+        dlg.sw_table_smooth.checkedChanged.connect(_on_table_smooth_toggled)
         dlg.exec()
 
     # ==================== 设置应用 ====================

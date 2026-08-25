@@ -44,6 +44,9 @@ class LedgerPanelWindow(FluentWindow):
         self.settings_page = SettingsPage(self)
         self.settings_page.setObjectName("ledgerSettingsPage")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "设置")
+        # 表格平滑滚动开关变更：实时刷新记录页表格滚动模式（仅本面板）
+        self.settings_page.table_smooth_changed.connect(
+            lambda _v: self.records_page._apply_smooth_mode())
 
         self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
         self.navigationInterface.setCurrentItem(self.entry_page.objectName())

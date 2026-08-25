@@ -34,7 +34,8 @@ __all__ = [
     "_accent_hex", "_style_cand_list", "_hex_rgba",
     "_SectionCard", "YesNoSegment", "_field_label", "_inline_error",
     "TABLE_COLUMNS", "_COL_CHECK", "_YES_NO_COLORS", "_badge_label",
-    "_ROW_BTN_TMPL", "_row_btn", "_PREVIEW_COLUMNS", "_PREVIEW_WIDTHS",
+    "_ROW_BTN_TMPL", "_row_btn", "_row_btn_css", "_prebuild_btn_css",
+    "_PREVIEW_COLUMNS", "_PREVIEW_WIDTHS",
 ]
 
 # 表格固定行高（与管理面板一致，避免默认行高浪费纵向空间）
@@ -276,8 +277,8 @@ _ROW_BTN_TMPL = (
 )
 
 
-def _row_btn(text: str, style: str, on_click, parent=None) -> _QPushButton:
-    """行内操作按钮：primary=强调色实心 / danger=红色描边 / ghost=中性描边
+def _row_btn_css(style: str) -> str:
+    """行内按钮 QSS（primary=强调色实心 / danger=红色描边 / ghost=中性描边）
 
     强调色实时读取当前主题（与迁移按钮同套路），hover/pressed 由令牌派生。
     """
@@ -298,10 +299,25 @@ def _row_btn(text: str, style: str, on_click, parent=None) -> _QPushButton:
         else:
             kw = dict(bg="transparent", fg="#333333", bd="#c9c9c9",
                       hov="#f0f0f0", hov_bd="#a6a6a6", prs="#e4e4e4")
+    return _ROW_BTN_TMPL.format(**kw)
+
+
+def _prebuild_btn_css() -> dict:
+    """一次预构建 primary/danger/ghost 三种按钮 QSS（表格批量填充用）
+
+    表格每行 2-3 个按钮，若每按钮现算样式会重复读主题色 + 拼 QSS 字符串；
+    同一页填充期间主题不变，循环外构建一次即可省去 ~150 次重复计算。
+    """
+    return {s: _row_btn_css(s) for s in ("primary", "danger", "ghost")}
+
+
+def _row_btn(text: str, style: str, on_click, parent=None,
+             css: str | None = None) -> _QPushButton:
+    """行内操作按钮（css 可传入预构建样式，批量填充时避免重复计算）"""
     btn = _QPushButton(text, parent)
     btn.setFixedHeight(24)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setStyleSheet(_ROW_BTN_TMPL.format(**kw))
+    btn.setStyleSheet(css if css is not None else _row_btn_css(style))
     btn.clicked.connect(lambda _=False: on_click())
     return btn
 

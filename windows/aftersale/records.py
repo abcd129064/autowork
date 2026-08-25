@@ -21,7 +21,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
-from core.perf import is_acrylic_enabled
+from core.perf import is_acrylic_enabled, apply_table_smooth_mode
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
 from database import aftersale_db, table_db
@@ -46,6 +46,9 @@ class RecordsPage(QWidget):
     （是/否徽章），完整信息保留在行 tooltip；未解决行提供行内
     一键「标记已解决」。
     """
+
+    # 面板标识：供 core.perf 面板级覆盖取值与全局刷新发现使用
+    _PERF_PANEL_KEY = "aftersale"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -217,6 +220,11 @@ class RecordsPage(QWidget):
 
         # --- 表格 ---
         self._table = TableWidget(self)
+        # 性能（2026-08-26）：默认关闭 qfluentwidgets 平滑滚动动画——滚轮触发
+        # 动画引擎逐帧 moveScrollBar，50 行 + 行内控件逐帧重绘导致滚动卡顿；
+        # NO_SMOOTH 走原生滚动（压测 20 步 384ms → 0ms）。按 本面板覆盖→全局 生效，
+        # 设置页开关可即时切换（见 _apply_smooth_mode）。
+        self._apply_smooth_mode()
         # 勾选列 + 数据列（列号：勾选=0，数据列 1..N，注意不要少算勾选列）
         self._table.setColumnCount(_COL_CHECK + 1 + len(TABLE_COLUMNS))
         self._table.setHorizontalHeaderLabels(
@@ -268,6 +276,10 @@ class RecordsPage(QWidget):
         self._btn_next.clicked.connect(lambda _=False: self._step_page(1))
         bottom.addWidget(self._btn_next)
         root.addLayout(bottom)
+
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置（本面板覆盖→全局）刷新表格滚动模式（即时）"""
+        apply_table_smooth_mode(self._table, panel=self._PERF_PANEL_KEY)
 
     # ---------- 概览卡与批量条构造 ----------
 
@@ -555,11 +567,24 @@ class RecordsPage(QWidget):
             f"响应时间: {rec.get('response_time') or ''}")
 
     def _populate(self, rows):
-        """行数据 → 表格：勾选列 + 双行信息整合列 + 是/否徽章三列 + 行内操作按钮"""
+        """行数据 → 表格：勾选列 + 双行信息整合列 + 是/否徽章三列 + 行内操作按钮
+
+        性能（2026-08-26）：是/否徽章由 cellWidget（QLabel）改为文本 item +
+        语义色前景/淡色背景——QTableWidget 的 cellWidget 在填充与滚动重绘时
+        每个都要创建/重定位，每行 3 个徽章 × 50 行 = 150 个小部件是填充耗时
+        第一名（cProfile 占 42%）；文本 item 零小部件开销，视觉用
+        彩色文字 + 淡底色近似胶囊徽章。行内操作按钮保留 cellWidget（交互必需），
+        但按钮样式循环外预构建，避免每按钮重复读主题/拼 QSS。
+        """
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
             self._table.setRowCount(len(rows))
+            # 循环外预构建三种按钮 QSS（同一页填充期间主题不变）
+            btn_css = _prebuild_btn_css()
+            # 双行单元格的小号字体（循环外构造一次，避免每行每列 QFont 复制）
+            small_font = QFont()
+            small_font.setPointSizeF(10.5)
             for r, item in enumerate(rows):
                 tip = self._row_tooltip(item)
                 # 重要标记：勾选「重要」后该行整体淡黄底色（浅色亮黄 / 深色暗黄随主题）
@@ -584,40 +609,37 @@ class RecordsPage(QWidget):
                         cell = QTableWidgetItem(
                             f"{self._short_dt(item.get('created_at'))}\n"
                             f"{str(item.get('creator') or '')}")
-                        f = QFont(cell.font())
-                        f.setPointSizeF(10.5)
-                        cell.setFont(f)
+                        cell.setFont(small_font)
                     elif key == "location":
                         cell = QTableWidgetItem(
                             f"{str(item.get('room_name') or '')}\n"
                             f"{str(item.get('region') or '')} · "
                             f"{str(item.get('table_no') or '')}")
-                        f = QFont(cell.font())
-                        f.setPointSizeF(10.5)
-                        cell.setFont(f)
+                        cell.setFont(small_font)
                     elif key == "response_time":
                         cell = QTableWidgetItem(
                             f"{str(item.get('response_time') or '—')}\n"
                             f"{str(item.get('resolver') or '')}")
-                        f = QFont(cell.font())
-                        f.setPointSizeF(10.5)
-                        cell.setFont(f)
+                        cell.setFont(small_font)
                     elif key in _YES_NO_COLORS:
+                        # 徽章文本化：只强调「是」（语义色加粗 + 极淡同色底）；
+                        # 「否」统一中性灰加粗、无底色，避免三列满屏色块过渡渲染。
                         is_yes = str(item.get(key) or "") == "是"
-                        yes_c, no_c = _YES_NO_COLORS[key]
-                        badge = _badge_label(
-                            "是" if is_yes else "否",
-                            yes_c if is_yes else no_c,
-                            self._table.viewport())
-                        bg_item = QTableWidgetItem("")
-                        if _row_bg is not None:
-                            bg_item.setBackground(_row_bg)
-                        self._table.setItem(r, col, bg_item)
-                        self._table.setCellWidget(r, col, badge)
-                        continue
+                        yes_c, _no_c = _YES_NO_COLORS[key]
+                        badge_c = yes_c if is_yes else SEMANTIC["neutral"]
+                        cell = QTableWidgetItem("是" if is_yes else "否")
+                        cell.setForeground(QColor(badge_c))
+                        if _row_bg is None and is_yes:
+                            bgc = QColor(badge_c)
+                            bgc.setAlpha(20)  # ~8% 透明度，更淡的徽章底（仅「是」）
+                            cell.setBackground(bgc)
+                        cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        _b = QFont(cell.font())
+                        _b.setBold(True)
+                        cell.setFont(_b)
                     elif key == "ops":
                         self._table.setCellWidget(
-                            r, col, self._make_ops_cell(r, item))
+                            r, col, self._make_ops_cell(r, item, btn_css))
                         continue
                     else:
                         val = str(item.get(key) or "")
@@ -635,8 +657,12 @@ class RecordsPage(QWidget):
         QTimer.singleShot(0, self._table.scheduleDelayedItemsLayout)
         self._sync_batch_bar()
 
-    def _make_ops_cell(self, row: int, rec: dict) -> QWidget:
-        """操作列容器：未解决行 = [已解决 + 编辑 + 删除]，已解决行 = [编辑 + 删除]（删除常驻）"""
+    def _make_ops_cell(self, row: int, rec: dict,
+                       btn_css: dict | None = None) -> QWidget:
+        """操作列容器：未解决行 = [已解决 + 编辑 + 删除]，已解决行 = [编辑 + 删除]（删除常驻）
+
+        btn_css: 预构建按钮样式（_populate 循环外算好传入，避免每按钮重复计算）。
+        """
         wrap = QWidget()
         if bool(rec.get("is_important")):
             wrap.setStyleSheet(
@@ -648,10 +674,14 @@ class RecordsPage(QWidget):
         if not is_yes:
             lay.addWidget(_row_btn(
                 "已解决", "primary",
-                lambda: self._quick_resolve(row), wrap))
-        lay.addWidget(_row_btn("编辑", "ghost", lambda: self._on_edit(row), wrap))
+                lambda: self._quick_resolve(row), wrap,
+                css=btn_css["primary"] if btn_css else None))
         lay.addWidget(_row_btn(
-            "删除", "danger", lambda: self._on_delete(row), wrap))
+            "编辑", "ghost", lambda: self._on_edit(row), wrap,
+            css=btn_css["ghost"] if btn_css else None))
+        lay.addWidget(_row_btn(
+            "删除", "danger", lambda: self._on_delete(row), wrap,
+            css=btn_css["danger"] if btn_css else None))
         lay.addStretch(1)
         return wrap
 

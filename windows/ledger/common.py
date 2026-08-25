@@ -9,16 +9,18 @@ from windows.aftersale.common import (  # noqa: F401,F403
     _FIXED_ROW_HEIGHT, _popup_ani_type, _default_creator,
     _hex_rgba, _SectionCard, YesNoSegment,
     _field_label, _inline_error, _badge_label, _row_btn, _ROW_BTN_TMPL,
+    _prebuild_btn_css,
 )
 
 from database import ledger_db
 
 __all__ = [
     "TABLE_COLUMNS", "_COL_OPS", "CATEGORY_ACCENTS", "_category_badge",
+    "_category_color",
     "_FIXED_ROW_HEIGHT", "_popup_ani_type", "_default_creator",
     "_hex_rgba", "_SectionCard", "YesNoSegment",
     "_field_label", "_inline_error", "_badge_label", "_row_btn",
-    "_ROW_BTN_TMPL",
+    "_ROW_BTN_TMPL", "_prebuild_btn_css",
 ]
 
 # 表格展示列（无勾选列；第 0 列即填写时间，ops 为行内操作列）。
@@ -54,3 +56,12 @@ def _category_badge(text: str, parent=None):
     color = CATEGORY_ACCENTS.get(text, SEMANTIC["neutral"] if isDarkTheme()
                                 else "#616161")
     return _badge_label(text, color, parent)
+
+
+def _category_color(text: str):
+    """分类语义色 QColor（表格徽章文本化用；未知分类用中性灰）"""
+    from core.design_tokens import SEMANTIC
+    from qfluentwidgets import isDarkTheme
+    from PySide6.QtGui import QColor
+    fallback = SEMANTIC["neutral"] if isDarkTheme() else "#616161"
+    return QColor(CATEGORY_ACCENTS.get(text, fallback))

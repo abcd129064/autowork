@@ -7,6 +7,7 @@
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QTimer, QDate
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QHeaderView, QAbstractItemView, QFileDialog,
                                QDialog)
@@ -18,6 +19,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 
 from core.design_tokens import SEMANTIC
 from core.flow_widgets import FlowToolbarScrollArea
+from core.perf import apply_table_smooth_mode
 from core.utils import show_info_bar
 from database import ledger_db
 from workers.aftersale_worker import AftersaleDBWorker
@@ -123,6 +125,9 @@ class SignerStatsDialog(MessageBoxBase):
 
 class RecordsPage(QWidget):
     """记录与统计页：四分类指标卡 + 筛选/分页 + 行内编辑/删除 + 署名统计 + 导出"""
+
+    # 面板标识：供 core.perf 面板级覆盖取值与全局刷新发现使用（跑视频面板）
+    _PERF_PANEL_KEY = "video"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -293,6 +298,11 @@ class RecordsPage(QWidget):
 
         # --- 表格 ---
         self._table = TableWidget(self)
+        # 性能（2026-08-26）：默认关闭 qfluentwidgets 平滑滚动动画——滚轮触发
+        # 动画引擎逐帧 moveScrollBar，50 行 + 行内控件逐帧重绘导致滚动卡顿；
+        # NO_SMOOTH 走原生滚动（压测 20 步 410ms → 7ms）。按 本面板覆盖→全局 生效，
+        # 设置页开关可即时切换（见 _apply_smooth_mode）。
+        self._apply_smooth_mode()
         self._table.setColumnCount(len(TABLE_COLUMNS))
         self._table.setHorizontalHeaderLabels([c[1] for c in TABLE_COLUMNS])
         self._table.setSelectionBehavior(
@@ -330,6 +340,10 @@ class RecordsPage(QWidget):
         self._btn_next.clicked.connect(lambda _=False: self._step_page(1))
         bottom.addWidget(self._btn_next)
         root.addLayout(bottom)
+
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置（本面板覆盖→全局）刷新表格滚动模式（即时）"""
+        apply_table_smooth_mode(self._table, panel=self._PERF_PANEL_KEY)
 
     # ---------- 指标卡 ----------
 
@@ -617,6 +631,10 @@ class RecordsPage(QWidget):
             self._table.clearContents()
             self._table.setRowCount(len(self._rows))
             from PySide6.QtWidgets import QTableWidgetItem
+            # 性能（2026-08-26）：按钮样式循环外预构建 + 徽章文本化——
+            # 分类徽章由 cellWidget 改为文本 item（语义色前景 + 淡色底），
+            # cellWidget 从每行 2 个降到 1 个（仅操作列），填充与滚动重绘双受益
+            btn_css = _prebuild_btn_css()
             for r, row in enumerate(self._rows):
                 # 描述/复现过长截断 + tooltip 保留完整内容
                 desc = str(row.get("description") or "")
@@ -636,14 +654,18 @@ class RecordsPage(QWidget):
                     row.get("signer", ""),
                 ]
                 for c, v in enumerate(vals):
-                    if c == 1:  # 分类徽章
-                        w = QWidget(self._table)
-                        lay = QHBoxLayout(w)
-                        lay.setContentsMargins(2, 4, 2, 4)
-                        lay.setSpacing(0)
-                        lay.addWidget(_category_badge(str(v), w))
-                        lay.addStretch(1)
-                        self._table.setCellWidget(r, c, w)
+                    if c == 1:  # 分类徽章：文本 item + 语义色（不再用 cellWidget）
+                        it = QTableWidgetItem(str(v))
+                        color = _category_color(str(v))
+                        it.setForeground(color)
+                        bgc = QColor(color)
+                        bgc.setAlpha(26)  # ~10% 透明度，近似徽章淡底
+                        it.setBackground(bgc)
+                        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        _b = QFont(it.font())
+                        _b.setBold(True)
+                        it.setFont(_b)
+                        self._table.setItem(r, c, it)
                         continue
                     it = QTableWidgetItem(str(v))
                     if c == 0:
@@ -658,7 +680,7 @@ class RecordsPage(QWidget):
                         it.setToolTip(repro)
                     self._table.setItem(r, c, it)
                 self._table.setCellWidget(r, _COL_OPS,
-                                          self._make_ops_widget(row))
+                                          self._make_ops_widget(row, btn_css))
         finally:
             self._table.setUpdatesEnabled(True)
             self._table.blockSignals(False)
@@ -672,16 +694,21 @@ class RecordsPage(QWidget):
         s = str(val or "").strip()
         return s[5:16] if len(s) >= 16 else s
 
-    def _make_ops_widget(self, row) -> QWidget:
-        """行内操作列：编辑（primary）/ 删除（danger）"""
+    def _make_ops_widget(self, row, btn_css: dict | None = None) -> QWidget:
+        """行内操作列：编辑（primary）/ 删除（danger）
+
+        btn_css: 预构建按钮样式（_populate 循环外算好传入，避免每按钮重复计算）。
+        """
         w = QWidget(self._table)
         lay = QHBoxLayout(w)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(6)
         btn_edit = _row_btn("编辑", "primary",
-                            lambda r=row: self._on_edit(r), w)
+                            lambda r=row: self._on_edit(r), w,
+                            css=btn_css["primary"] if btn_css else None)
         btn_del = _row_btn("删除", "danger",
-                           lambda r=row: self._on_delete(r), w)
+                           lambda r=row: self._on_delete(r), w,
+                           css=btn_css["danger"] if btn_css else None)
         lay.addWidget(btn_edit)
         lay.addWidget(btn_del)
         lay.addStretch(1)
