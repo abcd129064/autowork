@@ -27,7 +27,7 @@ _table_smooth_enabled: bool | None = None
 # key 为面板标识，value 为 settings.json 字段名。
 _PANEL_TABLE_KEYS = {
     "aftersale": "perf_table_smooth_aftersale",   # 售后面板（windows/aftersale）
-    "video":     "perf_table_smooth_video",       # 跑视频面板（windows/ledger）
+    "video":     "perf_table_smooth_video",       # 跑视频面板（windows/run_video）
     "management": "perf_table_smooth_management", # 管理面板（windows/management，4 处表格）
     "remote":    "perf_table_smooth_remote",      # 远程会话（windows/remote_session，2 处表格）
 }
@@ -36,14 +36,17 @@ _panel_table_overrides: dict | None = None  # {panel: bool}，None=尚未加载
 # 弹出动画的「面板级覆盖」：与表格平滑滚动同模型（未设置回退全局）。
 _PANEL_ANIMATION_KEYS = {
     "aftersale": "perf_animation_aftersale",   # 售后面板（windows/aftersale）
-    "video":     "perf_animation_video",       # 跑视频面板（windows/ledger）
+    "video":     "perf_animation_video",       # 跑视频面板（windows/run_video）
 }
 _panel_animation_overrides: dict | None = None  # {panel: bool}，None=尚未加载
 
-# 面板窗口类名 → 面板标识（菜单动画中央补丁按父链识别所属面板用）
+# 面板窗口类名 → 面板标识（菜单动画/弹窗动画中央补丁按父链识别所属面板用）
 _PANEL_WINDOW_CLASSES = {
     "AftersalePanelWindow": "aftersale",
     "LedgerPanelWindow": "video",
+    "ManagementPanelWindow": "management",
+    "TunnelPanelWindow": "remote",
+    "ConnDiagPanel": "remote",
 }
 
 
@@ -243,15 +246,66 @@ def set_animation(panel: str | None, enabled: bool):
         set_animation_enabled(enabled)
 
 
-def _menu_panel_key(menu) -> str | None:
-    """沿菜单父链向上找所属面板窗口（主界面/其它窗口返回 None 走全局）"""
-    w = menu.parentWidget() if hasattr(menu, "parentWidget") else None
+def _window_panel_key(widget) -> str | None:
+    """沿父链向上找所属面板窗口（主界面/其它窗口返回 None 走全局）"""
+    w = widget
     while w is not None:
         panel = _PANEL_WINDOW_CLASSES.get(type(w).__name__)
         if panel:
             return panel
-        w = w.parentWidget()
+        w = w.parentWidget() if hasattr(w, "parentWidget") else None
     return None
+
+
+def _menu_panel_key(menu) -> str | None:
+    """沿菜单父链向上找所属面板窗口（主界面/其它窗口返回 None 走全局）"""
+    return _window_panel_key(menu)
+
+
+def patch_dialog_animation():
+    """中央拦截 MaskDialogBase 淡入/淡出动画：动画关闭时跳过（幂等）
+
+    背景：MessageBoxBase（含项目内 6 个弹窗：编辑售后/球桌/设备/署名统计/
+    单视频等）继承 MaskDialogBase，打开/关闭时用 QGraphicsOpacityEffect +
+    QPropertyAnimation 做整窗透明度渐变——opacity 效果强制整窗离屏渲染，
+    弹窗控件越多、尺寸越大每帧渲染越重，「双击打开面板」低帧/卡顿的主因。
+    动画开关（面板覆盖→全局）为关时直接显示/关闭，秒开无渐变。
+    """
+    try:
+        from PySide6.QtWidgets import QDialog
+        from qfluentwidgets.components.dialog_box.mask_dialog_base import (
+            MaskDialogBase)
+    except Exception:
+        return
+    if getattr(MaskDialogBase, "_perf_dialog_patched", False):
+        return
+    _orig_show = MaskDialogBase.showEvent
+    _orig_done = MaskDialogBase.done
+
+    def _show(self, e):
+        try:
+            if not get_animation(_window_panel_key(self)):
+                self.setGraphicsEffect(None)
+                super(MaskDialogBase, self).showEvent(e)
+                return
+        except Exception:
+            pass
+        _orig_show(self, e)
+
+    def _done(self, code):
+        try:
+            if not get_animation(_window_panel_key(self)):
+                self.widget.setGraphicsEffect(None)
+                self.setGraphicsEffect(None)
+                QDialog.done(self, code)
+                return
+        except Exception:
+            pass
+        _orig_done(self, code)
+
+    MaskDialogBase.showEvent = _show
+    MaskDialogBase.done = _done
+    MaskDialogBase._perf_dialog_patched = True
 
 
 def patch_menu_animation():

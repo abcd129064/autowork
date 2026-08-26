@@ -4,7 +4,7 @@
 结构参照售后面板（windows/aftersale/window.py）：
 - 填写录入（EntryPage）：表单 + 必填进度 + 提交，支持主界面会话预填
 - 记录与统计（RecordsPage）：指标卡 + 筛选/分页 + 编辑/删除/署名统计/导出
-- 设置（SettingsPage）：默认署名 + 数据库设置（MysqlSyncCard，ledger scope）
+- 设置（SettingsPage）：默认署名 + 数据库设置（MysqlSyncCard，run_video scope）
 
 主界面「跑视频面板」按钮经 open_entry_with_context(ctx) 打开本窗口并
 预填当前球桌会话上下文（未选设备时球房为空，面板内手填）。
@@ -15,9 +15,9 @@ from qfluentwidgets import FluentWindow, FluentIcon
 
 from core.perf import is_acrylic_enabled
 
-from windows.ledger.entry import EntryPage
-from windows.ledger.records import RecordsPage
-from windows.ledger.settings import SettingsPage
+from windows.run_video.entry import EntryPage
+from windows.run_video.records import RecordsPage
+from windows.run_video.settings import SettingsPage
 
 
 class LedgerPanelWindow(FluentWindow):

@@ -1007,6 +1007,11 @@ def save_xqzg(rows: list, file_path: str = "") -> int:
         rows: API 返回的记录列表
         file_path: 日期路径，如 "2026/08/02"；仅替换该日期的数据
     """
+    # fail fast：file_path 是 DELETE/INSERT 分区与 sync_meta 键的组成部分，
+    # 非 yyyy/MM/dd 格式会写脏键/错分区造成数据错乱，入口直接拒绝
+    if file_path and not re.fullmatch(r"\d{4}/\d{2}/\d{2}", file_path):
+        raise ValueError(
+            f"file_path 必须为 yyyy/MM/dd 格式（如 2026/08/02），收到: {file_path!r}")
     conn = _get_conn()
     with _batch_transaction(conn):
         _probe_status_ext_cols(conn, "xqzg_status")

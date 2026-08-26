@@ -106,6 +106,35 @@ class ManagementPanelWindow(FluentWindow):
         # （全局单例，与主窗口远程面板/球桌面板共享同一 frpc 进程）
         self._remote_bridge = get_session_manager()
 
+        # 设置页表格平滑滚动开关 → 刷新各子页表格（管理面板覆盖→全局）
+        self.settings_page.table_smooth_changed.connect(
+            self._apply_table_smooth_all)
+        # 远程会话表格开关 → 刷新已打开的隧道/连接诊断窗口
+        self.settings_page.remote_smooth_changed.connect(
+            self._apply_remote_table_smooth)
+
+    def _apply_table_smooth_all(self):
+        """刷新管理面板所有已构建子页的表格滚动模式（按 覆盖→全局 生效）"""
+        for page in (self.table_page, self.device_page, self.health_page):
+            fn = getattr(page, "_apply_smooth_mode", None)
+            if fn is not None:
+                try:
+                    fn()
+                except Exception:
+                    pass
+
+    def _apply_remote_table_smooth(self):
+        """刷新已打开的远程会话窗口表格（隧道列表/连接诊断，各自按 覆盖→全局）"""
+        from PySide6.QtWidgets import QApplication
+        for w in QApplication.topLevelWidgets():
+            if type(w).__name__ in ("TunnelPanelWindow", "ConnDiagPanel"):
+                fn = getattr(w, "_apply_smooth_mode", None)
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
     def showEvent(self, event):
         super().showEvent(event)
         self._reset_titlebar_button_state()

@@ -33,7 +33,8 @@ from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
-from core.perf import is_acrylic_enabled, is_animation_enabled
+from core.perf import (is_acrylic_enabled, is_animation_enabled,
+                       apply_table_smooth_mode)
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import launch_sibling_app, show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
@@ -629,6 +630,10 @@ class HealthPage(QWidget):
         # 页面载入立即拉取一次（完成后自动刷新展示）
         self._fetch_health_data()
 
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新本页表格（管理面板设置页联动）"""
+        apply_table_smooth_mode(self._table, panel="management")
+
     def _init_ui(self):
         """搭建标题/阈值提示 + 告警表格（首列勾选框）+ 已处理按钮"""
         layout = QVBoxLayout(self)
@@ -656,6 +661,8 @@ class HealthPage(QWidget):
         layout.addWidget(hint)
 
         self._table = TableWidget(self)
+        # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
+        apply_table_smooth_mode(self._table, panel="management")
         self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(
             ["", "球桌号", "球房名称", "在线状态", "健康度"])

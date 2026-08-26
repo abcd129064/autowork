@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """跑视频面板（re-export shim）
 
-功能实现在 ``windows/ledger/`` 包：
+功能实现在 ``windows/run_video/`` 包：
 - common.py / form.py / entry.py / records.py / settings.py / window.py
 
-本文件仅做 re-export（``from windows.ledger import *``），并保留
+本文件仅做 re-export（``from windows.run_video import *``），并保留
 独立进程入口（``python windows/ledger_panel.py``，供打包分发或调试）：
 - ``from windows.ledger_panel import LedgerPanelWindow``
 """
@@ -36,8 +36,8 @@ try:
 except Exception:
     pass
 
-from windows.ledger import *  # noqa: F401,F403
-from windows.ledger import __all__ as _ledger_all
+from windows.run_video import *  # noqa: F401,F403
+from windows.run_video import __all__ as _ledger_all
 __all__ = list(_ledger_all)
 
 

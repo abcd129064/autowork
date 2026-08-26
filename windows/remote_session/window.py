@@ -11,6 +11,7 @@ from qfluentwidgets.window.fluent_window import FluentTitleBar
 from qframelesswindow import FramelessWindow
 
 from core.frp_remote import get_session_manager
+from core.perf import apply_table_smooth_mode
 from core.utils import show_info_bar
 
 _HEADERS = ["serverName", "关联球桌", "本地端口", "来源", "最近使用", "断开连接", "删除 snk"]
@@ -48,6 +49,8 @@ class TunnelPanelWindow(FramelessWindow):
 
         # --- 隧道表格 ---
         self._table = TableWidget(self)
+        # 性能（2026-08-26）：远程会话表格接入平滑滚动开关（覆盖→全局）
+        apply_table_smooth_mode(self._table, panel="remote")
         self._table.setColumnCount(len(_HEADERS))
         self._table.setHorizontalHeaderLabels(_HEADERS)
         self._table.verticalHeader().setVisible(False)
@@ -77,7 +80,12 @@ class TunnelPanelWindow(FramelessWindow):
 
         self.refresh()
 
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新本窗口表格（远程会话设置页联动）"""
+        apply_table_smooth_mode(self._table, panel="remote")
+
     def closeEvent(self, event):
+        """关闭时停止 frpc 状态监听（QTimer 挂在本窗口上，随窗口销毁自动停止）"""
         """关闭时显式断开 manager 信号连接，防止销毁后回调崩溃"""
         mgr = get_session_manager()
         try:

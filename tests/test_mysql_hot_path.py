@@ -130,3 +130,23 @@ def test_get_conn_reuses_healthy_connection_without_ping(monkeypatch):
     assert table_db._get_conn() is conn
     assert table_db._get_conn() is conn
     assert created == [conn]
+
+
+def test_save_xqzg_invalid_file_path_raises_value_error():
+    """save_xqzg 入口校验：非 yyyy/MM/dd 格式的 file_path 必须 fail fast。
+
+    校验发生在 _get_conn() 之前，因此无需数据库连接即可断言；
+    脏 file_path 会写坏 sync_meta 键与数据分区，必须入口拒绝。
+    """
+    import pytest
+
+    with pytest.raises(ValueError):
+        table_db.save_xqzg([], file_path="2026/8/2")
+    with pytest.raises(ValueError):
+        table_db.save_xqzg([], file_path="abc")
+    with pytest.raises(ValueError):
+        table_db.save_xqzg([], file_path="2026-08-02")
+    # 空串合法（无分区）：校验条件为 `if file_path and ...`，空串不触发。
+    # 不实际调用 save_xqzg([]) 以免进入 _get_conn 依赖数据库环境。
+    assert table_db.save_xqzg.__defaults__ == ("",)
+

@@ -255,6 +255,29 @@ def cycle_label(cycle_start: str) -> str:
 
 # ==================== 周期归属（统一按发生时间动态计算） ====================
 
+def cycle_date_range(cycle_start: str) -> tuple:
+    """周期起止日期（date, date）：month 模式为整月，其余为起始日 + span-1 天
+
+    供统计弹窗「当前周期」趋势范围使用；month 模式按周期自身所在月份计算
+    （不依赖当前时刻，历史周期同样正确）。非法输入返回 (None, None)。
+    """
+    start = _parse_occurred(cycle_start)
+    if start is None:
+        # 周期筛选/落库格式为 yyyy/MM/dd（斜杠），_parse_occurred 只认横杠
+        try:
+            start = datetime.strptime(
+                str(cycle_start or "").strip()[:10], "%Y/%m/%d")
+        except (ValueError, TypeError):
+            return None, None
+    s = start.date()
+    if load_cycle_mode().get("type") == "month":
+        import calendar
+        e = s.replace(day=calendar.monthrange(s.year, s.month)[1])
+    else:
+        e = s + timedelta(days=cycle_span_days() - 1)
+    return s, e
+
+
 def _record_cycle(occurred_at: str, created_at: str):
     """记录归属周期：优先按 occurred_at 计算，缺失/非法时回退 created_at，
 
@@ -543,6 +566,82 @@ def query_with_stats(page_no: int, page_size: int, keyword: str = "",
              "unresolved": n_all - n_resolved,
              "initiative": n_init, "our_problem": n_our, "rate": rate}
     return total, rows, stats
+
+
+def query_stats_detail(keyword: str = "", cycle_start: str = "",
+                       issue_type: str = "", trend_start: str = "",
+                       trend_end: str = "") -> dict:
+    """售后统计弹窗详细统计（与四卡片/列表完全同口径）
+
+    与 query_with_stats 一致：统计不带 resolved/is_initiative/
+    is_our_problem 筛选（否则已解决/未解决计数退化），仅按
+    keyword + issue_type + cycle_start（按记录时间动态归属）过滤。
+    返回：
+    - summary: {total, resolved, unresolved, rate, initiative, our_problem}
+    - daily  : [{"date": "2026-08-18", "count": n, "resolved": n}, ...]
+               按日升序；trend_start/trend_end（"YYYY-MM-DD"）仅过滤该序列
+    - regions: [{"region": "广东", "count": n}, ...] 按数量降序
+    - types  : [{"issue_type": "硬件问题", "count": n, "resolved": n,
+                 "unresolved": n}, ...] 按数量降序
+    """
+    conn = _conn()
+    where, params = _build_where(keyword, issue_type, "")
+    cur = conn.execute(
+        "SELECT occurred_at, created_at, region, issue_type, resolved, "
+        "is_initiative, is_our_problem FROM aftersale_records" + where, params)
+    recs = [dict(zip(("occurred_at", "created_at", "region", "issue_type",
+                      "resolved", "is_initiative", "is_our_problem"), r))
+            for r in cur.fetchall()]
+    if cycle_start:
+        recs = [r for r in recs if _match_cycle(r, cycle_start)]
+
+    n_all = len(recs)
+    n_resolved = sum(1 for r in recs if r["resolved"] == "是")
+    n_init = sum(1 for r in recs if r["is_initiative"] == "是")
+    n_our = sum(1 for r in recs if r["is_our_problem"] == "是")
+    rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
+    summary = {"total": n_all, "resolved": n_resolved,
+               "unresolved": n_all - n_resolved, "rate": rate,
+               "initiative": n_init, "our_problem": n_our}
+
+    # 每日趋势：按发生日期（occurred_at 优先，缺失回退 created_at）聚合
+    daily_map = {}
+    for r in recs:
+        d = str(r["occurred_at"] or r["created_at"] or "")[:10]
+        if not d:
+            continue
+        if trend_start and d < trend_start:
+            continue
+        if trend_end and d > trend_end:
+            continue
+        item = daily_map.setdefault(d, [0, 0])
+        item[0] += 1
+        if r["resolved"] == "是":
+            item[1] += 1
+    daily = [{"date": d, "count": c, "resolved": rd}
+             for d, (c, rd) in sorted(daily_map.items())]
+
+    region_map = {}
+    for r in recs:
+        k = str(r["region"] or "").strip() or "未填地区"
+        region_map[k] = region_map.get(k, 0) + 1
+    regions = [{"region": k, "count": v}
+               for k, v in sorted(region_map.items(),
+                                  key=lambda kv: kv[1], reverse=True)]
+
+    type_map = {}
+    for r in recs:
+        t = str(r["issue_type"] or "").strip() or "未分类"
+        item = type_map.setdefault(t, [0, 0])
+        item[0] += 1
+        if r["resolved"] == "是":
+            item[1] += 1
+    types = [{"issue_type": t, "count": c, "resolved": rd,
+              "unresolved": c - rd}
+             for t, (c, rd) in sorted(type_map.items(),
+                                      key=lambda kv: kv[1][0], reverse=True)]
+    return {"summary": summary, "daily": daily,
+            "regions": regions, "types": types}
 
 
 def get_cycle_options() -> list:

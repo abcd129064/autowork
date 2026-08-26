@@ -33,7 +33,8 @@ from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
-from core.perf import is_acrylic_enabled, is_animation_enabled
+from core.perf import (is_acrylic_enabled, is_animation_enabled,
+                       get_table_smooth, set_table_smooth)
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import launch_sibling_app, show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
@@ -72,6 +73,11 @@ class AdminSettingsPage(QWidget):
         ("xqzg · 新球房运维后台（xqzg.newbv.cn）", "xqzg"),
     ]
     _API_LABELS = {"api1": "接口1 xqzg", "api2": "接口2 kd"}
+
+    # 表格平滑滚动开关变更（管理窗口据此刷新各子页表格滚动模式）
+    table_smooth_changed = Signal(bool)
+    # 远程会话表格平滑滚动开关变更（管理窗口据此刷新已打开隧道/诊断窗口）
+    remote_smooth_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -122,6 +128,8 @@ class AdminSettingsPage(QWidget):
             view, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
         layout.addWidget(self._build_upload_card(view))
         layout.addWidget(self._build_add_card(view))
+        # 性能卡片：管理/远程表格平滑滚动开关（面板级覆盖→全局）
+        layout.addWidget(self._build_perf_card(view))
         # MySQL 远程同步配置（可复用组件，独立保存 settings.json）
         self._mysql_card = MysqlSyncCard(view, sync_scope="ops")
         self._mysql_card.load()
@@ -135,6 +143,63 @@ class AdminSettingsPage(QWidget):
         btn_row.addWidget(self._btn_save)
         layout.addLayout(btn_row)
         layout.addStretch(1)
+
+    def _build_perf_card(self, parent) -> QWidget:
+        """性能卡片：管理面板表格 / 远程会话表格平滑滚动开关（面板级覆盖→全局）
+
+        开关即时生效（set_table_smooth 持久化 + 信号通知管理窗口刷新各表格）；
+        未单独拨动时跟随主界面全局开关。
+        """
+        card = CardWidget(parent)
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(8)
+        vbox.addWidget(BodyLabel("性能", card))
+        vbox.addWidget(CaptionLabel(
+            "管理面板表格与远程会话表格的平滑滚动动画；"
+            "未单独拨动时跟随主界面全局开关", card))
+
+        row_mgmt = QHBoxLayout()
+        row_mgmt.setSpacing(8)
+        lbl_mgmt = BodyLabel("管理面板表格平滑滚动", card)
+        lbl_mgmt.setToolTip(
+            "关闭后管理面板的球桌/设备/健康度等表格走原生滚动，滚动更跟手")
+        row_mgmt.addWidget(lbl_mgmt, 1)
+        self.sw_mgmt_smooth = SwitchButton(card)
+        self.sw_mgmt_smooth.setOnText("开")
+        self.sw_mgmt_smooth.setOffText("关")
+        # 先回显当前生效值，再连接信号，避免初始化 setChecked 误触发持久化
+        self.sw_mgmt_smooth.setChecked(get_table_smooth("management"))
+        self.sw_mgmt_smooth.checkedChanged.connect(
+            self._on_mgmt_smooth_toggled)
+        row_mgmt.addWidget(self.sw_mgmt_smooth)
+        vbox.addLayout(row_mgmt)
+
+        row_remote = QHBoxLayout()
+        row_remote.setSpacing(8)
+        lbl_remote = BodyLabel("远程会话表格平滑滚动", card)
+        lbl_remote.setToolTip(
+            "关闭后当前隧道列表 / 连接诊断表格走原生滚动")
+        row_remote.addWidget(lbl_remote, 1)
+        self.sw_remote_smooth = SwitchButton(card)
+        self.sw_remote_smooth.setOnText("开")
+        self.sw_remote_smooth.setOffText("关")
+        self.sw_remote_smooth.setChecked(get_table_smooth("remote"))
+        self.sw_remote_smooth.checkedChanged.connect(
+            self._on_remote_smooth_toggled)
+        row_remote.addWidget(self.sw_remote_smooth)
+        vbox.addLayout(row_remote)
+        return card
+
+    def _on_mgmt_smooth_toggled(self, checked):
+        """管理面板表格平滑滚动切换：持久化 + 通知管理窗口刷新各子页表格"""
+        set_table_smooth("management", checked)
+        self.table_smooth_changed.emit(checked)
+
+    def _on_remote_smooth_toggled(self, checked):
+        """远程会话表格平滑滚动切换：持久化 + 通知管理窗口刷新已打开窗口"""
+        set_table_smooth("remote", checked)
+        self.remote_smooth_changed.emit(checked)
 
     def _on_add_record(self):
         """从内嵌表单读取 → 写入本地数据库 → 刷新球桌管理页"""

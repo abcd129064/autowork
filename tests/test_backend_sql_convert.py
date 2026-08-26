@@ -108,13 +108,66 @@ def test_quote_reserved_insert_tuple():
 def test_convert_date_function_three_days():
     sql = "replace(date(replace(col, '/', '-'), '-3 days'), '-', '/')"
     expected = ("DATE_FORMAT(DATE_SUB(STR_TO_DATE(REPLACE(col, '/', '-'), "
-                "'%Y-%m-%d'), INTERVAL 3 DAY), '%Y/%m/%d')")
+                "'%%Y-%%m-%%d'), INTERVAL 3 DAY), '%%Y/%%m/%%d')")
     assert backend._convert_sqlite_date_functions(sql) == expected
 
 
 def test_convert_date_function_no_match_unchanged():
     sql = "SELECT date('now')"
     assert backend._convert_sqlite_date_functions(sql) == sql
+
+
+# ==================== %% 日期格式符 + pymysql 参数化还原 ====================
+
+def test_convert_date_format_percent_escaped_then_restored_by_format():
+    """_convert_sql 输出含 %%Y，经 pymysql 的 `query % ()` 格式化后还原为 %Y。"""
+    converted = backend._convert_sql(
+        "replace(date(replace(fp, '/', '-'), '-7 days'), '-', '/')")
+    assert "%%Y-%%m-%%d" in converted
+    assert "%%Y/%%m/%%d" in converted
+    # 模拟 pymysql 无参数路径：execute 检测到 %% 时传空元组触发格式化
+    restored = converted % ()
+    assert "%Y-%m-%d" in restored
+    assert "%Y/%m/%d" in restored
+    assert "%%" not in restored
+
+
+def test_convert_sql_mixed_placeholders_date_and_reserved():
+    """组合场景：? 占位符（→%s）、日期函数、WHERE key= 保留字同一条 SQL。"""
+    sql = ("SELECT key, replace(date(replace(fp, '/', '-'), '-7 days'), '-', '/') "
+           "FROM kd_status WHERE key = ?")
+    converted = backend._convert_sql(sql)
+    assert "`key`" in converted
+    assert "%s" in converted
+    assert "%%Y-%%m-%%d" in converted
+    # 带参数路径：sql % (值,) 后 %% 还原为 %、%s 替换为值（纯 % 格式化不加引号，
+    # 引号由 pymysql escape 负责，这里只验证值替换本身）
+    rendered = converted % ("abc",)
+    assert "%Y-%m-%d" in rendered
+    assert "%%" not in rendered
+    assert "%s" not in rendered
+    assert "abc" in rendered
+
+
+def test_convert_sql_query_kd_alerts_like_sqlite_no_param_no_double_percent():
+    """query_kd_alerts 的 SQLite 原文（days=7）转换后，无参数路径无 %% 残留。"""
+    sql = """
+    WITH latest(fp) AS (
+        SELECT MAX(file_path) FROM kd_status WHERE file_path != ''
+    ),
+    cutoff(c) AS (
+        SELECT replace(date(replace(fp, '/', '-'), '-7 days'), '-', '/')
+        FROM latest
+    )
+    SELECT device_code FROM kd_status
+    WHERE file_path >= (SELECT c FROM cutoff)
+    """
+    converted = backend._convert_sql(sql)
+    assert "DATE_FORMAT" in converted
+    assert "%%Y" in converted
+    restored = converted % ()
+    assert "%%" not in restored
+    assert "%Y-%m-%d" in restored
 
 
 # ==================== _convert_sql (端到端管线) ====================

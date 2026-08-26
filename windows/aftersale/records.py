@@ -30,6 +30,7 @@ from windows.mysql_sync_card import MysqlSyncCard
 
 from windows.aftersale.common import *  # noqa: F401,F403
 from windows.aftersale.dialogs import EditRecordDialog, ImportPreviewDialog
+from windows.aftersale.stats_dialog import AfterSaleStatsDialog
 from windows.stat_charts import StatsOpener, _aftersale_options
 
 # 重要标记行底色（浅色=淡黄 / 深色=暗黄）：勾选「重要」后该条在列表中淡黄显示
@@ -62,6 +63,7 @@ class RecordsPage(QWidget):
         self._cycles_loaded = False
         self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
         self._batch_worker = None
+        self._stats_dialog = None  # 售后统计弹窗（非模态，复用实例）
         self._init_ui()
         # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
         self._stats_opener = StatsOpener(_aftersale_options, "aftersale", self)
@@ -107,6 +109,13 @@ class RecordsPage(QWidget):
         unr_card.setCursor(Qt.CursorShape.PointingHandCursor)
         unr_card.setToolTip("点击查看未解决条目（再次点击恢复全部）")
         unr_card.clicked.connect(self._on_unresolved_card_clicked)
+        # 「售后总数」卡可点击：打开详细统计弹窗（每日趋势/地区/问题类型，
+        # 独立可缩放非模态窗口，统计范围跟随当前筛选）
+        total_card = self._card_total[0]
+        total_card.setCursor(Qt.CursorShape.PointingHandCursor)
+        total_card.setToolTip(
+            "点击查看详细统计（每日趋势 · 地区分布 · 问题类型）")
+        total_card.clicked.connect(self._on_total_card_clicked)
 
         # --- 工具栏（与主界面同范式：库版 FlowLayout 换行 + 滚动容器锁高，
         #     窄宽自动换行严禁重叠，折行超上限上下滚动） ---
@@ -384,6 +393,58 @@ class RecordsPage(QWidget):
         else:
             self._resolved_seg.setValue("否")  # 只看未解决
         self._on_filter_changed()
+
+    def _on_total_card_clicked(self):
+        """点击概览「售后总数」卡：打开详细统计弹窗（非模态，实例复用）
+
+        统计范围跟随当前筛选；弹窗内点击地区/类型行会联动筛选列表。
+        """
+        if self._stats_dialog is None:
+            self._stats_dialog = AfterSaleStatsDialog(
+                self._current_filters(), self.window())
+            self._stats_dialog.apply_filter.connect(self._on_stats_filter)
+        else:
+            # 复用实例：更新统计范围并刷新（避免每次打开新建父级弹窗堆积）
+            self._stats_dialog.set_filters(self._current_filters())
+        self._stats_dialog.show()
+        self._stats_dialog.raise_()
+        self._stats_dialog.activateWindow()
+
+    def _on_stats_filter(self, overrides: dict):
+        """统计弹窗点击联动：按条件筛选记录列表并切回本页
+
+        overrides 支持 {"issue_type": str} 与 {"keyword": str}（地区走关键词，
+        关键词搜索覆盖 region 字段）。
+        """
+        f = overrides or {}
+        self._type_combo.blockSignals(True)
+        self._search_edit.blockSignals(True)
+        try:
+            if "issue_type" in f:
+                t = str(f.get("issue_type") or "").strip()
+                idx = self._type_combo.findText(t)
+                if idx >= 0:
+                    self._type_combo.setCurrentIndex(idx)
+                elif t:
+                    try:
+                        self._type_combo.setEditText(t)
+                    except Exception:
+                        pass  # 非常规可编辑实现，忽略
+            if "keyword" in f:
+                self._search_edit.setText(str(f.get("keyword") or ""))
+        finally:
+            self._type_combo.blockSignals(False)
+            self._search_edit.blockSignals(False)
+        self._on_filter_changed()
+        # 确保记录页可见（弹窗为非模态，期间可能已切到其他页）
+        win = self.window()
+        if win is not None and hasattr(win, "switchTo"):
+            try:
+                win.switchTo(self)
+            except Exception:
+                pass
+        show_info_bar("已按统计条件筛选记录列表", "success",
+                      title="统计联动", parent=self, duration=2000)
 
     def _on_open_stats_chart(self):
         """打开 pygwalker 自助分析窗口。"""

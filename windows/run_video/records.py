@@ -24,8 +24,8 @@ from core.utils import show_info_bar
 from database import ledger_db
 from workers.aftersale_worker import AftersaleDBWorker
 
-from windows.ledger.common import *  # noqa: F401,F403
-from windows.ledger.form import LedgerForm
+from windows.run_video.common import *  # noqa: F401,F403
+from windows.run_video.form import LedgerForm
 from windows.stat_charts import StatsOpener, _ledger_options
 
 
@@ -142,7 +142,7 @@ class RecordsPage(QWidget):
         self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
         self._init_ui()
         # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
-        self._stats_opener = StatsOpener(_ledger_options, "ledger", self)
+        self._stats_opener = StatsOpener(_ledger_options, "run_video", self)
         self._stats_opener.finished.connect(self._on_stats_finished)
 
     def _init_ui(self):
@@ -466,8 +466,6 @@ class RecordsPage(QWidget):
             self._on_filter_changed()
 
         if not category:
-            for c in ledger_db.KIND_CANDIDATES.values():
-                pass  # 全部分类：候选为全部并集（下方同步填充）
             cands = []
             seen = set()
             for v in ledger_db.KIND_CANDIDATES.values():

@@ -146,6 +146,10 @@ class MysqlCursorAdapter:
         sql = _convert_sql(sql)
         if params is not None:
             self._cur.execute(sql, params)
+        elif "%%" in sql:
+            # pymysql 仅带参数时做 % 格式化：传空元组触发格式化，把 %% 还原为 %，
+            # 避免 DATE_FORMAT 收到 %% 输出字面 %Y（见 _convert_sqlite_date_functions）
+            self._cur.execute(sql, ())
         else:
             self._cur.execute(sql)
         return self
@@ -154,6 +158,8 @@ class MysqlCursorAdapter:
         sql = _convert_sql(sql)
         # 委托驱动原生 executemany：PyMySQL 会把 INSERT 批次改写为多值
         # INSERT，避免 Python 循环产生 N 次网络往返。
+        # 注：executemany 无需处理 %% 还原——pymysql 内部逐行 `query % args`
+        # 自然完成 % 格式化，与 execute 的空元组路径等价。
         self._cur.executemany(sql, seq_params)
         self._rowcount = self._cur.rowcount
         return self
@@ -203,6 +209,10 @@ def _convert_sqlite_date_functions(sql: str) -> str:
     处理 query_kd_alerts 中的模式：
     replace(date(replace(col, '/', '-'), '-N days'), '-', '/')
     → DATE_FORMAT(DATE_SUB(STR_TO_DATE(REPLACE(col, '/', '-'), '%Y-%m-%d'), INTERVAL N DAY), '%Y/%m/%d')
+
+    注意：输出 SQL 中的 MySQL 日期格式符写为 %%Y/%%m/%%d，经 pymysql
+    参数化格式化（query % args）后还原为 %Y/%m/%d。**禁止**再对该 SQL
+    做 Python % 格式化（会双转义成 %%Y）。
     """
     # 匹配：replace(date(replace(X, '/', '-'), '-N days'), '-', '/')
     pattern = re.compile(
@@ -212,8 +222,8 @@ def _convert_sqlite_date_functions(sql: str) -> str:
     def replacer(m):
         col = m.group(1)
         days = m.group(2)
-        return (f"DATE_FORMAT(DATE_SUB(STR_TO_DATE(REPLACE({col}, '/', '-'), '%Y-%m-%d'), "
-                f"INTERVAL {days} DAY), '%Y/%m/%d')")
+        return (f"DATE_FORMAT(DATE_SUB(STR_TO_DATE(REPLACE({col}, '/', '-'), '%%Y-%%m-%%d'), "
+                f"INTERVAL {days} DAY), '%%Y/%%m/%%d')")
 
     return pattern.sub(replacer, sql)
 

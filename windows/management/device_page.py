@@ -33,7 +33,8 @@ from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
-from core.perf import is_acrylic_enabled, is_animation_enabled
+from core.perf import (is_acrylic_enabled, is_animation_enabled,
+                       apply_table_smooth_mode)
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import launch_sibling_app, show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
@@ -78,6 +79,10 @@ class FileListPanel(QWidget):
         self._init_ui()
         self.hide()
 
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新表格滚动模式（管理面板设置页联动）"""
+        apply_table_smooth_mode(self._list, panel="management")
+
     def _init_ui(self):
         self.setFixedWidth(self._PANEL_WIDTH)
         self.setObjectName("fileListPanel")
@@ -113,6 +118,8 @@ class FileListPanel(QWidget):
         layout.addLayout(header)
 
         self._list = TableWidget(self)
+        # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
+        apply_table_smooth_mode(self._list, panel="management")
         self._list.setColumnCount(1)
         self._list.setHorizontalHeaderLabels(["文件名"])
         self._list.horizontalHeader().setSectionResizeMode(
@@ -473,6 +480,11 @@ class DevicePage(QWidget):
         self._pending_search = ""
         self._pending_date = ""
 
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新本页表格（管理面板设置页联动）"""
+        if getattr(self, "_table", None) is not None:
+            apply_table_smooth_mode(self._table, panel="management")
+
     def focus_search(self, keyword: str, file_path: str = ""):
         """外部设置搜索关键词并触发查询（如趋势页预警跳转）
 
@@ -610,6 +622,8 @@ class DevicePage(QWidget):
 
         # --- 表格 ---
         self._table = _SortableTableWidget(self)
+        # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
+        apply_table_smooth_mode(self._table, panel="management")
         self._sort_key = ""   # 当前排序字段（DEVICE_COLUMNS key），空=默认 id 顺序
         self._sort_desc = False
         self._table.setColumnCount(len(DEVICE_COLUMNS))

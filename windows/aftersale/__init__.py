@@ -23,6 +23,7 @@ from windows.aftersale.entry import EntryPage  # noqa: F401
 from windows.aftersale.dialogs import (  # noqa: F401
     EditRecordDialog, ImportPreviewDialog,
 )
+from windows.aftersale.stats_dialog import AfterSaleStatsDialog  # noqa: F401
 from windows.aftersale.records import RecordsPage  # noqa: F401
 from windows.aftersale.settings import (  # noqa: F401
     CycleSettingsPage, SettingsPage,
@@ -38,6 +39,8 @@ __all__ = [
     "EntryPage",
     # dialogs
     "EditRecordDialog", "ImportPreviewDialog",
+    # 统计弹窗
+    "AfterSaleStatsDialog",
     # records
     "RecordsPage",
     # settings

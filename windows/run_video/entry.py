@@ -12,8 +12,8 @@ from core.utils import show_info_bar
 from database import ledger_db
 from workers.aftersale_worker import AftersaleDBWorker
 
-from windows.ledger.common import *  # noqa: F401,F403
-from windows.ledger.form import LedgerForm
+from windows.run_video.common import *  # noqa: F401,F403
+from windows.run_video.form import LedgerForm
 
 
 class EntryPage(QWidget):

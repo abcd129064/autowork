@@ -15,18 +15,18 @@ windows/ledger_panel.py 为 re-export shim（独立进程入口），
 main_window 经它引用 LedgerPanelWindow。
 """
 
-from windows.ledger.common import (  # noqa: F401
+from windows.run_video.common import (  # noqa: F401
     TABLE_COLUMNS, CATEGORY_ACCENTS,
 )
-from windows.ledger.form import LedgerForm  # noqa: F401
-from windows.ledger.entry import EntryPage  # noqa: F401
-from windows.ledger.records import (  # noqa: F401
+from windows.run_video.form import LedgerForm  # noqa: F401
+from windows.run_video.entry import EntryPage  # noqa: F401
+from windows.run_video.records import (  # noqa: F401
     RecordsPage, EditLedgerDialog, SignerStatsDialog,
 )
-from windows.ledger.settings import (  # noqa: F401
+from windows.run_video.settings import (  # noqa: F401
     SignerSettingsCard, SettingsPage,
 )
-from windows.ledger.window import LedgerPanelWindow  # noqa: F401
+from windows.run_video.window import LedgerPanelWindow  # noqa: F401
 
 __all__ = [
     # common

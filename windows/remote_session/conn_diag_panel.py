@@ -27,7 +27,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     MenuAnimationType, isDarkTheme, Pivot)
 
 from core.app_paths import get_app_dir
-from core.perf import is_animation_enabled
+from core.perf import is_animation_enabled, apply_table_smooth_mode
 from core.theme_qss import apply_window_qss
 
 
@@ -249,6 +249,10 @@ class ConnDiagPanel(QDialog):
         self._init_ui()
         self.reload()
 
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新本窗口表格（远程会话设置页联动）"""
+        apply_table_smooth_mode(self._table, panel="remote")
+
     # ==================== UI 构建 ====================
 
     def _init_ui(self):
@@ -308,6 +312,8 @@ class ConnDiagPanel(QDialog):
 
         # 页 0：明细表格
         self._table = TableWidget(self)
+        # 性能（2026-08-26）：远程会话表格接入平滑滚动开关（覆盖→全局）
+        apply_table_smooth_mode(self._table, panel="remote")
         self._table.setColumnCount(len(_COLUMNS))
         self._table.setHorizontalHeaderLabels([c[0] for c in _COLUMNS])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

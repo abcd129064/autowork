@@ -206,8 +206,14 @@ class RemoteSessionManager(QObject):
         changed = False
         if info is None:
             # 新注册：未指定端口时随机分配一个未被占用的端口
-            port = int(bind_port) if bind_port else \
-                generate_random_port(exclude_ports=self.used_ports())
+            if bind_port:
+                try:
+                    port = int(bind_port)
+                except (TypeError, ValueError):
+                    # 非法端口不崩溃：回退随机端口（与未指定等价）
+                    port = generate_random_port(exclude_ports=self.used_ports())
+            else:
+                port = generate_random_port(exclude_ports=self.used_ports())
             self._visitors[server_name] = {
                 "serverName": server_name,
                 "bindPort": port,
@@ -221,7 +227,12 @@ class RemoteSessionManager(QObject):
             # 已存在：仅更新显式传入且有变化的字段，
             # 未指定端口时保持原端口不变（避免每次调用都换端口）
             if bind_port:
-                port = int(bind_port)
+                try:
+                    port = int(bind_port)
+                except (TypeError, ValueError):
+                    # 非法端口不崩溃：保持原端口不变（port == info["bindPort"]
+                    # 恒真，跳过下方更新分支）
+                    port = info["bindPort"]
                 if port != info["bindPort"]:
                     # 新端口若已被其他 visitor 占用则报错，防止隧道端口冲突
                     owner = self._port_owner(port)

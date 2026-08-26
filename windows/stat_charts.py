@@ -28,7 +28,7 @@ class StatsOpener(QObject):
     """pygwalker 独立窗口打开器（无 UI 宿主，由记录页按钮触发）。
 
     builder: 无参函数，返回 pandas.DataFrame（原始记录，pygwalker 自助分析）。
-    kind: 'aftersale' / 'ledger'（临时文件前缀）。
+    kind: 'aftersale' / 'run_video'（临时文件前缀）。
     finished(bool, str): 打开成功/失败信号（后台线程 emit，Qt 自动回主线程）。
     """
 

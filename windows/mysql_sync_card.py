@@ -54,7 +54,7 @@ class MysqlSyncCard(CardWidget):
 
     Args:
         sync_scope: "ops" 推 5 张运维业务表；"aftersale" 只推售后记录；
-            "ledger" 只推跑视频记录（仅影响说明文案，开关/连接配置共用）
+            "run_video" 只推跑视频记录（仅影响说明文案，开关/连接配置共用）
     """
 
     def __init__(self, parent=None, sync_scope: str = "ops"):
@@ -69,11 +69,11 @@ class MysqlSyncCard(CardWidget):
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
-        # 同步范围文案：ops 运维业务数据；aftersale 售后记录；ledger 跑视频记录
+        # 同步范围文案：ops 运维业务数据；aftersale 售后记录；run_video 跑视频记录
         _SCOPE_NAMES = {
             "ops": "运维业务数据",
             "aftersale": "售后记录",
-            "ledger": "跑视频记录",
+            "run_video": "跑视频记录",
         }
         scope_name = _SCOPE_NAMES.get(self.sync_scope, "运维业务数据")
         card_title = "数据库设置" if self.sync_scope != "ops" else "服务器SQL 同步"

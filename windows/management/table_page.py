@@ -33,7 +33,8 @@ from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
-from core.perf import is_acrylic_enabled, is_animation_enabled
+from core.perf import (is_acrylic_enabled, is_animation_enabled,
+                       apply_table_smooth_mode)
 from core.secrets import decrypt_settings, encrypt_settings
 from core.utils import show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
@@ -87,6 +88,10 @@ class TablePage(QWidget):
         self._meta_worker.result_ready.connect(self._on_meta_finished)
         self._meta_worker.start()
 
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新本页表格（管理面板设置页联动）"""
+        apply_table_smooth_mode(self._table, panel="management")
+
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
@@ -120,6 +125,8 @@ class TablePage(QWidget):
 
         # --- 表格 ---
         self._table = TableWidget(self)
+        # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
+        apply_table_smooth_mode(self._table, panel="management")
         self._table.setColumnCount(len(TABLE_COLUMNS))
         self._table.setHorizontalHeaderLabels([c[1] for c in TABLE_COLUMNS])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)

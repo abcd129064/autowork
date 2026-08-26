@@ -1293,11 +1293,11 @@ class UIMixin:
             self._show_info_bar("打包上传进行中，请等待完成或先取消", "warning")
             return
 
-        # 延迟 import：NewLog 依赖 openpyxl，缺失时给出明确提示而非崩溃
+        # 延迟 import：newlog 依赖 openpyxl，缺失时给出明确提示而非崩溃
         try:
-            import NewLog  # noqa: F401 —— 仅用于探测依赖（NewLog 顶层 import openpyxl）
+            import newlog  # noqa: F401 —— 仅用于探测依赖（newlog 顶层 import openpyxl）
         except ImportError as e:
-            self._show_info_bar(f"无法加载 NewLog 模块（请确认已安装 openpyxl）: {e}",
+            self._show_info_bar(f"无法加载 newlog 模块（请确认已安装 openpyxl）: {e}",
                                 "error", duration=5000)
             return
         # 默认筛选署名：上次整理时保存的 newlog_target_name（无记录则为空）
