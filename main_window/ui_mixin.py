@@ -1597,10 +1597,12 @@ class UIMixin:
                 row1.addWidget(self.sw_acrylic)
                 self.viewLayout.addLayout(row1)
 
-                # 弹出动画开关
+                # 弹出动画开关（全局：影响未单独设置的面板）
                 row2 = QHBoxLayout()
                 lbl2 = BodyLabel("菜单弹出动画", self)
-                lbl2.setToolTip("关闭后菜单直接弹出，无过渡动画")
+                lbl2.setToolTip(
+                    "关闭后菜单/下拉框直接弹出，无过渡动画。\n"
+                    "全局生效；售后面板/跑视频面板可在各自设置里单独覆盖")
                 row2.addWidget(lbl2, 1)
                 self.sw_animation = SwitchButton(self)
                 self.sw_animation.setOnText("开")
@@ -1637,7 +1639,7 @@ class UIMixin:
         def _on_animation_toggled(checked):
             set_animation_enabled(checked)
             state = "开启" if checked else "关闭"
-            self._append_log(f"[性能] 弹出动画已{state}（即时生效）")
+            self._append_log(f"[性能] 弹出动画已{state}（全局，即时生效）")
 
         def _on_table_smooth_toggled(checked):
             set_table_smooth_scroll_enabled(checked)

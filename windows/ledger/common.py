@@ -6,7 +6,7 @@ windows.aftersale.common 的现成实现（经 __all__ 导出，口径一致）�
 本模块只定义跑视频自身的常量：表格列、分类、类别候选。
 """
 from windows.aftersale.common import (  # noqa: F401,F403
-    _FIXED_ROW_HEIGHT, _popup_ani_type, _default_creator,
+    _FIXED_ROW_HEIGHT, _default_creator,
     _hex_rgba, _SectionCard, YesNoSegment,
     _field_label, _inline_error, _badge_label, _row_btn, _ROW_BTN_TMPL,
     _prebuild_btn_css,
@@ -22,6 +22,17 @@ __all__ = [
     "_field_label", "_inline_error", "_badge_label", "_row_btn",
     "_ROW_BTN_TMPL", "_prebuild_btn_css",
 ]
+
+
+def _popup_ani_type():
+    """弹出菜单动画类型：按跑视频面板生效值（本面板覆盖→全局开关）
+
+    不复用售后面板的同名函数：那边读的是 aftersale 覆盖值，
+    本面板需读自己的 video 覆盖值。"""
+    from core.perf import get_animation
+    from qfluentwidgets import MenuAnimationType
+    return (MenuAnimationType.DROP_DOWN if get_animation("video")
+            else MenuAnimationType.NONE)
 
 # 表格展示列（无勾选列；第 0 列即填写时间，ops 为行内操作列）。
 # 字段与在线模板数据 sheet 对齐，系统附加 填写时间/操作 两列。

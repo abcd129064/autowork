@@ -43,9 +43,9 @@ _FIXED_ROW_HEIGHT = 32
 
 
 def _popup_ani_type():
-    """弹出菜单动画类型：关闭动画选项时用 NONE（性能开关联动）"""
-    from core.perf import is_animation_enabled
-    return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
+    """弹出菜单动画类型：按售后面板生效值（本面板覆盖→全局开关）"""
+    from core.perf import get_animation
+    return (MenuAnimationType.DROP_DOWN if get_animation("aftersale")
             else MenuAnimationType.NONE)
 
 

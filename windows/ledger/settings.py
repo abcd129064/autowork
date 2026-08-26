@@ -11,7 +11,8 @@ from PySide6.QtCore import Signal
 from qfluentwidgets import (ScrollArea, CardWidget, BodyLabel, CaptionLabel,
                             LineEdit, PushButton, FluentIcon, SwitchButton)
 
-from core.perf import get_table_smooth, set_table_smooth
+from core.perf import (get_table_smooth, set_table_smooth,
+                       get_animation, set_animation)
 from core.utils import show_info_bar
 from windows.mysql_sync_card import (MysqlSyncCard, _load_settings,
                                      _save_settings)
@@ -56,7 +57,7 @@ class SignerSettingsCard(CardWidget):
 
 
 class SettingsPage(QWidget):
-    """设置面板：默认署名 + 性能（表格平滑滚动）+ 数据库设置（MySQL 同步，仅推跑视频记录）"""
+    """设置面板：默认署名 + 性能（动画/表格平滑滚动）+ 数据库设置（MySQL 同步，仅推跑视频记录）"""
 
     # 表格平滑滚动开关变更（窗口据此刷新记录页表格滚动模式）
     table_smooth_changed = Signal(bool)
@@ -77,7 +78,7 @@ class SettingsPage(QWidget):
         self.signer_card.load()
         cl.addWidget(self.signer_card)
 
-        # 性能卡片（表格平滑滚动，仅影响本面板）
+        # 性能卡片（动画/表格平滑滚动，仅影响本面板）
         self._perf_card = self._make_perf_card(content)
         cl.addWidget(self._perf_card)
 
@@ -99,20 +100,39 @@ class SettingsPage(QWidget):
         super().showEvent(event)
         self.signer_card.load()
         self.mysql_card.load()
-        # 回显平滑滚动当前生效值（覆盖→全局），blockSignals 避免误触发持久化
+        # 回显两个性能开关当前生效值（覆盖→全局），blockSignals 避免误触发持久化
         self.sw_table_smooth.blockSignals(True)
         self.sw_table_smooth.setChecked(get_table_smooth("video"))
         self.sw_table_smooth.blockSignals(False)
+        self.sw_animation.blockSignals(True)
+        self.sw_animation.setChecked(get_animation("video"))
+        self.sw_animation.blockSignals(False)
 
     def _make_perf_card(self, parent):
-        """性能卡片：表格平滑滚动开关（仅影响本面板记录列表）"""
+        """性能卡片：菜单弹出动画 + 表格平滑滚动开关（仅影响本面板）"""
         card = CardWidget(parent)
         vbox = QVBoxLayout(card)
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
         vbox.addWidget(BodyLabel("性能", card))
         vbox.addWidget(CaptionLabel(
-            "仅影响跑视频面板记录列表的滚动表现；未单独拨动时跟随主界面全局开关", card))
+            "仅影响跑视频面板的菜单/下拉动画与记录列表滚动表现；"
+            "未单独拨动时跟随主界面全局开关", card))
+        # 菜单弹出动画（下一次弹出即生效，无需信号联动）
+        row_ani = QHBoxLayout()
+        row_ani.setSpacing(8)
+        lbl_ani = BodyLabel("菜单弹出动画", card)
+        lbl_ani.setToolTip("关闭后本面板的右键菜单/下拉框直接弹出，无过渡动画")
+        row_ani.addWidget(lbl_ani, 1)
+        self.sw_animation = SwitchButton(card)
+        self.sw_animation.setOnText("开")
+        self.sw_animation.setOffText("关")
+        # 先回显当前生效值，再连接信号，避免初始化 setChecked 误触发持久化
+        self.sw_animation.setChecked(get_animation("video"))
+        row_ani.addWidget(self.sw_animation)
+        vbox.addLayout(row_ani)
+        self.sw_animation.checkedChanged.connect(self._on_animation_toggled)
+        # 表格平滑滚动
         row = QHBoxLayout()
         row.setSpacing(8)
         lbl = BodyLabel("表格平滑滚动", card)
@@ -128,6 +148,10 @@ class SettingsPage(QWidget):
         self.sw_table_smooth.checkedChanged.connect(
             self._on_table_smooth_toggled)
         return card
+
+    def _on_animation_toggled(self, checked):
+        """拨动动画开关：持久化本面板覆盖值（下一次菜单弹出即生效）"""
+        set_animation("video", checked)
 
     def _on_table_smooth_toggled(self, checked):
         """拨动开关：持久化本面板覆盖值并通知窗口刷新记录页表格滚动模式"""

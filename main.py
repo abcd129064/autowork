@@ -49,6 +49,11 @@ from PySide6.QtCore import Qt, qInstallMessageHandler
 from PySide6.QtGui import QFont, QIcon
 from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 
+# 中央拦截菜单弹出动画：按「面板覆盖→全局」生效值降级（含库内硬编码的
+# ComboBox 下拉），开关切换后下一次弹出即生效（幂等，重复调用无害）
+from core.perf import patch_menu_animation
+patch_menu_animation()
+
 from core.app_paths import get_app_dir, get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler
 from core.design_tokens import pt_to_px

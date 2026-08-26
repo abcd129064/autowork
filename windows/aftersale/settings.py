@@ -20,7 +20,8 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
-from core.perf import (is_acrylic_enabled, get_table_smooth, set_table_smooth)
+from core.perf import (is_acrylic_enabled, get_table_smooth, set_table_smooth,
+                       get_animation, set_animation)
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
 from database import aftersale_db, table_db
@@ -148,10 +149,11 @@ class CycleSettingsPage(QWidget):
 # ==================== 设置面板（周期 + 数据库） ====================
 
 class SettingsPage(QWidget):
-    """设置面板：统计周期设置 + 性能（表格平滑滚动）+ 数据库设置（原 MySQL 设置更名）
+    """设置面板：统计周期设置 + 性能（动画/表格平滑滚动）+ 数据库设置（原 MySQL 设置更名）
 
     周期设置保存后通过 cycle_page.saved 信号通知记录页刷新周期下拉；
     表格平滑滚动开关经 table_smooth_changed 信号联动记录页实时刷新滚动模式；
+    动画开关在菜单下一次弹出时动态读取生效值，无需信号联动；
     数据库卡片复用 MysqlSyncCard（仅推售后记录）。
     整体包在 ScrollArea 里：小分辨率下设置项可滚动查看，不再被裁剪。
     """
@@ -174,7 +176,7 @@ class SettingsPage(QWidget):
         self.cycle_page = CycleSettingsPage(content)
         cl.addWidget(self.cycle_page)
 
-        # 性能卡片（表格平滑滚动，仅影响本面板）
+        # 性能卡片（动画/表格平滑滚动，仅影响本面板）
         self._perf_card = self._make_perf_card(content)
         cl.addWidget(self._perf_card)
 
@@ -195,20 +197,39 @@ class SettingsPage(QWidget):
         """进入设置面板回显最新配置（导航信号部分版本缺失，用 Qt 原生事件兜底）"""
         super().showEvent(event)
         self.mysql_card.load()
-        # 回显平滑滚动当前生效值（覆盖→全局），blockSignals 避免误触发持久化
+        # 回显两个性能开关当前生效值（覆盖→全局），blockSignals 避免误触发持久化
         self.sw_table_smooth.blockSignals(True)
         self.sw_table_smooth.setChecked(get_table_smooth("aftersale"))
         self.sw_table_smooth.blockSignals(False)
+        self.sw_animation.blockSignals(True)
+        self.sw_animation.setChecked(get_animation("aftersale"))
+        self.sw_animation.blockSignals(False)
     
     def _make_perf_card(self, parent):
-        """性能卡片：表格平滑滚动开关（仅影响本面板记录列表）"""
+        """性能卡片：菜单弹出动画 + 表格平滑滚动开关（仅影响本面板）"""
         card = CardWidget(parent)
         vbox = QVBoxLayout(card)
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
         vbox.addWidget(BodyLabel("性能", card))
         vbox.addWidget(CaptionLabel(
-            "仅影响售后面板记录列表的滚动表现；未单独拨动时跟随主界面全局开关", card))
+            "仅影响售后面板的菜单/下拉动画与记录列表滚动表现；"
+            "未单独拨动时跟随主界面全局开关", card))
+        # 菜单弹出动画（下一次弹出即生效，无需信号联动）
+        row_ani = QHBoxLayout()
+        row_ani.setSpacing(8)
+        lbl_ani = BodyLabel("菜单弹出动画", card)
+        lbl_ani.setToolTip("关闭后本面板的右键菜单/下拉框直接弹出，无过渡动画")
+        row_ani.addWidget(lbl_ani, 1)
+        self.sw_animation = SwitchButton(card)
+        self.sw_animation.setOnText("开")
+        self.sw_animation.setOffText("关")
+        # 先回显当前生效值，再连接信号，避免初始化 setChecked 误触发持久化
+        self.sw_animation.setChecked(get_animation("aftersale"))
+        row_ani.addWidget(self.sw_animation)
+        vbox.addLayout(row_ani)
+        self.sw_animation.checkedChanged.connect(self._on_animation_toggled)
+        # 表格平滑滚动
         row = QHBoxLayout()
         row.setSpacing(8)
         lbl = BodyLabel("表格平滑滚动", card)
@@ -225,6 +246,10 @@ class SettingsPage(QWidget):
             self._on_table_smooth_toggled)
         return card
     
+    def _on_animation_toggled(self, checked):
+        """拨动动画开关：持久化本面板覆盖值（下一次菜单弹出即生效）"""
+        set_animation("aftersale", checked)
+
     def _on_table_smooth_toggled(self, checked):
         """拨动开关：持久化本面板覆盖值并通知窗口刷新记录页表格滚动模式"""
         set_table_smooth("aftersale", checked)
