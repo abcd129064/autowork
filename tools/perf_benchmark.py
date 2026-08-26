@@ -221,22 +221,22 @@ def main():
         "aftersale EditRecordDialog", rounds)
 
     # 跑视频记录页
-    from windows.ledger.records import RecordsPage as LedgerPage
-    from windows.ledger.records import EditLedgerDialog
+    from windows.run_video.records import RecordsPage as LedgerPage
+    from windows.run_video.records import EditLedgerDialog
     l_page = LedgerPage()
     l_page.resize(1440, 800)
     l_page.show()
     _flush_events()
     l_rows = _make_ledger_rows(rows_n)
     print("== 跑视频记录页 ==")
-    bench_fill(l_page, l_rows, "ledger _populate", populate_has_arg=False)
+    bench_fill(l_page, l_rows, "run_video _populate", populate_has_arg=False)
     t_smooth = bench_scroll(l_page._table, steps, smooth=True)
     t_nosmooth = bench_scroll(l_page._table, steps, smooth=False)
-    print(f"[scroll] ledger: smooth={t_smooth}ms NO_SMOOTH={t_nosmooth}ms "
+    print(f"[scroll] run_video: smooth={t_smooth}ms NO_SMOOTH={t_nosmooth}ms "
           f"({steps} steps)")
     bench_edit_dlg(
         lambda rec: EditLedgerDialog(rec, l_page), l_rows,
-        "ledger EditLedgerDialog", rounds)
+        "run_video EditLedgerDialog", rounds)
 
 
 if __name__ == "__main__":

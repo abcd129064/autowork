@@ -21,7 +21,7 @@ from core.utils import show_info_bar
 from database import ledger_db
 from workers.aftersale_worker import AftersaleDBWorker
 
-from windows.ledger.common import *  # noqa: F401,F403
+from windows.run_video.common import *  # noqa: F401,F403
 
 # 新程序取值（模板「新程序」列宽仅 8.5，是/否 标记）
 NEW_PROGRAM_VALUES = ("", "是", "否")

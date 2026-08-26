@@ -27,7 +27,7 @@ _table_smooth_enabled: bool | None = None
 # key 为面板标识，value 为 settings.json 字段名。
 _PANEL_TABLE_KEYS = {
     "aftersale": "perf_table_smooth_aftersale",   # 售后面板（windows/aftersale）
-    "video":     "perf_table_smooth_video",       # 跑视频面板（windows/ledger）
+    "video":     "perf_table_smooth_video",       # 跑视频面板（windows/run_video）
     "management": "perf_table_smooth_management", # 管理面板（windows/management，4 处表格）
     "remote":    "perf_table_smooth_remote",      # 远程会话（windows/remote_session，2 处表格）
 }
@@ -36,7 +36,7 @@ _panel_table_overrides: dict | None = None  # {panel: bool}，None=尚未加载
 # 弹出动画的「面板级覆盖」：与表格平滑滚动同模型（未设置回退全局）。
 _PANEL_ANIMATION_KEYS = {
     "aftersale": "perf_animation_aftersale",   # 售后面板（windows/aftersale）
-    "video":     "perf_animation_video",       # 跑视频面板（windows/ledger）
+    "video":     "perf_animation_video",       # 跑视频面板（windows/run_video）
 }
 _panel_animation_overrides: dict | None = None  # {panel: bool}，None=尚未加载
 

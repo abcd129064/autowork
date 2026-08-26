@@ -3,7 +3,7 @@
 
 默认署名读写 settings.json 的 newlog_target_name（与主界面
 NewLog 批量整理共用同一键，_default_creator 预填口径一致）；
-数据库卡片复用 MysqlSyncCard（sync_scope="ledger"，仅推跑视频记录）。
+数据库卡片复用 MysqlSyncCard（sync_scope="run_video"，仅推跑视频记录）。
 """
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
 from PySide6.QtCore import Signal
@@ -83,7 +83,7 @@ class SettingsPage(QWidget):
         cl.addWidget(self._perf_card)
 
         # 数据库设置卡片（MySQL 开关/连接/测试；scope 文案为跑视频记录）
-        self.mysql_card = MysqlSyncCard(content, sync_scope="ledger")
+        self.mysql_card = MysqlSyncCard(content, sync_scope="run_video")
         self.mysql_card.load()
         cl.addWidget(self.mysql_card)
         cl.addStretch(1)
