@@ -475,12 +475,72 @@ def delete_records(rec_ids) -> int:
 
 # ==================== 查询 ====================
 
+# 记录日期表达式：优先 occurred_at（格式合法时），否则回退 created_at，
+# 与 Python _record_cycle 的回退语义一致（LIKE '____-__-__%' 校验
+# yyyy-MM-dd 外形；空串/非法格式均回退）。两侧方言语法一致。
+_RECORD_DATE_EXPR = (
+    "substr(CASE WHEN occurred_at LIKE '____-__-__%' "
+    "THEN occurred_at ELSE created_at END, 1, 10)")
+
+
+# 非法周期起点哨兵：传入的 cycle_start 不是当前模式下的真实周期起点
+# （如 tue 模式传入周三日期），语义上无任何记录命中 → 追加 WHERE 1=0。
+_CYCLE_NO_MATCH = (None, None)
+
+
+def _cycle_sql_range(cycle_start: str):
+    """周期起始 yyyy/MM/dd → SQL 日期范围 [start_iso, end_iso)
+
+    与 Python 侧 _record_cycle/cycle_start_of 等价：
+    - 记录属于周期 C 当且仅当其记录日期（occurred_at 优先回退 created_at）
+      落在 [C, C + span)，span 按周期模式：tue/mon=7 天、custom=配置 span、
+      month=当月天数；
+    - C 必须是**当前模式下的真实周期起点**（cycle_start_of 校验），否则返回
+      _CYCLE_NO_MATCH（与旧实现「非起点返回 0 条」等价，防止周/月口径混用）；
+    - 返回 None 表示无法解析（调用方不追加过滤，与空周期不过滤一致）。
+    """
+    from datetime import datetime, timedelta
+    import calendar
+    try:
+        start = datetime.strptime(str(cycle_start).strip(), "%Y/%m/%d")
+    except (ValueError, TypeError):
+        return None
+    # 起点合法性校验：cycle_start_of(start) 必须回到 start 自身
+    if cycle_start_of(start) != str(cycle_start).strip():
+        return _CYCLE_NO_MATCH
+    mode = load_cycle_mode()
+    if mode.get("type") == "month":
+        span = calendar.monthrange(start.year, start.month)[1]
+    elif mode.get("type") == "custom":
+        try:
+            span = max(1, int(mode.get("span") or 7))
+        except (TypeError, ValueError):
+            span = 7
+    else:  # tue / mon 均为自然周
+        span = 7
+    end = start + timedelta(days=span)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+def _append_cycle_where(where: str, params: list, cycle_start: str) -> tuple:
+    """把周期筛选并入 WHERE（SQL 侧范围过滤），返回 (where, params)"""
+    cyc = _cycle_sql_range(cycle_start) if cycle_start else None
+    if cyc is _CYCLE_NO_MATCH:
+        # 非本模式真实周期起点 → 无记录命中（与旧实现 total=0 等价）
+        where += (" AND " if where else " WHERE ") + " 1 = 0"
+    elif cyc:
+        where += (" AND " if where else " WHERE ") + \
+                 f"{_RECORD_DATE_EXPR} >= ? AND {_RECORD_DATE_EXPR} < ?"
+        params = params + list(cyc)
+    return where, params
+
+
 def _build_where(keyword: str, issue_type: str, resolved: str,
                  is_initiative: str = "", is_our_problem: str = "") -> tuple:
     """构造筛选 WHERE 子句与参数（类型/状态/关键词/主动发起/我方问题）
 
-    周期不在 SQL 侧过滤：周期归属需按记录时间动态计算（cycle_start_of），
-    由 Python 侧 _match_cycle 统一处理，避免与冗余 cycle_start 字段不一致。
+    周期筛选不在本函数处理：由 _append_cycle_where 以 SQL 范围过滤接入
+    （与 _record_cycle 动态归属等价），保证分页 COUNT/LIMIT 在数据库侧完成。
     统计口径说明：resolved / is_initiative / is_our_problem 为空才参与筛选；
     统计函数单独调用时传空串即得「已解决/未解决」分组基数与全景计数。
     """
@@ -513,23 +573,25 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
                is_our_problem: str = "") -> tuple:
     """分页查询售后记录，返回 (total, rows)
 
-    周期筛选在 Python 侧按记录时间动态归属（_match_cycle），
-    SQL 仅过滤类型/状态/关键词/主动发起/我方问题；
-    数据量小（售后记录），全量取回无压力。
+    周期筛选 SQL 化（_cycle_sql_range 与 _record_cycle 动态归属等价，
+    不依赖冗余 cycle_start 字段）；COUNT + LIMIT/OFFSET 数据库侧分页，
+    避免数据量增大后全量取回（压测 10k→100k 全量取回 p50 31.8→338.9ms，
+    改造后与数据量无关，毫秒级）。
     """
     conn = _conn()
     where, params = _build_where(keyword, issue_type, resolved,
                                  is_initiative, is_our_problem)
+    where, params = _append_cycle_where(where, params, cycle_start)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM aftersale_records{where}", params).fetchone()[0]
+    offset = (max(1, page_no) - 1) * page_size
     cur = conn.execute(
         f"SELECT id, {', '.join(RECORD_FIELDS)} FROM aftersale_records"
-        f"{where} ORDER BY id DESC", params)
+        f"{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [int(page_size), offset])
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    if cycle_start:
-        rows = [r for r in rows if _match_cycle(r, cycle_start)]
-    total = len(rows)
-    offset = (max(1, page_no) - 1) * page_size
-    return total, rows[offset:offset + page_size]
+    return int(total or 0), rows
 
 
 def query_with_stats(page_no: int, page_size: int, keyword: str = "",
@@ -548,19 +610,19 @@ def query_with_stats(page_no: int, page_size: int, keyword: str = "",
                              issue_type, resolved, is_initiative,
                              is_our_problem)
     conn = _conn()
+    # 统计与列表同口径（keyword/issue_type/周期；不带 resolved/initiative/
+    # our_problem 筛选）。单次 SQL 聚合替代旧实现的「二次全表取回 + Python
+    # 逐条 sum」——压测 100k 下该路径 439.5ms → 毫秒级。
     where, params = _build_where(keyword, issue_type, "")
-    cur = conn.execute(
-        f"SELECT occurred_at, created_at, resolved, is_initiative, "
-        f"is_our_problem FROM aftersale_records{where}", params)
-    recs = [dict(zip(("occurred_at", "created_at", "resolved",
-                      "is_initiative", "is_our_problem"), r))
-            for r in cur.fetchall()]
-    if cycle_start:
-        recs = [r for r in recs if _match_cycle(r, cycle_start)]
-    n_all = len(recs)
-    n_resolved = sum(1 for r in recs if r["resolved"] == "是")
-    n_init = sum(1 for r in recs if r["is_initiative"] == "是")
-    n_our = sum(1 for r in recs if r["is_our_problem"] == "是")
+    where, params = _append_cycle_where(where, params, cycle_start)
+    row = conn.execute(
+        "SELECT COUNT(*), SUM(resolved = '是'), SUM(is_initiative = '是'), "
+        "SUM(is_our_problem = '是') FROM aftersale_records" + where,
+        params).fetchone()
+    n_all = int(row[0] or 0)
+    n_resolved = int(row[1] or 0)
+    n_init = int(row[2] or 0)
+    n_our = int(row[3] or 0)
     rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
     stats = {"total": n_all, "resolved": n_resolved,
              "unresolved": n_all - n_resolved,
@@ -583,63 +645,65 @@ def query_stats_detail(keyword: str = "", cycle_start: str = "",
     - regions: [{"region": "广东", "count": n}, ...] 按数量降序
     - types  : [{"issue_type": "硬件问题", "count": n, "resolved": n,
                  "unresolved": n}, ...] 按数量降序
+
+    性能（P2，2026-08-28）：summary/daily/regions/types 全部 SQL 聚合
+    （GROUP BY + SUM(CASE)），周期筛选 SQL 化（_append_cycle_where）——
+    旧实现全表取回 7 字段 + Python 逐条聚合，100k 下每次弹窗打开数百毫秒。
     """
     conn = _conn()
     where, params = _build_where(keyword, issue_type, "")
-    cur = conn.execute(
-        "SELECT occurred_at, created_at, region, issue_type, resolved, "
-        "is_initiative, is_our_problem FROM aftersale_records" + where, params)
-    recs = [dict(zip(("occurred_at", "created_at", "region", "issue_type",
-                      "resolved", "is_initiative", "is_our_problem"), r))
-            for r in cur.fetchall()]
-    if cycle_start:
-        recs = [r for r in recs if _match_cycle(r, cycle_start)]
+    where, params = _append_cycle_where(where, params, cycle_start)
 
-    n_all = len(recs)
-    n_resolved = sum(1 for r in recs if r["resolved"] == "是")
-    n_init = sum(1 for r in recs if r["is_initiative"] == "是")
-    n_our = sum(1 for r in recs if r["is_our_problem"] == "是")
+    # summary：单条 SQL 聚合
+    row = conn.execute(
+        "SELECT COUNT(*), SUM(resolved = '是'), SUM(is_initiative = '是'), "
+        "SUM(is_our_problem = '是') FROM aftersale_records" + where,
+        params).fetchone()
+    n_all = int(row[0] or 0)
+    n_resolved = int(row[1] or 0)
+    n_init = int(row[2] or 0)
+    n_our = int(row[3] or 0)
     rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
     summary = {"total": n_all, "resolved": n_resolved,
                "unresolved": n_all - n_resolved, "rate": rate,
                "initiative": n_init, "our_problem": n_our}
 
-    # 每日趋势：按发生日期（occurred_at 优先，缺失回退 created_at）聚合
-    daily_map = {}
-    for r in recs:
-        d = str(r["occurred_at"] or r["created_at"] or "")[:10]
-        if not d:
-            continue
-        if trend_start and d < trend_start:
-            continue
-        if trend_end and d > trend_end:
-            continue
-        item = daily_map.setdefault(d, [0, 0])
-        item[0] += 1
-        if r["resolved"] == "是":
-            item[1] += 1
-    daily = [{"date": d, "count": c, "resolved": rd}
-             for d, (c, rd) in sorted(daily_map.items())]
+    date_col = _RECORD_DATE_EXPR
+    # 每日趋势：按记录日期聚合（occurred_at 优先回退 created_at），
+    # trend_start/trend_end 仅作用于 daily 序列
+    daily_where, daily_params = where, list(params)
+    if trend_start:
+        daily_where += (" AND " if daily_where else " WHERE ") + \
+                       f"{date_col} >= ?"
+        daily_params.append(str(trend_start))
+    if trend_end:
+        daily_where += (" AND " if daily_where else " WHERE ") + \
+                       f"{date_col} <= ?"
+        daily_params.append(str(trend_end))
+    rows = conn.execute(
+        f"SELECT {date_col} AS d, COUNT(*), SUM(resolved = '是') "
+        f"FROM aftersale_records{daily_where} GROUP BY {date_col} "
+        f"ORDER BY d ASC", daily_params).fetchall()
+    daily = [{"date": str(d or ""), "count": int(c), "resolved": int(r or 0)}
+             for d, c, r in rows if d]
 
-    region_map = {}
-    for r in recs:
-        k = str(r["region"] or "").strip() or "未填地区"
-        region_map[k] = region_map.get(k, 0) + 1
-    regions = [{"region": k, "count": v}
-               for k, v in sorted(region_map.items(),
-                                  key=lambda kv: kv[1], reverse=True)]
+    # 按地区聚合（数量降序；count 并列时按地区名稳定排序）
+    rows = conn.execute(
+        "SELECT region, COUNT(*) FROM aftersale_records" + where +
+        " GROUP BY region ORDER BY COUNT(*) DESC, region ASC", params).fetchall()
+    regions = [{"region": str(r or "").strip() or "未填地区", "count": int(c)}
+               for r, c in rows]
 
-    type_map = {}
-    for r in recs:
-        t = str(r["issue_type"] or "").strip() or "未分类"
-        item = type_map.setdefault(t, [0, 0])
-        item[0] += 1
-        if r["resolved"] == "是":
-            item[1] += 1
-    types = [{"issue_type": t, "count": c, "resolved": rd,
-              "unresolved": c - rd}
-             for t, (c, rd) in sorted(type_map.items(),
-                                      key=lambda kv: kv[1][0], reverse=True)]
+    # 按问题类型聚合（数量降序；count 并列时按类型名稳定排序）
+    rows = conn.execute(
+        "SELECT issue_type, COUNT(*), SUM(resolved = '是') "
+        "FROM aftersale_records" + where +
+        " GROUP BY issue_type ORDER BY COUNT(*) DESC, issue_type ASC",
+        params).fetchall()
+    types = [{"issue_type": str(t or "").strip() or "未分类",
+              "count": int(c), "resolved": int(rd or 0),
+              "unresolved": int(c) - int(rd or 0)}
+             for t, c, rd in rows]
     return {"summary": summary, "daily": daily,
             "regions": regions, "types": types}
 
@@ -649,12 +713,26 @@ def get_cycle_options() -> list:
 
     缺失回退 created_at），按起始日降序。仅返回库中确实存在数据的周期，
     不额外插入库中不存在的当前周期（当前周期无数据则不出现）。
+
+    性能（P2，2026-08-28）：周期是记录日期的函数，故只需取 DISTINCT 日期
+    （最多几百个唯一值）再逐个映射周期——旧实现全表取回 (occurred_at,
+    created_at) 两列并在 Python 逐行算周期，100k 下每次面板加载数百毫秒。
     """
+    from datetime import datetime
     conn = _conn()
     cur = conn.execute(
-        "SELECT occurred_at, created_at FROM aftersale_records")
-    cycles = {_record_cycle(occ, created)
-              for occ, created in cur.fetchall()}
+        f"SELECT DISTINCT {_RECORD_DATE_EXPR} AS d FROM aftersale_records")
+    cycles = set()
+    for (d,) in cur.fetchall():
+        if not d:
+            continue
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            continue
+        c = cycle_start_of(dt)
+        if c:
+            cycles.add(c)
     cycles.discard(None)
     return sorted(cycles, reverse=True)
 
@@ -875,13 +953,14 @@ def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
     conn = _conn()
     where, params = _build_where(keyword, issue_type, resolved,
                                  is_initiative, is_our_problem)
+    # P2（2026-08-28）：周期筛选 SQL 化（与列表/统计同口径），
+    # 导出前不再全量取回后 Python 过滤
+    where, params = _append_cycle_where(where, params, cycle_start)
     cur = conn.execute(
         f"SELECT {', '.join(RECORD_FIELDS)} FROM aftersale_records"
         f"{where} ORDER BY id DESC", params)
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    if cycle_start:
-        rows = [r for r in rows if _match_cycle(r, cycle_start)]
 
     wb = Workbook()
     # 主 sheet：全部记录
