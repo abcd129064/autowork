@@ -375,15 +375,18 @@ def create_mysql_connection():
         password=cfg.get("password", ""),
         database=cfg.get("database", "autowork"),
         charset="utf8mb4",
-        connect_timeout=10,
+        # 连接超时 3s：MySQL 不可达（服务器未开/网络断）时快速失败降级
+        # SQLite，避免每个查询/翻页同步白等 10s 造成程序假死。
+        connect_timeout=3,
         # autocommit=True 是关键：QThread 结束后 thread-local 连接被丢弃，
         # 若 autocommit=False 会留下未提交事务，持续持有表元数据锁，
         # 导致后续 DDL（CREATE/TRUNCATE）与查询全部排队卡死。
         # 自动提交后丢弃的连接不再持锁，彻底消除级联阻塞。
         autocommit=True,
-        # 读写超时保护：网络抖动时快速失败而非无限挂起
-        read_timeout=60,
-        write_timeout=60,
+        # 读写超时保护：网络抖动/黑洞时快速失败而非无限挂起
+        # （worker 线程中 30s 足够；主线程直接查库的路径受此保护）
+        read_timeout=30,
+        write_timeout=30,
     )
     return MysqlConnectionAdapter(conn)
 

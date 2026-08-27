@@ -14,9 +14,11 @@ import database.table_db as table_db
 
 @pytest.fixture
 def reset_state(monkeypatch):
-    """每测试重置后端状态为 ONLINE、清空 thread-local MySQL 连接"""
+    """每测试重置后端状态为 ONLINE、清空 thread-local MySQL 连接、
+    重置 DEGRADED 恢复试探节流时间戳（避免跨测试被节流拦截）"""
     monkeypatch.setattr(backend, "_state", backend.STATE_ONLINE)
     monkeypatch.setattr(table_db, "_mysql_local", threading_local())
+    monkeypatch.setattr(table_db, "_last_mysql_probe_ts", 0.0)
 
 
 def threading_local():

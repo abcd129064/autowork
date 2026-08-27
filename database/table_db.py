@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -336,6 +337,12 @@ _lock = threading.Lock()
 _mysql_local = threading.local()  # MySQL 模式：每线程独立连接，避免并发协议序列号错乱
 _mysql_tables_ready = False       # 建表只执行一次（全局标志，跨线程共享）
 
+# DEGRADED 状态 MySQL 恢复试探节流：MySQL 持续不可用时，间隔内直接走
+# SQLite 兜底，不重复 connect（避免每个查询都白等 connect_timeout 秒导致
+# 程序假死/数据加载停滞十几秒）。恢复后首个间隔内最多试连一次。
+_MYSQL_PROBE_INTERVAL = 15.0   # 秒：两次恢复试探的最小间隔
+_last_mysql_probe_ts = 0.0     # 上次试探时间戳（time.monotonic）
+
 
 def _discard_thread_mysql_connection():
     """关闭当前线程的旧 MySQL 连接（配置变更或连接级异常后调用）。"""
@@ -358,7 +365,7 @@ def _get_conn():
       合并回写（_trigger_merge_back，阶段二实现），失败则继续 SQLite 兜底。
     SQLite 模式：模块级单连接（WAL，支持多线程读）。
     """
-    global _mysql_tables_ready
+    global _mysql_tables_ready, _last_mysql_probe_ts
     if backend.is_mysql_test_mode():
         generation = backend.mysql_settings_generation()
         if backend.get_state() == backend.STATE_ONLINE:
@@ -376,6 +383,8 @@ def _get_conn():
             except Exception as e:
                 # MySQL 不可用 → 降级兜底，业务不中断
                 backend.mark_degraded()
+                # 记录试探时间：DEGRADED 节流据此避免立即重复试连
+                _last_mysql_probe_ts = time.monotonic()
                 _log_degraded(e)
                 return _get_sqlite_conn()
             if not _mysql_tables_ready:
@@ -385,12 +394,18 @@ def _get_conn():
             _mysql_local.generation = generation
             return conn
         else:
-            # DEGRADED：试探 MySQL 是否恢复
+            # DEGRADED：试探 MySQL 是否恢复（节流：间隔内不重复试连，
+            # MySQL 持续不可用时每个操作直接走 SQLite，秒回不卡顿）
+            now = time.monotonic()
+            if now - _last_mysql_probe_ts < _MYSQL_PROBE_INTERVAL:
+                return _get_sqlite_conn()
             try:
                 conn = backend.create_mysql_connection()
             except Exception:
+                _last_mysql_probe_ts = time.monotonic()
                 return _get_sqlite_conn()  # 仍不可用，继续兜底
             # 恢复成功
+            _last_mysql_probe_ts = time.monotonic()
             if not _mysql_tables_ready:
                 _ensure_mysql_tables(conn)
                 _mysql_tables_ready = True

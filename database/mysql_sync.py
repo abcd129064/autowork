@@ -62,7 +62,8 @@ def _connect(cfg: dict = None, use_database: bool = True):
         "user": cfg.get("user", "root"),
         "password": cfg.get("password", ""),
         "charset": "utf8mb4",
-        "connect_timeout": 10,
+        # 连接超时 3s：连通性测试/恢复探测快速反馈，避免卡 10s
+        "connect_timeout": 3,
         "cursorclass": pymysql.cursors.DictCursor,
     }
     if use_database:
