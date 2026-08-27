@@ -182,7 +182,7 @@ class _HBarList(QWidget):
         self._rows = []     # [(label, count)]
         self._total = 1
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("点击地区行：关闭弹窗并在记录列表筛选该地区")
+        self.setToolTip("点击地区行：在记录列表筛选该地区（弹窗保持打开）")
 
     def setRows(self, rows, total):
         self._rows = [(str(r.get("region") or "未填地区"),
@@ -280,8 +280,8 @@ class AfterSaleStatsDialog(QDialog):
     展示该 7 天，周期模式为自然月则展示整月），可切换 近7天/近30天/全部。
 
     点击联动：点击地区行 → 发射 apply_filter({"keyword": 地区})；点击
-    类型行 → 发射 apply_filter({"issue_type": 类型})，随后自动关闭，
-    由记录页接收后跳回列表并按条件筛选（「未填地区/未分类」无真实值，
+    类型行 → 发射 apply_filter({"issue_type": 类型})。弹窗保持打开，
+    由记录页在后台切换列表并按条件筛选（「未填地区/未分类」无真实值，
     不参与联动）。
     """
 
@@ -522,21 +522,25 @@ class AfterSaleStatsDialog(QDialog):
     # ---------- 点击联动 ----------
 
     def _on_region_clicked(self, label: str):
-        """点击地区行：按地区关键词联动筛选（未填地区无真实值，不参与）"""
+        """点击地区行：按地区关键词联动筛选（未填地区无真实值，不参与）
+
+        弹窗保持打开，仅通知记录页切换并筛选。
+        """
         if label == "未填地区":
             return
         self.apply_filter.emit({"keyword": label})
-        self.close()
 
     def _on_type_cell_clicked(self, item):
-        """点击类型行：按类型联动筛选（未分类无真实值，不参与）"""
+        """点击类型行：按类型联动筛选（未分类无真实值，不参与）
+
+        弹窗保持打开，仅通知记录页切换并筛选。
+        """
         if item.column() != 0:
             return
         t = self._type_table.item(item.row(), 0).text()
         if t == "未分类":
             return
         self.apply_filter.emit({"issue_type": t})
-        self.close()
 
     # ---------- 渲染 ----------
 
