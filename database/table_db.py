@@ -335,6 +335,7 @@ def _ensure_initialized(conn):
 _conn = None
 _lock = threading.Lock()
 _mysql_local = threading.local()  # MySQL 模式：每线程独立连接，避免并发协议序列号错乱
+_sqlite_local = threading.local()  # SQLite 兜底：每线程独立连接（WAL 多连接安全）
 _mysql_tables_ready = False       # 建表只执行一次（全局标志，跨线程共享）
 
 # DEGRADED 状态 MySQL 恢复试探节流：MySQL 持续不可用时，间隔内直接走
@@ -420,20 +421,37 @@ def _get_conn():
 
 
 def _get_sqlite_conn():
-    """本地 SQLite 单连接（WAL；兜底模式与非 MySQL 模式共用）"""
-    global _conn
-    if _conn is None:
+    """本地 SQLite 连接（WAL；thread-local + DB_PATH 校验，多 worker 并发不抢同一连接）
+
+    兜底模式/非 MySQL 模式下查询与保存分散在多个 QThread worker，若共用
+    一个连接，写事务持有期间其他线程在同一连接上排队（busy_timeout 3s
+    后抛 database is locked），表现为 MySQL 降级后各面板偶发卡顿/假死。
+    WAL 天然支持多连接并发读 + 写串行（busy_timeout 兜底），故每线程一个
+    连接最稳妥；建表迁移幂等，每个新连接只执行一次。
+
+    缓存带 DB_PATH 标记：测试/配置变更切换库路径（monkeypatch DB_PATH）
+    时自动丢弃旧连接重建，兼容既有 `table_db._conn = None` 强开语义。
+    """
+    conn = getattr(_sqlite_local, 'conn', None)
+    if conn is not None and getattr(_sqlite_local, 'db_path', None) != DB_PATH:
+        # DB_PATH 已切换（测试临时库隔离 / 配置变更）→ 丢弃旧连接重建
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _sqlite_local.conn = None
+        conn = None
+    if conn is None:
         os.makedirs(_DB_DIR, exist_ok=True)
-        # check_same_thread=False：查询/保存分散在多个 QThread worker 里跑，
-        # 共用这一个连接省掉多连接各自建表迁移的开销；并发安全交给下面
-        # 的 WAL + busy_timeout，否则默认校验会直接抛 ProgrammingError
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         # WAL 读写分离：worker 批量写入时 UI 线程的分页查询不被阻塞
-        _conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA journal_mode=WAL")
         # 抢锁失败时最多等 3 秒而不是立刻报 database is locked
-        _conn.execute("PRAGMA busy_timeout=3000")
-        _ensure_initialized(_conn)
-    return _conn
+        conn.execute("PRAGMA busy_timeout=3000")
+        _ensure_initialized(conn)
+        _sqlite_local.conn = conn
+        _sqlite_local.db_path = DB_PATH
+    return conn
 
 
 def _log_degraded(exc):
@@ -508,6 +526,14 @@ def close():
     if _conn is not None:
         _conn.close()
         _conn = None
+    # 当前线程的 SQLite 兜底连接一并关闭（worker 线程连接随线程结束/进程退出由 OS 回收）
+    sc = getattr(_sqlite_local, 'conn', None)
+    if sc is not None:
+        try:
+            sc.close()
+        except Exception:
+            pass
+        _sqlite_local.conn = None
     # MySQL thread-local 连接也尝试关闭当前线程的
     _discard_thread_mysql_connection()
 

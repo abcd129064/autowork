@@ -110,6 +110,8 @@ class TableFetchWorker(QThread):
             # 循环翻页直至拉全（以「已请求页数 × 每页条数」是否覆盖 total 为准）
             page = 1
             while page * self._PAGE_SIZE < total and page < self._MAX_PAGES:
+                if self.isInterruptionRequested():
+                    break  # 面板关闭/刷新时停止继续拉取（避免 API 慢时堆积卡顿）
                 page += 1
                 inner = self._fetch_page(page)
                 batch = inner.get("lists") or []
@@ -200,6 +202,8 @@ class SnookerOmFetchWorker(QThread):
             page = max(1, self.page)
             # 以「已请求页数 × 每页条数」是否覆盖 total 为准，翻页直至拉全
             while page - self.page < self._MAX_PAGES:
+                if self.isInterruptionRequested():
+                    break  # 面板关闭/刷新时停止继续拉取（避免 API 慢时堆积卡顿）
                 params = dict(base_params, page=page)
                 resp = session.get(API1_DATA_URL, params=params, timeout=30)
 
@@ -333,6 +337,8 @@ class DevicesFetchWorker(QThread):
             page = max(1, self.page)
             # 以「已请求页数 × 每页条数」是否覆盖 total 为准，翻页直至拉全
             while page - self.page < self._MAX_PAGES:
+                if self.isInterruptionRequested():
+                    break  # 面板关闭/刷新时停止继续拉取（避免 API 慢时堆积卡顿）
                 params = dict(base_params, page=page)
                 headers = {"Authorization": f"Bearer {token}"}
                 resp = requests.get(API2_DATA_URL, params=params,
