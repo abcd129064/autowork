@@ -91,7 +91,15 @@ def _read_mysql_settings() -> dict:
 # ==================== SQL 语法转换 ====================
 
 def convert_placeholders(sql: str) -> str:
-    """SQLite 占位符 ? → MySQL %s（跳过字符串字面量内的 ?）"""
+    """SQLite 占位符 ? → MySQL %s（跳过字符串字面量内的 ?）
+
+    同时把 SQL 中字面 % 转义为 %%：pymysql 带参数执行时会对整条 SQL 做
+    ``query % args`` 格式化，字面量中的裸 %（如 LIKE '____-__-__%'）会被
+    误当格式符抛 ValueError: unsupported format character（售后周期筛选
+    实际踩坑）。转义成 %% 后经 pymysql 格式化还原为单个 %；无参数路径由
+    两个适配器的 "%%" 空元组分支完成同样还原。注意：本函数必须先于
+    _convert_sqlite_date_functions 执行，后者注入的 %%Y 不受本次转义影响。
+    """
     result = []
     in_str = False
     i = 0
@@ -101,6 +109,10 @@ def convert_placeholders(sql: str) -> str:
             in_str = True
         elif c == "'" and in_str:
             in_str = False
+        elif c == "%":
+            result.append("%%")
+            i += 1
+            continue
         elif c == "?" and not in_str:
             result.append("%s")
             i += 1
@@ -283,6 +295,10 @@ class MysqlConnectionAdapter:
         try:
             if params is not None:
                 cur.execute(sql, params)
+            elif "%%" in sql:
+                # 与 MysqlCursorAdapter.execute 同理：传空元组触发 pymysql
+                # % 格式化，把字面 % / 日期格式符的 %% 还原为单个 %
+                cur.execute(sql, ())
             else:
                 cur.execute(sql)
             return MysqlCursorAdapter(cur)

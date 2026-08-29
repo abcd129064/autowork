@@ -195,7 +195,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['qfluentwidgets.multimedia', 'scipy'],
+    # simplejson：jedi 自带的 typeshed 存根目录无 __init__.py，会被误收为
+    # 命名空间包，导致 requests 回退导入时命中空壳报 ImportError（本环境
+    # 未安装 simplejson，排除后 requests 自动回退标准库 json，零功能损失）
+    excludes=['qfluentwidgets.multimedia', 'scipy', 'simplejson'],
     noarchive=False,
     optimize=0,
 )

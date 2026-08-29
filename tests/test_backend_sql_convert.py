@@ -117,6 +117,37 @@ def test_convert_date_function_no_match_unchanged():
     assert backend._convert_sqlite_date_functions(sql) == sql
 
 
+# ==================== 字面 % 转义（pymysql 参数化格式化兼容） ====================
+
+def test_placeholders_escapes_literal_percent():
+    """SQL 字面量中的裸 % 须转义为 %%，否则 pymysql `query % args`
+    会把 %' 当格式符抛 ValueError: unsupported format character。"""
+    assert backend.convert_placeholders(
+        "SELECT * FROM t WHERE a LIKE '____-__-__%' AND b = ?"
+    ) == "SELECT * FROM t WHERE a LIKE '____-__-__%%' AND b = %s"
+
+
+def test_convert_sql_literal_percent_restored_by_format():
+    """售后周期筛选实际场景：_RECORD_DATE_EXPR 含 LIKE '____-__-__%'，
+    带参数执行时 pymysql 格式化应还原字面 % 而非报错。"""
+    sql = ("SELECT COUNT(*) FROM aftersale_records "
+           "WHERE substr(CASE WHEN occurred_at LIKE '____-__-__%' "
+           "THEN occurred_at ELSE created_at END, 1, 10) >= ? "
+           "AND substr(CASE WHEN occurred_at LIKE '____-__-__%' "
+           "THEN occurred_at ELSE created_at END, 1, 10) < ?")
+    converted = backend._convert_sql(sql)
+    # 转义后的 %% 经 pymysql 格式化还原为单个 %，%s 被参数替换
+    rendered = converted % ("2026/08/01", "2026/09/01")
+    assert "LIKE '____-__-__%'" in rendered
+    assert "%%" not in rendered
+    assert "%s" not in rendered
+    # 不再触发 unsupported format character（%' 已被转义）
+    try:
+        converted % ("2026/08/01", "2026/09/01")
+    except ValueError as e:
+        raise AssertionError(f"pymysql 格式化报错: {e}")
+
+
 # ==================== %% 日期格式符 + pymysql 参数化还原 ====================
 
 def test_convert_date_format_percent_escaped_then_restored_by_format():
