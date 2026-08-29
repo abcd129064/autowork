@@ -141,6 +141,38 @@ def convert_on_conflict(sql: str) -> str:
     return sql[:m.start()] + "ON DUPLICATE KEY UPDATE " + mysql_assign
 
 
+def escape_literal_percent(sql: str) -> str:
+    """字符串字面量内的单个 % → %%（pymysql 参数化执行所需）
+
+    pymysql 带参数执行时按 ``query % args`` 做 Python % 格式化，SQL 字面量
+    内的百分号（如 LIKE '____-__-__%' 的模式尾缀）会被误认为格式说明符，
+    触发 ``ValueError: unsupported format character '''``。规则：
+    - 已成对的 %%（_convert_sqlite_date_functions 输出的日期格式符）原样保留，
+      由 pymysql 格式化还原为单个 %；
+    - 字面量之外的 %（占位符 %s 等）不动。
+
+    仅在**带参数执行**路径调用；无参数路径 pymysql 不做 % 格式化，
+    无需转义。
+    """
+    out = []
+    in_str = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            in_str = not in_str
+            out.append(c)
+        elif in_str and c == "%":
+            out.append("%%")
+            if i + 1 < n and sql[i + 1] == "%":
+                i += 1  # 已成对的 %%，跳过配对百分号，避免重复转义
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def convert_insert_or_replace(sql: str) -> str:
     """INSERT OR REPLACE → INSERT（MySQL 无此语法，调用前已确保无主键冲突）"""
     return re.sub(r"INSERT\s+OR\s+REPLACE", "INSERT", sql, flags=re.IGNORECASE)
@@ -157,7 +189,8 @@ class MysqlCursorAdapter:
     def execute(self, sql, params=None):
         sql = _convert_sql(sql)
         if params is not None:
-            self._cur.execute(sql, params)
+            # pymysql 参数化路径做 query % args 格式化，字面量 % 需转义
+            self._cur.execute(escape_literal_percent(sql), params)
         elif "%%" in sql:
             # pymysql 仅带参数时做 % 格式化：传空元组触发格式化，把 %% 还原为 %，
             # 避免 DATE_FORMAT 收到 %% 输出字面 %Y（见 _convert_sqlite_date_functions）
@@ -170,9 +203,8 @@ class MysqlCursorAdapter:
         sql = _convert_sql(sql)
         # 委托驱动原生 executemany：PyMySQL 会把 INSERT 批次改写为多值
         # INSERT，避免 Python 循环产生 N 次网络往返。
-        # 注：executemany 无需处理 %% 还原——pymysql 内部逐行 `query % args`
-        # 自然完成 % 格式化，与 execute 的空元组路径等价。
-        self._cur.executemany(sql, seq_params)
+        # 注：executemany 逐行 `query % args` 同样做 % 格式化，字面量 % 需转义。
+        self._cur.executemany(escape_literal_percent(sql), seq_params)
         self._rowcount = self._cur.rowcount
         return self
 
@@ -294,7 +326,8 @@ class MysqlConnectionAdapter:
         cur = self._conn.cursor()
         try:
             if params is not None:
-                cur.execute(sql, params)
+                # pymysql 参数化路径做 query % args 格式化，字面量 % 需转义
+                cur.execute(escape_literal_percent(sql), params)
             elif "%%" in sql:
                 # 与 MysqlCursorAdapter.execute 同理：传空元组触发 pymysql
                 # % 格式化，把字面 % / 日期格式符的 %% 还原为单个 %
@@ -312,7 +345,7 @@ class MysqlConnectionAdapter:
         cur = self._conn.cursor()
         try:
             # 保持 PyMySQL 的批量优化路径，禁止退化成逐条 execute。
-            cur.executemany(sql, seq_params)
+            cur.executemany(escape_literal_percent(sql), seq_params)
             adapter = MysqlCursorAdapter(cur)
             adapter._rowcount = cur.rowcount
             return adapter

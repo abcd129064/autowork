@@ -646,6 +646,10 @@ class RecordsPage(QWidget):
             # 双行单元格的小号字体（循环外构造一次，避免每行每列 QFont 复制）
             small_font = QFont()
             small_font.setPointSizeF(10.5)
+            # 徽章加粗字体（循环外构造一次：原每徽章 QFont(cell.font()) 拷贝
+            # ×3/行 ×50 行 = 150 次跨边界调用；默认应用字体加粗，渲染不变）
+            bold_font = QFont()
+            bold_font.setBold(True)
             for r, item in enumerate(rows):
                 tip = self._row_tooltip(item)
                 # 重要标记：勾选「重要」后该行整体淡黄底色（浅色亮黄 / 深色暗黄随主题）
@@ -695,9 +699,7 @@ class RecordsPage(QWidget):
                             bgc.setAlpha(20)  # ~8% 透明度，更淡的徽章底（仅「是」）
                             cell.setBackground(bgc)
                         cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        _b = QFont(cell.font())
-                        _b.setBold(True)
-                        cell.setFont(_b)
+                        cell.setFont(bold_font)
                     elif key == "ops":
                         self._table.setCellWidget(
                             r, col, self._make_ops_cell(r, item, btn_css))

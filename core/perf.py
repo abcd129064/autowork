@@ -262,6 +262,43 @@ def _menu_panel_key(menu) -> str | None:
     return _window_panel_key(menu)
 
 
+def patch_table_hover_repaint():
+    """中央拦截 TableBase hover 重绘：鼠标扫过行时只重绘新旧两行条带（幂等）
+
+    背景：qfluentwidgets TableBase._setHoverRow 在 hover 行变化时调用
+    viewport().update()（无参=整视口重绘）。2K 分辨率 + 每页 50 行内嵌
+    cellWidget（售后/跑视频操作列）时，鼠标每划过一行就整表重绘一次，
+    与滚轮滚动的重绘叠加后是低配机掉帧的主因之一。改为仅 update 新旧
+    两行的水平条带（行高固定 36/40px），重绘面积约降至 1/25；
+    hover 高亮效果不变（delegate.paint 按 hoverRow 判断，逐格裁剪绘制）。
+    """
+    try:
+        from qfluentwidgets.components.widgets.table_view import TableBase
+    except Exception:
+        return
+    if getattr(TableBase, "_perf_hover_patched", False):
+        return
+
+    def _setHoverRow(self, row):
+        old = self.delegate.hoverRow
+        if old == row:
+            return
+        self.delegate.setHoverRow(row)
+        vp = self.viewport()
+        total = self.model().rowCount()
+        for r in (old, row):
+            if r is None or not 0 <= r < total:
+                continue
+            h = self.rowHeight(r)
+            if h <= 0:
+                continue
+            y = self.rowViewportPosition(r)
+            vp.update(0, y, vp.width(), h)
+
+    TableBase._setHoverRow = _setHoverRow
+    TableBase._perf_hover_patched = True
+
+
 def patch_dialog_animation():
     """中央拦截 MaskDialogBase 淡入/淡出动画：动画关闭时跳过（幂等）
 

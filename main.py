@@ -51,11 +51,15 @@ from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 
 # 中央拦截菜单弹出动画：按「面板覆盖→全局」生效值降级（含库内硬编码的
 # ComboBox 下拉），开关切换后下一次弹出即生效（幂等，重复调用无害）
-from core.perf import patch_menu_animation, patch_dialog_animation
+from core.perf import (patch_menu_animation, patch_dialog_animation,
+                       patch_table_hover_repaint)
 patch_menu_animation()
 # 中央拦截 MessageBoxBase 弹窗淡入/淡出（QGraphicsOpacityEffect 整窗离屏
 # 渲染是「双击打开面板」低帧/卡顿主因）：动画关闭时直接显示，秒开无渐变
 patch_dialog_animation()
+# 中央拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代
+# 库默认整视口重绘），滚轮滚动 + 鼠标移动叠加场景掉帧显著减少（幂等）
+patch_table_hover_repaint()
 
 from core.app_paths import get_app_dir, get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler
