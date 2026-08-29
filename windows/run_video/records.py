@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QTimer, QDate
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QHeaderView, QAbstractItemView, QFileDialog,
-                               QDialog)
+                               QDialog, QTableWidgetItem)
 
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
                             ToolButton, FluentIcon, TitleLabel, CaptionLabel,
@@ -107,7 +107,6 @@ class SignerStatsDialog(MessageBoxBase):
         table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         table.setRowCount(max(1, len(stats)))
-        from PySide6.QtWidgets import QTableWidgetItem
         for r, s in enumerate(stats):
             vals = [s.get("signer", ""),
                     s.get("问题", 0), s.get("未复现", 0),
@@ -628,11 +627,14 @@ class RecordsPage(QWidget):
         try:
             self._table.clearContents()
             self._table.setRowCount(len(self._rows))
-            from PySide6.QtWidgets import QTableWidgetItem
             # 性能（2026-08-26）：按钮样式循环外预构建 + 徽章文本化——
             # 分类徽章由 cellWidget 改为文本 item（语义色前景 + 淡色底），
             # cellWidget 从每行 2 个降到 1 个（仅操作列），填充与滚动重绘双受益
             btn_css = _prebuild_btn_css()
+            # 徽章加粗字体（循环外构造一次：原每徽章 QFont(it.font()) 拷贝；
+            # 默认应用字体加粗，渲染不变）
+            bold_font = QFont()
+            bold_font.setBold(True)
             for r, row in enumerate(self._rows):
                 # 描述/复现过长截断 + tooltip 保留完整内容
                 desc = str(row.get("description") or "")
@@ -660,9 +662,7 @@ class RecordsPage(QWidget):
                         bgc.setAlpha(26)  # ~10% 透明度，近似徽章淡底
                         it.setBackground(bgc)
                         it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        _b = QFont(it.font())
-                        _b.setBold(True)
-                        it.setFont(_b)
+                        it.setFont(bold_font)
                         self._table.setItem(r, c, it)
                         continue
                     it = QTableWidgetItem(str(v))
@@ -682,9 +682,7 @@ class RecordsPage(QWidget):
         finally:
             self._table.setUpdatesEnabled(True)
             self._table.blockSignals(False)
-        # 刷新时 cellWidget 定位可能残留陈旧偏移（行内按钮整列下沉），
-        # 延迟重排让 Qt 在事件循环中按最新布局重新定位所有 cellWidget
-        QTimer.singleShot(0, self._table.scheduleDelayedItemsLayout)
+        pass
 
     @staticmethod
     def _short_dt(val) -> str:
@@ -711,6 +709,25 @@ class RecordsPage(QWidget):
         lay.addWidget(btn_del)
         lay.addStretch(1)
         return w
+
+    # ---------- 右键菜单 ----------
+
+    def _show_context_menu(self, pos):
+        idx = self._table.indexAt(pos)
+        if not idx.isValid():
+            return
+        self._table.selectRow(idx.row())
+        menu = RoundMenu(parent=self._table)
+        act_edit = Action(FluentIcon.EDIT, "编辑", self._table)
+        act_edit.triggered.connect(
+            lambda _=False: self._on_edit(idx.row()))
+        menu.addAction(act_edit)
+        act_del = Action(FluentIcon.DELETE, "删除", self._table)
+        act_del.triggered.connect(
+            lambda _=False: self._on_delete(idx.row()))
+        menu.addAction(act_del)
+        menu.exec_(self._table.viewport().mapToGlobal(pos),
+                   aniType=_popup_ani_type())
 
     # ---------- 编辑 / 删除 ----------
 

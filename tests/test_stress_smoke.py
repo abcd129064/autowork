@@ -69,9 +69,13 @@ def test_cycle_options_fast_and_exact():
         conn.close()
 
 
-def test_paging_sql_mysql_compatible():
+def test_paging_sql_mysql_compatible(monkeypatch):
     """P0 改造后的查询 SQL 片段不依赖 SQLite 专属语法（MySQL 可执行）"""
     from database import aftersale_db as adb
+    # 周期模式是环境配置（settings）：tue/mon/custom 模式下 2026/08/01（周六）
+    # 不是合法周期起点 → WHERE 1=0 短路，substr/CASE WHEN 断言必失败。
+    # 固定 month 模式让本测试只验证 SQL 方言兼容性，不随环境周期模式漂移。
+    monkeypatch.setattr(adb, "load_cycle_mode", lambda: {"type": "month"})
     where, params = adb._build_where("kw", "球桌问题", "否")
     where, params = adb._append_cycle_where(where, params, "2026/08/01")
     sql = ("SELECT COUNT(*) FROM aftersale_records" + where +

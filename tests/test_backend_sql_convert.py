@@ -53,6 +53,44 @@ def test_on_conflict_no_match_unchanged():
     assert backend.convert_on_conflict(sql) == sql
 
 
+# ==================== escape_literal_percent ====================
+
+def test_escape_literal_percent_like_pattern():
+    """SQL 字面量内的单个 %（如 LIKE '____-__-__%'）转义为 %%。
+
+    回归背景：aftersale_db._RECORD_DATE_EXPR 的周期筛选在 MySQL
+    参数化路径触发 ValueError: unsupported format character "'"。
+    """
+    sql = ("SELECT COUNT(*) FROM aftersale_records "
+           "WHERE substr(CASE WHEN occurred_at LIKE '____-__-__%' "
+           "THEN occurred_at ELSE created_at END, 1, 10) >= ?")
+    # 真实执行顺序：先方言转换（? → %s），再在参数化路径转义字面量 %
+    escaped = backend.escape_literal_percent(backend._convert_sql(sql))
+    assert "'____-__-__%%'" in escaped
+    # 模拟 pymysql 参数化路径的 `query % args` 格式化：还原为单个 %，不报错
+    rendered = escaped % ("2026/08/01",)
+    assert "'____-__-__%'" in rendered
+    assert "2026/08/01" in rendered
+
+
+def test_escape_literal_percent_keeps_paired_and_outside():
+    # 已成对的 %%（日期格式符）不再重复转义；字面量外的 %s 占位符不动
+    sql = ("SELECT DATE_FORMAT(d, '%%Y/%%m/%%d') FROM t WHERE a = %s")
+    assert backend.escape_literal_percent(sql) == sql
+
+
+def test_escape_literal_percent_multiple_singles():
+    # 同一字面量内多个单 %，以及无参数残留 % 的普通 SQL
+    assert backend.escape_literal_percent(
+        "SELECT * FROM t WHERE a LIKE 'x%y%' AND b = ?"
+    ) == "SELECT * FROM t WHERE a LIKE 'x%%y%%' AND b = ?"
+
+
+def test_escape_literal_percent_empty_and_no_percent():
+    assert backend.escape_literal_percent("") == ""
+    assert backend.escape_literal_percent("SELECT 1") == "SELECT 1"
+
+
 # ==================== convert_insert_or_replace ====================
 
 def test_insert_or_replace_uppercase():
