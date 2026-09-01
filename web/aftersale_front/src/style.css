@@ -19,18 +19,27 @@ body { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; fon
 
 .topbar { display: flex; align-items: center; gap: 14px; height: 50px; padding: 0 18px;
   background: #fff; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; }
+.topbar .collapse-btn { color: var(--ts); padding: 6px 8px; margin-left: -6px; }
+.topbar .collapse-btn:hover { color: var(--accent); background: rgba(0, 188, 212, .08); }
 .topbar .logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
-.topbar .logo .ic { width: 26px; height: 26px; border-radius: 7px; background: var(--accent);
-  color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; }
 .topbar .crumb { font-size: 12px; color: var(--ts); }
 
 .app { display: flex; min-height: calc(100vh - 50px); }
-.sidebar { width: 200px; flex: none; background: #fff; border-right: 1px solid var(--border); padding: 12px 10px; }
+.sidebar { width: 200px; flex: none; background: #fff; border-right: 1px solid var(--border);
+  padding: 12px 10px; overflow: hidden; white-space: nowrap; }
 .sidebar .grp { font-size: 11px; color: var(--td, #a6abb3); padding: 10px 12px 4px; letter-spacing: .5px; }
 .sidebar .item { display: flex; align-items: center; gap: 9px; padding: 8px 12px; border-radius: 7px;
   font-size: 13px; color: var(--ts); cursor: pointer; }
+.sidebar .item .t { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .item .short { display: none; font-weight: 600; }
 .sidebar .item.on { background: var(--accent); color: #fff; font-weight: 600; }
 .sidebar .side-foot { margin-top: 18px; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--td, #a6abb3); line-height: 1.8; }
+.sidebar.collapsed { width: 56px; padding: 12px 5px; }
+.sidebar.collapsed .grp { display: none; }
+.sidebar.collapsed .item { justify-content: center; padding: 8px 0; gap: 0; }
+.sidebar.collapsed .item .t { display: none; }
+.sidebar.collapsed .item .short { display: inline; }
+.sidebar.collapsed .side-foot { display: none; }
 
 .main { flex: 1; padding: 16px 20px 40px; min-width: 0; }
 .page-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
