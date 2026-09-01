@@ -166,3 +166,213 @@ def table_columns():
         {"key": "is_initiative", "label": "主动发起", "width": 70},
         {"key": "response_time", "label": "响应", "width": 110},
     ]}
+
+from fastapi import Depends
+
+# ===== PHASE-2 APPEND: auth + write APIs (gated) =====
+import json as _json, time as _time
+from datetime import datetime as _dt
+try:
+    import bcrypt as _bcrypt
+except ImportError: _bcrypt = None
+try:
+    import jwt as _jwt
+except ImportError: _jwt = None
+from fastapi import Header, HTTPException, Body
+
+# 可写字段白名单（与 DESC 表对齐；id/created_at/updated_at 由系统控制）
+_WRITABLE = {"creator","issue_type","table_no","room_name","region","problem",
+             "cause","resolved","solution","resolver","response_time","snk_code",
+             "device_code","cycle_start","is_initiative","is_our_problem",
+             "occurred_at","is_important"}
+
+def _write_enabled() -> bool: return os.getenv("WRITE_ENABLED", "false").lower() == "true"
+def _auth_enabled() -> bool: return os.getenv("AUTH_ENABLED", "false").lower() == "true"
+def _auth_required(): 
+    if not _auth_enabled(): raise HTTPException(503, "auth not enabled")
+    if not _jwt: raise HTTPException(500, "pyjwt missing")
+    if not _bcrypt: raise HTTPException(500, "bcrypt missing")
+
+def _load_users():
+    p = "/opt/aftersale-web/users.json"
+    if not os.path.exists(p): return {}
+    try:
+        with open(p, encoding="utf-8") as f: return _json.load(f)
+    except Exception: return {}
+
+@app.post("/api/auth/login")
+def auth_login(payload: dict = Body(...)):
+    _auth_required()
+    u, pw = payload.get("username",""), payload.get("password","")
+    users = _load_users()
+    rec = users.get(u)
+    if not rec or not _bcrypt.checkpw(pw.encode(), rec["pw_hash"].encode()):
+        raise HTTPException(401, "invalid credentials")
+    token = _jwt.encode({"u": u, "exp": _time.time() + 12*3600}, os.environ["AUTH_SECRET"], algorithm="HS256")
+    return {"token": token, "user": u}
+
+def require_auth(authorization: str = Header(default="")):
+    if not _auth_enabled(): return  # 关闭时不要求
+    if not authorization.startswith("Bearer "): raise HTTPException(401, "missing token")
+    try:
+        data = _jwt.decode(authorization[7:], os.environ["AUTH_SECRET"], algorithms=["HS256"])
+        return data["u"]
+    except Exception:
+        raise HTTPException(401, "invalid token")
+
+@app.get("/api/auth/me")
+def auth_me(user = Depends(require_auth)):
+    return {"user": user}
+
+@app.post("/api/records")
+def create_record(rec: dict = Body(...), user = Depends(require_auth)):
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    fields, values = [], []
+    for k in _WRITABLE:
+        if k in rec and rec[k] is not None:
+            fields.append(k); values.append(rec[k])
+    if not fields: raise HTTPException(400, "no writable fields")
+    if "creator" not in fields:  # 强制记录创建人
+        fields.append("creator"); values.append(user)
+    placeholders = ",".join(["%s"]*len(fields))
+    cols = ",".join(fields)
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"INSERT INTO aftersale_records ({cols}) VALUES ({placeholders})", values)
+        rid = cur.lastrowid
+    return {"id": rid, "creator": user}
+
+@app.put("/api/records/{rid}")
+def update_record(rid: int, rec: dict = Body(...), user = Depends(require_auth)):
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    sets, values = [], []
+    for k in _WRITABLE:
+        if k in rec and rec[k] is not None:
+            sets.append(f"{k}=%s"); values.append(rec[k])
+    if not sets: raise HTTPException(400, "no fields")
+    values += [rid]
+    client_updated_at = rec.get("updated_at")  # 乐观锁：客户端传读取时的时间戳
+    if client_updated_at:
+        values.append(client_updated_at)
+        sql = f"UPDATE aftersale_records SET {','.join(sets)}, updated_at=NOW() WHERE id=%s AND updated_at=%s"
+    else:
+        sql = f"UPDATE aftersale_records SET {','.join(sets)}, updated_at=NOW() WHERE id=%s"
+    with _db() as c, c.cursor() as cur:
+        cur.execute(sql, values)
+        if cur.rowcount == 0:
+            raise HTTPException(409, "conflict: record changed by another client")
+    return {"id": rid, "updated": True}
+
+@app.delete("/api/records/{rid}")
+def delete_record(rid: int, user = Depends(require_auth)):
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    with _db() as c, c.cursor() as cur:
+        cur.execute("DELETE FROM aftersale_records WHERE id=%s", [rid])
+    return {"deleted": rid}
+
+@app.post("/api/records/batch-resolve")
+def batch_resolve(payload: dict = Body(...), user = Depends(require_auth)):
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    ids = payload.get("ids", [])
+    if not ids: raise HTTPException(400, "ids required")
+    placeholders = ",".join(["%s"]*len(ids))
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"UPDATE aftersale_records SET resolved='是', updated_at=NOW() WHERE id IN ({placeholders})", ids)
+        n = cur.rowcount
+    return {"updated": n}
+
+@app.post("/api/records/batch-delete")
+def batch_delete(payload: dict = Body(...), user = Depends(require_auth)):
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    ids = payload.get("ids", [])
+    if not ids: raise HTTPException(400, "ids required")
+    placeholders = ",".join(["%s"]*len(ids))
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"DELETE FROM aftersale_records WHERE id IN ({placeholders})", ids)
+        n = cur.rowcount
+    return {"deleted": n}
+
+
+# ===== PHASE-1.5 APPEND: charts stats API =====
+@app.get("/api/stats/charts")
+def stats_charts(cycle_start: str = "", issue_type: str = "", resolved: str = "",
+                 is_initiative: str = "", is_our_problem: str = ""):
+    """默认图表四件套：地区分布 / 每日售后量 / 我方问题占比 / 问题类型分布
+    统计口径与 /api/records 筛选一致（可传同样筛选参数）。"""
+    where, params = _build_where("", issue_type, resolved,
+                                 is_initiative, is_our_problem, cycle_start)
+    cyc = _cycle_range(cycle_start) if cycle_start else None
+    # 无周期时：最近 90 天（避免全表聚合过慢）
+    if not cyc:
+        where += (" AND " if where else " WHERE ") + f"{DATE_EXPR} >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
+
+    def group(q: str, extra=(), limit=200):
+        with _db() as c, c.cursor() as cur:
+            cur.execute(q + where + f" GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}", params + list(extra))
+            return cur.fetchall()
+
+    region = [{"name": r.get("region") or "未知", "value": r["n"]}
+              for r in group("SELECT region, COUNT(*) n FROM aftersale_records")
+              if r.get("region")]
+    daily = [{"date": r["d"][5:] if r["d"] else "", "count": r["n"]}
+             for r in group("SELECT " + DATE_EXPR + " d, COUNT(*) n FROM aftersale_records")]
+    # 我方问题占比（NULL 视为否）
+    with _db() as c, c.cursor() as cur:
+        cur.execute("SELECT COUNT(*) n FROM aftersale_records" + where, params)
+        total = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) n FROM aftersale_records" + where + " AND is_our_problem='是'", params)
+        yes = cur.fetchone()["n"]
+    our = {"yes": yes, "no": max(0, total - yes)}
+    issue = [{"name": r.get("issue_type") or "未填", "value": r["n"]}
+             for r in group("SELECT issue_type, COUNT(*) n FROM aftersale_records")]
+    return {"region_dist": region, "daily": daily, "our_problem": our,
+            "issue_type_dist": issue, "total": total}
+
+
+# ===== PHASE-2A APPEND: generic aggregation (custom charts) =====
+_DIM = {
+    "region": "region", "issue_type": "issue_type", "resolved": "resolved",
+    "is_initiative": "is_initiative", "is_our_problem": "is_our_problem",
+    "table_no": "table_no", "creator": "creator", "resolver": "resolver",
+    "day": DATE_EXPR,
+    "week": "DATE_FORMAT(" + DATE_EXPR + ", '%x-W%u')",
+}
+
+@app.post("/api/stats/query")
+def stats_query(payload: dict = Body(...)):
+    """通用聚合（自定义图表）：单维度 + 度量 + 图表类型，维度白名单防注入"""
+    dim = payload.get("dimension", "")
+    measure = payload.get("measure", "count")
+    chart = payload.get("chart", "bar")
+    sort = payload.get("sort", "value_desc")
+    try:
+        limit = min(max(int(payload.get("limit") or 20), 1), 50)
+    except (TypeError, ValueError):
+        limit = 20
+    if dim not in _DIM:
+        raise HTTPException(400, f"bad dimension: {dim}")
+    if measure not in ("count", "percent"):
+        raise HTTPException(400, "bad measure")
+    if chart not in ("bar", "line", "pie", "ring", "hbar"):
+        raise HTTPException(400, "bad chart")
+    f = payload.get("filter") or {}
+    where, params = _build_where(str(f.get("keyword") or ""), str(f.get("issue_type") or ""),
+                                 str(f.get("resolved") or ""), str(f.get("is_initiative") or ""),
+                                 str(f.get("is_our_problem") or ""), str(f.get("cycle_start") or ""))
+    col = _DIM[dim]
+    order = "n DESC" if sort == "value_desc" else ("n ASC" if sort == "value_asc" else "name ASC")
+    sql = (f"SELECT {col} name, COUNT(*) n FROM aftersale_records{where} "
+           f"GROUP BY {col} ORDER BY {order} LIMIT {limit}")
+    with _db() as c, c.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        if measure == "percent":
+            cur.execute("SELECT COUNT(*) n FROM aftersale_records" + where, params)
+            total = cur.fetchone()["n"] or 1
+        else:
+            total = None
+    out = [{"name": r["name"] if r["name"] not in (None, "") else "未填", "value": r["n"]} for r in rows]
+    if total:
+        for x in out:
+            x["percent"] = round(x["value"] * 100 / total, 1)
+    return {"columns": out, "dimension": dim, "measure": measure, "chart": chart,
+            "total": total, "limit": limit}

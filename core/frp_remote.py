@@ -9,7 +9,9 @@ RemoteSessionManager 为模块级单例（get_session_manager()）：
 - 统一 visitor 注册表：手工 visitor 与 snk 快捷连接共享注册表，
   同一 serverName 已注册则复用现有隧道与本地端口，不重复建隧道
 - 单一 frpc_xtcp_panel.toml + 单一 frpc 进程；visitor 变化时增量重写并重启 frpc
-- frpc_xtcp.toml 仍同步维护（仅手工 visitor），用于下次启动恢复与"打开配置"查看
+- 持久化同样收敛到 frpc_xtcp_panel.toml：关联球桌/来源/最近使用等
+  元数据以 # meta 注释内联在 visitor 块中；旧版 frpc_xtcp.toml /
+  frpc_xtcp_meta.json 仅升级时回读，不再写入
 - open_session 保持与 FrpRemoteBridge 相同语义，便于调用方平滑迁移
 - FrpRemoteBridge 保留为薄包装（委托 manager），仅为导入兼容
 
@@ -40,12 +42,11 @@ from core.secrets import decrypt_settings
 from core.utils import show_info_bar
 from p2p import generate_random_port
 
-# 统一 TOML（所有 visitor：手工 + snk 快捷），frpc 实际加载该文件
+# 统一 TOML（唯一持久化文件：server 配置 + 全部 visitor + 元数据注释），
+# frpc 实际加载该文件，启动恢复也只回读该文件
 _PANEL_TOML_NAME = "frpc_xtcp_panel.toml"
-# 手工 visitor 持久化 TOML（启动恢复 / 配置查看用），由 manager 同步维护
+# 旧版持久化文件（已停止写入，仅旧版本升级时回读迁移一次）
 _MAIN_TOML_NAME = "frpc_xtcp.toml"
-# 注册表元数据快照（全部 visitor 含 tableId/source/lastUsed），启动恢复用；
-# frpc_xtcp.toml 只能存 serverName/端口/密钥，关联球桌等元数据靠该文件补齐
 _META_NAME = "frpc_xtcp_meta.json"
 
 # frpc 服务器默认配置（auth_token 由 settings.json 提供）
@@ -84,7 +85,12 @@ def _now_str() -> str:
 
 
 def _parse_visitors_toml(toml_path: str) -> list:
-    """解析 frpc TOML 中的 [[visitors]] 段，返回 visitor 字典列表"""
+    """解析 frpc TOML 中的 [[visitors]] 段，返回 visitor 记录列表
+
+    每块末尾的 ``# meta = {...}`` 注释行携带注册表元数据（tableId/source/
+    lastUsed，TOML 不便表达注册表扩展字段故以内联注释承载）；缺失时
+    （旧版文件）按未处理的手工 visitor 恢复。
+    """
     visitors = []
     if not os.path.exists(toml_path):
         return visitors
@@ -97,12 +103,26 @@ def _parse_visitors_toml(toml_path: str) -> list:
         m_server = re.search(r'serverName\s*=\s*"([^"]+)"', block)
         m_key = re.search(r'secretKey\s*=\s*"([^"]+)"', block)
         m_port = re.search(r'bindPort\s*=\s*(\d+)', block)
-        if m_server and m_port:
-            visitors.append({
-                "serverName": m_server.group(1),
-                "secretKey": m_key.group(1) if m_key else "abc123",
-                "bindPort": int(m_port.group(1)),
-            })
+        if not (m_server and m_port):
+            continue
+        v = {
+            "serverName": m_server.group(1),
+            "secretKey": m_key.group(1) if m_key else "abc123",
+            "bindPort": int(m_port.group(1)),
+            "tableId": "",
+            "source": SOURCE_MANUAL,
+            "lastUsed": "",
+        }
+        m_meta = re.search(r"^#\s*meta\s*=\s*(\{.*\})\s*$", block, re.M)
+        if m_meta:
+            try:
+                meta = json.loads(m_meta.group(1))
+                v["tableId"] = str(meta.get("tableId") or "")
+                v["source"] = str(meta.get("source") or SOURCE_MANUAL)
+                v["lastUsed"] = str(meta.get("lastUsed") or "")
+            except ValueError:
+                pass  # meta 注释损坏：按缺省恢复，基础字段不受影响
+        visitors.append(v)
     return visitors
 
 
@@ -128,11 +148,19 @@ class RemoteSessionManager(QObject):
     def _load_registry(self):
         """启动恢复 visitor 注册表（不自动启动 frpc）
 
-        优先读 frpc_xtcp_meta.json 全量快照（含 snk 快捷隧道及关联球桌/
-        来源/最近使用），缺失或损坏时回退解析 frpc_xtcp.toml 仅恢复
-        手工 visitor。断开后「当前隧道」面板仍能看到已知隧道即靠此恢复。
+        唯一持久化文件为 frpc_xtcp_panel.toml（visitor 块内 # meta 注释
+        携带关联球桌/来源/最近使用）；文件存在即视为权威——含空注册表
+        （上次全部断开后仅剩 server 配置，不回读旧文件复活残留隧道）。
+        文件缺失（旧版本升级）时按 frpc_xtcp_meta.json 快照 →
+        frpc_xtcp.toml 顺序回读迁移一次。
         """
         app_dir = get_app_dir()
+        panel_path = os.path.join(app_dir, _PANEL_TOML_NAME)
+        if os.path.exists(panel_path):
+            for v in _parse_visitors_toml(panel_path):
+                self._visitors[v["serverName"]] = v
+            return
+        # ---- 旧版本升级迁移（以下文件已停止写入） ----
         try:
             with open(os.path.join(app_dir, _META_NAME), "r",
                       encoding="utf-8") as f:
@@ -165,31 +193,18 @@ class RemoteSessionManager(QObject):
             # 两源混读反而会让旧的 TOML 数据覆盖新的 meta 快照
             if self._visitors:
                 return
-        # 回退：元数据缺失（旧版本升级）时按 TOML 恢复手工 visitor
+        # 回退：元数据缺失时按旧手工 TOML 恢复（无 meta 注释 → 手工来源）
         for v in _parse_visitors_toml(os.path.join(app_dir, _MAIN_TOML_NAME)):
-            self._visitors[v["serverName"]] = {
-                "serverName": v["serverName"],
-                "bindPort": v["bindPort"],
-                "secretKey": v["secretKey"],
-                "tableId": "",
-                "source": SOURCE_MANUAL,
-                "lastUsed": "",
-            }
-
-    def _write_registry_meta(self, path: str):
-        """写出注册表元数据快照（apply 时调用，供下次启动完整恢复）"""
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(list(self._visitors.values()), f,
-                          ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+            self._visitors[v["serverName"]] = v
 
     def _persist_registry(self):
-        """落盘持久化文件（不触碰 frpc 进程）：手工/球桌库 TOML + 全量 meta 快照"""
-        app_dir = get_app_dir()
-        self._write_manual_toml(os.path.join(app_dir, _MAIN_TOML_NAME))
-        self._write_registry_meta(os.path.join(app_dir, _META_NAME))
+        """落盘唯一持久化文件 frpc_xtcp_panel.toml（不触碰 frpc 进程）"""
+        self._write_toml(os.path.join(get_app_dir(), _PANEL_TOML_NAME))
+
+    def persist(self):
+        """落盘持久化文件（不触碰 frpc 进程），供面板添加/删除 visitor 后
+        调用：注册表与 frpc_xtcp_panel.toml 即时对齐，重启后不丢不复活"""
+        self._persist_registry()
 
     def register_visitor(self, server_name: str, bind_port: int | None = None,
                          secret_key: str | None = None, source: str = SOURCE_MANUAL,
@@ -390,7 +405,8 @@ class RemoteSessionManager(QObject):
 
     def apply(self):
         """按当前注册表重写 TOML 并（重新）启动 frpc；注册表为空时停止 frpc"""
-        # 先落盘持久化（frpc_xtcp.toml + 全量 meta），再处理 frpc 进程
+        # 先落盘唯一持久化文件（frpc_xtcp_panel.toml，含 server 配置），
+        # 再处理 frpc 进程
         self._persist_registry()
         if not self._visitors:
             # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
@@ -403,8 +419,8 @@ class RemoteSessionManager(QObject):
         # 先停旧进程再启新进程：旧进程持有旧配置（端口/visitor 列表），
         # 直接复用会导致新配置不生效或端口冲突
         self._stop_frpc()
+        # _persist_registry 已按当前注册表写出最新 TOML，直接复用该文件
         toml_path = os.path.join(app_dir, _PANEL_TOML_NAME)
-        self._write_toml(toml_path)
         proc = QProcess(self)
         proc.setWorkingDirectory(app_dir)
         # 信号在 start 之前接好：frpc 可能在极短时间内退出，晚接会错过 finished 事件
@@ -480,24 +496,20 @@ class RemoteSessionManager(QObject):
             f.write('\n')
             self._write_visitor_blocks(f)
 
-    def _write_manual_toml(self, path: str):
-        """同步维护 frpc_xtcp.toml（手工 + 球桌库 visitor，启动恢复/配置查看用）"""
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                self._write_visitor_blocks(f, sources=_PANEL_SOURCES)
-        except OSError:
-            pass
-
-    def _write_visitor_blocks(self, f, sources=None):
+    def _write_visitor_blocks(self, f):
+        """写全部 visitor 块；块尾 # meta 注释内联注册表元数据（回读见
+        _parse_visitors_toml）"""
         for sn, v in self._visitors.items():
-            if sources is not None and v["source"] not in sources:
-                continue
             f.write("[[visitors]]\n")
             f.write(f'name = "{sn}"\n')
             f.write('type = "xtcp"\n')
             f.write(f'serverName = "{sn}"\n')
             f.write(f'secretKey = "{v["secretKey"]}"\n')
             f.write(f'bindPort = {v["bindPort"]}\n')
+            meta = {"tableId": v.get("tableId", ""),
+                    "source": v.get("source", ""),
+                    "lastUsed": v.get("lastUsed", "")}
+            f.write(f"# meta = {json.dumps(meta, ensure_ascii=False)}\n")
             f.write("\n")
 
     # ---------- 对外入口（与 FrpRemoteBridge.open_session 同语义） ----------

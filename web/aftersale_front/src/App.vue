@@ -2,23 +2,22 @@
   <div>
     <!-- 顶栏 -->
     <div class="topbar">
-      <div class="logo"><div class="ic">售</div>AutoWork 售后</div>
+      <el-button text class="collapse-btn" :title="collapsed ? '展开菜单' : '收起菜单'" @click="toggleSide">
+        <el-icon :size="16"><Expand v-if="collapsed" /><Fold v-else /></el-icon>
+      </el-button>
+      <div class="logo">AutoWork 售后</div>
       <div class="crumb">工作台 / 售后面板</div>
       <div style="flex:1"></div>
-      <el-tag size="small" :type="health ? 'success' : 'danger'" effect="light">
-        {{ health ? 'MySQL 已连接' : '数据库未连接' }}
-      </el-tag>
-      <span style="font-size:11px;color:#a6abb3">{{ version }}</span>
     </div>
 
     <div class="app">
       <!-- 侧边导航 -->
-      <aside class="sidebar">
+      <aside class="sidebar" :class="{ collapsed }">
         <div class="grp">售后</div>
-        <div class="item">填写录入</div>
-        <div class="item on">记录与统计</div>
-        <div class="item">设置</div>
-        <div class="side-foot">周期模式 tue<br>只读，填写请使用autowork</div>
+        <div class="item"><span class="t">填写录入</span><span class="short">填</span></div>
+        <div class="item on"><span class="t">记录与统计</span><span class="short">记</span></div>
+        <div class="item"><span class="t">设置</span><span class="short">设</span></div>
+        <div class="side-foot" v-if="!collapsed">周期模式 tue<br>只读，填写请使用autowork</div>
       </aside>
 
       <!-- 主内容 -->
@@ -227,11 +226,20 @@
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Fold, Expand } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
-import { fetchRecords, fetchCycleOptions, fetchHealth, fetchCharts, fetchQuery } from './api'
+import { fetchRecords, fetchCycleOptions, fetchCharts, fetchQuery } from './api'
 
-const version = 'v0.2 图表'
-const health = ref(false)
+// 侧边栏折叠（持久化；不用宽度过渡——过渡期间主区表格+图表每帧重排会卡顿，改为瞬时切换）
+const collapsed = ref(localStorage.getItem('aftersale_sidebar_collapsed') === '1')
+let sideTimer = null
+function toggleSide() {
+  collapsed.value = !collapsed.value
+  localStorage.setItem('aftersale_sidebar_collapsed', collapsed.value ? '1' : '0')
+  clearTimeout(sideTimer)
+  sideTimer = setTimeout(resizeCharts, 60) // 布局稳定后一次性重算图表
+}
+
 const loading = ref(false)
 const rows = ref([])
 const total = ref(0)
@@ -450,7 +458,6 @@ function toggleAll(v) {
 function openDetail(row) { dlg.row = row; dlg.show = true }
 
 onMounted(async () => {
-  try { health.value = !!(await fetchHealth())?.ok } catch { health.value = false }
   try { cycles.value = (await fetchCycleOptions())?.options || [] } catch { /* ignore */ }
   loadViews()
   await nextTick()

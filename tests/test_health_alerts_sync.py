@@ -24,6 +24,7 @@ CREATE TABLE health_alerts (
     onlineStatusName TEXT DEFAULT '',
     health          REAL DEFAULT 0,
     resolved_health REAL,
+    resolved_at     TEXT DEFAULT '',
     device_code     TEXT DEFAULT '',
     updated_at      TEXT DEFAULT ''
 )
@@ -75,6 +76,18 @@ def test_sync_inserts_only_valid_alerts(monkeypatch, tmp_path):
     assert sorted(names) == ["A", "B"]
 
 
+def _backdate_resolved_at(db, name, days_ago=3):
+    """把已处理标记时间回拨（模拟 48 小时宽限期已过）"""
+    from datetime import datetime, timedelta
+    old = (datetime.now() - timedelta(days=days_ago)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    sl = sqlite3.connect(db)
+    sl.execute("UPDATE health_alerts SET resolved_at=? WHERE name=?",
+               (old, name))
+    sl.commit()
+    sl.close()
+
+
 def test_sync_keeps_resolved_when_health_unchanged(monkeypatch, tmp_path):
     """已处理且 health 未变：保持已处理，不计入未处理条数"""
     _setup_sqlite(monkeypatch, tmp_path)
@@ -106,6 +119,67 @@ def test_sync_reclears_when_health_changed(monkeypatch, tmp_path):
         [{"name": "A", "health": 4800, "roomName": "R1",
           "onlineStatusName": "空闲"}]) == 1
     assert _row(db, "A") == (4800.0, None)
+    # 清除标记时 resolved_at 一并清空
+    conn = table_db._get_conn()
+    assert conn.execute(
+        "SELECT resolved_at FROM health_alerts WHERE name='A'"
+    ).fetchone()[0] is None
+
+
+def test_fresh_resolved_hidden_within_grace_period(monkeypatch, tmp_path):
+    """处理后 48 小时宽限期内：health 未变则保留标记不展示"""
+    _setup_sqlite(monkeypatch, tmp_path)
+    db = table_db.DB_PATH
+    rows = [{"name": "A", "health": 4500, "roomName": "R1",
+             "onlineStatusName": "空闲"}]
+    table_db.sync_health_alerts(rows)
+    table_db.mark_health_alerts_resolved(["A"])
+    conn = table_db._get_conn()
+    # 标记时同时记录 resolved_at（stale 判定基准点）
+    assert conn.execute(
+        "SELECT resolved_at FROM health_alerts WHERE name='A'"
+    ).fetchone()[0]
+    # 宽限期内重刷：仍隐藏，查询不返回
+    assert table_db.sync_health_alerts(rows) == 0
+    assert table_db.query_health_alerts() == []
+
+
+def test_stale_reshown_with_flag_after_48h(monkeypatch, tmp_path):
+    """超过 48 小时 health 仍与处理时一致：重新展示且 stale=1"""
+    _setup_sqlite(monkeypatch, tmp_path)
+    db = table_db.DB_PATH
+    rows = [{"name": "A", "health": 13225, "roomName": "R1",
+             "onlineStatusName": "空闲", "code": "CODE-A"}]
+    table_db.sync_health_alerts(rows)
+    table_db.mark_health_alerts_resolved(["A"])
+    _backdate_resolved_at(db, "A", days_ago=3)
+
+    # stale 行计入返回条数，查询带 stale=1 与原 device_code
+    assert table_db.sync_health_alerts(rows) == 1
+    stale = table_db.query_health_alerts()
+    assert len(stale) == 1
+    assert stale[0]["name"] == "A"
+    assert stale[0]["stale"] == 1
+    assert stale[0]["device_code"] == "CODE-A"
+    # 标记保留（不算未处理），重刷仍保持
+    assert _row(db, "A")[1] == 13225.0
+    assert table_db.sync_health_alerts(rows) == 1
+
+
+def test_remark_stale_resets_grace_period(monkeypatch, tmp_path):
+    """stale 行重新「已处理」：宽限期重新起算，不再展示"""
+    _setup_sqlite(monkeypatch, tmp_path)
+    db = table_db.DB_PATH
+    rows = [{"name": "A", "health": 13225, "roomName": "R1",
+             "onlineStatusName": "空闲"}]
+    table_db.sync_health_alerts(rows)
+    table_db.mark_health_alerts_resolved(["A"])
+    _backdate_resolved_at(db, "A", days_ago=3)
+    assert table_db.sync_health_alerts(rows) == 1
+
+    table_db.mark_health_alerts_resolved(["A"])
+    assert table_db.sync_health_alerts(rows) == 0
+    assert table_db.query_health_alerts() == []
 
 
 def test_sync_updates_base_fields_and_removes_gone(monkeypatch, tmp_path):
@@ -196,7 +270,7 @@ def test_mysql_sync_batches_upsert():
         {"name": "D", "health": 4200, "roomName": "公司测试"},  # 过滤
     ]
     ret = table_db._sync_health_alerts_mysql(
-        conn, rows, "2026-08-23 02:00:00")
+        conn, rows, "2026-08-23 02:00:00", "2026-08-21 02:00:00")
     assert ret == 2
 
     # 批量 upsert 只调用一次，参数只含有效设备
@@ -204,6 +278,7 @@ def test_mysql_sync_batches_upsert():
     sql, params = conn.batch
     assert "ON DUPLICATE KEY UPDATE" in sql
     assert "resolved_health = IF(" in sql
+    assert "resolved_at = IF(" in sql
     assert "device_code = VALUES(device_code)" in sql
     assert [p[0] for p in params] == ["A", "B"]
     assert [p[4] for p in params] == ["CODE-A", "CODE-B"]
@@ -219,7 +294,8 @@ def test_mysql_sync_empty_batch_skips_upsert():
     """全部被过滤：不调 executemany，也不执行非法 DELETE（NOT IN ()）"""
     conn = _FakeMysqlConn(unresolved=0)
     ret = table_db._sync_health_alerts_mysql(
-        conn, [{"name": "X", "health": 100}], "2026-08-23 02:00:00")
+        conn, [{"name": "X", "health": 100}],
+        "2026-08-23 02:00:00", "2026-08-21 02:00:00")
     assert ret == 0
     assert conn.batch is None
     # 无 DELETE（空批次不执行），只剩最终 COUNT 查询

@@ -875,7 +875,7 @@ class UIMixin:
 
         # 「配置」菜单：原第三行功能栏「配置」按钮迁移，下拉直接选择要打开的文件
         cfg_menu = _create_menu("配置", self)
-        for name in ("settings.json", "cfg.json", "frpc_xtcp.toml"):
+        for name in ("settings.json", "cfg.json", "frpc_xtcp_panel.toml"):
             act = Action(FluentIcon.DOCUMENT, name, self)
             act.triggered.connect(
                 lambda _=False, n=name: QTimer.singleShot(0, lambda n=n: self._open_config_file(n)))

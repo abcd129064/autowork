@@ -162,7 +162,8 @@ class RemoteMixin:
             self._on_p2p_search_changed("")
 
     def _load_visitors_from_manager(self):
-        """从统一会话中心恢复手工 visitor 列表（manager 启动时已解析 frpc_xtcp.toml）"""
+        """从统一会话中心恢复 visitor 列表（manager 启动时已解析
+        frpc_xtcp_panel.toml，含手工/球桌库来源与关联球桌元数据）"""
         restored = self._session_mgr.manual_visitors()
         self._p2p_visitors.extend(restored)
         if restored:
@@ -242,7 +243,8 @@ class RemoteMixin:
         visitor = {
             "serverName": server_name,
             "bindPort": port,
-            "secretKey": self.ui.p2p_form_key.text().strip() or "abc123"
+            "secretKey": self.ui.p2p_form_key.text().strip() or "abc123",
+            "source": SOURCE_MANUAL,
         }
         self._p2p_visitors.append(visitor)
         self.ui.p2p_visitor_list.blockSignals(True)
@@ -251,8 +253,9 @@ class RemoteMixin:
         self._p2p_current_index = len(self._p2p_visitors) - 1
         self.ui.p2p_visitor_list.setCurrentRow(self._p2p_current_index)
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
-        # frpc 运行中新增的隧道不会立即生效：visitor 仅进入待连接列表，
-        # 需断开重连（重新 register_visitor + apply 重启 frpc）才被加载
+        # 添加即注册进会话中心（不启动 frpc）：「当前隧道」面板立即可见该 snk，
+        # 注册表与持久化文件同步对齐；隧道生效仍需断开重连（apply 重启 frpc）
+        self._register_visitor_to_manager(visitor)
         if self._session_mgr.is_running():
             self._show_info_bar(
                 f"隧道「{server_name}」已添加，请断开后重新连接以生效",
@@ -268,17 +271,12 @@ class RemoteMixin:
             removed = self._p2p_visitors.pop(row)
             self._p2p_current_index = -1
             self._refresh_p2p_list()
-            # frpc 运行中时同步移除会话中心注册并重写配置，避免残留隧道；
-            # 先关闭该端口上的会话，避免隧道移除后窗口假死
+            # 同步会话中心（双向）：运行中先关该端口会话再 apply 释放端口；
+            # 未运行仅移除并落盘——添加即注册后，不同步会残留在
+            # 「当前隧道」面板与 frpc_xtcp_panel.toml 恢复文件中
             name = removed.get("serverName", "")
-            if name and self._session_mgr.is_running():
-                self._session_mgr.close_sessions_on_port(
-                    removed.get("bindPort"), reason=name)
-                if self._session_mgr.remove_visitor(name):
-                    try:
-                        self._session_mgr.apply()
-                    except (OSError, RuntimeError) as e:
-                        self._append_log(f"[远程] 应用变更失败: {e}")
+            if name and self._session_mgr.delete_visitor(name) == "error":
+                self._append_log(f"[远程] 应用变更失败: 删除 {name}")
 
     def _on_p2p_visitor_selected(self, row):
         """列表选择：XTCP 模式加载 visitor 到表单，TCP 模式填充 host/port"""
@@ -435,6 +433,8 @@ class RemoteMixin:
     def _on_table_search_return(self):
         """回车：popup 可见时由 QCompleter 原生选中高亮项（activated），
         无高亮/未弹出时直接选中首个匹配球桌（免鼠标点选）"""
+        if self._p2p_picking:
+            return  # 选中回填流程进行中，忽略后续重复回车
         self._p2p_search_timer.stop()
         matches = self._query_snk_tables(self._p2p_table_search.text())
         if matches:
@@ -504,6 +504,11 @@ class RemoteMixin:
         popup.setMaximumHeight(
             row_h * self._TABLE_PICKER_VISIBLE_ROWS + 8)
         self._p2p_table_completer.complete()
+        # 显式高亮首行：QCompleter 弹层无高亮行时会把回车事件整个吞掉
+        # （activated/returnPressed 均不触发），表现为「回车不添加」；
+        # 高亮首行后回车即选中首个候选，方向键仍可切换高亮行
+        if self._p2p_match_model.rowCount() > 0:
+            popup.setCurrentIndex(self._p2p_match_model.index(0, 0))
 
     def _on_table_match_activated(self, text: str):
         """候选选中（鼠标点击/回车）：由显示文本反查球桌行并回填表单
@@ -596,10 +601,33 @@ class RemoteMixin:
             added["tableId"] = str(
                 self._p2p_selected_table.get("name") or "").strip() \
                 if self._p2p_selected_table else ""
+            # 添加即注册进会话中心（不启动 frpc）：「当前隧道」面板立即可见
+            self._register_visitor_to_manager(added)
             self._show_info_bar(f"已添加 {snk}", "success")
         else:
             # 添加未生效（如端口校验拒绝）：明确记日志，避免静默失败无迹可查
             self._append_log(f"[球桌库] 添加 {snk} 失败，请查看上方日志中的拒绝原因")
+
+    def _register_visitor_to_manager(self, visitor: dict):
+        """把面板 visitor 同步注册进会话中心（不启动 frpc）
+
+        添加即注册：「当前隧道」面板读注册表，注册后球桌库/手工添加的
+        snk 无需连接即可见；persist() 落盘即时对齐（重启后不丢不复活）。
+        连接时 _on_xtcp_connect 全量重建注册表，口径一致。
+        """
+        name = str(visitor.get("serverName") or "").strip()
+        if not name:
+            return
+        try:
+            self._session_mgr.register_visitor(
+                name,
+                bind_port=visitor.get("bindPort"),
+                secret_key=visitor.get("secretKey") or "abc123",
+                source=visitor.get("source") or SOURCE_MANUAL,
+                table_id=str(visitor.get("tableId") or ""))
+            self._session_mgr.persist()
+        except (OSError, RuntimeError, ValueError) as e:
+            self._append_log(f"[远程] 注册 visitor {name} 失败: {e}")
 
     # ------------------------------------------------------------------ TCP 保存的服务器
     def _load_tcp_servers(self):

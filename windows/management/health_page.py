@@ -54,6 +54,11 @@ from windows.management.image_viewer import is_image_file
 
 logger = logging.getLogger(__name__)
 
+# stale 行（已处理超 48 小时数据源仍未刷新）底色（浅色=淡黄 / 深色=暗黄），
+# 与售后面板记录列表「重要」行同款配色（records.py _IMPORTANT_BG_*）
+_STALE_BG_LIGHT = QColor(255, 243, 205)
+_STALE_BG_DARK = QColor(64, 57, 28)
+
 from windows.management.common import *  # noqa: F401,F403
 
 # ==================== 健康度趋势看板（C3） ====================
@@ -601,8 +606,11 @@ class HealthPage(QWidget):
     4000~5000 健康度异常；>5000 严重异常需立即处理；>40 万为脏数据排除。
     排序：① 空闲且严重异常；② 健康度异常（4000~5000）；③ 其余严重异常。
     勾选+「已处理」：调用 xqzg update_health 将服务端健康度重置为 4000，
-    成功后在本地记录当时 health；后续刷新 health 未变化不再展示，
-    变化且仍异常则重新展示（变化后 <4000 自动消失）。
+    成功后在本地记录当时 health；后续刷新 health 未变化不再展示
+    （网站接口每小时才刷新一次，48 小时宽限期内等待数据源更新），
+    变化且仍异常则重新展示（变化后 <4000 自动消失）；超过 48 小时
+    仍与处理时一致则判定数据源未刷新，重新展示但加 * 号并整行
+    黄色高亮（与售后面板「重要」行同款配色）。
     """
 
     _FETCH_INTERVAL_MS = 30 * 60 * 1000    # 数据获取：每 30 分钟
@@ -712,6 +720,10 @@ class HealthPage(QWidget):
             severe = h > table_db.HEALTH_SEVERE
             color = QColor(SEMANTIC["danger"]) if severe else QColor(SEMANTIC["warning"])
             level = "严重异常" if severe else "健康度异常"
+            # stale（已处理超 48 小时数据源仍未刷新）：加 * 号 + 整行黄色底
+            stale = bool(r.get("stale"))
+            row_bg = (_STALE_BG_DARK if isDarkTheme() else _STALE_BG_LIGHT) \
+                if stale else None
             row = self._table.rowCount()
             self._table.insertRow(row)
             cb = CheckBox(self)
@@ -722,10 +734,17 @@ class HealthPage(QWidget):
             for col, key in ((1, "name"), (2, "roomName"), (3, "onlineStatusName")):
                 it = QTableWidgetItem(str(r.get(key) or ""))
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if row_bg is not None:
+                    it.setBackground(row_bg)
                 self._table.setItem(row, col, it)
-            it_h = QTableWidgetItem(f"{h:.0f} · {level}")
+            it_h = QTableWidgetItem(f"{h:.0f}{' *' if stale else ''} · {level}")
             it_h.setFlags(it_h.flags() & ~Qt.ItemFlag.ItemIsEditable)
             it_h.setForeground(QBrush(color))
+            if stale:
+                it_h.setBackground(row_bg)
+                it_h.setToolTip(
+                    "已处理超过 48 小时，服务器数据仍未变化——"
+                    "可能是数据源未刷新或重置未生效，可重新勾选处理")
             self._table.setItem(row, 4, it_h)
         self._update_resolved_enabled()
         now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")

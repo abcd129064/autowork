@@ -54,7 +54,7 @@ class RecordsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._page_no = 1
-        self._page_size = 50
+        self._page_size = 60
         self._total = 0
         self._rows = []
         self._worker = None
@@ -81,7 +81,7 @@ class RecordsPage(QWidget):
         head_box.setSpacing(1)
         head_box.addWidget(TitleLabel("记录与统计", self))
         head_box.addWidget(CaptionLabel(
-            "售后问题从上报到解决的全流程跟踪", self))
+            "售后问题上报", self))
         head.addLayout(head_box)
         head.addStretch(1)
         # 数据源指示：MySQL / 本地 SQLite / 降级兜底
@@ -104,7 +104,7 @@ class RecordsPage(QWidget):
         self._card_our_problem = self._make_stats_card(cards_row)
         root.addLayout(cards_row)
         # 「未解决」卡可点击：一键联动「是否解决=否」筛选，展示未解决条目
-        # （再次点击恢复全部，与筛选条切换一致）
+        # 再次点击恢复全部
         unr_card = self._card_unresolved[0]
         unr_card.setCursor(Qt.CursorShape.PointingHandCursor)
         unr_card.setToolTip("点击查看未解决条目（再次点击恢复全部）")
@@ -231,7 +231,7 @@ class RecordsPage(QWidget):
         self._table = TableWidget(self)
         # 性能（2026-08-26）：默认关闭 qfluentwidgets 平滑滚动动画——滚轮触发
         # 动画引擎逐帧 moveScrollBar，50 行 + 行内控件逐帧重绘导致滚动卡顿；
-        # NO_SMOOTH 走原生滚动（压测 20 步 384ms → 0ms）。按 本面板覆盖→全局 生效，
+        # NO_SMOOTH 走原生滚动。按 本面板覆盖→全局 生效，
         # 设置页开关可即时切换（见 _apply_smooth_mode）。
         self._apply_smooth_mode()
         # 勾选列 + 数据列（列号：勾选=0，数据列 1..N，注意不要少算勾选列）

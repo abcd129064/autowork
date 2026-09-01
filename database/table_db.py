@@ -821,6 +821,10 @@ def get_table_info_by_snk_or_host(snk: str = "", host_hint: str = "") -> dict:
 HEALTH_WARN = 4000.0
 HEALTH_SEVERE = 5000.0
 HEALTH_INVALID_MAX = 400000.0
+# 已处理后数据源未刷新的宽限期（小时）：网站接口每小时才刷新一次，
+# 处理后 48 小时内 health 与处理时一致仍视为「等待刷新」不展示；
+# 超过 48 小时仍一致则重新展示（stale，带 * 标记由 UI 黄色高亮）
+HEALTH_STALE_HOURS = 48
 
 _CREATE_HEALTH_ALERT_SQL = schema.to_sqlite_ddl("health_alerts")
 
@@ -883,9 +887,12 @@ def sync_health_alerts(rows: list) -> int:
     （无逐行 SELECT 的 N+1 往返）。
     """
     conn = _get_conn()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_dt = datetime.now()
+    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    stale_cutoff = (now_dt - timedelta(hours=HEALTH_STALE_HOURS)).strftime(
+        "%Y-%m-%d %H:%M:%S")
     if backend.is_mysql_test_mode():
-        return _sync_health_alerts_mysql(conn, rows, now)
+        return _sync_health_alerts_mysql(conn, rows, now, stale_cutoff)
     items = _filter_alert_items(rows)
     seen = {t[0] for t in items}
     # 一次取回全部现有记录的已处理标记（roomName 等基础字段本轮必被覆盖，
@@ -922,8 +929,8 @@ def sync_health_alerts(rows: list) -> int:
     if updates_clear:
         conn.executemany(
             "UPDATE health_alerts SET roomName=?, onlineStatusName=?, "
-            "health=?, device_code=?, resolved_health=NULL, updated_at=? "
-            "WHERE name=?",
+            "health=?, device_code=?, resolved_health=NULL, resolved_at=NULL, "
+            "updated_at=? WHERE name=?",
             updates_clear)
     if seen:
         # seen 为空说明本轮没有有效告警，跳过 DELETE——否则 NOT IN () 拼出
@@ -933,11 +940,13 @@ def sync_health_alerts(rows: list) -> int:
             f"({','.join('?' * len(seen))})", tuple(seen))
     conn.commit()
     return conn.execute(
-        "SELECT COUNT(*) FROM health_alerts WHERE resolved_health IS NULL"
-    ).fetchone()[0]
+        "SELECT COUNT(*) FROM health_alerts WHERE resolved_health IS NULL "
+        "OR (resolved_health = health AND resolved_at IS NOT NULL "
+        "AND resolved_at != '' AND resolved_at <= ?)", (stale_cutoff,)).fetchone()[0]
 
 
-def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
+def _sync_health_alerts_mysql(conn, rows: list, now: str,
+                              stale_cutoff: str) -> int:
     """MySQL 多用户同步：原子 upsert，保留他人已处理标记
 
     与 SQLite 逐行 SELECT+INSERT/UPDATE 不同，多用户并发写同一张表时
@@ -945,8 +954,9 @@ def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
     改用单条 ON DUPLICATE KEY UPDATE 原子完成：
     - 新设备：插入，resolved_health 为 NULL（未处理）；
     - 已存在未处理：刷新基础字段；
-    - 已处理且 health 未变：保留 resolved_health（他人/自己的处理标记不丢）；
-    - 已处理但 health 变化：置 NULL 重新展示。
+    - 已处理且 health 未变：保留 resolved_health/resolved_at
+      （他人/自己的处理标记不丢）；
+    - 已处理但 health 变化：两者置 NULL 重新展示。
     其他端已提交的标记在本端同步时自然可见，实现多端状态对齐。
 
     参数列表先收集、再一次 executemany 批量提交（旧实现逐行 execute，
@@ -955,13 +965,19 @@ def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
     upsert_sql = (
         "INSERT INTO health_alerts "
         "(name, roomName, onlineStatusName, health, device_code, "
-        "resolved_health, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, NULL, ?) "
+        "resolved_health, resolved_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL, NULL, ?) "
         "ON DUPLICATE KEY UPDATE "
         "roomName = VALUES(roomName), "
         "onlineStatusName = VALUES(onlineStatusName), "
         "health = VALUES(health), "
         "device_code = VALUES(device_code), "
+        # resolved_at 与 resolved_health 同条件同生命周期：health 未变则
+        # 保留（stale 判定基准点不动），变化则一并清空；条件里引用的
+        # resolved_health 在赋值前仍是旧值，先算 resolved_at 保证口径一致
+        "resolved_at = IF(resolved_health IS NOT NULL AND "
+        "ABS(VALUES(health) - resolved_health) < 0.000000001, "
+        "resolved_at, NULL), "
         "resolved_health = IF(resolved_health IS NOT NULL AND "
         "ABS(VALUES(health) - resolved_health) < 0.000000001, "
         "resolved_health, NULL), "
@@ -978,39 +994,57 @@ def _sync_health_alerts_mysql(conn, rows: list, now: str) -> int:
             f"({','.join('?' * len(seen))})", tuple(seen))
     conn.commit()
     return conn.execute(
-        "SELECT COUNT(*) FROM health_alerts WHERE resolved_health IS NULL"
-    ).fetchone()[0]
+        "SELECT COUNT(*) FROM health_alerts WHERE resolved_health IS NULL "
+        "OR (resolved_health = health AND resolved_at IS NOT NULL "
+        "AND resolved_at != '' AND resolved_at <= ?)", (stale_cutoff,)).fetchone()[0]
 
 
 def query_health_alerts() -> list:
-    """查询当前应展示的告警条目（未处理），按需求排序：
+    """查询当前应展示的告警条目，按需求排序：
 
     ① 空闲且严重异常（health>5000）；② 健康度异常（4000<health<=5000）；
-    ③ 其余严重异常；同级按 health 降序。
+    ③ 其余严重异常；同级按 health 降序；stale 行排同级末尾。
     返回行含 device_code（xqzg update_health 入参，供「已处理」重置用）。
+
+    展示范围（48 小时宽限期，基准点为标记时的 resolved_at）：
+    - 未处理（resolved_health IS NULL）：正常展示；
+    - 已处理且 health 与处理时一致且 resolved_at 超过宽限期：
+      stale 重新展示（stale=1，UI 加 * 号并黄色高亮该行，
+      提示数据源长时间未刷新）；
+    - 已处理且宽限期内 health 未变：不展示（等待数据源刷新）。
     """
     conn = _get_conn()
+    stale_cutoff = (datetime.now() - timedelta(
+        hours=HEALTH_STALE_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute(
-        "SELECT name, roomName, onlineStatusName, health, device_code "
+        "SELECT name, roomName, onlineStatusName, health, device_code, "
+        "resolved_at, "
+        "CASE WHEN resolved_health IS NOT NULL THEN 1 ELSE 0 END AS stale "
         "FROM health_alerts "
-        "WHERE resolved_health IS NULL ORDER BY "
+        "WHERE resolved_health IS NULL "
+        "   OR (resolved_health = health AND resolved_at IS NOT NULL "
+        "       AND resolved_at != '' AND resolved_at <= ?) "
+        "ORDER BY stale, "
         "CASE WHEN onlineStatusName='空闲' AND health > ? THEN 0 "
         "     WHEN health <= ? THEN 1 ELSE 2 END, "
         "health DESC",
-        (HEALTH_SEVERE, HEALTH_SEVERE))
+        (stale_cutoff, HEALTH_SEVERE, HEALTH_SEVERE))
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 def mark_health_alerts_resolved(names: list) -> int:
-    """标记告警为已处理：记录当时的 health 值，返回受影响行数"""
+    """标记告警为已处理：记录当时的 health 值与标记时间，返回受影响行数"""
     names = [str(n or "").strip() for n in (names or []) if str(n or "").strip()]
     if not names:
         return 0
     conn = _get_conn()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute(
-        f"UPDATE health_alerts SET resolved_health = health WHERE name IN "
-        f"({','.join('?' * len(names))})", tuple(names))
+        f"UPDATE health_alerts SET resolved_health = health, "
+        f"resolved_at = ? WHERE name IN "
+        f"({','.join('?' * len(names))})",
+        (now, *names))
     conn.commit()
     return cur.rowcount
 

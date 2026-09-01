@@ -1203,8 +1203,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
             path = self._get_settings_path()
         elif name == "cfg.json":
             path = os.path.join(self.exe_dir, "cfg.json")
-        else:  # frpc_xtcp.toml
-            path = os.path.join(self._get_app_dir(), "frpc_xtcp.toml")
+        else:  # frpc_xtcp_panel.toml（唯一 frp 持久化配置）
+            path = os.path.join(self._get_app_dir(), "frpc_xtcp_panel.toml")
 
         if not os.path.exists(path):
             self._append_log(f"[配置] 文件不存在: {path}")

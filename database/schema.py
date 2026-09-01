@@ -225,6 +225,10 @@ TABLE_COLUMNS = {
         ColumnDef("onlineStatusName", "TEXT", "VARCHAR(255)", "''", "''"),
         ColumnDef("health", "REAL", "DOUBLE", "0", "0"),
         ColumnDef("resolved_health", "REAL", "DOUBLE"),
+        # resolved_at：「已处理」标记时间快照（'' 表示未标记）；48 小时后
+        # health 仍与 resolved_health 一致则判定数据源未刷新，
+        # 带 * 重新展示（stale）
+        ColumnDef("resolved_at", "TEXT", "VARCHAR(32)", "''", "''"),
         # device_code：xqzg update_health 接口入参（billiard_tables.code），
         # 点击「已处理」时按此码调接口将服务端健康度重置为 4000
         ColumnDef("device_code", "TEXT", "VARCHAR(255)", "''", "''"),
@@ -365,6 +369,9 @@ MIGRATIONS: dict = {
         # 旧库补 device_code（xqzg update_health 接口入参，见 TABLE_COLUMNS）
         ColumnMigration("health_alerts", "device_code", "TEXT", "''",
                         "VARCHAR(255)", "''"),
+        # 旧库补 resolved_at（已处理时间快照，48 小时 stale 判定用）
+        ColumnMigration("health_alerts", "resolved_at", "TEXT", "''",
+                        "VARCHAR(32)", "''"),
     ],
     "aftersale_records": [
         ColumnMigration("aftersale_records", "is_initiative", "TEXT", "'否'",
