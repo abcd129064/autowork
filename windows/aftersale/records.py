@@ -17,8 +17,11 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     FluentWindow, NavigationItemPosition, MenuAnimationType,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
     SpinBox, SegmentedWidget, ProgressBar, FlowLayout, ComboBox,
-    EditableComboBox)
+    EditableComboBox, HyperlinkButton)
 
+import json
+
+from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import is_acrylic_enabled, apply_table_smooth_mode
@@ -36,6 +39,23 @@ from windows.stat_charts import StatsOpener, _aftersale_options
 # 重要标记行底色（浅色=淡黄 / 深色=暗黄）：勾选「重要」后该条在列表中淡黄显示
 _IMPORTANT_BG_LIGHT = QColor(255, 243, 205)
 _IMPORTANT_BG_DARK = QColor(64, 57, 28)
+
+# 线上售后面板兜底地址（本地 Web 服务未启用时超链接指向此处）
+_WEB_FALLBACK_URL = "http://49.235.34.253/"
+
+
+def _web_entry_url():
+    """售后面板网页入口：本地 Web 服务（core.local_web_server）启用时指向
+    http://localhost:<port>，否则回退线上站点。读 settings.json local_web
+    节点，与 local_web_server 的默认值保持一致（缺省 enabled=True, port=8787）。"""
+    try:
+        with open(os.path.join(get_app_dir(), "settings.json"), "r", encoding="utf-8") as f:
+            cfg = (json.load(f).get("local_web") or {})
+        if bool(cfg.get("enabled", True)):
+            return f"http://localhost:{int(cfg.get('port') or 8787)}/"
+    except Exception:
+        pass
+    return _WEB_FALLBACK_URL
 
 # ==================== 板块二：记录与统计页 ====================
 
@@ -84,6 +104,15 @@ class RecordsPage(QWidget):
             "售后问题上报", self))
         head.addLayout(head_box)
         head.addStretch(1)
+        # 网页版入口：浏览器打开售后面板网页（本地 8787 / 线上兜底）；
+        # 文本显示为主机:端口，与数据源标签同高同字号，视觉对齐
+        self._btn_web = HyperlinkButton(_web_entry_url(), "localhost:8787", self)
+        self._btn_web.setFixedHeight(20)
+        _wf = self._btn_web.font()
+        _wf.setPixelSize(12)
+        self._btn_web.setFont(_wf)
+        self._btn_web.setToolTip("在浏览器中打开售后面板网页")
+        head.addWidget(self._btn_web, 0, Qt.AlignmentFlag.AlignTop)
         # 数据源指示：MySQL / 本地 SQLite / 降级兜底
         self._lbl_source = CaptionLabel("", self)
         head.addWidget(self._lbl_source, 0, Qt.AlignmentFlag.AlignTop)
