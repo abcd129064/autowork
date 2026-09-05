@@ -17,7 +17,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     FluentWindow, NavigationItemPosition, MenuAnimationType,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
     SpinBox, SegmentedWidget, ProgressBar, FlowLayout, ComboBox,
-    EditableComboBox, HyperlinkButton)
+    EditableComboBox)
 
 import json
 
@@ -56,6 +56,15 @@ def _web_entry_url():
     except Exception:
         pass
     return _WEB_FALLBACK_URL
+
+
+def _web_link_html():
+    """超链接富文本：显示主机:端口，主题色无下划线，点击由
+    QLabel.openExternalLinks 用系统浏览器打开。"""
+    url = _web_entry_url().rstrip("/")
+    host = url.split("//", 1)[-1]
+    return (f'<a href="{url}" style="color: {current_accent_hex()}; '
+            f'text-decoration: none;">{host}</a>')
 
 # ==================== 板块二：记录与统计页 ====================
 
@@ -104,13 +113,13 @@ class RecordsPage(QWidget):
             "售后问题上报", self))
         head.addLayout(head_box)
         head.addStretch(1)
-        # 网页版入口：浏览器打开售后面板网页（本地 8787 / 线上兜底）；
-        # 文本显示为主机:端口，与数据源标签同高同字号，视觉对齐
-        self._btn_web = HyperlinkButton(_web_entry_url(), "localhost:8787", self)
-        self._btn_web.setFixedHeight(20)
-        _wf = self._btn_web.font()
-        _wf.setPixelSize(12)
-        self._btn_web.setFont(_wf)
+        # 网页版入口：浏览器打开售后面板网页（本地 8787 / 线上兜底）。
+        # 用富文本 QLabel 而非 HyperlinkButton：与数据源标签同字体族渲染，
+        # 天然基线对齐，无按钮内边距导致的文字顶部裁切
+        self._btn_web = CaptionLabel("", self)
+        self._btn_web.setTextFormat(Qt.TextFormat.RichText)
+        self._btn_web.setOpenExternalLinks(True)
+        self._btn_web.setText(_web_link_html())
         self._btn_web.setToolTip("在浏览器中打开售后面板网页")
         head.addWidget(self._btn_web, 0, Qt.AlignmentFlag.AlignTop)
         # 数据源指示：MySQL / 本地 SQLite / 降级兜底
@@ -414,6 +423,8 @@ class RecordsPage(QWidget):
         self._lbl_source.setToolTip(
             "关闭 MySQL 后自动读写本地 SQLite；"
             "MySQL 恢复可用时会自动切回并合并兜底增量")
+        # 同步刷新网页入口（跟随主题色与 settings 中 local_web 最新配置）
+        self._btn_web.setText(_web_link_html())
 
     def _on_unresolved_card_clicked(self):
         """点击概览「未解决」卡：切到未解决列表（再次点击恢复全部）"""
