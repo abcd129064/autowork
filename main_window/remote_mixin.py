@@ -6,7 +6,7 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QTimer, Qt, QStringListModel
+from PySide6.QtCore import QTimer, Qt, QStringListModel, QEvent, QModelIndex
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (QFormLayout, QWidget, QHBoxLayout,
                                QCompleter, QLineEdit)
@@ -403,6 +403,12 @@ class RemoteMixin:
         QLineEdit.setCompleter(self._p2p_table_search, completer)
         self._p2p_table_completer = completer
 
+        # 回车统一由本类 eventFilter 截获处理。安装顺序很关键：Qt 事件过滤
+        # 器后装先调，装在 QCompleter 之后才能先于它拿到回车——否则弹层
+        # 无高亮行时回车被 QCompleter 吞掉（表现为不添加），有高亮行时
+        # 又会无脑选中首条模糊命中（短关键词连错球房的根因）
+        self._p2p_table_search.installEventFilter(self)
+
     def _hide_table_matches(self):
         """收起候选下拉并清空候选数据（容忍 C++ 对象已销毁的情况）"""
         self._p2p_table_map.clear()
@@ -430,17 +436,76 @@ class RemoteMixin:
             return
         self._p2p_search_timer.start()
 
+    def eventFilter(self, obj, event):
+        """截获球桌库搜索框的回车，统一走安全选中逻辑
+
+        QCompleter 的事件过滤器在无高亮行时吞回车（不添加），高亮行时
+        直接激活候选（模糊命中多条时会连错球桌）——两种行为都不可靠，
+        在它之前截获回车，交给 _on_table_search_return 判定后选中。
+        """
+        if obj is self._p2p_table_search \
+                and event.type() == QEvent.Type.KeyPress \
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._on_table_search_return()
+            return True  # 消费回车：QCompleter 与输入框默认行为均不处理
+        return super().eventFilter(obj, event)
+
     def _on_table_search_return(self):
-        """回车：popup 可见时由 QCompleter 原生选中高亮项（activated），
-        无高亮/未弹出时直接选中首个匹配球桌（免鼠标点选）"""
+        """回车选中（安全语义）：候选弹层有高亮行（↑↓ 导航/悬停的明确
+        选择）时选该行；无高亮时仅当关键词能唯一定位一台球桌——snk 精确
+        命中，或全部命中仅一条——才自动选中。
+
+        多条模糊命中绝不猜第一条：短关键词（如两位数字）会子串命中大量
+        球桌，自动选首条极易连错球房（严重 bug），此时仅提示并展开候选
+        列表，由用户明确选择。
+        """
         if self._p2p_picking:
             return  # 选中回填流程进行中，忽略后续重复回车
         self._p2p_search_timer.stop()
-        matches = self._query_snk_tables(self._p2p_table_search.text())
-        if matches:
-            self._on_table_picked(matches[0])
-        else:
-            self._append_log("[球桌库] 未找到含 snk 标识的匹配球桌")
+        row = self._p2p_popup_current_row()
+        if row is None:
+            kw = self._p2p_table_search.text().strip()
+            if len(kw) < self._TABLE_PICKER_MIN_CHARS:
+                return
+            matches = self._query_snk_tables(kw)
+            exact = [r for r in matches
+                     if str(r.get("snk_code") or "").lower() == kw.lower()]
+            if len(exact) == 1:
+                row = exact[0]
+            elif len(matches) == 1:
+                row = matches[0]
+            elif not matches:
+                self._append_log("[球桌库] 未找到含 snk 标识的匹配球桌")
+                return
+            else:
+                self._append_log(
+                    f"[球桌库] 关键词 {kw!r} 命中 {len(matches)} 台球桌，"
+                    "请从候选列表选择（↑↓ 或点击），不做自动匹配")
+                self._show_table_matches()
+                return
+        self._on_table_picked(row)
+
+    def _p2p_popup_current_row(self):
+        """取候选弹层当前高亮行对应的球桌行；无有效高亮返回 None
+
+        弹层文本不在候选表时兜底从尾部解析 snk 重新查库（同 activated
+        鼠标点击路径），保证弹层与候选表短暂不同步时不静默失败。
+        """
+        try:
+            popup = self._p2p_table_completer.popup()
+            idx = popup.currentIndex()
+            if not popup.isVisible() or not idx.isValid():
+                return None
+            label = self._p2p_match_model.data(idx)
+        except (RuntimeError, OSError):
+            return None
+        row = self._p2p_table_map.get(label)
+        if row is None and label:
+            m = re.search(r"\(([^()]+)\)\s*$", str(label))
+            snk = m.group(1).strip() if m else str(label).strip()
+            row = next((r for r in self._query_snk_tables(snk)
+                        if r.get("snk_code") == snk), None)
+        return row
 
     def _query_snk_tables(self, keyword: str):
         """查询 snk_code 非空的球桌（复用表已有 FTS/LIKE 子串模糊搜索）
@@ -469,6 +534,11 @@ class RemoteMixin:
             if len(picked) >= self._TABLE_PICKER_MAX_ITEMS:
                 break
             picked.append(r)
+        # snk_code 命中关键字的排前面：球桌库以 snk 隧道为选中目标，
+        # 名称/球房含同数字的行往后排，提高候选列表首位相关性
+        kw_l = keyword.strip().lower()
+        picked.sort(
+            key=lambda r: 0 if kw_l in r["snk_code"].lower() else 1)
         return picked
 
     def _show_table_matches(self):
@@ -504,11 +574,11 @@ class RemoteMixin:
         popup.setMaximumHeight(
             row_h * self._TABLE_PICKER_VISIBLE_ROWS + 8)
         self._p2p_table_completer.complete()
-        # 显式高亮首行：QCompleter 弹层无高亮行时会把回车事件整个吞掉
-        # （activated/returnPressed 均不触发），表现为「回车不添加」；
-        # 高亮首行后回车即选中首个候选，方向键仍可切换高亮行
-        if self._p2p_match_model.rowCount() > 0:
-            popup.setCurrentIndex(self._p2p_match_model.index(0, 0))
+        # 不默认高亮任何行：此前高亮首行 + 回车自动选中的组合，会让
+        # 两位数字这类模糊关键词直接连上第一条命中（错球房）。弹层默认
+        # 无高亮，回车选中统一由 _on_table_search_return 按唯一命中/
+        # snk 精确命中判定，↑↓ 或悬停后的高亮行才是明确选择
+        popup.setCurrentIndex(QModelIndex())
 
     def _on_table_match_activated(self, text: str):
         """候选选中（鼠标点击/回车）：由显示文本反查球桌行并回填表单
