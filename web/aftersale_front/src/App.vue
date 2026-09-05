@@ -76,15 +76,13 @@
             <el-option label="是" value="是" /><el-option label="否" value="否" />
           </el-select>
           <el-input v-model="f.keyword" placeholder="搜索" clearable
-                    style="width:210px" @keyup.enter="reload" @clear="reload">
-            <template #prefix>🔍</template>
-          </el-input>
+                    style="width:210px" @keyup.enter="reload" @clear="reload" />
         </div>
 
         <!-- 图表统计（ECharts，跟随当前筛选口径） -->
         <div class="charts-panel">
           <div class="charts-head">
-            <b>📊 图表统计</b>
+            <b>图表统计</b>
             <span class="hint">跟随上方筛选条件</span>
             <div style="flex:1"></div>
             <el-switch v-model="chartsVisible" size="small" style="--el-switch-on-color: var(--accent)" />
@@ -120,7 +118,7 @@
                 </el-select>
                 <span class="lbl">TOP</span>
                 <el-input-number v-model="custom.limit" size="small" :min="5" :max="50" :step="5" style="width:100px" />
-                <el-button size="small" type="primary" @click="saveView">💾 保存视图</el-button>
+                <el-button size="small" type="primary" @click="saveView">保存视图</el-button>
                 <el-select v-model="viewSel" size="small" placeholder="我的视图" style="width:150px" clearable @change="applyView">
                   <el-option v-for="(v, i) in views" :key="i" :label="v.name" :value="i" />
                 </el-select>
@@ -142,7 +140,7 @@
 
         <!-- 表格 -->
         <div class="tbl-wrap">
-          <el-table :data="rows" v-loading="loading" row-key="id" height="560"
+          <el-table :data="rows" v-loading="loading" row-key="id" :height="tblH"
                     :row-class-name="rowClass" @selection-change="onSel"
                     @row-dblclick="openDetail" style="width:100%">
             <el-table-column type="selection" width="36" />
@@ -215,7 +213,7 @@
         <div class="it"><span class="k">是否我们的问题</span><span class="v">{{ dlg.row.is_our_problem || '否' }}</span></div>
         <div class="it full"><span class="k">解决方案</span><span class="v">{{ dlg.row.solution || '—' }}</span></div>
       </div>
-      <div class="readonly-tip">ℹ️ 本版为只读查询站点；新增 / 编辑 / 删除 / 批量操作请在桌面端完成。</div>
+      <div class="readonly-tip">本版为只读查询站点；新增 / 编辑 / 删除 / 批量操作请在桌面端完成。</div>
       <template #footer>
         <el-button @click="dlg.show = false">关闭</el-button>
       </template>
@@ -231,14 +229,23 @@ import * as echarts from 'echarts'
 import { fetchRecords, fetchCycleOptions, fetchCharts, fetchQuery } from './api'
 
 // 侧边栏折叠（持久化；不用宽度过渡——过渡期间主区表格+图表每帧重排会卡顿，改为瞬时切换）
+// 图表尺寸自适应统一由 chartRO（ResizeObserver）驱动，此处无需手动 resize
 const collapsed = ref(localStorage.getItem('aftersale_sidebar_collapsed') === '1')
-let sideTimer = null
 function toggleSide() {
   collapsed.value = !collapsed.value
   localStorage.setItem('aftersale_sidebar_collapsed', collapsed.value ? '1' : '0')
-  clearTimeout(sideTimer)
-  sideTimer = setTimeout(resizeCharts, 60) // 布局稳定后一次性重算图表
 }
+
+// 表格高度：按视口动态计算（桌面加长，手机按比例），并支持手机端抽屉侧栏
+const isMobile = () => window.innerWidth < 768
+const tblH = ref(760)
+function calcTblH() {
+  const h = window.innerHeight
+  tblH.value = isMobile()
+    ? Math.max(360, Math.round(h * 0.58))
+    : Math.max(560, Math.min(920, h - 280))
+}
+function onWinResize() { calcTblH() }
 
 const loading = ref(false)
 const rows = ref([])
@@ -293,6 +300,9 @@ async function delView() {
   persistViews()
 }
 
+let chartRO = null
+let chartROraf = 0
+
 function initCharts() {
   charts = [
     { el: chartRegion.value, type: 'pie' },
@@ -301,13 +311,22 @@ function initCharts() {
     { el: chartIssue.value, type: 'hbar' },
     { el: chartCustom.value, type: 'custom' },
   ].map(cfg => ({ ...cfg, inst: cfg.el ? echarts.init(cfg.el) : null })).filter(c => c.inst)
+  // 容器实际尺寸变化 → 统一驱动 resize（覆盖窗口缩放/侧栏折叠/面板开合所有场景）
+  if (window.ResizeObserver) {
+    chartRO = new ResizeObserver(() => {
+      cancelAnimationFrame(chartROraf)
+      chartROraf = requestAnimationFrame(resizeCharts) // rAF 合并，拖拽缩放时每帧最多一次
+    })
+    charts.forEach(c => chartRO.observe(c.el))
+  }
 }
 function disposeCharts() {
+  if (chartRO) { chartRO.disconnect(); chartRO = null }
+  cancelAnimationFrame(chartROraf)
   charts.forEach(c => c.inst.dispose())
   charts = []
 }
 function resizeCharts() { charts.forEach(c => c.inst.resize()) }
-watch(chartsVisible, v => nextTick(() => { if (v) resizeCharts() }))
 watch(custom, () => {
   clearTimeout(queryTimer)
   queryTimer = setTimeout(loadCustom, 250) // 防抖
@@ -460,16 +479,18 @@ function openDetail(row) { dlg.row = row; dlg.show = true }
 onMounted(async () => {
   try { cycles.value = (await fetchCycleOptions())?.options || [] } catch { /* ignore */ }
   loadViews()
+  if (isMobile()) collapsed.value = true // 手机端默认收起抽屉菜单
+  calcTblH()
   await nextTick()
   initCharts()
-  window.addEventListener('resize', resizeCharts)
+  window.addEventListener('resize', onWinResize)
   load()
   loadCharts()
   loadCustom()
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', resizeCharts)
+  window.removeEventListener('resize', onWinResize)
   disposeCharts()
 })
 </script>
