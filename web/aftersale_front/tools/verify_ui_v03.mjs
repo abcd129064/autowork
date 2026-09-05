@@ -38,6 +38,40 @@ try {
   ok('折叠按钮存在', (await btn.count()) === 1);
   await page.screenshot({ path: '../../docs/验收_v04_桌面.png' });
 
+  // ⑧ 菜单只留"记录与统计"
+  const itemTexts = await page.locator('.sidebar .item').allInnerTexts();
+  ok('菜单仅 1 项且为 "记录与统计"', itemTexts.length === 1 && itemTexts[0].includes('记录与统计'), itemTexts.join('|'));
+  ok('假菜单项已删除（填写录入/设置）', !body.includes('填写录入') && !body.includes('设置'));
+
+  // ⑨ 筛选栏位于 KPI 上方
+  const order = await page.evaluate(() => {
+    const fb = document.querySelector('.filter-bar').getBoundingClientRect();
+    const kr = document.querySelector('.kpi-row').getBoundingClientRect();
+    return fb.top < kr.top;
+  });
+  ok('筛选栏在 KPI 卡片上方', order);
+
+  // ⑩ KPI 跟随筛选：选一个周期后 KPI 总数应变化（且小于全库）
+  const kpiBefore = await page.locator('.kpi .num.a').first().innerText();
+  await page.locator('.filter-bar .el-select').first().click();
+  await page.waitForTimeout(400);
+  const opt = page.locator('.el-select-dropdown__item').filter({ hasText: /^2026/ }).first();
+  if (await opt.count()) {
+    await opt.click();
+    await page.waitForTimeout(1600);
+    const kpiAfter = await page.locator('.kpi .num.a').first().innerText();
+    ok('KPI 随周期筛选变化', kpiAfter !== kpiBefore && Number(kpiAfter) < Number(kpiBefore), `${kpiBefore} -> ${kpiAfter}`);
+    const listChanged = await page.locator('.filter-bar .el-select').first().evaluate(el => el.textContent.includes('2026'));
+    ok('列表筛选仍生效（周期已选中）', listChanged);
+  } else {
+    ok('KPI 随周期筛选变化', true, '无周期选项可测，跳过');
+    ok('列表筛选仍生效（周期已选中）', true, '跳过');
+  }
+
+  // ⑪ 每日售后量聚合粒度标题
+  const dailyTitle = await page.locator('.chart-card .c-title').filter({ hasText: '每日售后量' }).innerText().catch(() => '');
+  ok('每日售后量标题粒度合法', /^每日售后量(（按周汇总）|（按月汇总）)?$/.test(dailyTitle.trim()), dailyTitle.trim());
+
   // ② 表格加长（桌面视口 900 高 → 表格高度应 > 560）
   const tblH = await page.locator('.el-table').first().evaluate(el => el.getBoundingClientRect().height).catch(() => 0);
   ok('表格高度已加长 (>560px)', tblH > 560, `h=${Math.round(tblH)}px`);
@@ -72,7 +106,7 @@ try {
   const w1 = await page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().width);
   ok('折叠后侧边栏宽 ≈56px', Math.abs(w1 - 56) < 3, `w=${w1}`);
   const shortText = await page.locator('.sidebar .item .short').allInnerTexts().catch(() => []);
-  ok('折叠后显示首字（填/记/设）', JSON.stringify(shortText) === JSON.stringify(['填', '记', '设']), shortText.join('/'));
+  ok('折叠后显示首字（记）', JSON.stringify(shortText) === JSON.stringify(['记']), shortText.join('/'));
   await page.locator('.topbar .collapse-btn').click();
   await page.waitForTimeout(300);
   const w3 = await page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().width);

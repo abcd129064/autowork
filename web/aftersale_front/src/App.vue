@@ -14,9 +14,7 @@
       <!-- 侧边导航 -->
       <aside class="sidebar" :class="{ collapsed }">
         <div class="grp">售后</div>
-        <div class="item"><span class="t">填写录入</span><span class="short">填</span></div>
         <div class="item on"><span class="t">记录与统计</span><span class="short">记</span></div>
-        <div class="item"><span class="t">设置</span><span class="short">设</span></div>
         <div class="side-foot" v-if="!collapsed">周期模式 tue<br>只读，填写请使用autowork</div>
       </aside>
 
@@ -29,31 +27,7 @@
           <el-button size="small" @click="load()">刷新</el-button>
         </div>
 
-        <!-- KPI -->
-        <div class="kpi-row">
-          <div class="kpi a" @click="setKpi('all')">
-            <div class="lab">售后总数</div>
-            <div class="num a">{{ stats.total ?? '-' }}</div>
-            <div class="sub">全库记录</div>
-          </div>
-          <div class="kpi g" @click="setKpi('unresolved')">
-            <div class="lab">未解决</div>
-            <div class="num r">{{ stats.unresolved ?? '-' }}</div>
-            <div class="sub">待跟进:点击筛选</div>
-          </div>
-          <div class="kpi b" @click="setKpi('initiative')">
-            <div class="lab">我们主动发起</div>
-            <div class="num b">{{ stats.initiative ?? '-' }}</div>
-            <div class="sub">点击筛选</div>
-          </div>
-          <div class="kpi y" @click="setKpi('our')">
-            <div class="lab">我方问题</div>
-            <div class="num y">{{ stats.our_problem ?? '-' }}</div>
-            <div class="sub">点击筛选</div>
-          </div>
-        </div>
-
-        <!-- 筛选栏 -->
+        <!-- 筛选栏（置于 KPI 之上） -->
         <div class="filter-bar">
           <span class="lbl">周期</span>
           <el-select v-model="f.cycle_start" style="width:170px" clearable placeholder="全部周期" @change="reload">
@@ -79,6 +53,30 @@
                     style="width:210px" @keyup.enter="reload" @clear="reload" />
         </div>
 
+        <!-- KPI（跟随筛选条件变化） -->
+        <div class="kpi-row">
+          <div class="kpi a" @click="setKpi('all')">
+            <div class="lab">售后总数</div>
+            <div class="num a">{{ stats.total ?? '-' }}</div>
+            <div class="sub">全库记录</div>
+          </div>
+          <div class="kpi g" @click="setKpi('unresolved')">
+            <div class="lab">未解决</div>
+            <div class="num r">{{ stats.unresolved ?? '-' }}</div>
+            <div class="sub">待跟进:点击筛选</div>
+          </div>
+          <div class="kpi b" @click="setKpi('initiative')">
+            <div class="lab">我们主动发起</div>
+            <div class="num b">{{ stats.initiative ?? '-' }}</div>
+            <div class="sub">点击筛选</div>
+          </div>
+          <div class="kpi y" @click="setKpi('our')">
+            <div class="lab">我方问题</div>
+            <div class="num y">{{ stats.our_problem ?? '-' }}</div>
+            <div class="sub">点击筛选</div>
+          </div>
+        </div>
+
         <!-- 图表统计（ECharts，跟随当前筛选口径） -->
         <div class="charts-panel">
           <div class="charts-head">
@@ -89,7 +87,7 @@
           </div>
           <div v-show="chartsVisible" class="charts-grid">
             <div class="chart-card"><div class="c-title">地区分布</div><div ref="chartRegion" class="chart-box"></div></div>
-            <div class="chart-card"><div class="c-title">每日售后量</div><div ref="chartDaily" class="chart-box"></div></div>
+            <div class="chart-card"><div class="c-title" ref="chartDailyTitle">每日售后量</div><div ref="chartDaily" class="chart-box"></div></div>
             <div class="chart-card"><div class="c-title">我方问题占比</div><div ref="chartOur" class="chart-box"></div></div>
             <div class="chart-card"><div class="c-title">问题类型分布</div><div ref="chartIssue" class="chart-box"></div></div>
             <!-- 自定义图表（二期 A） -->
@@ -263,6 +261,7 @@ const dlg = reactive({ show: false, row: null })
 const chartsVisible = ref(true)
 const chartRegion = ref(null)
 const chartDaily = ref(null)
+const chartDailyTitle = ref(null)
 const chartOur = ref(null)
 const chartIssue = ref(null)
 const chartCustom = ref(null)
@@ -332,6 +331,27 @@ watch(custom, () => {
   queryTimer = setTimeout(loadCustom, 250) // 防抖
 }, { deep: true })
 
+// 每日售后量：长序列自动聚合（>60 天按周汇总，周后仍 >60 按月汇总），避免几百根柱子看不清
+const pad2 = x => String(x).padStart(2, '0')
+const fmtDate = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+function aggDaily(daily) {
+  if (daily.length <= 60) return { pts: daily, gran: '' }
+  const sumBy = (keyFn) => {
+    const m = new Map()
+    for (const { date, count } of daily) {
+      const k = keyFn(new Date(date + 'T00:00:00'))
+      m.set(k, (m.get(k) || 0) + count)
+    }
+    return [...m.entries()].map(([date, count]) => ({ date, count })).sort((a, b) => a.date < b.date ? -1 : 1)
+  }
+  // 周：以周一为周首
+  const weekKey = d => { d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return fmtDate(d) }
+  const weeks = sumBy(weekKey)
+  if (weeks.length <= 60) return { pts: weeks, gran: '（按周汇总）' }
+  const months = sumBy(d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`)
+  return { pts: months, gran: '（按月汇总）' }
+}
+
 function renderCharts(d) {
   if (!charts.length) initCharts()
   // 1) 地区分布：top8 + 其他
@@ -347,14 +367,18 @@ function renderCharts(d) {
       label: { show: false }, emphasis: { label: { show: true, fontSize: 12, fontWeight: 600 } },
       data: top }],
   })
-  // 2) 每日售后量
+  // 2) 每日售后量（长序列自动聚合：周/月汇总，标题提示粒度）
+  const agg = aggDaily(d.daily)
+  if (chartDailyTitle.value) chartDailyTitle.value.textContent = '每日售后量' + agg.gran
+  const isMo = agg.gran === '（按月汇总）'
   charts[1].inst.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: 34, right: 10, top: 18, bottom: 24 },
-    xAxis: { type: 'category', data: d.daily.map(x => x.date), axisLabel: { fontSize: 10 } },
+    xAxis: { type: 'category', data: agg.pts.map(x => isMo ? x.date : x.date.slice(5)),
+      axisLabel: { fontSize: 10, rotate: agg.gran ? 30 : 0 } },
     yAxis: { type: 'value', minInterval: 1, axisLabel: { fontSize: 10 } },
-    series: [{ type: 'bar', data: d.daily.map(x => x.count), barMaxWidth: 22,
-      itemStyle: { color: '#00bcd4', borderRadius: [3, 3, 0, 0] } }],
+    series: [{ type: 'bar', data: agg.pts.map(x => x.count), barMaxWidth: 22,
+      itemStyle: { color: '#00bcd4' } }],
   })
   // 3) 我方问题占比（环形）
   const y = d.our_problem.yes ?? 0, n = d.our_problem.no ?? 0
@@ -376,7 +400,7 @@ function renderCharts(d) {
     xAxis: { type: 'value', minInterval: 1, axisLabel: { fontSize: 10 } },
     yAxis: { type: 'category', data: it.map(x => x.name).reverse(), axisLabel: { fontSize: 10, width: 66, overflow: 'truncate' } },
     series: [{ type: 'bar', data: it.map(x => x.value).reverse(), barMaxWidth: 16,
-      itemStyle: { color: '#0078d4', borderRadius: [0, 3, 3, 0] } }],
+      itemStyle: { color: '#0078d4' } }],
   })
 }
 async function loadCharts() {
@@ -423,7 +447,7 @@ function customOption(d) {
       type: d.chart === 'line' ? 'line' : 'bar',
       data: isHbar ? [...vals].reverse() : vals,
       barMaxWidth: 18, smooth: d.chart === 'line',
-      itemStyle: { color: PALETTE[0], borderRadius: d.chart === 'line' ? 0 : [3, 3, 0, 0] },
+      itemStyle: { color: PALETTE[0] },
       areaStyle: d.chart === 'line' ? { opacity: 0.08 } : undefined,
     }],
   }
@@ -462,7 +486,7 @@ async function load() {
     const d = await fetchRecords({ ...f })
     rows.value = d.rows
     total.value = d.total
-    Object.assign(stats, d.stats)
+    Object.assign(stats, d.stats) // KPI 跟随筛选条件变化
   } catch (e) {
     ElMessage.error('加载失败：' + (e?.message || e))
   } finally {

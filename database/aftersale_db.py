@@ -24,24 +24,24 @@ from datetime import datetime, timedelta
 
 from database import table_db
 
-# ==================== 字段枚举（来源：售后问题汇总8月.xlsx 解析） ====================
+# ==================== 字段枚举 ====================
 
-# 类型（11 值，Excel 中为分组首行标记，系统改为每条独立选择）
+# 类型
 ISSUE_TYPES = (
     "硬件问题", "程序相关", "识别问题", "直播相关", "操作问题",
     "其他问题", "相机偏移", "新球助手", "安装调试", "不能扫码", "待查",
 )
 
-# 地区预置（Excel 历史 9 值，允许自由输入新地区）
+# 地区预置
 REGIONS_PRESET = ("上海", "云南", "四川", "广东", "新疆", "江苏", "江西", "湖南", "西藏")
 
-# 响应时间预置档位（Excel 原数据为自由文本，允许自由输入）
+# 响应时间预置档位
 RESPONSE_TIME_PRESET = ("1分钟内", "5分钟内", "30分钟内", "1小时内", "1小时以上")
 
-# 团队默认人员（填写人/解决人候选恒置顶：新库或库中暂无这些人时下拉也不为空）
+# 团队默认人员
 _CREW_PRESET = ("张峻涛", "沈喆", "孙跃源", "吴斌", "贺勤")
 
-# 记录字段（与建表 DDL 一致）
+# 记录字段
 RECORD_FIELDS = (
     "created_at", "occurred_at", "creator", "issue_type", "table_no",
     "room_name", "region", "problem", "cause", "resolved",
@@ -50,18 +50,18 @@ RECORD_FIELDS = (
     "updated_at",
 )
 
-# 售后业务键（多用户共享去重/合并定位用）：SQLite 与 MySQL 两侧 id 各自
-# 增长会撞车，按 (created_at, creator, table_no, problem) 判定同一条记录。
-# merge_back / 历史 mysql_sync 推送共用此定义（单一来源）。
+# 售后业务键：SQLite 与 MySQL 两侧 id 各自
+# 增长会撞车，按 created_at, creator, table_no, problem 判定同一条记录。
+# merge_back / 历史 mysql_sync 推送共用此定义。
 RECORD_KEY_COLS = ("created_at", "creator", "table_no", "problem")
 
-# 关键词搜索覆盖列（全字段模糊匹配）
+# 关键词搜索覆盖列，全字段模糊匹配
 _SEARCH_FIELDS = (
     "table_no", "room_name", "problem", "region",
     "cause", "solution", "resolver", "creator",
 )
 
-# 导出表头：与原 Excel 对齐 + 系统附加列
+# 导出表头
 _EXPORT_HEADERS = (
     ("issue_type", "类型"), ("room_name", "球房"), ("table_no", "桌号"),
     ("region", "地区"), ("problem", "问题"), ("cause", "发生原因"),
@@ -72,16 +72,16 @@ _EXPORT_HEADERS = (
 )
 
 
-# ==================== 周期计算（可配置模式） ====================
+# ==================== 周期计算 ====================
 
-# 周期模式：tue=周二起(默认) / mon=自然周(周一起) / custom=自定义起始日+周期天数 / month=自然月
+# 周期模式：tue=周二起 / mon=自然周 / custom=自定义起始日+周期天数 / month=自然月
 CYCLE_MODE_DEFAULT = {"type": "tue", "start": "", "span": 7}
 _CYCLE_KEY = "aftersale_cycle"
 _VALID_TYPES = ("tue", "mon", "custom", "month")
 
 
 def load_cycle_mode() -> dict:
-    """读取周期模式设置（settings.json 的 aftersale_cycle，缺省/非法回退周二起）"""
+    """读取周期模式设置，settings.json 的 aftersale_cycle，缺省/非法回退周二起"""
     import json
     from core.app_paths import get_app_dir
 
@@ -108,7 +108,7 @@ def load_cycle_mode() -> dict:
 
 
 def save_cycle_mode(mode: dict) -> dict:
-    """保存周期模式设置（合并写，保留 settings.json 其余字段），返回规范化配置"""
+    """保存周期模式设置，合并写，保留 settings.json 其余字段，返回规范化配置"""
     import json
     from core.app_paths import get_app_dir
 
@@ -136,10 +136,10 @@ def save_cycle_mode(mode: dict) -> dict:
     return cfg
 
 
-# ==================== 常用句（售后「问题」字段快捷文本） ====================
+# ==================== 常用句 ====================
 
 _QPC_KEY = "aftersale_quick_phrases"
-# 预置常见问题描述（新库 / 无历史数据时「问题」下拉不为空）
+# 预置常见问题描述
 _QPC_DEFAULT = [
     "主机没有开机", "遥控器没反应", "程序没了", "不能扫码",
     "识别不了", "记分牌显示不出来",
@@ -147,7 +147,7 @@ _QPC_DEFAULT = [
 
 
 def load_quick_phrases() -> list:
-    """读取常用句列表（settings.json 持久化，用户新增项置顶）"""
+    """读取常用句列表，settings.json 持久化"""
     import json
     from core.app_paths import get_app_dir
 
@@ -164,7 +164,7 @@ def load_quick_phrases() -> list:
 
 
 def add_quick_phrase(text: str) -> list:
-    """新增常用句（去重、置顶），写回 settings.json，返回更新后的列表"""
+    """新增常用句，写回 settings.json，返回更新后的列表"""
     import json
     from core.app_paths import get_app_dir
 
@@ -187,8 +187,7 @@ def add_quick_phrase(text: str) -> list:
 
 
 def cycle_span_days() -> int:
-    """当前模式周期天数：tue/mon 固定 7 天，custom 取配置值（≥1），
-    month 取当月天数（自然月）"""
+    """当前模式周期天数：tue/mon 固定 7 天，custom 取配置值（≥1），month 取当月天数"""
     import calendar
 
     mode = load_cycle_mode()
@@ -204,7 +203,7 @@ def cycle_span_days() -> int:
 
 
 def cycle_start_of(dt: datetime) -> str:
-    """计算给定时间所属周期的起始日（按当前周期模式），格式 yyyy/MM/dd
+    """计算给定时间所属周期的起始日，格式 yyyy/MM/dd
 
     模式：
     - tue（默认）：周二开始周一结束，days_since_tue=(weekday-1)%7
@@ -233,7 +232,7 @@ def current_cycle_start() -> str:
 
 
 def _parse_occurred(occurred: str):
-    """解析日期串（YYYY-MM-DD，兼容带时分秒的完整时间），非法返回 None 由调用方回退"""
+    """解析日期串 YYYY-MM-DD，非法返回 None 由调用方回退"""
     try:
         return datetime.strptime(str(occurred or "").strip()[:10], "%Y-%m-%d")
     except (ValueError, TypeError):
@@ -241,8 +240,7 @@ def _parse_occurred(occurred: str):
 
 
 def cycle_label(cycle_start: str) -> str:
-    """周期展示标签：周模式 '08/19 - 08/25'（起始日 + 周期天数-1，custom 按配置 span）；
-    month 模式 '2026-08'（自然月）"""
+    """周期展示标签：周模式 '08/19 - 08/25'（起始日 + 周期天数-1，custom 按配置 span）；month 模式 '2026-08'（自然月）"""
     try:
         start = datetime.strptime(str(cycle_start).strip(), "%Y/%m/%d")
     except (ValueError, TypeError):
@@ -253,7 +251,7 @@ def cycle_label(cycle_start: str) -> str:
     return f"{start:%m/%d} - {end:%m/%d}"
 
 
-# ==================== 周期归属（统一按发生时间动态计算） ====================
+# ==================== 周期归属 ====================
 
 def cycle_date_range(cycle_start: str) -> tuple:
     """周期起止日期（date, date）：month 模式为整月，其余为起始日 + span-1 天
@@ -263,7 +261,7 @@ def cycle_date_range(cycle_start: str) -> tuple:
     """
     start = _parse_occurred(cycle_start)
     if start is None:
-        # 周期筛选/落库格式为 yyyy/MM/dd（斜杠），_parse_occurred 只认横杠
+        # 周期筛选/落库格式为 yyyy/MM/dd
         try:
             start = datetime.strptime(
                 str(cycle_start or "").strip()[:10], "%Y/%m/%d")
@@ -293,7 +291,7 @@ def _record_cycle(occurred_at: str, created_at: str):
 
 
 def _match_cycle(record: dict, cycle_start: str) -> bool:
-    """记录是否属于所选周期：按记录时间动态计算后匹配（空周期不过滤）"""
+    """记录是否属于所选周期：按记录时间动态计算后匹配，空周期不过滤"""
     if not cycle_start:
         return True
     return _record_cycle(record.get("occurred_at"),
@@ -303,15 +301,14 @@ def _match_cycle(record: dict, cycle_start: str) -> bool:
 # ==================== 连接与工具 ====================
 
 def _conn():
-    """复用 table_db 双后端连接（SQLite 单连接 / MySQL thread-local）"""
+    """复用 table_db 双后端连接，SQLite 单连接 和 MySQL thread-local"""
     return table_db.get_conn()
 
 
 def _lookup_table_binding(table_no: str) -> tuple:
-    """按桌号精确匹配球桌管理库，返回 (snk_code, device_code)
+    """按桌号精确匹配球桌管理库，返回 snk_code, device_code
 
-    桌号自由文本允许非标格式（多桌/手误），匹配不到返回空串不阻断。
-    device_code 取该球桌最近一期 kd 状态记录。
+    桌号自由文本允许非标格式，匹配不到返回空串不阻断。device_code 取该球桌最近一期 kd 状态记录。
     """
     name = str(table_no or "").strip()
     if not name:
@@ -443,7 +440,7 @@ def delete_record(rec_id) -> int:
 
 
 def mark_resolved_batch(rec_ids) -> int:
-    """批量标记已解决（最小化更新：仅改 resolved 与 updated_at），返回受影响行数
+    """批量标记已解决，返回受影响行数
 
     供列表「一键标记已解决 / 批量标记」使用：区别于 update_record 的全字段
     回写，不依赖 UI 提供其余字段原值，不会误改其他字段。

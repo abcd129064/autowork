@@ -152,6 +152,16 @@ def main():
     except Exception:
         pass
 
+    # 本地售后面板 Web 服务：daemon 线程托管前端静态页 + 反代云端 API，
+    # 浏览器访问 http://localhost:8787（settings.json local_web 节点可配置/关闭）
+    try:
+        from core.local_web_server import start_local_web_server
+        _lw = start_local_web_server(_settings)
+        if _lw.get("started"):
+            print(f"[AutoWork] 本地售后面板: {_lw['url']}")
+    except Exception:
+        pass
+
     # 创建并显示主窗口
     window = MainWindow()
     window.show()

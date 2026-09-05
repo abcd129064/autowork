@@ -93,6 +93,13 @@ qfw_hiddenimports = [
 pygwalker_datas = collect_data_files('pygwalker')
 pygwalker_hiddenimports = collect_submodules('pygwalker')
 
+# ---- 本地售后面板 Web（core/local_web_server.py）----
+# 前端构建产物随包分发到 _internal/web_dist/，运行时本地端口托管；
+# 未构建前端（目录不存在）时跳过，不影响打包
+_web_dist_datas = []
+if os.path.isdir('web/aftersale_front/dist'):
+    _web_dist_datas.append(('web/aftersale_front/dist', 'web_dist'))
+
 # ---- conda 环境适配 ----
 # 运行环境是 conda base，但 PySide6 为 PyPI 版（历史修复误装）。两类问题分开处理：
 # 1) Python C 扩展（_ctypes/_sqlite3/pyexpat/PIL/zstandard/cryptography 等）依赖的
@@ -169,7 +176,7 @@ a = Analysis(
         # 注意：settings.json / frpc.exe / frpc_xtcp.toml 由 build_exe.py
         # 构建后复制到 dist 根目录（exe 旁边），不放入 datas；
         # autowork_with_table.py / p2p.py 已被 import 追踪编译进 PYZ，无需重复打包
-    ] + pygwalker_datas + _conda_datas,
+    ] + _web_dist_datas + pygwalker_datas + _conda_datas,
     hiddenimports=[
         'PySide6.QtWidgets',
         'PySide6.QtCore',
