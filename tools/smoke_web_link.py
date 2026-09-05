@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""offscreen 冒烟：RecordsPage 页头 HyperlinkButton（网页版入口）
+"""offscreen 冒烟：RecordsPage 页头"网页版"超链接（富文本 QLabel 实现）
 - DB 隔离到临时 tmp 库（避免触碰真实 tables.db / 云 MySQL）
 - 断言以 exit code 为准；stdout 用 flush（退出走 os._exit 防 offscreen 段错误）
 """
@@ -17,10 +17,10 @@ TMP = tempfile.mkdtemp(prefix="aftersale_smoke_")
 import database.table_db as table_db
 table_db.DB_PATH = os.path.join(TMP, "tables.db")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 app = QApplication([])
 
-from windows.aftersale.records import RecordsPage, _web_entry_url
+from windows.aftersale.records import RecordsPage, _web_entry_url, _web_link_html
 
 page = RecordsPage()
 page.resize(1280, 800)
@@ -37,20 +37,21 @@ url = _web_entry_url()
 check("URL 默认指向本地 8787", url == "http://localhost:8787/", url)
 
 btn = getattr(page, "_btn_web", None)
-check("页头存在 HyperlinkButton", btn is not None)
-check("按钮文本=localhost:8787", btn is not None and btn.text() == "localhost:8787",
-      btn.text() if btn is not None else "")
-u = (btn.url.toString() if isinstance(getattr(btn, "url", None), object) and not callable(btn.url) else btn.url().toString())
-check("按钮 URL 正确", u == url, u)
+check("页头存在超链接标签", isinstance(btn, QLabel))
+ol = btn.openExternalLinks()
+check("点击由系统浏览器打开", bool(ol) if callable(ol) else bool(ol))
+txt = btn.text()
+check("链接 href 指向 localhost:8787", 'href="http://localhost:8787"' in txt, txt[:90])
+check("显示文本=localhost:8787", ">localhost:8787</a>" in txt, txt[:90])
 
-# 几何：按钮在数据源标签左侧，且文字垂直对齐（中心差 < 5px）
+# 几何：链接在数据源标签左侧，且与标签垂直中心对齐（同字体族应≈0）
 lbl = page._lbl_source
-br, lr = btn.rect().translated(btn.mapTo(page, btn.rect().topLeft())), lbl.rect().translated(lbl.mapTo(page, lbl.rect().topLeft()))
-bx = br.left()
-lx = lr.left()
-check("按钮位于数据源标签左侧", bx < lx, f"btn.x={bx} lbl.x={lx}")
-bcy, lcy = br.center().y(), lr.center().y()
-check("文字垂直对齐（中心差<5px）", abs(bcy - lcy) < 5, f"btn.cy={bcy} lbl.cy={lcy} btnH={br.height()} lblH={lr.height()}")
+br = btn.rect().translated(btn.mapTo(page, btn.rect().topLeft()))
+lr = lbl.rect().translated(lbl.mapTo(page, lbl.rect().topLeft()))
+check("链接位于数据源标签左侧", br.left() < lr.left(), f"btn.x={br.left()} lbl.x={lr.left()}")
+diff = abs(br.center().y() - lr.center().y())
+check("文字垂直对齐（中心差<3px）", diff < 3, f"btn.cy={br.center().y()} lbl.cy={lr.center().y()} btnH={br.height()} lblH={lr.height()}")
+check("与标签同高（无裁切风险）", abs(br.height() - lr.height()) <= 1, f"btnH={br.height()} lblH={lr.height()}")
 
 # settings 覆盖：enabled=false → 回退线上
 cfg_path = os.path.join(os.getcwd(), "settings.json")
@@ -59,18 +60,15 @@ with open(cfg_path, "r", encoding="utf-8") as f:
 fake = dict(real_cfg)
 fake["local_web"] = {"enabled": False}
 import unittest.mock as mock
-with mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(fake))):
-    # _web_entry_url 用 get_app_dir()+settings.json，mock open 只在路径匹配时生效
-    import builtins
-    real_open = builtins.open
-    def patched(file, *a, **kw):
-        if str(file).endswith("settings.json"):
-            import io
-            return io.StringIO(json.dumps(fake))
-        return real_open(file, *a, **kw)
-    with mock.patch("builtins.open", patched):
-        url2 = _web_entry_url()
-check("disabled 时回退线上", url2 == "http://49.235.34.253/", url2)
+import io
+def patched(file, *a, **kw):
+    if str(file).endswith("settings.json"):
+        return io.StringIO(json.dumps(fake))
+    return open(file, *a, **kw)
+with mock.patch("builtins.open", patched):
+    url2 = _web_entry_url()
+    html2 = _web_link_html()
+check("disabled 时回退线上", url2 == "http://49.235.34.253/" and "49.235.34.253" in html2, html2[:90])
 
 print("SMOKE_" + ("OK" if ok else "FAILED"), flush=True)
 os._exit(0 if ok else 1)

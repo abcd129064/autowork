@@ -2,17 +2,20 @@
 """MainWindow 远程连接 Mixin：P2P 面板、XTCP/TCP 连接、frpc 管理、SFTP/SSH/RDP 窗口启动"""
 from __future__ import annotations
 
-import re
 import sys
+import time
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QTimer, Qt, QStringListModel, QEvent, QModelIndex
+from PySide6.QtCore import QTimer, Qt, QStringListModel, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence
-from PySide6.QtWidgets import (QFormLayout, QWidget, QHBoxLayout,
-                               QCompleter, QLineEdit)
+from PySide6.QtWidgets import QFormLayout, QCompleter
 from qfluentwidgets import (EditableComboBox, FluentIcon,
-                            PushButton as FluentPushButton,
-                            CaptionLabel)
+                            PushButton as FluentPushButton)
+# CompleterMenu / MenuAnimationManager 未在 qfluentwidgets 顶层导出
+# （同 core/perf.py 引用 menu 内部类的方式）
+from qfluentwidgets.components.widgets.line_edit import CompleterMenu
+from qfluentwidgets.components.widgets.menu import (
+    MenuAnimationManager, MenuAnimationType)
 
 if TYPE_CHECKING:
     from autowork_with_table import Ui_MainWindow
@@ -31,6 +34,148 @@ from windows.remote_session.remote_session_window import RemoteSessionWindow
 from p2p import generate_random_port
 from core.frp_remote import get_session_manager, SOURCE_MANUAL, SOURCE_TABLE
 from database import table_db
+
+
+class TablePickerMenu(CompleterMenu):
+    """球桌候选弹层：已展示时原位刷新，不重跑淡入动画
+
+    逐键过滤会反复 popup()；库内 FADE_IN_* 动画每次都把 windowOpacity 从 0
+    动画到 1 并位移 8px，表现为弹层随输入闪烁跳动（「弹层错位」观感）。
+    已展示且锚点未变时直接落位到同一终点，只换内容。
+    """
+
+    def exec(self, pos, ani=True, aniType=MenuAnimationType.DROP_DOWN):
+        if not self.isVisible():
+            return super().exec(pos, ani, aniType)
+        try:
+            manager = MenuAnimationManager.make(self, aniType)
+            old = getattr(self, "aniManager", None)
+            for a in (getattr(old, "aniGroup", None), getattr(old, "ani", None)):
+                if a is not None:
+                    a.stop()          # 停掉上一次未跑完的动画，避免抢位置
+            self.aniManager = manager
+            self.clearMask()
+            self.setWindowOpacity(1)
+            self.move(manager._endPosition(pos))
+            self.show()
+        except Exception:             # 库内实现变动时退回原生弹出
+            return super().exec(pos, ani, aniType)
+
+
+class TablePickerComboBox(EditableComboBox):
+    """球桌库选择下拉：EditableComboBox + 补全弹层承载大候选集
+
+    交互与售后面板 form.py 的「问题类型」type_combo 一致：点箭头展开选择，
+    输入即搜索。差别只在候选规模——球桌候选有数百条，库内置下拉（ComboBoxMenu）
+    逐条 addAction，且每条都要 _hasItemIcon/adjustSize 全量重算尺寸（O(n²)，
+    550 条实测约 350ms 卡顿，菜单宽度还会被最长候选撑到 550px 以上）。
+    故下拉箭头改走 QCompleter 的补全弹层（CompleterMenu）：bulk setItems
+    （550 条约 5ms）、宽度可控、且不取焦点（键盘始终留在输入框，不会抢焦点）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.popupMinWidth = 0     # 弹层最小宽度(px)，0 = 跟随输入框宽度
+        self.aboutToPopup = None   # callable：弹层展示前的候选刷新钩子
+        # 是否允许 textEdited 排队的延时补全弹层展示（见 _showCompleterMenu）
+        self._popupAllowed = False
+        self.textEdited.connect(self._onPickerTextEdited)
+
+    def _onPickerTextEdited(self, _text: str):
+        """用户真实编辑：重新允许随后的延时补全展示"""
+        self._popupAllowed = True
+
+    # ---------------------------------------------------------- 弹层控制
+
+    def showPopup(self):
+        """展示补全弹层：内容为当前过滤结果，空输入即全部候选"""
+        if callable(self.aboutToPopup):
+            self.aboutToPopup()
+        completer = self.completer()
+        if completer is None:
+            return
+        if self._completerMenu is None:
+            self.setCompleterMenu(TablePickerMenu(self))
+            if self.popupMinWidth > 0:
+                view = self._completerMenu.view
+                # 弹层项 sizeHint 宽度固定为 1，实际宽度完全由 minimumWidth 决定：
+                # 一次设死就不会随候选长短在逐键过滤时抢宽度
+                view.setMinimumWidth(self.popupMinWidth)
+                # 库默认 ElideNone：弹层宽度受限时超长候选被硬切，改右侧省略号
+                view.setTextElideMode(Qt.TextElideMode.ElideRight)
+        menu = self._completerMenu
+        completer.setCompletionPrefix(self.text().strip())
+        changed = menu.setCompletion(
+            completer.completionModel(), completer.completionColumn())
+        # setMaxVisibleItems 会全量重算尺寸，值未变时不重复调用
+        if menu.view.maxVisibleItems() != completer.maxVisibleItems():
+            menu.setMaxVisibleItems(completer.maxVisibleItems())
+        # items 未变且弹层已展示时不重复 popup（避免每次按键重跑弹出动画）
+        if changed or not menu.isVisible():
+            menu.popup()
+
+    def hidePopup(self) -> bool:
+        """收起补全弹层（返回是否确实收起了一个可见弹层）"""
+        # 收起即失效：此前 textEdited 排队的延时展示不再执行，
+        # 否则 Esc / 无命中收起后弹层会「自己弹回来」（候选残留）
+        self._popupAllowed = False
+        menu = self._completerMenu
+        if menu is None:
+            return False
+        try:
+            if not menu.isVisible():
+                return False
+            menu.close()
+        except (RuntimeError, OSError):   # C++ 对象可能已销毁
+            return False
+        return True
+
+    def isPopupVisible(self) -> bool:
+        """补全弹层是否正在展示"""
+        menu = self._completerMenu
+        if menu is None:
+            return False
+        try:
+            return menu.isVisible()
+        except (RuntimeError, OSError):
+            return False
+
+    def popupCurrentText(self):
+        """弹层高亮行文本（↑↓ 导航 / 悬停后的明确选择）；未展示或无高亮返回 None
+
+        弹层默认无高亮行（库内 setItems 只 bulk addItems，不选首行），
+        这正是「回车不误选第一条模糊命中」的前提；高亮行只能由用户主动
+        导航产生（弹层持有 Qt.Popup 键盘抓取，↑↓ 由库内 CompleterMenu
+        直接转给列表，本类不插手以免一键跳两行）。
+        """
+        menu = self._completerMenu
+        if menu is None:
+            return None
+        try:
+            if not menu.isVisible():
+                return None
+            row = menu.view.currentRow()
+            item = menu.view.item(row) if row >= 0 else None
+        except (RuntimeError, OSError):
+            return None
+        return item.text() if item is not None else None
+
+    # -------------------------------------------------- 覆盖库内下拉行为
+
+    def _showComboMenu(self):
+        """下拉箭头：切换补全弹层（不走库内 ComboBoxMenu，原因见类注释）"""
+        if not self.hidePopup():
+            self.showPopup()
+
+    def _showCompleterMenu(self):
+        """输入触发的补全弹层（库内 textEdited 钩子延时 50ms 调用）
+
+        弹层可见时按键由库内 CompleterMenu 转发回本输入框，焦点判定不可靠，
+        故只按「空输入」与「是否被显式收起」两个条件忽略延时调用。
+        """
+        if not self.text().strip() or not self._popupAllowed:
+            return
+        self.showPopup()
 
 
 class RemoteMixin:
@@ -53,13 +198,13 @@ class RemoteMixin:
         def _on_p2p_search_changed(self, text: str) -> None: ...
         def _resolve_remote_target(self, tag: str, feature_name: str) -> tuple[str, int, str, str, str] | None: ...
 
-    # 球桌库选择：最小触发字符数 / 下拉可见行数 / 单次查询上限 / 输入防抖延时(ms)
-    _TABLE_PICKER_MIN_CHARS = 2
+    # 球桌库选择：弹层可见条数 / 候选与查询上限 / 宽度(px) / 候选保鲜间隔(s)
     _TABLE_PICKER_VISIBLE_ROWS = 10
-    _TABLE_PICKER_MAX_ITEMS = 50
-    _TABLE_PICKER_QUERY_LIMIT = 2000
-    _TABLE_PICKER_DEBOUNCE_MS = 150
-    _TABLE_PICKER_LABEL_HIDE_MS = 3000  # 「已选」标签自动消失延时(ms)
+    _TABLE_PICKER_MAX_ITEMS = 1200      # 候选上限（现库约 550 台带 snk 的球桌）
+    _TABLE_PICKER_QUERY_LIMIT = 3000    # 单次查库行数上限
+    _TABLE_PICKER_WIDTH = 270           # 控件宽度上限 ≈ p2p_panel 内容宽度
+    _TABLE_PICKER_POPUP_WIDTH = 320     # 弹层宽度：完整显示「球桌名 / 球房名 (snk)」
+    _TABLE_PICKER_REFRESH_SEC = 600     # 超时后展开弹层时重载一次候选
 
     def _init_p2p_panel(self):
         """初始化远程面板状态，从统一会话中心恢复手工 visitor 列表"""
@@ -312,218 +457,114 @@ class RemoteMixin:
         # 重新应用搜索过滤
         self._on_p2p_search_changed(self.ui.p2p_search.text())
 
-    # ------------------------------------------------------------------ 从球桌库选择
+    # 从球桌库选择
 
     def _init_table_picker(self):
-        """在 XTCP visitor 表单顶部插入「从球桌库选择」动态下拉搜索控件
+        """在 XTCP visitor 表单顶部插入「从球桌库选择」可编辑下拉
 
-        实时搜索 balliard_tables 中 snk_code 非空的球桌（输入即弹候选，
-        子串包含匹配），选中后自动填充 serverName/secretKey 到表单。
+        与售后面板 form.py 的「问题类型」type_combo 同款交互：点箭头即展开
+        全部球桌候选，输入即按球桌名 / 球房名 / snk_code 模糊过滤；选中后
+        自动回填 serverName(snk)/secretKey 并走「添加」流程注册为 visitor。
         直连入口由面板下方「功能」区的文件管理/SSH 终端/远程桌面承担，
         此处不再重复提供快捷按钮。
         """
         self._p2p_selected_table = None   # 当前选中的球桌行 dict
-        self._p2p_picking = False         # 选中回填时抑制 textChanged 重弹候选
-        self._p2p_table_map = {}          # 候选显示文本 -> 球桌行 dict（选中时反查）
+        self._p2p_picking = False         # 选中回填期间抑制过滤与弹层
+        self._p2p_table_entries = []      # [(候选显示文本, 球桌行)]，已排序去重
+        self._p2p_table_map = {}          # 候选显示文本 -> 球桌行 dict
+        self._p2p_table_matches = []      # 当前过滤命中的球桌行（回车判定用）
+        self._p2p_table_loaded_at = 0.0   # 候选载入时间戳（保鲜判定）
 
-        # 需求17：「从球桌库选择」改用 qfluentwidgets EditableComboBox（LineEdit
-        # 子类，视觉与其它可编辑下拉统一）；候选弹层仍走下方 QCompleter 机制
-        # （EditableComboBox 的 items 不承载候选：ComboBoxBase.clear 会清空文本、
-        # addItem 首项会改写文本，不适合输入即查库的场景，故 items 保持为空，
-        # 下拉菜单不展开，输入候选完全由 completer popup 提供）。
-        self._p2p_table_search = EditableComboBox(self.ui.p2p_panel)
-        self._p2p_table_search.setObjectName(u"p2p_table_search")
-        self._p2p_table_search.setPlaceholderText("从球桌库选择")
-        self._p2p_table_search.setClearButtonEnabled(True)
+        combo = TablePickerComboBox(self.ui.p2p_panel)
+        self._p2p_table_search = combo
+        combo.setObjectName(u"p2p_table_search")
+        combo.setPlaceholderText("从球桌库选择")
+        combo.setClearButtonEnabled(True)
+        combo.setToolTip("选择球桌后自动回填 snk 并加入下方列表；\n"
+                         "可输入球桌名 / 球房名 / snk 模糊搜索")
+        # 宽度固定：ComboBoxBase.setText 会 adjustSize()，长球桌名/球房名/snk
+        # 回填时会把控件拉宽进而撑破 290px 面板；setFixedWidth 下只省略号截断，
+        # 且宽度恒定——弹层锚定控件位置，控件宽度不再因文本变化而抖动
+        panel_max = self.ui.p2p_panel.maximumWidth()
+        inner = panel_max - 20 if 0 < panel_max < 4096 \
+            else self._TABLE_PICKER_WIDTH
+        combo.setFixedWidth(max(150, min(inner, self._TABLE_PICKER_WIDTH)))
+        combo.popupMinWidth = self._TABLE_PICKER_POPUP_WIDTH
+        combo.aboutToPopup = self._ensure_table_candidates
 
-        # 单行紧凑布局：搜索框 + 已选标签（标签作为 picker 子控件，
-        # 随模式切换显隐时随容器一起隐藏，无需单独加入显隐列表）
-        self._p2p_table_search.setMinimumWidth(150)
-        picker = QWidget(self.ui.p2p_panel)
-        picker.setObjectName(u"p2p_table_picker")
-
-        self._p2p_table_selected_label = CaptionLabel("", picker)
-        self._p2p_table_selected_label.setObjectName(u"p2p_table_selected_label")
-        # 单行不换行：防止标签撑高 picker 行引起表单布局上下漂移——候选弹层
-        # 是顶层窗口，显示后不跟随锚点移动，布局漂移会让弹层与控件错位，
-        # 点击落在空处表现为「选了不生效」（布局稳定后才恢复正常）
-        self._p2p_table_selected_label.setWordWrap(False)
-        self._p2p_table_selected_label.hide()
-
-        lay = QHBoxLayout(picker)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
-        lay.addWidget(self._p2p_table_search, 1)
-        lay.addWidget(self._p2p_table_selected_label)
-
-        # 插入 XTCP 表单首行：随模式切换的显隐复用既有遍历（标签按行索引、
-        # 控件按 p2p_xtcp_widgets 列表），无需改动 _update_p2p_visibility
-        # 「球桌库」标题暂时隐藏腾出列表空间（Task #51），picker 改为跨整行插入
-        # self.ui.p2p_xtcp_form.insertRow(0, "球桌库:", picker)
-        self.ui.p2p_xtcp_form.insertRow(0, picker)
-        self.ui.p2p_xtcp_widgets.append(picker)
-
-        self._p2p_table_search.textChanged.connect(self._schedule_table_search)
-        self._p2p_table_search.returnPressed.connect(self._on_table_search_return)
-        # 输入防抖：每敲一个字符就查库弹候选太伤性能，停顿 150ms 才真正查询
-        self._p2p_search_timer = QTimer(self)
-        self._p2p_search_timer.setSingleShot(True)
-        self._p2p_search_timer.setInterval(self._TABLE_PICKER_DEBOUNCE_MS)
-        self._p2p_search_timer.timeout.connect(self._show_table_matches)
-
-        # 「已选」标签自动消失：每次选中 show() 后重启计时（快速连续选择
-        # 时后一次重新计时），到期仅 hide() 标签，布局自动收拢不留空行
-        self._p2p_selected_label_timer = QTimer(self)
-        self._p2p_selected_label_timer.setSingleShot(True)
-        self._p2p_selected_label_timer.setInterval(self._TABLE_PICKER_LABEL_HIDE_MS)
-        self._p2p_selected_label_timer.timeout.connect(
-            self._p2p_table_selected_label.hide)
-
-        # 候选下拉：Qt 原生 QCompleter（popup 为顶层 QListView，自动锚定输入框
-        # 正下方且不抢焦点，用户可在列表显示期间继续输入）。候选内容由本类
-        # 动态查库更新 model（UnfilteredPopupCompletion 全量展示 model）。
-        self._p2p_match_model = QStringListModel([], self)
-        completer = QCompleter(self._p2p_match_model, self)
-        # 用 UnfilteredPopupCompletion 让 Qt 不做二次过滤：候选已是按关键字
-        # 查库的结果，标签前缀是球桌名而非关键字，默认过滤模式会按前缀
-        # 再筛一遍把命中项全筛没
+        # 弹层内容 = _p2p_table_model，过滤与排序全由 _apply_table_filter 掌控：
+        # 球桌标签前缀是球桌名而非关键字，交给 QCompleter 自己过滤会把 snk /
+        # 球房命中全筛没，故用 UnfilteredPopupCompletion 全量展示 model
+        self._p2p_table_model = QStringListModel([], combo)
+        completer = QCompleter(self._p2p_table_model, combo)
         completer.setCompletionMode(
             QCompleter.CompletionMode.UnfilteredPopupCompletion)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        popup = completer.popup()
-        popup.setTextElideMode(Qt.TextElideMode.ElideRight)
-        popup.setUniformItemSizes(True)
+        completer.setMaxVisibleItems(self._TABLE_PICKER_VISIBLE_ROWS)
         completer.activated[str].connect(self._on_table_match_activated)
-        # 注意：qfluentwidgets LineEdit.setCompleter 未调基类（仅存引用），
-        # 必须显式走 QLineEdit.setCompleter 才能建立原生集成，否则
-        # QCompleter 内部 widget 为空、complete() 时直接崩溃。
-        # 且不写回 _completer 属性：qfluentwidgets 的 textEdited 钩子在
-        # completer() 为 None 时提前 return，不会干扰弹出我们残缺的
-        # CompleterMenu（嵌套 exec 抢焦点）
-        QLineEdit.setCompleter(self._p2p_table_search, completer)
+        combo.setCompleter(completer)
         self._p2p_table_completer = completer
 
-        # 回车统一由本类 eventFilter 截获处理。安装顺序很关键：Qt 事件过滤
-        # 器后装先调，装在 QCompleter 之后才能先于它拿到回车——否则弹层
-        # 无高亮行时回车被 QCompleter 吞掉（表现为不添加），有高亮行时
-        # 又会无脑选中首条模糊命中（短关键词连错球房的根因）
-        self._p2p_table_search.installEventFilter(self)
+        # 插入 XTCP 表单首行（跨整行）：随模式切换的显隐复用既有
+        # p2p_xtcp_widgets 遍历，无需改动 _update_p2p_visibility
+        # 「球桌库」标题暂时隐藏腾出列表空间（Task #51）
+        self.ui.p2p_xtcp_form.insertRow(0, combo)
+        self.ui.p2p_xtcp_widgets.append(combo)
 
-    def _hide_table_matches(self):
-        """收起候选下拉并清空候选数据（容忍 C++ 对象已销毁的情况）"""
-        self._p2p_table_map.clear()
+        combo.textChanged.connect(self._on_table_filter_changed)
+        # 回车/Esc 统一由本类 eventFilter 截获（须在库内行为之前）
+        combo.installEventFilter(self)
+        # 候选异步载入：不阻塞主窗口构建（现库 550+ 台带 snk 的球桌）
+        QTimer.singleShot(0, self._load_table_candidates)
+
+    def _load_table_candidates(self):
+        """载入全部可用球桌候选（默认展示，不需先输入关键字）"""
+        rows = self._fetch_snk_table_rows()
+        entries, table_map = [], {}
+        for r in rows:
+            label = self._format_table_label(r)
+            if label in table_map:      # 同名同球房同 snk 的重复行只留一条
+                continue
+            table_map[label] = r
+            entries.append((label, r))
+        self._p2p_table_entries = entries
+        self._p2p_table_map = table_map
+        self._p2p_table_loaded_at = time.time()
+
+        combo = self._p2p_table_search
+        typed = combo.text()
+        # items 承载全量候选，EditableComboBox 的 findText/currentIndex 语义
+        # 与「问题类型」下拉一致；重建期间屏蔽信号：addItem 首项会写入文本、
+        # setCurrentIndex(-1) 又清一次，不屏蔽会白跑两轮过滤
+        combo.blockSignals(True)
         try:
-            self._p2p_match_model.setStringList([])
-            popup = self._p2p_table_completer.popup()
-            if popup is not None and popup.isVisible():
-                popup.hide()
-        except (RuntimeError, OSError):
-            pass
+            combo.clear()                # ComboBoxBase.clear：清 items 与文本
+            combo.addItems([lb for lb, _ in entries])
+            combo.setCurrentIndex(-1)    # 复位 addItem 首项写入的文本
+            if typed:
+                combo.setText(typed)
+        finally:
+            combo.blockSignals(False)
+        self._apply_table_filter(typed)
+        self._append_log(f"[球桌库] 已加载 {len(entries)} 台可选球桌候选")
 
-    def _schedule_table_search(self, text=""):
-        """输入防抖：选中回填触发的 textChanged 不重新弹候选；
-        不足最小字符数时立即收起弹层（防 QLineEdit 用旧候选自动弹出）"""
-        if self._p2p_picking:
+    def _ensure_table_candidates(self):
+        """展开弹层前的候选保鲜：首次未载入完成或超时才重查库"""
+        if self._p2p_table_entries and \
+                time.time() - self._p2p_table_loaded_at \
+                < self._TABLE_PICKER_REFRESH_SEC:
             return
-        # 再次输入时立即收起上一次「已选」标签：在候选弹层出现前先稳定布局，
-        # 避免标签隐藏时行高变化导致已显示的弹层错位、点击落空
-        if text and not self._p2p_table_selected_label.isHidden():
-            self._p2p_selected_label_timer.stop()
-            self._p2p_table_selected_label.hide()
-        if len(text.strip()) < self._TABLE_PICKER_MIN_CHARS:
-            self._p2p_search_timer.stop()
-            self._hide_table_matches()
-            return
-        self._p2p_search_timer.start()
+        self._load_table_candidates()
 
-    def eventFilter(self, obj, event):
-        """截获球桌库搜索框的回车，统一走安全选中逻辑
-
-        QCompleter 的事件过滤器在无高亮行时吞回车（不添加），高亮行时
-        直接激活候选（模糊命中多条时会连错球桌）——两种行为都不可靠，
-        在它之前截获回车，交给 _on_table_search_return 判定后选中。
-        """
-        # 搜索框在 super().__init__() 之后才创建；构造期间基类会向窗口
-        # 派发 WindowStateChange 等事件并进入本过滤器，须容忍属性尚未
-        # 初始化（直接访问会在 C++ 构造栈中升级为 SystemError）
-        if obj is getattr(self, "_p2p_table_search", None) \
-                and event.type() == QEvent.Type.KeyPress \
-                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self._on_table_search_return()
-            return True  # 消费回车：QCompleter 与输入框默认行为均不处理
-        return super().eventFilter(obj, event)
-
-    def _on_table_search_return(self):
-        """回车选中（安全语义）：候选弹层有高亮行（↑↓ 导航/悬停的明确
-        选择）时选该行；无高亮时仅当关键词能唯一定位一台球桌——snk 精确
-        命中，或全部命中仅一条——才自动选中。
-
-        多条模糊命中绝不猜第一条：短关键词（如两位数字）会子串命中大量
-        球桌，自动选首条极易连错球房（严重 bug），此时仅提示并展开候选
-        列表，由用户明确选择。
-        """
-        if self._p2p_picking:
-            return  # 选中回填流程进行中，忽略后续重复回车
-        self._p2p_search_timer.stop()
-        row = self._p2p_popup_current_row()
-        if row is None:
-            kw = self._p2p_table_search.text().strip()
-            if len(kw) < self._TABLE_PICKER_MIN_CHARS:
-                return
-            matches = self._query_snk_tables(kw)
-            exact = [r for r in matches
-                     if str(r.get("snk_code") or "").lower() == kw.lower()]
-            if len(exact) == 1:
-                row = exact[0]
-            elif len(matches) == 1:
-                row = matches[0]
-            elif not matches:
-                self._append_log("[球桌库] 未找到含 snk 标识的匹配球桌")
-                return
-            else:
-                self._append_log(
-                    f"[球桌库] 关键词 {kw!r} 命中 {len(matches)} 台球桌，"
-                    "请从候选列表选择（↑↓ 或点击），不做自动匹配")
-                self._show_table_matches()
-                return
-        self._on_table_picked(row)
-
-    def _p2p_popup_current_row(self):
-        """取候选弹层当前高亮行对应的球桌行；无有效高亮返回 None
-
-        弹层文本不在候选表时兜底从尾部解析 snk 重新查库（同 activated
-        鼠标点击路径），保证弹层与候选表短暂不同步时不静默失败。
-        """
+    def _fetch_snk_table_rows(self):
+        """查全部 snk_code 非空的球桌（排除公司测试与手动版本设备）"""
         try:
-            popup = self._p2p_table_completer.popup()
-            idx = popup.currentIndex()
-            if not popup.isVisible() or not idx.isValid():
-                return None
-            label = self._p2p_match_model.data(idx)
-        except (RuntimeError, OSError):
-            return None
-        row = self._p2p_table_map.get(label)
-        if row is None and label:
-            m = re.search(r"\(([^()]+)\)\s*$", str(label))
-            snk = m.group(1).strip() if m else str(label).strip()
-            row = next((r for r in self._query_snk_tables(snk)
-                        if r.get("snk_code") == snk), None)
-        return row
-
-    def _query_snk_tables(self, keyword: str):
-        """查询 snk_code 非空的球桌（复用表已有 FTS/LIKE 子串模糊搜索）
-
-        Returns:
-            rows 最多 _TABLE_PICKER_MAX_ITEMS 条（查询层面限流即可）。
-        """
-        try:
-            # 排除「公司测试」与手动版本设备，避免误选内部测试/手动球桌
-            _, rows = table_db.query_page(1, self._TABLE_PICKER_QUERY_LIMIT,
-                                          keyword.strip(), include_test=False,
-                                          include_manual=False)
+            _, rows = table_db.query_page(
+                1, self._TABLE_PICKER_QUERY_LIMIT, "",
+                include_test=False, include_manual=False)
         except Exception as e:
             # 记录异常类型与数据库实际路径：打包版曾因种子库未随包分发
-            # 连到自建空库导致搜索无候选，日志带 DB 路径可秒定位此类问题
+            # 连到自建空库导致无候选，日志带 DB 路径可秒定位此类问题
             self._append_log(
                 f"[球桌库] 查询失败: {type(e).__name__}: {e} "
                 f"(db={table_db.DB_PATH})")
@@ -534,70 +575,136 @@ class RemoteMixin:
             if not snk:
                 continue
             r["snk_code"] = snk
-            if len(picked) >= self._TABLE_PICKER_MAX_ITEMS:
-                break
             picked.append(r)
-        # snk_code 命中关键字的排前面：球桌库以 snk 隧道为选中目标，
-        # 名称/球房含同数字的行往后排，提高候选列表首位相关性
-        kw_l = keyword.strip().lower()
-        picked.sort(
-            key=lambda r: 0 if kw_l in r["snk_code"].lower() else 1)
+        if len(picked) > self._TABLE_PICKER_MAX_ITEMS:
+            self._append_log(
+                f"[球桌库] 候选 {len(picked)} 台超出上限，仅保留最近 "
+                f"{self._TABLE_PICKER_MAX_ITEMS} 台（可输入关键字缩小范围）")
+            picked = picked[:self._TABLE_PICKER_MAX_ITEMS]
+        # 球房 + 球桌名排序：同球房的球桌聚在一起，长列表里更好找
+        # （query_page 本身按 id DESC，即新增优先）
+        picked.sort(key=lambda r: (str(r.get("roomName") or ""),
+                                   str(r.get("name") or "")))
         return picked
 
-    def _show_table_matches(self):
-        """防抖回调：查库 -> 更新候选 model -> completer.complete() 弹出
+    @staticmethod
+    def _format_table_label(row: dict) -> str:
+        """候选显示文本：球桌名 / 球房名 (snk_code)，便于区分同名球桌"""
+        name = str(row.get("name") or "").strip() or "未命名"
+        room = str(row.get("roomName") or "").strip()
+        snk = str(row.get("snk_code") or "").strip()
+        return f"{name} / {room} ({snk})" if room else f"{name} ({snk})"
 
-        popup 由 Qt 自动锚定在输入框正下方、不取焦点（键盘留在输入框），
-        高度限制为 VISIBLE_ROWS 行、超出滚动；宽度跟随输入框不超出面板。
-        """
-        kw = self._p2p_table_search.text().strip()
-        if len(kw) < self._TABLE_PICKER_MIN_CHARS:
-            self._hide_table_matches()
+    def _on_table_filter_changed(self, text: str):
+        """输入变化：实时过滤候选（选中回填写入的文本不参与过滤）"""
+        if self._p2p_picking:
             return
-        rows = self._query_snk_tables(kw)
-        self._p2p_table_map.clear()
-        labels = []
-        for r in rows:
-            name = str(r.get("name") or "").strip() or "未命名"
-            room = str(r.get("roomName") or "").strip()
-            label = f"{name} / {room} ({r['snk_code']})" if room \
-                else f"{name} ({r['snk_code']})"
-            self._p2p_table_map[label] = r
-            labels.append(label)
-        self._p2p_match_model.setStringList(labels)
-        popup = self._p2p_table_completer.popup()
-        if not labels:
-            popup.hide()
-            return
-        # 宽度与输入框一致（过窄时兜底）；高度 = 行高 × 可见行数，超出自动滚动
-        popup.setFixedWidth(max(self._p2p_table_search.width(), 150))
-        row_h = popup.sizeHintForRow(0)
-        if row_h <= 0:
-            row_h = popup.fontMetrics().height() + 8
-        popup.setMaximumHeight(
-            row_h * self._TABLE_PICKER_VISIBLE_ROWS + 8)
-        self._p2p_table_completer.complete()
-        # 不默认高亮任何行：此前高亮首行 + 回车自动选中的组合，会让
-        # 两位数字这类模糊关键词直接连上第一条命中（错球房）。弹层默认
-        # 无高亮，回车选中统一由 _on_table_search_return 按唯一命中/
-        # snk 精确命中判定，↑↓ 或悬停后的高亮行才是明确选择
-        popup.setCurrentIndex(QModelIndex())
+        self._apply_table_filter(text)
 
-    def _on_table_match_activated(self, text: str):
-        """候选选中（鼠标点击/回车）：由显示文本反查球桌行并回填表单
+    def _apply_table_filter(self, keyword: str):
+        """按关键字过滤候选并刷新弹层内容
 
-        弹层与候选表不同步（残留旧弹层等）时，兜底从显示文本尾部解析 snk
-        重新查库，保证连续选择不静默失败。
+        空格分隔的多关键字需全部命中（如「星牌 3」）；snk_code 命中的排前面
+        （球桌库以 snk 隧道为选中目标，名称/球房含同数字的行往后排）。
+        空关键字恢复展示全量候选。
         """
-        row = self._p2p_table_map.get(text)
-        if row is None:
-            m = re.search(r"\(([^()]+)\)\s*$", str(text or ""))
-            snk = m.group(1).strip() if m else str(text or "").strip()
-            row = next((r for r in self._query_snk_tables(snk)
-                        if r.get("snk_code") == snk), None)
+        kw = (keyword or "").strip().lower()
+        entries = self._p2p_table_entries
+        if kw:
+            words = kw.split()
+            hits = [(lb, r) for lb, r in entries
+                    if all(w in lb.lower() for w in words)]
+            # sort 稳定，同组保持球房 + 球桌名顺序
+            hits.sort(key=lambda e: 0 if any(
+                w in e[1]["snk_code"].lower() for w in words) else 1)
+        else:
+            hits = entries
+        self._p2p_table_matches = [r for _, r in hits]
+        self._p2p_table_model.setStringList([lb for lb, _ in hits])
+        combo = self._p2p_table_search
+        if not hits:
+            combo.hidePopup()        # 无命中：立即收起，不留旧候选
+        elif combo.isPopupVisible():
+            combo.showPopup()        # 已展示：原位刷新为过滤结果
+
+    def eventFilter(self, obj, event):
+        """截获球桌库下拉的回车 / Esc，统一走安全选中语义
+
+        库内 EditableComboBox 的 returnPressed 会把输入文本 addItem 进候选
+        （污染全量候选），弹层又只在有高亮行时响应回车——两者都不可靠，
+        故在它们之前截获：回车交 _on_table_search_return 判定，Esc 仅收起弹层
+        并丢弃排队中的延时展示（避免候选关了又自己弹回来）。
+        ↑↓ 不在此处理：弹层可见时按键由库内 CompleterMenu 直接转发给列表，
+        重复驱动会一次跳两行。
+        """
+        # 搜索框在 super().__init__() 之后才创建；构造期间基类会向窗口
+        # 派发 WindowStateChange 等事件并进入本过滤器，须容忍属性尚未
+        # 初始化（直接访问会在 C++ 构造栈中升级为 SystemError）
+        if obj is getattr(self, "_p2p_table_search", None) \
+                and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._on_table_search_return()
+                return True  # 消费回车：库内默认行为与弹层均不再处理
+            if key == Qt.Key.Key_Escape:
+                # 确实收起了弹层才消费，否则 Esc 照旧上传（关面板搜索框等）
+                return self._p2p_table_search.hidePopup()
+        return super().eventFilter(obj, event)
+
+    def _on_table_search_return(self):
+        """回车选中（安全语义）：弹层有高亮行（↑↓ 导航/悬停的明确选择）
+        时选该行；无高亮时仅当关键词能唯一定位一台球桌——snk 精确命中，
+        或当前命中仅一条——才自动选中。
+    
+        多条模糊命中绠不猜第一条：短关键词（如两位数字）会子串命中大量
+        球桌，自动选首条极易连错球房（严重 bug），此时仅提示并展开候选
+        列表，由用户明确选择。
+        """
+        if self._p2p_picking:
+            return  # 选中回填流程进行中，忽略后续重复回车
+        combo = self._p2p_table_search
+        # 弹层高亮行优先（弹层默认无高亮，高亮只能由用户主动导航产生）
+        row = self._p2p_table_map.get(combo.popupCurrentText() or "")
+        if row is not None:
+            self._on_table_picked(row)
+            return
+        kw = combo.text().strip()
+        if not kw:
+            combo.showPopup()   # 空输入回车：直接展开全部候选供浏览
+            return
+        self._ensure_table_candidates()
+        self._apply_table_filter(kw)
+        matches = self._p2p_table_matches
+        exact = [r for r in matches if r["snk_code"].lower() == kw.lower()]
+        if len(exact) == 1:
+            self._on_table_picked(exact[0])
+        elif len(matches) == 1:
+            self._on_table_picked(matches[0])
+        elif not matches:
+            self._append_log(f"[球桌库] 关键词 {kw!r} 未匹配到球桌")
+        else:
             self._append_log(
-                f"[球桌库] 弹层文本未命中候选表({text!r})，"
-                f"按 snk={snk!r} 兜底查询{'命中' if row else '无结果'}")
+                f"[球桌库] 关键词 {kw!r} 命中 {len(matches)} 台球桌，"
+                "请从候选列表选择（↑↓ 或点击），不做自动匹配")
+            combo.showPopup()
+    
+    def _on_table_match_activated(self, text: str):
+        """候选选中（鼠标点击 / 弹层高亮行回车）：按显示文本反查球桌行
+
+        弹层与候选表短暂不同步（展开期间候选被保鲜重载）时，兜底从显示
+        文本尾部解析 snk 在已载入的候选里回查，保证连续选择不静默失败。
+        """
+        if self._p2p_picking:
+            return  # 同一次选择的其它触发路径（弹层与回车）不重复添加
+        label = str(text or "")
+        row = self._p2p_table_map.get(label)
+        if row is None:
+            snk = label.rpartition("(")[2].rstrip(")").strip()
+            row = next((r for _lb, r in self._p2p_table_entries
+                        if r["snk_code"] == snk), None) if snk else None
+            self._append_log(
+                f"[球桌库] 候选文本未命中候选表({label!r})，按 snk={snk!r} "
+                f"兜底回查{'命中' if row else '无结果'}")
             if row is None:
                 return
         self._on_table_picked(row)
@@ -606,8 +713,6 @@ class RemoteMixin:
         """选中球桌：回填表单后自动走「添加」流程，注册为 visitor 加入列表"""
         self._p2p_picking = True
         try:
-            self._p2p_search_timer.stop()
-            self._hide_table_matches()
             snk = row["snk_code"]
             name = str(row.get("name") or "").strip() or "未命名"
             room = str(row.get("roomName") or "").strip()
@@ -616,37 +721,33 @@ class RemoteMixin:
             secret = str(self._load_settings().get("xtcp_secret_key") or "abc123")
             self.ui.p2p_form_key.setText(secret)
             self._p2p_selected_table = row
-            shown = f"已选：{name} / {room} ({snk})" if room else f"已选：{name} ({snk})"
-            # 单行标签限长截断：避免挤压搜索框宽度（高度已由单行固定）
-            display = shown if len(shown) <= 34 else shown[:33] + "…"
-            self._p2p_table_selected_label.setText(display)
-            self._p2p_table_selected_label.show()
-            self._p2p_selected_label_timer.start()  # 重启 3s 自动消失计时
-            self._append_log(f"[球桌库] 已选择 {shown[3:]}，自动添加到 visitor 列表")
-            self._add_picked_table(snk)
+            shown = f"{name} / {room} ({snk})" if room else f"{name} ({snk})"
+            self._append_log(
+                f"[球桌库] 已选择 {shown}，自动添加到 visitor 列表")
+            self._add_picked_table(snk, name)
         finally:
-            # QCompleter 在本调用栈返回后才把候选标签写回输入框（textChanged
-            # 在 picking 标志仍有效时被忽略），随后清空输入框防残留长文本
-            # 触发延时重弹旧候选——连续选择时误点已添加项即由此产生；
-            # 已选结果由右侧「已选」标签展示，清空后直接可输下一个关键词
-            # 需求17：EditableComboBox 回车时库内部 _onReturnPressed 会把输入
-            # 文本加入 items，这里清掉防下拉菜单残留（文本由 _finish_table_pick 清空）
-            try:
-                self._p2p_table_search.items.clear()
-            except Exception:
-                pass
+            self._p2p_table_search.hidePopup()
+            # 选中结果由 InfoBar + visitor 列表选中行反馈，输入框延时清空：
+            # 库内 CompleterMenu 先 setText(候选文本) 再发 activated，
+            # EditableComboBox.__onActivated 随后又按 findText 写回一次，
+            # 必须等本次调用栈结束再清，否则清完立刻被写回（选中后
+            # 输入框残留长文本）；清空后直接可输下一个关键词
             QTimer.singleShot(0, self._finish_table_pick)
 
     def _finish_table_pick(self):
-        """选中流程收尾：解除输入抑制并清空搜索框（写回已在此前发生）"""
-        self._p2p_picking = False
-        self._p2p_search_timer.stop()
-        self._p2p_table_search.blockSignals(True)
-        self._p2p_table_search.clear()
-        self._p2p_table_search.blockSignals(False)
-        self._hide_table_matches()
+        """选中收尾：清空输入框并恢复全量候选（候选文本回写已在此前发生）"""
+        combo = self._p2p_table_search
+        try:
+            # setCurrentIndex(-1) 清文本并恢复 placeholder；回车路径下库内
+            # 未写回候选文本、currentIndex 本就是 -1，此时显式 setText 兜底
+            combo.setCurrentIndex(-1)
+            if combo.text():
+                combo.setText("")
+        finally:
+            self._p2p_picking = False
+        self._apply_table_filter("")
 
-    def _add_picked_table(self, snk: str):
+    def _add_picked_table(self, snk: str, table_name: str = ""):
         """把选中的球桌按表单注册为 XTCP visitor（复用「添加」按钮完整路径）
 
         重复添加保护：serverName 已在列表中时仅 InfoBar 提示并选中该行。
@@ -676,7 +777,10 @@ class RemoteMixin:
                 if self._p2p_selected_table else ""
             # 添加即注册进会话中心（不启动 frpc）：「当前隧道」面板立即可见
             self._register_visitor_to_manager(added)
-            self._show_info_bar(f"已添加 {snk}", "success")
+            # 带球桌名提示：输入框选中后会被清空，反馈全靠这条 InfoBar
+            self._show_info_bar(
+                f"已添加 {table_name}（{snk}）" if table_name
+                else f"已添加 {snk}", "success")
         else:
             # 添加未生效（如端口校验拒绝）：明确记日志，避免静默失败无迹可查
             self._append_log(f"[球桌库] 添加 {snk} 失败，请查看上方日志中的拒绝原因")
@@ -812,11 +916,6 @@ class RemoteMixin:
             "◎ 服务器 / visitors" if is_xtcp else "◎ 保存的服务器")
         for w in self.ui.p2p_xtcp_widgets:
             w.setVisible(is_xtcp)
-        # 球桌库「已选」标签：仅 XTCP 模式且已选中球桌时显示
-        picked_label = getattr(self, "_p2p_table_selected_label", None)
-        if picked_label is not None and is_xtcp \
-                and not getattr(self, "_p2p_selected_table", None):
-            picked_label.hide()
         for i in range(self.ui.p2p_xtcp_form.rowCount()):
             lbl = self.ui.p2p_xtcp_form.itemAt(i * 2, QFormLayout.ItemRole.LabelRole)
             if lbl and lbl.widget():
