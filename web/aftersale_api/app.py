@@ -136,9 +136,11 @@ def records(
                 f"SELECT * FROM aftersale_records{where} {order} LIMIT %s OFFSET %s",
                 params + [page_size, (page - 1) * page_size])
             rows = cur.fetchall()
-            # 统计（全局口径，与桌面端 stats 一致：不按周期过滤）
+            # 统计：与列表同一筛选口径（KPI 跟随筛选变化）
             def cnt(extra: str):
-                cur.execute(f"SELECT COUNT(*) n FROM aftersale_records WHERE {extra}")
+                cond = f"({extra})"
+                w = (where + " AND " + cond) if where else f" WHERE {cond}"
+                cur.execute(f"SELECT COUNT(*) n FROM aftersale_records{w}", params)
                 return cur.fetchone()["n"]
             stats = {
                 "total": cnt("1=1"),
