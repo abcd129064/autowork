@@ -15,15 +15,15 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontDatabase, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame,
-                               QScrollArea, QSizePolicy, QLabel,
+                               QScrollArea, QSizePolicy,
                                QStackedWidget)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, CardWidget,
-                            FluentIcon, SegmentedWidget, ExpandSettingCard)
+                            FluentIcon, SegmentedWidget,
+                            ComboBox, LineEdit, SwitchButton, PushButton)
 
 from main_window.pivot_page import PivotPage
 from main_window.setting_cards import (SettingGroup, SettingRow, make_switch,
-                                       make_combo, make_button, make_spinbox,
-                                       SubRow)
+                                       make_combo, make_button, make_spinbox)
 
 
 # ==================== 运维管理 ====================
@@ -167,13 +167,16 @@ class LedgerHub(PivotPage):
 # ==================== 设置（底部，Watt Toolkit 式分组卡片） ====================
 
 class SettingsHubPage(QWidget):
-    """统一设置页：左侧标题 + 右侧 SegmentedWidget 分页切换（Watt Toolkit 式）
+    """统一设置页：左标题 + 右 SegmentedWidget 分页切换（Watt Toolkit 式）
 
-    页签（2026-09-06 一期反馈：由单页长滚动改为分段切换）：
-        外观 │ 性能 │ 工具 │ 数据库 │ 面板设置
-        - 工具 = 快捷键与工具 + 配置文件
-        - 面板设置 = 售后（周期）+ 跑视频（署名）
-        - 数据库 = 管理设置整体（数据源/接口/上传/MySQL）
+    页签（2026-09-07 二期反馈：按使用频率重排 + 配置域归位）：
+        应用配置 │ 工具 │ 性能 │ 数据库 │ 面板设置 │ 外观
+        - 应用配置 = 路径 / 远程含FRP / AI 分析 / 收集与上传（自数据库页
+          迁入）/ 日志高亮 / 配置文件（自工具页迁入）
+        - 工具 = 快捷键与工具
+        - 性能 = 亚克力 / 动画 / 表格平滑滚动（范围下拉 + 开关）
+        - 数据库 = 数据源/双接口/MySQL（收集上传与手动添加已迁出）
+        - 面板设置 = 售后（周期）+ 跑视频（署名）+ 运维（手动添加球桌记录）
 
     信号：
         aftersale_cycle_saved —— 周期设置保存成功（主窗口转发售后记录页刷新）
@@ -192,29 +195,17 @@ class SettingsHubPage(QWidget):
         outer.setContentsMargins(28, 24, 28, 24)
         outer.setSpacing(12)
 
-        # --- 头部：左侧图标块 +「设置」标题 + 描述；右侧分段切换 ---
+        # --- 头部：「设置」标题 + 单行描述；右侧分段切换 ---
+        # 2026-09-07 用户反馈：删除左侧图标块，「设置」即标题；副标题一行
         header = QHBoxLayout()
         header.setSpacing(16)
-
-        icon_card = QFrame(self)
-        icon_card.setFixedSize(56, 56)
-        icon_card.setStyleSheet(
-            "QFrame { border-radius: 12px;"
-            " background: rgba(128, 128, 128, 0.14); }")
-        icon_lbl = QLabel(icon_card)
-        icon_lbl.setPixmap(FluentIcon.SETTING.icon().pixmap(28, 28))
-        icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lay = QVBoxLayout(icon_card)
-        icon_lay.setContentsMargins(0, 0, 0, 0)
-        icon_lay.addWidget(icon_lbl)
-        header.addWidget(icon_card, 0, Qt.AlignTop)
 
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
         title_col.addWidget(TitleLabel("设置", self))
         d = CaptionLabel("修改后立即生效并自动保存", self)
         d.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
-        d.setWordWrap(True)
+        d.setWordWrap(False)  # 副标题固定一行，不随分段控件挤压换行
         title_col.addWidget(d)
         header.addLayout(title_col)
         header.addStretch(1)
@@ -223,11 +214,18 @@ class SettingsHubPage(QWidget):
         self._seg = SegmentedWidget(self)
         self._stack = QStackedWidget(self)
         pages = (
-            ("appearance", "外观", (self._group_appearance,)),
+            # 2026-09-07 二期反馈：顺序 应用配置→工具→性能→数据库→面板设置→外观；
+            # 收集与上传自数据库页迁入、配置文件自工具页迁入应用配置，
+            # 手动添加球桌记录自数据库页迁入面板设置（运维）
+            ("config", "应用配置", (self._group_paths, self._group_remote,
+                                    self._group_ai, self._group_upload,
+                                    self._group_log_rules, self._group_files)),
+            ("tools", "工具", (self._group_tools,)),
             ("perf", "性能", (self._group_perf,)),
-            ("tools", "工具", (self._group_tools, self._group_files)),
             ("database", "数据库", (self._group_database,)),
-            ("panels", "面板设置", (self._group_aftersale, self._group_ledger)),
+            ("panels", "面板设置", (self._group_aftersale, self._group_ledger,
+                                    self._group_management)),
+            ("appearance", "外观", (self._group_appearance,)),
         )
         self._keys = []
         for index, (key, text, builders) in enumerate(pages):
@@ -241,7 +239,7 @@ class SettingsHubPage(QWidget):
 
             self._seg.addItem(routeKey=key, text=text, onClick=_go)
             self._stack.addWidget(self._make_page(builders))
-        self._seg.setCurrentItem("appearance")
+        self._seg.setCurrentItem("config")
         header.addWidget(self._seg, 0, Qt.AlignTop)
         outer.addLayout(header)
 
@@ -347,11 +345,11 @@ class SettingsHubPage(QWidget):
         from core.perf import (is_acrylic_enabled, is_animation_enabled,
                                is_table_smooth_scroll_enabled,
                                get_table_smooth, set_acrylic_enabled,
-                               set_animation_enabled,
-                               set_table_smooth_scroll_enabled,
-                               set_table_smooth)
-        # 面板级覆盖 4 个开关收进 Win11 设置式折叠卡（ExpandSettingCard，
-        # 默认收起、点击标题行展开）
+                               set_animation_enabled, set_table_smooth)
+        # 2026-09-07 用户反馈重排为三项：亚克力 / 动画 / 表格平滑滚动；
+        # 原面板级覆盖 ExpandSettingCard 在卡内渲染挤压错乱（真机截图），
+        # 改为 Win11 设置式「作用范围下拉框 + 开关」：下拉选范围，开关
+        # 作用于所选范围（全部面板=全局，具体面板=单独覆盖）
         g = SettingGroup("性能", parent)
 
         g.addRow(SettingRow(
@@ -362,34 +360,42 @@ class SettingsHubPage(QWidget):
             FluentIcon.QUIET_HOURS, "动画效果",
             "菜单和弹窗的过渡动画，关闭后立即显示",
             make_switch(is_animation_enabled(), set_animation_enabled)))
+
+        # 表格平滑滚动：范围下拉（全部/售后/跑视频/运维/远程）+ 开关
+        scope_combo = ComboBox()
+        for label, panel in (("全部面板", None), ("售后面板", "aftersale"),
+                             ("跑视频面板", "video"), ("运维管理", "management"),
+                             ("远程会话", "remote")):
+            scope_combo.addItem(label, userData=panel)
+        scope_combo.setCurrentIndex(0)  # 先回显再连接，初始化不误触发
+        scope_combo.setFixedWidth(120)
+
+        state = {"syncing": False}
+
+        def _sync_switch():
+            """切范围时回显该范围当前生效值（覆盖→全局；panel=None 即全局）"""
+            state["syncing"] = True
+            v = get_table_smooth(scope_combo.currentData())
+            smooth_switch.setChecked(v)
+            smooth_switch.setText("开" if v else "关")
+            state["syncing"] = False
+
+        def _on_smooth(checked):
+            if state["syncing"]:
+                return
+            # 开关作用于所选范围；qfw setChecked 亦会发 checkedChanged，
+            # syncing 守卫挡掉回显引发的重复写盘
+            set_table_smooth(scope_combo.currentData(), checked)
+            self.table_smooth_changed.emit("all")
+
+        smooth_switch = make_switch(is_table_smooth_scroll_enabled(),
+                                    _on_smooth)
+        scope_combo.currentIndexChanged.connect(lambda _i: _sync_switch())
+
         g.addRow(SettingRow(
             FluentIcon.SPEED_HIGH, "表格平滑滚动",
-            "大表格逐帧重绘容易卡顿，关闭后滚动更跟手",
-            make_switch(
-                is_table_smooth_scroll_enabled(),
-                lambda v: (set_table_smooth_scroll_enabled(v),
-                           self.table_smooth_changed.emit("all")))))
-
-        # 面板级覆盖折叠卡：默认收起，展开后为 4 个面板级开关
-        cover = ExpandSettingCard(
-            FluentIcon.SPEED_HIGH, "面板表格平滑滚动", parent=parent)
-        body = QWidget(cover)
-        v = QVBoxLayout(body)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        for title, panel in (("售后面板", "aftersale"),
-                             ("跑视频面板", "video"),
-                             ("运维管理", "management"),
-                             ("远程会话", "remote")):
-            v.addWidget(SubRow(
-                title,
-                make_switch(
-                    get_table_smooth(panel),
-                    lambda checked, p=panel: (
-                        set_table_smooth(p, checked),
-                        self.table_smooth_changed.emit("all")))))
-        cover.addWidget(body)
-        g.addWidget(cover)
+            "开关作用于所选范围，选择具体面板时单独覆盖全局设置",
+            [scope_combo, smooth_switch]))
         return g
 
     def _group_tools(self, parent):
@@ -417,8 +423,9 @@ class SettingsHubPage(QWidget):
 
     def _group_database(self, parent):
         g = SettingGroup("数据库与接口", parent)
-        # 原管理设置页整体迁入（数据源/接口1·2 账号/收集上传/MySQL 配置）；
-        # embedded=True 去掉内部滚动与性能卡（性能组已有同款开关），统一页统一滚动
+        # 原管理设置页迁入（数据源/接口1·2 账号/MySQL 配置）；2026-09-07
+        # 收集上传迁「应用配置」、手动添加球桌迁「面板设置→运维」，embedded
+        # 模式不再构建这三张卡
         from windows.management.settings_page import AdminSettingsPage
         self.admin_settings = AdminSettingsPage(parent, embedded=True)
         self.admin_settings.table_smooth_changed.connect(
@@ -443,6 +450,14 @@ class SettingsHubPage(QWidget):
         g.addWidget(self.signer_card)
         return g
 
+    def _group_management(self, parent):
+        """运维（2026-09-07 手动添加球桌记录自数据库页迁入，作运维面板设置）"""
+        from windows.management.settings_page import AddTableRecordCard
+        g = SettingGroup("运维", parent)
+        self.add_record_card = AddTableRecordCard(parent)
+        g.addWidget(self.add_record_card)
+        return g
+
     def _group_files(self, parent):
         win = self._win
         g = SettingGroup("配置文件", parent)
@@ -459,6 +474,406 @@ class SettingsHubPage(QWidget):
             "cfg.json")
         row(FluentIcon.DOCUMENT, "frpc_xtcp_panel.toml", "远程会话穿透配置",
             "frpc_xtcp_panel.toml")
+        return g
+
+    # ---------- 应用配置（2026-09-07 弹窗 7 配置域迁入） ----------
+
+    @staticmethod
+    def _safe_int(value, default):
+        """安全整数转换，失败时返回默认值"""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _group_paths(self, parent):
+        """路径配置：程序/视频/工具路径与批量整理目录，编辑即存"""
+        from main_window.setting_cards import make_path_row
+        win = self._win
+        settings = win._load_settings()
+        defaults = getattr(win, "DEFAULT_PATHS", {})
+        g = SettingGroup("路径配置", parent)
+        items = [
+            ("exe_dir", "程序目录", "dir"),
+            ("videos_dir", "视频/日志目录", "dir"),
+            ("cipher_tool", "加密工具", "file"),
+            ("front_exe", "前端程序", "file"),
+            ("backend_exe", "后端程序", "file"),
+            ("newlog_excel_dir", "整理Excel目录", "dir"),
+            ("newlog_out_dir", "整理输出目录", "dir"),
+        ]
+        for key, title, mode in items:
+            value = str(settings.get(key, "") or defaults.get(key, "") or "")
+            g.addRow(make_path_row(key, title, value, mode, win))
+        return g
+
+    def _group_remote(self, parent):
+        """远程连接：会话恢复开关 + SSH/SFTP 凭据 + FRP 穿透服务器
+
+        凭据写 credentials 域，落盘由门面自动 DPAPI 加密（UI 只接触明文）；
+        FRP 为嵌套 dict，三个控件任一编辑结束都整副本写回。
+        """
+        from main_window.setting_cards import make_line_edit
+        win = self._win
+        settings = win._load_settings()
+        g = SettingGroup("远程连接", parent)
+
+        g.addRow(SettingRow(
+            FluentIcon.SYNC, "启动时恢复远程会话",
+            "重启后自动恢复上次未退出的 SSH 与远程桌面会话",
+            make_switch(bool(settings.get("restore_remote_sessions", True)),
+                        lambda v: win._save_settings(
+                            {"restore_remote_sessions": v}))))
+
+        g.addRow(SettingRow(
+            FluentIcon.PEOPLE, "SSH 用户名", "远程主机的登录用户名",
+            make_line_edit(str(settings.get("ssh_user", "") or ""),
+                           lambda t: win._save_settings(
+                               {"ssh_user": t.strip()}),
+                           "SSH 用户名")))
+
+        g.addRow(SettingRow(
+            FluentIcon.VPN, "SSH 密码", "落盘自动加密",
+            make_line_edit(str(settings.get("ssh_pass", "") or ""),
+                           lambda t: win._save_settings(
+                               {"ssh_pass": t.strip()}),
+                           "SSH 密码", password=True)))
+
+        g.addRow(SettingRow(
+            FluentIcon.FOLDER, "SFTP 默认路径", "远程文件传输的起始目录",
+            make_line_edit(str(settings.get("sftp_default_remote_path", "") or ""),
+                           lambda t: win._save_settings(
+                               {"sftp_default_remote_path": t.strip()}),
+                           "如 /home/user/project")))
+
+        # FRP 穿透服务器（嵌套 dict：任一控件编辑结束整副本写回）
+        frpc = dict(settings.get("frpc_server", {}) or {})
+        e_addr = make_line_edit(str(frpc.get("serverAddr", "") or ""),
+                                placeholder="服务器 IP")
+        e_port = make_line_edit(str(frpc.get("serverPort", 7000)),
+                                placeholder="端口号")
+        e_token = make_line_edit(str(frpc.get("auth_token", "") or ""),
+                                 placeholder="认证 Token", password=True)
+
+        def _save_frpc():
+            merged = dict(frpc)
+            merged.update({
+                "serverAddr": e_addr.text().strip(),
+                "serverPort": self._safe_int(e_port.text().strip(), 7000),
+                "auth_method": "token",
+                "auth_token": e_token.text().strip(),
+            })
+            win._save_settings({"frpc_server": merged})
+
+        for _e in (e_addr, e_port, e_token):
+            _e.editingFinished.connect(_save_frpc)
+
+        g.addRow(SettingRow(
+            FluentIcon.CONNECT, "FRP 服务器地址", "内网穿透服务器地址", e_addr))
+        g.addRow(SettingRow(
+            FluentIcon.SPEED_HIGH, "FRP 服务器端口", "默认 7000", e_port))
+        g.addRow(SettingRow(
+            FluentIcon.CERTIFICATE, "FRP 认证 Token", "落盘自动加密", e_token))
+        return g
+
+    def _group_ai(self, parent):
+        """AI 分析：总开关 + 厂商/Key/模型联动
+
+        联动规则沿用原弹窗 _apply_ai_vendor：切换厂商 → 刷新该厂商已存
+        Key、重置官方默认模型并更新接口地址提示；首次回显保留已保存的
+        自定义模型。Key 按厂商分别保存在 ai_api_keys 嵌套 dict（清空即
+        删除该厂商条目），落盘门面自动 DPAPI。
+        """
+        from core.ai_providers import AI_PROVIDERS, get_provider
+        from main_window.setting_cards import make_line_edit
+        win = self._win
+        settings = win._load_settings()
+        g = SettingGroup("AI 分析", parent)
+
+        g.addRow(SettingRow(
+            FluentIcon.ROBOT, "启用 AI 日志分析",
+            "对采集的 SSH 日志做智能分析",
+            make_switch(bool(settings.get("forensic_ai_analysis", True)),
+                        lambda v: win._save_settings(
+                            {"forensic_ai_analysis": v}))))
+
+        saved_keys = dict(settings.get("ai_api_keys", {}) or {})
+        saved_model = str(settings.get("ai_model", "") or "").strip()
+        cur_vendor = str(settings.get("ai_vendor", "deepseek") or "deepseek")
+        provider = get_provider(cur_vendor)
+
+        combo = ComboBox()
+        for p in AI_PROVIDERS:
+            # qfw addItem 第二参是 icon，userData 必须关键字传参
+            combo.addItem(p["label"], userData=p["id"])
+        idx = next((i for i in range(combo.count())
+                    if combo.itemData(i) == provider["id"]), 0)
+        combo.setCurrentIndex(idx)  # 先回显再连接，初始化不误触发
+        combo.setFixedWidth(170)
+
+        e_key = make_line_edit(
+            str(saved_keys.get(provider["id"]) or ""),
+            placeholder="各厂商开放平台创建的 API Key", password=True)
+        e_model = make_line_edit(
+            saved_model or provider["default_model"],
+            placeholder="模型名")
+
+        url_row = SettingRow(FluentIcon.GLOBE, "接口地址",
+                             provider["base_url"])
+
+        state = {"vendor": provider["id"], "initial": True}
+
+        def _apply_vendor(vendor_id):
+            p = get_provider(vendor_id)
+            state["vendor"] = p["id"]
+            e_key.setText(str(saved_keys.get(p["id"]) or ""))
+            if state["initial"]:
+                # 首次回显：保留已保存的自定义模型
+                e_model.setText(saved_model or p["default_model"])
+            else:
+                # 手动切换厂商：重置为官方默认模型并保存选择
+                e_model.setText(p["default_model"])
+                win._save_settings({"ai_vendor": p["id"]})
+            if getattr(url_row, "desc_label", None) is not None:
+                url_row.desc_label.setText(p["base_url"])
+            state["initial"] = False
+
+        def _save_key():
+            v = e_key.text().strip()
+            if v:
+                saved_keys[state["vendor"]] = v
+            else:
+                saved_keys.pop(state["vendor"], None)
+            win._save_settings({"ai_api_keys": dict(saved_keys)})
+
+        def _save_model():
+            win._save_settings({"ai_model": e_model.text().strip()})
+
+        combo.currentIndexChanged.connect(
+            lambda _i: _apply_vendor(combo.currentData()))
+        e_key.editingFinished.connect(_save_key)
+        e_model.editingFinished.connect(_save_model)
+
+        g.addRow(SettingRow(FluentIcon.PALETTE, "模型厂商",
+                            "OpenAI 兼容接口的服务商", combo))
+        g.addRow(SettingRow(FluentIcon.VPN, "API Key",
+                            "按厂商分别保存，清空即删除当前厂商的 Key",
+                            e_key))
+        g.addRow(SettingRow(FluentIcon.FONT, "模型",
+                            "留空使用所选厂商的默认模型", e_model))
+        g.addRow(url_row)
+        return g
+
+    def _group_upload(self, parent):
+        """收集与上传（2026-09-07 自数据库页 AdminSettingsPage 迁入）
+
+        精度/问题文件收集打包上传的 SFTP 目标；键与旧卡同（upload_*，
+        credentials 域落盘自动 DPAPI），        独立窗口模式的管理设置页仍保留
+        原集中保存卡，两处写同一批配置键。
+        """
+        from main_window.setting_cards import make_line_edit
+        win = self._win
+        settings = win._load_settings()
+        g = SettingGroup("收集与上传", parent)
+
+        def _int_or(text, default):
+            try:
+                return int(text)
+            except (TypeError, ValueError):
+                return default
+
+        g.addRow(SettingRow(
+            FluentIcon.CONNECT, "上传服务器",
+            "精度/问题文件收集打包上传的目标主机",
+            make_line_edit(str(settings.get("upload_host", "49.235.34.253") or ""),
+                           lambda t: win._save_settings(
+                               {"upload_host": t.strip()}),
+                           "上传服务器 IP")))
+        g.addRow(SettingRow(
+            FluentIcon.SPEED_HIGH, "上传端口", "SFTP 端口，默认 22",
+            make_line_edit(str(settings.get("upload_port", 22)),
+                           lambda t: win._save_settings(
+                               {"upload_port": _int_or(t.strip(), 22)}),
+                           "端口号（默认 22）", width=120)))
+        g.addRow(SettingRow(
+            FluentIcon.FOLDER, "远程目录", "服务器上的存储路径",
+            make_line_edit(
+                str(settings.get("upload_remote_dir",
+                                 "/lhcos-data/videos") or ""),
+                lambda t: win._save_settings(
+                    {"upload_remote_dir": t.strip()}),
+                "如 /lhcos-data/videos")))
+        g.addRow(SettingRow(
+            FluentIcon.PEOPLE, "上传用户名", "留空使用 root",
+            make_line_edit(str(settings.get("upload_user", "root") or ""),
+                           lambda t: win._save_settings(
+                               {"upload_user": t.strip() or "root"}),
+                           "上传用户名（默认 root）")))
+        g.addRow(SettingRow(
+            FluentIcon.VPN, "上传密码", "落盘自动加密",
+            make_line_edit(str(settings.get("upload_pass", "") or ""),
+                           lambda t: win._save_settings({"upload_pass": t}),
+                           "上传密码", password=True)))
+        return g
+
+    def _group_log_rules(self, parent):
+        """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效"""
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem, QDialog
+        from PySide6.QtWidgets import QFormLayout as _QForm
+        from main_window.settings_dialog import (_DEFAULT_LOG_RULES,
+                                                 _compile_log_rules)
+        win = self._win
+        settings = win._load_settings()
+        g = SettingGroup("日志高亮", parent)
+
+        tip = CaptionLabel(
+            "规则按序匹配，命中行整行着色；开启「命中通知」后弹提示"
+            "（每规则 10 秒去重）。正则写法与 Python re 一致，"
+            "如 ERROR|Exception。", parent)
+        tip.setWordWrap(True)
+        tip.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
+        g.addWidget(tip)
+
+        self._log_rules_state = list(
+            settings.get("log_highlight_rules") or _DEFAULT_LOG_RULES)
+        rules_list = QListWidget(parent)
+        rules_list.setFixedHeight(150)
+        g.addWidget(rules_list)
+
+        btn_host = QWidget(parent)
+        btn_lay = QHBoxLayout(btn_host)
+        btn_lay.setContentsMargins(0, 0, 0, 0)
+        btn_lay.setSpacing(10)
+        btn_lay.addWidget(make_button("添加", lambda: _add_rule(), width=76))
+        btn_lay.addWidget(make_button("编辑", lambda: _edit_rule(), width=76))
+        btn_lay.addWidget(make_button("删除", lambda: _del_rule(), width=76))
+        btn_lay.addStretch(1)
+        g.addWidget(btn_host)
+
+        def _persist():
+            """规则变更落盘 + 重编译（渲染与通知共用，不刷新则旧规则仍生效）"""
+            win._save_settings(
+                {"log_highlight_rules": list(self._log_rules_state)})
+            win._log_rules = _compile_log_rules(
+                self._log_rules_state or _DEFAULT_LOG_RULES)
+
+        def _refresh():
+            rules_list.clear()
+            for r in self._log_rules_state:
+                name = r.get("name", "") or ""
+                pat = r.get("pattern", "") or ""
+                notify = "通知" if r.get("notify") else "静默"
+                item = QListWidgetItem(f"{name}  ·  {pat}  ·  {notify}")
+                try:
+                    item.setForeground(QColor(r.get("color", "#ff5252")))
+                except Exception:
+                    pass
+                item.setData(1, r)
+                rules_list.addItem(item)
+
+        def _current_rule():
+            item = rules_list.currentItem()
+            return item.data(1) if item is not None else None
+
+        def _add_rule():
+            rule = _edit_rule_dialog({"name": "", "pattern": "",
+                                      "color": "#ff5252", "notify": True})
+            if rule:
+                self._log_rules_state.append(rule)
+                _refresh()
+                _persist()
+
+        def _edit_rule():
+            rule = _current_rule()
+            if rule is None:
+                return
+            new_rule = _edit_rule_dialog(dict(rule))
+            if new_rule:
+                i = self._log_rules_state.index(rule)
+                self._log_rules_state[i] = new_rule
+                _refresh()
+                _persist()
+
+        def _del_rule():
+            rule = _current_rule()
+            if rule is None:
+                return
+            self._log_rules_state.remove(rule)
+            _refresh()
+            _persist()
+
+        def _edit_rule_dialog(rule):
+            """规则编辑弹窗：确定返回新规则 dict，取消或正则非法返回 None"""
+            import re as _re
+            from qfluentwidgets import ColorDialog
+            dlg = QDialog(self)
+            dlg.setWindowTitle("编辑规则" if rule.get("name") else "添加规则")
+            dlg.resize(460, 250)
+            v = QVBoxLayout(dlg)
+            form = _QForm()
+            form.setSpacing(8)
+
+            name_edit = LineEdit(dlg)
+            name_edit.setText(rule.get("name", "") or "")
+            name_edit.setPlaceholderText("规则名，如：错误")
+            form.addRow("规则名:", name_edit)
+
+            pat_edit = LineEdit(dlg)
+            pat_edit.setText(rule.get("pattern", "") or "")
+            pat_edit.setPlaceholderText("正则，如 ERROR|Exception")
+            form.addRow("匹配正则:", pat_edit)
+
+            color = QColor(rule.get("color", "#ff5252") or "#ff5252")
+            color_lbl = BodyLabel(color.name(), dlg)
+            color_lbl.setStyleSheet(f"color:{color.name()}; font-weight:bold;")
+            btn_color = PushButton("选择颜色…", dlg)
+
+            def _pick():
+                nonlocal color
+                cd = ColorDialog(color, "选择高亮颜色", dlg)
+                if cd.exec():
+                    color = cd.color
+                    color_lbl.setText(color.name())
+                    color_lbl.setStyleSheet(
+                        f"color:{color.name()}; font-weight:bold;")
+
+            btn_color.clicked.connect(_pick)
+            h = QHBoxLayout()
+            h.addWidget(btn_color)
+            h.addWidget(color_lbl)
+            h.addStretch(1)
+            form.addRow("颜色:", h)
+
+            notify_sw = SwitchButton("命中时弹通知", dlg)
+            notify_sw.setChecked(bool(rule.get("notify")))
+            form.addRow("命中通知:", notify_sw)
+            v.addLayout(form)
+
+            btns = QHBoxLayout()
+            btns.addStretch(1)
+            btn_ok = PushButton("确定", dlg)
+            btn_ok.clicked.connect(dlg.accept)
+            btn_cancel = PushButton("取消", dlg)
+            btn_cancel.clicked.connect(dlg.reject)
+            btns.addWidget(btn_ok)
+            btns.addWidget(btn_cancel)
+            v.addLayout(btns)
+
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            pat = pat_edit.text().strip()
+            if not pat:
+                return None
+            try:
+                _re.compile(pat)
+            except _re.error:
+                return None
+            return {"name": name_edit.text().strip() or pat,
+                    "pattern": pat,
+                    "color": color.name(),
+                    "notify": notify_sw.isChecked()}
+
+        _refresh()
         return g
 
 

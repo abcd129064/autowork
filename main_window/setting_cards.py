@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame,
                                QLabel, QSizePolicy)
 from qfluentwidgets import (CardWidget, CaptionLabel, BodyLabel,
                             SwitchButton, ComboBox, PushButton, ToolButton,
-                            SpinBox, FluentIconBase, Theme, isDarkTheme)
+                            SpinBox, FluentIconBase, Theme, isDarkTheme,
+                            qconfig, FluentIcon, LineEdit, PasswordLineEdit)
 
 
 class SubRow(QWidget):
@@ -94,6 +95,8 @@ class SettingRow(CardWidget):
             # 2026-09-07 用户反馈：依赖默认色在真机深色模式下显示为黑看不清。
             d.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
             text_col.addWidget(d)
+            # 暴露描述标签引用（动态更新场景，如 AI 接口地址随厂商切换）
+            self.desc_label = d
         lay.addLayout(text_col, 0)
 
         lay.addStretch(1)
@@ -102,6 +105,26 @@ class SettingRow(CardWidget):
             ctrls = control if isinstance(control, (list, tuple)) else [control]
             for c in ctrls:
                 lay.addWidget(c, 0, Qt.AlignRight | Qt.AlignVCenter)
+
+        # 主题切换立即落位卡片背景（2026-09-07 用户真机反馈：切换后卡片
+        # 停在旧主题色，深色下浅白卡/浅色下深灰卡）。qfw 默认走 120ms
+        # QPropertyAnimation，widget 不可见时动画可能被跳过导致终点色丢失；
+        # 此处在 qfw 之后连接，动画启动后立即停止并直接写入终点色。
+        qconfig.themeChanged.connect(self._on_theme_changed_direct)
+
+    def _on_theme_changed_direct(self, _theme=None):
+        """themeChanged 直落回调：按当前 hover/pressed 状态选色后直接
+        落位（setBackgroundColor 内部自带 update()），不经过动画。"""
+        if not self.isEnabled():
+            color = self._disabledBackgroundColor()
+        elif self.isPressed:
+            color = self._pressedBackgroundColor()
+        elif self.isHover:
+            color = self._hoverBackgroundColor()
+        else:
+            color = self._normalBackgroundColor()
+        self.backgroundColorAni.stop()
+        self.setBackgroundColor(color)
 
     def add_stretch_hint(self):
         """文本列允许换行拉宽（长描述行用）"""
@@ -199,3 +222,60 @@ class SettingGroup(QWidget):
         """嵌入整卡组件（如 AdminSettingsPage / 周期设置卡 / 署名卡）"""
         self._body.addWidget(w)
         return w
+
+
+def make_line_edit(value="", on_change=None, placeholder="", width=220,
+                   password=False):
+    """内联文本/密码输入（2026-09-07 弹窗配置域迁入统一设置页）。
+
+    editingFinished（回车或失焦）才触发 on_change(完整文本)，
+    输入过程不写盘；密码用 PasswordLineEdit + 圆点遮蔽，
+    回显明文（门面已解密），落盘由调用方走门面自动 DPAPI。
+    """
+    edit = PasswordLineEdit() if password else LineEdit()
+    edit.setText(value)
+    if placeholder:
+        edit.setPlaceholderText(placeholder)
+    if password:
+        edit.setEchoMode(LineEdit.EchoMode.Password)
+    if width:
+        edit.setFixedWidth(width)
+    if on_change is not None:
+        edit.editingFinished.connect(lambda: on_change(edit.text()))
+    return edit
+
+
+def make_path_row(key, title, value, mode, win, desc=""):
+    """路径配置卡片行：LineEdit + 浏览按钮，编辑即存（config/paths.json）。
+
+    编辑结束或浏览选定后经 win._save_settings 落盘并刷新主窗口路径缓存；
+    mode="dir" 选目录，"file" 选文件，浏览起始目录取当前值。
+    """
+    from PySide6.QtWidgets import QFileDialog
+
+    edit = LineEdit()
+    edit.setText(value)
+    edit.setPlaceholderText(f"请选择{title}…")
+    edit.setFixedWidth(260)
+
+    def _persist():
+        win._save_settings({key: edit.text().strip()})
+        win._load_paths()
+
+    edit.editingFinished.connect(_persist)
+
+    def _browse():
+        start = edit.text().strip()
+        if mode == "dir":
+            path = QFileDialog.getExistingDirectory(edit, "选择目录", start)
+        else:
+            path, _f = QFileDialog.getOpenFileName(edit, "选择文件", start)
+        if path:
+            edit.setText(path)
+            _persist()
+
+    btn = ToolButton(FluentIcon.FOLDER)
+    btn.setFixedSize(32, 32)
+    btn.setToolTip("浏览…")
+    btn.clicked.connect(lambda: _browse())
+    return SettingRow(FluentIcon.FOLDER, title, desc, [edit, btn])

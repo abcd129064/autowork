@@ -231,14 +231,17 @@ print("\n[14] 统一设置页（左标题 + 右 SegmentedWidget 分页切换）"
 from qfluentwidgets.components.navigation.segmented_widget import (  # noqa: E402
     SegmentedItem)
 sh = w.settings_hub
-check("14.1 分组存在（外观/性能/工具/数据库/售后/跑视频/配置文件）",
+check("14.1 分组存在（应用配置6组/工具/性能/数据库/面板设置3组/外观）",
       all(hasattr(sh, m) for m in ("_group_appearance", "_group_perf",
-          "_group_tools", "_group_database", "_group_aftersale",
-          "_group_ledger", "_group_files")))
+          "_group_tools", "_group_paths", "_group_remote", "_group_ai",
+          "_group_upload", "_group_log_rules", "_group_database",
+          "_group_aftersale", "_group_ledger", "_group_management",
+          "_group_files")))
 check("14.2 分段控件 + 内容页栈存在",
       getattr(sh, "_seg", None) is not None
       and getattr(sh, "_stack", None) is not None)
-check("14.3 分页共 5 页", sh._stack.count() == 5,
+check("14.3 分页共 6 页（2026-09-07 追加应用配置）",
+      sh._stack.count() == 6,
       f"count={sh._stack.count()}")
 check("14.4 管理设置已嵌入（AdminSettingsPage embedded）",
       getattr(getattr(sh, "admin_settings", None), "_embedded", False) is True)
@@ -251,13 +254,13 @@ try:
     for _ in range(5):
         app.processEvents()
     items = sh._seg.findChildren(SegmentedItem)
-    check("14.7 找到 SegmentedItem", len(items) == 5, f"count={len(items)}")
+    check("14.7 找到 SegmentedItem", len(items) == 6, f"count={len(items)}")
     before = sh._stack.currentIndex()
     items[-1].click()  # 点最后一项「面板设置」
     for _ in range(5):
         app.processEvents()
     check("14.8 点击分段项后内容页真实切换",
-          sh._stack.currentIndex() == 4 and before != 4,
+          sh._stack.currentIndex() == 5 and before != 5,
           f"{before} -> {sh._stack.currentIndex()}")
     sh.table_smooth_changed.emit("all")
     for _ in range(3):

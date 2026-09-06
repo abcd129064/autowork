@@ -61,6 +61,86 @@ from windows.management.dialogs import (
 
 # ==================== 页面3: 管理设置 ====================
 
+class AddTableRecordCard(QWidget):
+    """手动添加球桌记录卡：内嵌表单，写入本地数据库后刷新球桌管理页
+
+    2026-09-07 由 AdminSettingsPage._build_add_card 抽出为独立组件：
+    统一设置页「面板设置 → 运维」直接复用；AdminSettingsPage（独立
+    窗口模式）经 _build_add_card 委托同款组件，行为不变。
+    刷新走 self.window() 的 table_page 属性别名（主窗口已提供，
+    见 main_window.py table_page property）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        card = CardWidget(self)
+        outer.addWidget(card)
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(8)
+        vbox.addWidget(BodyLabel("手动添加球桌记录", card))
+        vbox.addWidget(CaptionLabel(
+            "直接在下方填写并提交，写入本地数据库（下次同步可能被接口数据覆盖）", card))
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self._edit_name = LineEdit(card)
+        self._edit_name.setPlaceholderText("球桌号")
+        form.addRow("球桌号:", self._edit_name)
+        self._edit_room = LineEdit(card)
+        self._edit_room.setPlaceholderText("球房名称")
+        form.addRow("球房名称:", self._edit_room)
+        self._edit_camera = LineEdit(card)
+        self._edit_camera.setPlaceholderText("相机密码")
+        form.addRow("相机密码:", self._edit_camera)
+        self._edit_snk = LineEdit(card)
+        self._edit_snk.setPlaceholderText("如 snk_001（留空则从备注解析）")
+        form.addRow("SNK标识:", self._edit_snk)
+        self._edit_remark = PlainTextEdit(card)
+        self._edit_remark.setFixedHeight(72)
+        form.addRow("备注:", self._edit_remark)
+        vbox.addLayout(form)
+
+        add_row = QHBoxLayout()
+        add_row.addStretch(1)
+        self._btn_add = PrimaryPushButton(FluentIcon.ADD, "添加记录", card)
+        self._btn_add.setToolTip("将表单内容写入本地数据库")
+        self._btn_add.clicked.connect(self._on_add_record)
+        add_row.addWidget(self._btn_add)
+        vbox.addLayout(add_row)
+
+    def _on_add_record(self):
+        """从内嵌表单读取 → 写入本地数据库 → 刷新球桌管理页"""
+        name = self._edit_name.text().strip()
+        if not name:
+            self._edit_name.setPlaceholderText("球桌号不能为空")
+            self._edit_name.setFocus()
+            return
+        record = {
+            "name": name,
+            "roomName": self._edit_room.text().strip(),
+            "onlineStatusName": "",
+            "remark": self._edit_remark.toPlainText().strip(),
+            "cameraPassExt": self._edit_camera.text().strip(),
+            "snk_code": self._edit_snk.text().strip(),
+        }
+        table_db.insert_one(record)
+        self._edit_name.clear()
+        self._edit_room.clear()
+        self._edit_camera.clear()
+        self._edit_snk.clear()
+        self._edit_remark.clear()
+        win = self.window()
+        page = getattr(win, "table_page", None)
+        if page is not None:
+            page._page_no = 1
+            page._load_local()
+        show_info_bar(f"球桌「{name}」已写入本地数据库", "success",
+                      title="添加成功", parent=self, duration=2000)
+
+
 class AdminSettingsPage(QWidget):
     """管理设置页：数据源选择、API 账号密码、连接测试
 
@@ -140,11 +220,13 @@ class AdminSettingsPage(QWidget):
         layout.addWidget(self._build_api_card(
             # （JWT 认证）
             host, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
-        layout.addWidget(self._build_upload_card(host))
-        layout.addWidget(self._build_add_card(host))
         if not self._embedded:
-            # 性能卡片：管理/远程表格平滑滚动开关（面板级覆盖→全局）；
-            # embedded 模式由统一设置页的性能组承载，此处跳过
+            # embedded（统一设置页「数据库」）仅保留 数据源/双接口/MySQL/保存：
+            # 收集上传→统一设置「应用配置」、手动添加球桌→「面板设置→运维」、
+            # 性能开关→统一设置「性能」组（2026-09-07 迁移）；
+            # 独立窗口模式（windows/management/window.py）保持原样
+            layout.addWidget(self._build_upload_card(host))
+            layout.addWidget(self._build_add_card(host))
             layout.addWidget(self._build_perf_card(host))
         # MySQL 远程同步配置（可复用组件，独立保存 settings.json）
         self._mysql_card = MysqlSyncCard(host, sync_scope="ops")
@@ -217,72 +299,10 @@ class AdminSettingsPage(QWidget):
         set_table_smooth("remote", checked)
         self.remote_smooth_changed.emit(checked)
 
-    def _on_add_record(self):
-        """从内嵌表单读取 → 写入本地数据库 → 刷新球桌管理页"""
-        name = self._add_edit_name.text().strip()
-        if not name:
-            self._add_edit_name.setPlaceholderText("球桌号不能为空")
-            self._add_edit_name.setFocus()
-            return
-        record = {
-            "name": name,
-            "roomName": self._add_edit_room.text().strip(),
-            "onlineStatusName": "",
-            "remark": self._add_edit_remark.toPlainText().strip(),
-            "cameraPassExt": self._add_edit_camera.text().strip(),
-            "snk_code": self._add_edit_snk.text().strip(),
-        }
-        table_db.insert_one(record)
-        self._add_edit_name.clear()
-        self._add_edit_room.clear()
-        self._add_edit_camera.clear()
-        self._add_edit_snk.clear()
-        self._add_edit_remark.clear()
-        win = self.window()
-        page = getattr(win, "table_page", None)
-        if page is not None:
-            page._page_no = 1
-            page._load_local()
-        show_info_bar(f"球桌「{name}」已写入本地数据库", "success",
-                      title="添加成功", parent=self, duration=2000)
-
     def _build_add_card(self, parent):
-        """手动添加球桌记录：内嵌表单卡片，无需弹窗"""
-        card = CardWidget(parent)
-        vbox = QVBoxLayout(card)
-        vbox.setContentsMargins(16, 14, 16, 14)
-        vbox.setSpacing(8)
-        vbox.addWidget(BodyLabel("手动添加球桌记录", card))
-        vbox.addWidget(CaptionLabel(
-            "直接在下方填写并提交，写入本地数据库（下次同步可能被接口数据覆盖）", card))
-
-        form = QFormLayout()
-        form.setSpacing(8)
-        self._add_edit_name = LineEdit(card)
-        self._add_edit_name.setPlaceholderText("球桌号")
-        form.addRow("球桌号:", self._add_edit_name)
-        self._add_edit_room = LineEdit(card)
-        self._add_edit_room.setPlaceholderText("球房名称")
-        form.addRow("球房名称:", self._add_edit_room)
-        self._add_edit_camera = LineEdit(card)
-        self._add_edit_camera.setPlaceholderText("相机密码")
-        form.addRow("相机密码:", self._add_edit_camera)
-        self._add_edit_snk = LineEdit(card)
-        self._add_edit_snk.setPlaceholderText("如 snk_001（留空则从备注解析）")
-        form.addRow("SNK标识:", self._add_edit_snk)
-        self._add_edit_remark = PlainTextEdit(card)
-        self._add_edit_remark.setFixedHeight(72)
-        form.addRow("备注:", self._add_edit_remark)
-        vbox.addLayout(form)
-
-        add_row = QHBoxLayout()
-        add_row.addStretch(1)
-        self._btn_add = PrimaryPushButton(FluentIcon.ADD, "添加记录", card)
-        self._btn_add.setToolTip("将表单内容写入本地数据库")
-        self._btn_add.clicked.connect(self._on_add_record)
-        add_row.addWidget(self._btn_add)
-        vbox.addLayout(add_row)
-        return card
+        """手动添加球桌记录：内嵌表单卡片（2026-09-07 抽出为独立组件
+        AddTableRecordCard，统一设置页「面板设置 → 运维」复用同一组件）"""
+        return AddTableRecordCard(parent)
 
     def _build_upload_card(self, parent):
         """收集与上传：与主界面设置对话框同款配置（复用 settings.json 同键）"""
@@ -375,13 +395,14 @@ class AdminSettingsPage(QWidget):
         active = str(creds.get("active_source", "kd")).lower()
         idx = next((i for i, (_, v) in enumerate(self._SOURCE_OPTIONS) if v == active), 0)
         self._source_combo.setCurrentIndex(idx)
-        # 收集与上传（与主界面设置同键）
-        self._edit_upload_host.setText(str(settings.get("upload_host", "49.235.34.253")))
-        self._edit_upload_port.setText(str(settings.get("upload_port", 22)))
-        self._edit_upload_dir.setText(
-            str(settings.get("upload_remote_dir", "/lhcos-data/videos")))
-        self._edit_upload_user.setText(str(settings.get("upload_user", "root")))
-        self._edit_upload_pass.setText(str(settings.get("upload_pass", "")))
+        # 收集与上传（与主界面设置同键）；embedded 模式已迁出统一设置页，不构建
+        if getattr(self, "_edit_upload_host", None) is not None:
+            self._edit_upload_host.setText(str(settings.get("upload_host", "49.235.34.253")))
+            self._edit_upload_port.setText(str(settings.get("upload_port", 22)))
+            self._edit_upload_dir.setText(
+                str(settings.get("upload_remote_dir", "/lhcos-data/videos")))
+            self._edit_upload_user.setText(str(settings.get("upload_user", "root")))
+            self._edit_upload_pass.setText(str(settings.get("upload_pass", "")))
 
     def _on_save(self):
         """保存设置：合并接口凭据/数据源/上传配置写 settings.json，即时生效"""
@@ -397,18 +418,21 @@ class AdminSettingsPage(QWidget):
             "active_source": self._SOURCE_OPTIONS[self._source_combo.currentIndex()][1],
         }
         try:
-            upload_port = int(self._edit_upload_port.text().strip() or 22)
-        except ValueError:
-            upload_port = 22
-        try:
-            _save_settings({
-                "api_credentials": api_credentials,
-                "upload_host": self._edit_upload_host.text().strip(),
-                "upload_port": upload_port,
-                "upload_remote_dir": self._edit_upload_dir.text().strip(),
-                "upload_user": self._edit_upload_user.text().strip() or "root",
-                "upload_pass": self._edit_upload_pass.text(),
-            })
+            data = {"api_credentials": api_credentials}
+            # 收集与上传仅独立窗口模式有此表单（embedded 已迁出统一设置页）
+            if getattr(self, "_edit_upload_host", None) is not None:
+                try:
+                    upload_port = int(self._edit_upload_port.text().strip() or 22)
+                except ValueError:
+                    upload_port = 22
+                data.update({
+                    "upload_host": self._edit_upload_host.text().strip(),
+                    "upload_port": upload_port,
+                    "upload_remote_dir": self._edit_upload_dir.text().strip(),
+                    "upload_user": self._edit_upload_user.text().strip() or "root",
+                    "upload_pass": self._edit_upload_pass.text(),
+                })
+            _save_settings(data)
             show_info_bar("配置已写入 settings.json，即时生效", "success",
                           title="已保存", parent=self, duration=2500)
         except Exception as e:

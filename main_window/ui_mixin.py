@@ -17,7 +17,9 @@ from qfluentwidgets import (setTheme, setThemeColor, Theme,
     TransparentDropDownPushButton, setCustomStyleSheet,
     MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
     BodyLabel, CaptionLabel, TitleLabel, isDarkTheme, RoundMenu, SwitchButton,
-    PushButton, ScrollArea, TextEdit, ProgressBar)
+    PushButton, ScrollArea, TextEdit, ProgressBar, qconfig, FluentStyleSheet)
+from qfluentwidgets.common.style_sheet import (styleSheetManager,
+    StyleSheetCompose, CustomStyleSheet, getStyleSheet)
 from qfluentwidgets.components.material import AcrylicMenu
 from qfluentwidgets.components.material.acrylic_menu import (AcrylicMenuBase,
     AcrylicMenuActionListWidget)
@@ -31,8 +33,8 @@ from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
     ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
-from main_window.settings_dialog import (SettingsDialog, _DEFAULT_LOG_RULES,
-    _compile_log_rules)
+from main_window.settings_dialog import (_DEFAULT_LOG_RULES,
+    _compile_log_rules)  # 弹窗已废止（2026-09-07），仅保留规则常量与编译函数
 
 # ==================== 版本信息（帮助→关于） ====================
 # 版本号由 core/version.py 根据 git 分支与提交次数自动计算：
@@ -1537,37 +1539,15 @@ class UIMixin:
         self._reactivate_newlog_dlg(dlg)
 
     def _on_open_settings(self):
-        """统一设置面板：分组展示所有可配置项，支持路径浏览、即时编辑"""
-        settings = self._load_settings()
+        """统一设置入口：跳转底部设置 Hub（2026-09-07 弹窗废止）
 
-        dlg = SettingsDialog(self, settings)
-        dlg.yesButton.setText("保存")
-        dlg.cancelButton.setText("取消")
-        dlg.widget.setMinimumWidth(520)
-        if dlg.exec():
-            new_data = dlg.collect()
-            old_dpi = settings.get("dpi_scale", 100)
-            old_font_size = settings.get("font_size", 11)
-            old_font_family = settings.get("font_family", "")
-            self._save_settings(new_data)
-            self._reload_settings_cache()
-            self._load_paths()
-            # SQL 同步分区被打开过：让 backend 各线程按新配置重建连接
-            # （与卡片内「保存配置」等效，避免继续使用旧 host/账号/开关）
-            if getattr(dlg, "_sql_built", False):
-                from database import backend
-                backend.invalidate_mysql_settings_cache()
-            # 日志高亮规则即时生效：notify/颜色/正则改动无需重启
-            # （_log_rules 是渲染与通知共用的编译结果，不刷新则旧规则仍生效）
-            self._log_rules = _compile_log_rules(
-                new_data.get("log_highlight_rules") or _DEFAULT_LOG_RULES)
-            # 外观变更即时应用
-            if new_data.get("font_size") != old_font_size or new_data.get("font_family") != old_font_family:
-                self._apply_global_font()
-            if new_data.get("dpi_scale") != old_dpi:
-                self._show_info_bar("缩放已修改，重启后生效")
-            self._append_log("[配置] 设置面板已保存")
-            self._show_info_bar("设置已保存")
+        配置项已全部内联迁入 SettingsHubPage（编辑即存，无保存按钮）；
+        原弹窗保存后的后处理已随配置项迁入对应保存回调：路径 →
+        make_path_row 即存后 _load_paths；MySQL → MysqlSyncCard 卡内
+        保存后 invalidate_mysql_settings_cache；日志高亮 → 规则组
+        _persist 即时重编译 _log_rules；字体/缩放 → 外观组内联回调。
+        """
+        self.switchTo(self.settings_hub)
 
     def _on_about(self):
         """显示关于对话框（版本号随 git 发布手工递增，含 GitHub 与开源库链接）"""
@@ -1769,6 +1749,13 @@ class UIMixin:
         # 全部业务页面都位于 stackedWidget 之下，故把 QSS 挂到 stackedWidget，
         # 子控件样式效果与原先完全一致。
         self._apply_business_qss()
+        # 修复 qfw 合并源嵌套膨胀（2026-09-07）：setTheme 与 setThemeColor 各触发
+        # 一次 updateStyleSheet 全量轮询，其 setStyleSheet(widget, file) 走
+        # register(reset=True) 把旧合并树整体包进新树——每切一次主题每个注册
+        # 控件 +1~2 层（stackedWidget 实测 17039→45846 字符、3→9 层）。
+        # 切换完成后统一重置为干净树；singleShot(0) 兜底 lazy 轮询异步排队的情况。
+        self._reset_qss_compose_trees()
+        QTimer.singleShot(0, self._reset_qss_compose_trees)
         if not is_dark:
             self.style().unpolish(self)
             self.style().polish(self)
@@ -1800,10 +1787,60 @@ class UIMixin:
         setStyleSheet(合并串) 会在第一个 Paint 事件被 dirty watcher 打回纯
         FLUENT_WINDOW qss（7445 → 1969），与信号连接顺序无关。
 
-        light/dark 双槽一次写入两套 qss，主题切换由 qfw 自动选择对应槽；
-        强调色变化时 _apply_theme 再次调用本方法刷新槽内容。"""
+        light/dark 双槽一次写入两套 qss，主题切换由 qfw 自动选择对应槽，
+        因此只需首挂一次（_business_qss_applied 幂等守卫）：业务 qss 全部
+        为硬编码色值、无强调色变量锚点，强调色变化时无需重挂——重复调用
+        setCustomStyleSheet 会经 DynamicPropertyChange 每次向 stackedWidget
+        的合并源 StyleSheetCompose 追加嵌套（实测每次切主题 +2 层：
+        17039 → 23906 → 32255 → 45846 字符），纯浪费且拖慢样式解析。"""
+        if getattr(self, "_business_qss_applied", False):
+            return
         setCustomStyleSheet(self.stackedWidget,
                             self._load_qss('light'), self._load_qss('dark'))
+        self._business_qss_applied = True
+
+    def _reset_qss_compose_trees(self):
+        """主题切换后重置 qfw 样式合并源树，消除嵌套膨胀（2026-09-07）。
+
+        背景：qfw updateStyleSheet 对每个注册控件执行 setStyleSheet(widget,
+        file)，内部 register(reset=True) 走
+        widgets[widget] = Compose([file, CustomStyleSheet(widget)])，而 file
+        本身就是上一轮的旧树——旧树被整体包进新树且 Compose 去重只挡
+        「同一对象」，挡不住新包出来的层。setTheme 与 setThemeColor(lazy=True)
+        各触发一次全量轮询，每切一次主题每个控件 +1~2 层，qss 字符串随切换
+        次数线性膨胀（stackedWidget 实测 17039 → 23906 → 32255 → 45846 字符），
+        且无法自行收敛。
+
+        此处在轮询完成后逐控件下钻到最内层 Compose，按其第一个孩子的类型
+        把树重建为干净结构（通常 Compose([FluentStyleSheet, CustomStyleSheet])）。
+        CustomStyleSheet 动态读取 widget 的 light/darkCustomQss 属性，
+        setCustomStyleSheet 写入的业务 qss 自动保留；树已干净时重建为等价
+        结构，幂等无害。仅当控件已销毁（RuntimeError）时跳过。
+        """
+        manager = styleSheetManager
+        theme = qconfig.theme
+        for widget in list(manager.widgets):
+            try:
+                source = manager.source(widget)
+                # 下钻：外层 Compose 的第一个孩子仍是 Compose 则继续深入
+                while (isinstance(source, StyleSheetCompose) and source.sources
+                       and isinstance(source.sources[0], StyleSheetCompose)):
+                    source = source.sources[0]
+                if not (isinstance(source, StyleSheetCompose) and source.sources):
+                    continue
+                head = source.sources[0]
+                if isinstance(head, FluentStyleSheet):
+                    clean = StyleSheetCompose([head, CustomStyleSheet(widget)])
+                elif isinstance(head, CustomStyleSheet):
+                    # 纯 CustomStyleSheet 树（从未被库 apply 过原生源）：
+                    # 动态属性即全部内容，单源重建即可
+                    clean = StyleSheetCompose([CustomStyleSheet(widget)])
+                else:
+                    continue
+                manager.widgets[widget] = clean
+                widget.setStyleSheet(getStyleSheet(clean, theme))
+            except RuntimeError:
+                continue
 
     def _enforce_toolbar_radio_height(self):
         """工具栏 RadioButton 固定 32px 行高（与按钮中线对齐）。

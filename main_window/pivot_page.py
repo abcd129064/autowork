@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget,
                                QHBoxLayout, QScrollArea, QFrame)
 from qfluentwidgets import (Pivot, TitleLabel, CaptionLabel, CardWidget,
-                            PushButton)
+                            PushButton, setCustomStyleSheet)
 
 
 class PivotPage(QWidget):
@@ -92,14 +92,20 @@ class PivotPage(QWidget):
         PivotItem 默认 18px 字体 + qss 上下 10px padding，视觉过大。
         只 setFixedHeight(24) 压不住：全局字体较大时 qss padding 使
         minimumSizeHint 涨到 40+px 并被布局机制写回 minimumHeight，
-        整行仍被撑高（offscreen 实测 height=42）。因此需同步改写
-        item 样式表的 padding（仅此一条，其余选中态/hover 规则保留）
-        + 13px 字体 + 24px 行高。
+        整行仍被撑高（offscreen 实测 height=42）。因此需覆盖 item 的
+        padding（仅此一条，其余选中态/hover 规则保留）+ 13px 字体 +
+        24px 行高。
+
+        2026-09-07 由 styleSheet 字符串 replace 迁移到 setCustomStyleSheet：
+        字符串级修改会被 qfw 主题切换轮询以及主窗口合并源重置
+        （ui_mixin._reset_qss_compose_trees）的 setStyleSheet 重设冲掉，
+        item 行高回弹 42px；CustomStyleSheet 动态属性则由 qfw 机制自动
+        保留并重应用（同 _enforce_toolbar_radio_height 模式）。
         """
         self.pivot.setItemFontSize(13)
+        qss = "PivotItem { padding: 1px 12px; }"
         for item in self.pivot.items.values():
-            item.setStyleSheet(item.styleSheet().replace(
-                "padding: 10px 12px;", "padding: 1px 12px;"))
+            setCustomStyleSheet(item, qss, qss)
             item.setFixedHeight(24)
 
     # ---------- 关闭清理 ----------
