@@ -14,9 +14,11 @@ MySQL 模式下多人各自提交即提交即落库，其他用户刷新/手动�
 周期规则：周二开始、周一结束为默认；可在售后面板「周期设置」切换为自然周
 （周一~周日）或自定义（起始日+周期天数）。
 周期归属统一按记录发生时间 occurred_at 动态计算（缺失时回退填写时间
-created_at）——列表、统计、周期下拉、导出共用 cycle_start_of 同一规则，
-不依赖冗余落库的 cycle_start 字段（该字段仅作导出展示，可能因周期配置
-变更与记录实际归属不一致）。
+created_at）——列表、统计、周期下拉、导出共用 cycle_start_of 同一规则。
+性能（2026-09-06 S3）：周期筛选改为走落库的 cycle_start 物化列（等值过滤，
+idx_aftersale_cycle 索引可用，旧表达式过滤索引失效全表扫），该列由
+insert_record 落库时维护 + 周期配置保存/面板首次加载时 recalc_cycle_starts
+幂等重算保证与动态口径一致；存量空值行由 _ensure_cycle_materialized 兜底回填。
 """
 
 import os
@@ -79,9 +81,22 @@ CYCLE_MODE_DEFAULT = {"type": "tue", "start": "", "span": 7}
 _CYCLE_KEY = "aftersale_cycle"
 _VALID_TYPES = ("tue", "mon", "custom", "month")
 
+# S1（2026-09-06）：周期模式进程内缓存——get_cycle_options 会对每个 DISTINCT
+# 日期调 cycle_start_of → load_cycle_mode，旧实现每次 open+json.load 读盘，
+# 241 个日期即 241 次读盘（占周期下拉耗时 74%）。save_cycle_mode 写盘成功后
+# 置空失效（与 backend.py 的 MySQL settings 缓存同策略）；测试均 monkeypatch
+# 注入替换函数，天然绕过缓存，不受影响。
+_cycle_mode_cache: dict | None = None
+
 
 def load_cycle_mode() -> dict:
-    """读取周期模式设置，settings.json 的 aftersale_cycle，缺省/非法回退周二起"""
+    """读取周期模式设置，settings.json 的 aftersale_cycle，缺省/非法回退周二起
+
+    命中进程内缓存直接返回副本（防止调用方污染缓存）。
+    """
+    global _cycle_mode_cache
+    if _cycle_mode_cache is not None:
+        return dict(_cycle_mode_cache)
     import json
     from core.app_paths import get_app_dir
 
@@ -104,11 +119,13 @@ def load_cycle_mode() -> dict:
                 cfg["span"] = 7
     except Exception:
         pass
+    _cycle_mode_cache = dict(cfg)
     return cfg
 
 
 def save_cycle_mode(mode: dict) -> dict:
     """保存周期模式设置，合并写，保留 settings.json 其余字段，返回规范化配置"""
+    global _cycle_mode_cache
     import json
     from core.app_paths import get_app_dir
 
@@ -129,11 +146,56 @@ def save_cycle_mode(mode: dict) -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         data[_CYCLE_KEY] = cfg
+        # S3 返工：置重算待办标志——周期配置已切换而物化列尚未重算，
+        # recalc_cycle_starts 成功后清除（失败残留，由面板首载自愈追平）
+        data[_CYCLE_RECALC_PENDING_KEY] = True
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        # 写盘成功：置空周期模式缓存，下次读取按新配置生效
+        _cycle_mode_cache = None
     except Exception:
         pass
     return cfg
+
+
+# ==================== 周期物化列重算待办标志 ====================
+
+# S3 返工（2026-09-06）：保存周期成功 → 重算 worker 失败（DB 瞬时锁等）
+# 的场景下，周期下拉按新口径（动态计算）而数据按旧口径（物化列）过滤，
+# 命中错/空且无自动追平路径。本标志实现自愈：save 置 True → recalc
+# 成功清除 → 面板每次打开时检查，有残留即全量重算（无需用户干预）。
+_CYCLE_RECALC_PENDING_KEY = "aftersale_cycle_recalc_pending"
+
+
+def _load_recalc_pending() -> bool:
+    """读取重算待办标志（settings.json 布尔键，缺省/异常回退 False）"""
+    import json
+    from core.app_paths import get_app_dir
+    try:
+        path = os.path.join(get_app_dir(), "settings.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return bool(json.load(f).get(_CYCLE_RECALC_PENDING_KEY))
+    except Exception:
+        pass
+    return False
+
+
+def _save_recalc_pending(flag: bool) -> None:
+    """合并写重算待办标志（False 时移除键，稳态 settings.json 无冗余键）"""
+    import json
+    from core.app_paths import get_app_dir
+    path = os.path.join(get_app_dir(), "settings.json")
+    data = {}
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    if flag:
+        data[_CYCLE_RECALC_PENDING_KEY] = True
+    else:
+        data.pop(_CYCLE_RECALC_PENDING_KEY, None)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ==================== 常用句 ====================
@@ -370,6 +432,7 @@ def insert_record(record: dict) -> int:
          snk, device, cycle, now_str,
          int(bool(record.get("is_important"))) ))
     conn.commit()
+    _invalidate_field_cands_cache()
     return cur.lastrowid
 
 
@@ -426,6 +489,7 @@ def update_record(record: dict) -> int:
          snk, device, cycle, now_str,
          int(bool(record.get("is_important"))), rec_id))
     conn.commit()
+    _invalidate_field_cands_cache()
     return cur.rowcount
 
 
@@ -436,6 +500,7 @@ def delete_record(rec_id) -> int:
     conn = _conn()
     cur = conn.execute("DELETE FROM aftersale_records WHERE id = ?", (rec_id,))
     conn.commit()
+    _invalidate_field_cands_cache()
     return cur.rowcount
 
 
@@ -455,6 +520,7 @@ def mark_resolved_batch(rec_ids) -> int:
         f"UPDATE aftersale_records SET resolved = '是', updated_at = ? "
         f"WHERE id IN ({qs})", [now_str] + list(ids))
     conn.commit()
+    _invalidate_field_cands_cache()
     return cur.rowcount
 
 
@@ -467,6 +533,7 @@ def delete_records(rec_ids) -> int:
     qs = ", ".join(["?"] * len(ids))
     cur = conn.execute(f"DELETE FROM aftersale_records WHERE id IN ({qs})", ids)
     conn.commit()
+    _invalidate_field_cands_cache()
     return cur.rowcount
 
 
@@ -480,64 +547,158 @@ _RECORD_DATE_EXPR = (
     "THEN occurred_at ELSE created_at END, 1, 10)")
 
 
-# 非法周期起点哨兵：传入的 cycle_start 不是当前模式下的真实周期起点
+# 非法周期起点判定：传入的 cycle_start 不是当前模式下的真实周期起点
 # （如 tue 模式传入周三日期），语义上无任何记录命中 → 追加 WHERE 1=0。
-_CYCLE_NO_MATCH = (None, None)
+def _cycle_is_valid_start(cycle_start: str):
+    """周期起点合法性判定，返回 True / False / None
 
-
-def _cycle_sql_range(cycle_start: str):
-    """周期起始 yyyy/MM/dd → SQL 日期范围 [start_iso, end_iso)
-
-    与 Python 侧 _record_cycle/cycle_start_of 等价：
-    - 记录属于周期 C 当且仅当其记录日期（occurred_at 优先回退 created_at）
-      落在 [C, C + span)，span 按周期模式：tue/mon=7 天、custom=配置 span、
-      month=当月天数；
-    - C 必须是**当前模式下的真实周期起点**（cycle_start_of 校验），否则返回
-      _CYCLE_NO_MATCH（与旧实现「非起点返回 0 条」等价，防止周/月口径混用）；
-    - 返回 None 表示无法解析（调用方不追加过滤，与空周期不过滤一致）。
+    - True：当前模式下的真实周期起点（yyyy/MM/dd，cycle_start_of 校验
+      起点回到自身），正常走物化列过滤；
+    - False：格式合法但非本模式真实周期起点（周/月口径混用）→ 0 命中；
+    - None：无法解析（与旧实现一致，调用方不追加过滤）。
     """
-    from datetime import datetime, timedelta
-    import calendar
+    cyc = str(cycle_start or "").strip()
     try:
-        start = datetime.strptime(str(cycle_start).strip(), "%Y/%m/%d")
+        start = datetime.strptime(cyc, "%Y/%m/%d")
     except (ValueError, TypeError):
         return None
-    # 起点合法性校验：cycle_start_of(start) 必须回到 start 自身
-    if cycle_start_of(start) != str(cycle_start).strip():
-        return _CYCLE_NO_MATCH
-    mode = load_cycle_mode()
-    if mode.get("type") == "month":
-        span = calendar.monthrange(start.year, start.month)[1]
-    elif mode.get("type") == "custom":
-        try:
-            span = max(1, int(mode.get("span") or 7))
-        except (TypeError, ValueError):
-            span = 7
-    else:  # tue / mon 均为自然周
-        span = 7
-    end = start + timedelta(days=span)
-    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    return cycle_start_of(start) == cyc
+
+
+# 物化列兜底回填的连续失效计数（日期形似但不可解析/回填异常时防循环）
+_cycle_recalc_futile = 0
+
+
+def _legacy_cycle_rows_pending() -> bool:
+    """是否存在 cycle_start 为空但记录日期可解析的存量行（物化列待回填）
+
+    走 idx_aftersale_cycle 索引探测（cycle_start = '' 等值），干净库上
+    微秒级。LIKE '____-__-__%' 与 _parse_occurred 的 yyyy-MM-dd 外形校验
+    一致，仅命中可能被回填的行。
+    """
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM aftersale_records WHERE cycle_start = '' AND "
+        "(occurred_at LIKE '____-__-__%' OR created_at LIKE '____-__-__%') "
+        "LIMIT 1").fetchone()
+    return row is not None
+
+
+def _ensure_cycle_materialized() -> None:
+    """周期物化列兜底：检测到存量空值行时幂等回填一次（S3）
+
+    周期筛选走 cycle_start 物化列（索引化），直写库的历史数据（早期
+    Excel 导入/外部写入）该列可能为空，物化过滤会漏掉它们——检测到
+    即同步重算（_record_cycle 同口径，幂等）。回填后仍有残留（日期
+    形似但不可解析，_record_cycle 返回 None 写 ''）或回填异常（只读
+    库等）时递增失效计数，进程内最多重试 2 次，避免每次查询全表重算。
+    """
+    global _cycle_recalc_futile
+    if _cycle_recalc_futile >= 2:
+        return
+    try:
+        if _legacy_cycle_rows_pending():
+            recalc_cycle_starts()
+            if _legacy_cycle_rows_pending():
+                _cycle_recalc_futile += 1
+            else:
+                _cycle_recalc_futile = 0
+        else:
+            _cycle_recalc_futile = 0
+    except Exception:
+        _cycle_recalc_futile += 1
+
+
+def recalc_cycle_starts(batch: int = 2000) -> int:
+    """按当前周期配置全表重算 cycle_start 物化列，返回更新行数（幂等）
+
+    分批（默认 2000 行/批）SELECT id, occurred_at, created_at,
+    cycle_start → _record_cycle 计算新周期起点 → 与现值不同的收集后
+    executemany UPDATE；_record_cycle 返回 None（两日期均无法解析）的
+    记录写 ''。周期配置保存后、面板首次加载兜底、存量数据一次性回填
+    共用本函数；二次执行无差异时返回 0（无感知）。成功路径清除
+    重算待办标志（先读后写，稳态无标志时不产生 settings.json 写盘）。
+    """
+    conn = _conn()
+    updated = 0
+    last_id = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, occurred_at, created_at, cycle_start "
+            "FROM aftersale_records WHERE id > ? ORDER BY id LIMIT ?",
+            (last_id, int(batch))).fetchall()
+        if not rows:
+            break
+        last_id = rows[-1][0]
+        updates = []
+        for rec_id, occ, cre, cur in rows:
+            new = _record_cycle(occ, cre) or ""
+            if str(cur or "") != new:
+                updates.append((new, rec_id))
+        if updates:
+            conn.executemany(
+                "UPDATE aftersale_records SET cycle_start = ? WHERE id = ?",
+                updates)
+            updated += len(updates)
+    conn.commit()
+    # 重算成功 → 清除待办标志（任何触发路径统一在此闭环；失败/异常不清除，
+    # 由面板下次打开经 recalc_cycle_starts_on_load 自愈）
+    try:
+        if _load_recalc_pending():
+            _save_recalc_pending(False)
+    except Exception:
+        pass
+    return updated
+
+
+def recalc_cycle_starts_on_load() -> int:
+    """面板首载兜底：有待办标志或存量空值行 → 全量重算，否则仅索引探测
+
+    S3 返工（2026-09-06）：上次保存周期后的重算失败会残留
+    aftersale_cycle_recalc_pending 标志——周期下拉按新口径（动态计算）、
+    数据按旧口径（物化列）过滤，命中错/空。本函数在面板每次打开时检查：
+    有待办标志（无论空值探测结果）或探测到空值存量行 → 全量
+    recalc_cycle_starts（成功即清标志），否则走微秒级空值探测返回 0，
+    正常路径零额外成本。幂等，可放心重复调用。
+    """
+    if _load_recalc_pending() or _legacy_cycle_rows_pending():
+        return recalc_cycle_starts()
+    return 0
 
 
 def _append_cycle_where(where: str, params: list, cycle_start: str) -> tuple:
-    """把周期筛选并入 WHERE（SQL 侧范围过滤），返回 (where, params)"""
-    cyc = _cycle_sql_range(cycle_start) if cycle_start else None
-    if cyc is _CYCLE_NO_MATCH:
+    """把周期筛选并入 WHERE，返回 (where, params)
+
+    S3（2026-09-06）：由 _RECORD_DATE_EXPR 表达式范围过滤（索引失效，
+    EXPLAIN=SCAN，每次加载 3 条全表扫）改为 cycle_start 物化列等值过滤，
+    idx_aftersale_cycle 两端索引直接可用。传入非当前模式真实周期起点
+    时追加 1=0（与旧实现「非起点返回 0 条」等价，防止周/月口径混用），
+    无法解析的串不追加过滤（与旧实现一致）；物化列由 insert_record
+    落库维护 + 周期保存/首次加载重算保证一致，存量空值行先经
+    _ensure_cycle_materialized 幂等回填，旧数据不漏。
+    """
+    cyc = str(cycle_start or "").strip()
+    if not cyc:
+        return where, params
+    valid = _cycle_is_valid_start(cyc)
+    if valid is None:
+        return where, params
+    if not valid:
         # 非本模式真实周期起点 → 无记录命中（与旧实现 total=0 等价）
         where += (" AND " if where else " WHERE ") + " 1 = 0"
-    elif cyc:
-        where += (" AND " if where else " WHERE ") + \
-                 f"{_RECORD_DATE_EXPR} >= ? AND {_RECORD_DATE_EXPR} < ?"
-        params = params + list(cyc)
-    return where, params
+        return where, params
+    _ensure_cycle_materialized()
+    where += (" AND " if where else " WHERE ") + "cycle_start = ?"
+    return where, params + [cyc]
 
 
 def _build_where(keyword: str, issue_type: str, resolved: str,
                  is_initiative: str = "", is_our_problem: str = "") -> tuple:
     """构造筛选 WHERE 子句与参数（类型/状态/关键词/主动发起/我方问题）
 
-    周期筛选不在本函数处理：由 _append_cycle_where 以 SQL 范围过滤接入
-    （与 _record_cycle 动态归属等价），保证分页 COUNT/LIMIT 在数据库侧完成。
+    周期筛选不在本函数处理：由 _append_cycle_where 以 cycle_start 物化列
+    等值过滤接入（与 _record_cycle 动态归属等价，由落库维护 + 重算保证
+    一致），保证分页 COUNT/LIMIT 在数据库侧完成。
     统计口径说明：resolved / is_initiative / is_our_problem 为空才参与筛选；
     统计函数单独调用时传空串即得「已解决/未解决」分组基数与全景计数。
     """
@@ -570,10 +731,10 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
                is_our_problem: str = "") -> tuple:
     """分页查询售后记录，返回 (total, rows)
 
-    周期筛选 SQL 化（_cycle_sql_range 与 _record_cycle 动态归属等价，
-    不依赖冗余 cycle_start 字段）；COUNT + LIMIT/OFFSET 数据库侧分页，
-    避免数据量增大后全量取回（压测 10k→100k 全量取回 p50 31.8→338.9ms，
-    改造后与数据量无关，毫秒级）。
+    周期筛选 SQL 化（cycle_start 物化列等值过滤走索引，与 _record_cycle
+    动态归属等价，由落库维护 + 重算保证一致）；COUNT + LIMIT/OFFSET
+    数据库侧分页，避免数据量增大后全量取回（压测 10k→100k 全量取回
+    p50 31.8→338.9ms，改造后与数据量无关，毫秒级）。
     """
     conn = _conn()
     where, params = _build_where(keyword, issue_type, resolved,
@@ -789,8 +950,27 @@ def save_last_people(creator: str, resolver: str) -> None:
         pass
 
 
+# S4（2026-09-06）：动态候选进程内缓存（写后失效）——get_field_candidates
+# 是 4 条 GROUP BY 全表聚合（100k 内存库单次 94ms），录入页 showEvent 与
+# 新增/编辑弹窗每次打开都触发，数据未变时纯属重复劳动。写操作成功后
+# 置空失效（insert/update/delete/mark_resolved_batch/delete_records/import）。
+_field_cands_cache: dict | None = None
+
+
+def _invalidate_field_cands_cache() -> None:
+    """写操作成功后置空候选缓存（下次 get_field_candidates 重建）"""
+    global _field_cands_cache
+    _field_cands_cache = None
+
+
 def get_field_candidates() -> dict:
-    """动态候选：问题/解决人/地区/填写人（按使用频次降序，各取前 60）"""
+    """动态候选：问题/解决人/地区/填写人（按使用频次降序，各取前 60）
+
+    命中进程内缓存返回深副本（列表可变，防调用方污染缓存）。
+    """
+    global _field_cands_cache
+    if _field_cands_cache is not None:
+        return {k: list(v) for k, v in _field_cands_cache.items()}
     conn = _conn()
     out = {}
     for key, field in (("problems", "problem"),
@@ -815,6 +995,7 @@ def get_field_candidates() -> dict:
                 seen.add(name)
                 merged.append(name)
         out[key] = merged[:60]
+    _field_cands_cache = {k: list(v) for k, v in out.items()}
     return out
 
 
@@ -1072,4 +1253,5 @@ def import_excel_rows(xlsx_path: str) -> int:
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [tuple(rec[k] for k in order) + ("", "") for rec in data])
     conn.commit()
+    _invalidate_field_cands_cache()
     return len(data)

@@ -73,9 +73,12 @@ def test_paging_sql_mysql_compatible(monkeypatch):
     """P0 改造后的查询 SQL 片段不依赖 SQLite 专属语法（MySQL 可执行）"""
     from database import aftersale_db as adb
     # 周期模式是环境配置（settings）：tue/mon/custom 模式下 2026/08/01（周六）
-    # 不是合法周期起点 → WHERE 1=0 短路，substr/CASE WHEN 断言必失败。
+    # 不是合法周期起点 → WHERE 1=0 短路，物化列断言必失败。
     # 固定 month 模式让本测试只验证 SQL 方言兼容性，不随环境周期模式漂移。
     monkeypatch.setattr(adb, "load_cycle_mode", lambda: {"type": "month"})
+    # 本测试只验证 SQL 片段方言兼容性：隔离物化列兜底回填（否则会触达
+    # 真实 tables.db 的周期物化探测/重算）
+    monkeypatch.setattr(adb, "_ensure_cycle_materialized", lambda: None)
     where, params = adb._build_where("kw", "球桌问题", "否")
     where, params = adb._append_cycle_where(where, params, "2026/08/01")
     sql = ("SELECT COUNT(*) FROM aftersale_records" + where +
@@ -85,5 +88,7 @@ def test_paging_sql_mysql_compatible(monkeypatch):
     # 不应出现 SQLite 专属语法
     for banned in ("PRAGMA", "IF NOT EXISTS", "AUTOINCREMENT", "`"):
         assert banned not in sql, f"SQL 含 SQLite/MySQL 专属语法: {banned}"
-    # 周期范围表达式用标准 substr/CASE/LIKE（两方言均有）
-    assert "substr(" in sql and "CASE WHEN" in sql
+    # S3（2026-09-06）：周期筛选由 substr/CASE 范围表达式改为 cycle_start
+    # 物化列等值过滤（索引可用；等值/占位符两方言均有，仍保持兼容）
+    assert "cycle_start = ?" in sql
+    assert "substr(" not in sql and "CASE WHEN" not in sql

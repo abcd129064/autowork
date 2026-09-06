@@ -25,6 +25,10 @@ from database import aftersale_db as adb
 from tools.stress_test.data_gen import build_memory_db
 conn = build_memory_db(100000, verbose=False)
 adb._conn = lambda: conn
+# S3（2026-09-06）：data_gen 的 cycle_start 是简化口径（occurred 前 10 天
+# 的 yyyy-MM-dd 串），与真实 cycle_start_of（yyyy/MM/dd 周期起点）不一致；
+# 周期筛选已改为 cycle_start 物化列等值过滤，必须先重算物化列再查询
+adb.recalc_cycle_starts()
 
 from windows.aftersale.records import RecordsPage
 page = RecordsPage()
@@ -99,6 +103,6 @@ print(f"[6] 周期下拉选项: {(time.perf_counter()-t0)*1000:.0f}ms  {len(opts
       f"(最新 {opts[0] if opts else '-'})")
 
 # 断言：默认带当前周期筛选（10万条中当前周期 ~1.1万），分页/渲染正常即可
-# 筛选会重置页号，断言数据加载与表格渲染正确即可
-ok = page._total > 0 and page._table.rowCount() == 50
+# 筛选会重置页号，断言数据加载与表格渲染正确即可（页大小现为 60）
+ok = page._total > 0 and page._table.rowCount() == 60
 print("PASS" if ok else "FAIL: 数据未正确加载")

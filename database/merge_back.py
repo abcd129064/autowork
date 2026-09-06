@@ -113,6 +113,13 @@ def merge_aftersale(mysql_conn, progress_cb=None) -> int:
                 cur.execute(insert_sql, [d[c] for c in _AFTERSALE_COLS])
                 inserted += 1
     mysql_conn.commit()
+    # S4（2026-09-06）：售后记录经 MySQL 写库成功后，失效本地字段候选缓存，
+    # 避免编辑表单下拉沿用合并前的旧候选值（merge_back 已模块级 import
+    # aftersale_db，无循环导入问题，直接调用即可）。
+    try:
+        aftersale_db._invalidate_field_cands_cache()
+    except Exception:
+        pass  # 缓存失效失败不影响合并结果本身
     if progress_cb:
         progress_cb(f"aftersale: 新增 {inserted}，更新 {updated}，跳过 {skipped}")
     return inserted + updated

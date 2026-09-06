@@ -42,6 +42,7 @@ class CycleSettingsPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._recalc_worker = None  # 周期物化列重算 worker（保存后触发）
         self._init_ui()
 
     def showEvent(self, event):
@@ -127,7 +128,17 @@ class CycleSettingsPage(QWidget):
         self._custom_wrap.setVisible(mode == "custom")
 
     def _on_save(self):
-        """保存周期设置：写 settings.json（合并写保留其他字段）并即时生效"""
+        """保存周期设置：写 settings.json（合并写保留其他字段）并即时生效
+
+        S3（2026-09-06）：保存成功后先后台重算 cycle_start 物化列（周期筛选
+        走索引的等值过滤，口径必须跟随新配置），完成后再发 saved 信号触发
+        记录页刷新——保证「保存 → 重算 → 刷新」顺序，刷新时新周期口径已生效。
+        重算不阻塞 UI 线程。P1-2 自愈（2026-09-06 返工）：save_cycle_mode
+        成功时会顺带写入 aftersale_cycle_recalc_pending=true 标志，
+        recalc_cycle_starts 成功后才清除；若重算失败则标志残留，记录页
+        下次首载（recalc_cycle_starts_on_load）检测到残留即自动全量重算
+        并清标志，实现打开面板自动追平，无需用户干预。
+        """
         if self._rb_mon.isChecked():
             mode = "mon"
         elif self._rb_custom.isChecked():
@@ -141,9 +152,30 @@ class CycleSettingsPage(QWidget):
             "start": self._start_picker.date.toString("yyyy-MM-dd"),
             "span": self._span_spin.value(),
         })
-        show_info_bar("周期设置已保存，列表/统计已按新周期重新归属",
+        show_info_bar("周期设置已保存，正在按新周期重算记录归属…",
                       "success", title="周期设置", parent=self, duration=3000)
+        self._btn_save.setEnabled(False)
+        self._recalc_worker = AftersaleDBWorker(
+            aftersale_db.recalc_cycle_starts)
+        self._recalc_worker.result_ready.connect(self._on_recalc_done)
+        self._recalc_worker.error.connect(self._on_recalc_error)
+        self._recalc_worker.start()
+
+    def _on_recalc_done(self, updated: int):
+        """重算完成：通知记录页刷新周期下拉与统计（新周期口径已就绪）"""
+        self._btn_save.setEnabled(True)
         self.saved.emit()  # 通知记录页刷新周期下拉与统计
+
+    def _on_recalc_error(self, msg: str):
+        """重算失败：仍触发刷新（保存已成功；pending 标志残留，记录页下次首载自动追平）"""
+        self._btn_save.setEnabled(True)
+        # P1-2 自愈（2026-09-06 返工）：重算失败时 pending 标志未被清除，
+        # 记录页下次首载会自动全量重算并清标志，此处明确告知用户口径
+        # 暂时按旧周期过滤、重开面板后自动追平。
+        show_info_bar(
+            "周期重算失败，列表过滤暂按旧周期口径，重新打开面板后将自动追平",
+            "error", title="周期设置", parent=self, duration=5000)
+        self.saved.emit()
 
 
 # ==================== 设置面板（周期 + 数据库） ====================
