@@ -41,6 +41,10 @@ videos/*
 settings.json
 moyu_state.json
 
+# 本地凭据与备份文件（含 DeepSeek API Key 等明文，禁止入库）
+config/credentials.json
+settings.json.bak
+
 # frpc 隧道配置（含内网地址等敏感信息，不提交）
 frpc_xtcp.toml
 frpc_xtcp_panel.toml
