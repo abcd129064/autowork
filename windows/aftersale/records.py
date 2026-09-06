@@ -145,15 +145,16 @@ class RecordsPage(QWidget):
         root.setContentsMargins(20, 14, 20, 12)
         root.setSpacing(8)
 
-        # --- 页头：标题 + 数据源状态（右对齐） ---
-        # 副标题「售后问题上报」已删除（2026-09-06）：与二级页签重复
-        head = QHBoxLayout()
-        head.setSpacing(10)
-        head_box = QVBoxLayout()
-        head_box.setSpacing(1)
-        # head_box.addWidget(TitleLabel("记录与统计", self))
-        head.addLayout(head_box)
-        head.addStretch(1)
+        # --- 周期概览指标卡（四张，随筛选口径实时更新） ---
+        # 概览标题行：概览（左）+ 网页入口/数据源指示（右）。
+        # 网页链接与数据源 2026-09-07 从独立页头行下移合并到本行、与概览
+        # 齐平（页头左侧标题早已删除，原行只剩右侧两个小标签、单独占一行
+        # 浪费垂直空间）。
+        ov_head = QHBoxLayout()
+        ov_head.setSpacing(8)
+        self._lbl_overview = BodyLabel("概览", self)
+        ov_head.addWidget(self._lbl_overview)
+        ov_head.addStretch(1)
         # 网页版入口：浏览器打开售后面板网页（本地 8787 / 线上兜底）。
         # 用富文本 QLabel 而非 HyperlinkButton：与数据源标签同字体族渲染，
         # 天然基线对齐，无按钮内边距导致的文字顶部裁切
@@ -162,18 +163,10 @@ class RecordsPage(QWidget):
         self._btn_web.setOpenExternalLinks(True)
         self._btn_web.setText(_web_link_html())
         self._btn_web.setToolTip("在浏览器中打开售后面板网页")
-        head.addWidget(self._btn_web, 0, Qt.AlignmentFlag.AlignTop)
+        ov_head.addWidget(self._btn_web)
         # 数据源指示：MySQL / 本地 SQLite / 降级兜底
         self._lbl_source = CaptionLabel("", self)
-        head.addWidget(self._lbl_source, 0, Qt.AlignmentFlag.AlignTop)
-        root.addLayout(head)
-
-        # --- 周期概览指标卡（四张，随筛选口径实时更新） ---
-        ov_head = QHBoxLayout()
-        ov_head.setSpacing(8)
-        self._lbl_overview = BodyLabel("概览", self)
-        ov_head.addWidget(self._lbl_overview)
-        ov_head.addStretch(1)
+        ov_head.addWidget(self._lbl_source)
         root.addLayout(ov_head)
         cards_row = QHBoxLayout()
         cards_row.setSpacing(10)

@@ -13,15 +13,17 @@
     Action + 三个面板的设置项
 """
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontDatabase, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame,
                                QScrollArea, QSizePolicy, QLabel,
                                QStackedWidget)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, CardWidget,
-                            FluentIcon, SegmentedWidget)
+                            FluentIcon, SegmentedWidget, ExpandSettingCard)
 
 from main_window.pivot_page import PivotPage
 from main_window.setting_cards import (SettingGroup, SettingRow, make_switch,
-                                       make_combo, make_button)
+                                       make_combo, make_button, make_spinbox,
+                                       SubRow)
 
 
 # ==================== 运维管理 ====================
@@ -210,8 +212,8 @@ class SettingsHubPage(QWidget):
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
         title_col.addWidget(TitleLabel("设置", self))
-        d = CaptionLabel("外观 / 性能 / 工具 / 数据库 —— 修改即时生效并持久化到 "
-                         "config/ 分域配置", self)
+        d = CaptionLabel("修改后立即生效并自动保存", self)
+        d.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         d.setWordWrap(True)
         title_col.addWidget(d)
         header.addLayout(title_col)
@@ -269,20 +271,21 @@ class SettingsHubPage(QWidget):
 
     def _group_appearance(self, parent):
         win = self._win
+        settings = win._load_settings()
         g = SettingGroup("外观", parent)
 
         # 主题模式（跟随系统/浅色/深色 → 复用菜单 Action 对象回调）
-        mode = win._get_theme_mode(win._load_settings())
+        mode = win._get_theme_mode(settings)
         acts = {"auto": win._act_theme_auto, "light": win._act_theme_light,
                 "dark": win._act_theme_dark}
         g.addRow(SettingRow(
-            FluentIcon.SYNC, "主题模式", "跟随系统 / 浅色 / 深色",
+            FluentIcon.SYNC, "主题模式", "切换浅色、深色或跟随系统",
             make_combo([("跟随系统", "auto"), ("浅色", "light"),
                         ("深色", "dark")],
                        list(acts).index(mode if mode in acts else "auto"),
                        lambda m: win._on_theme_selected(acts[m]))))
 
-        # 主题颜色：色块 + 更改 + 还原默认
+        # 主题颜色：色块 + 更改 + 还原默认（选色天然需要弹窗，保持按钮）
         self._color_chip = QFrame(parent)
         self._color_chip.setFixedSize(22, 22)
         self._color_chip.setStyleSheet(
@@ -290,24 +293,49 @@ class SettingsHubPage(QWidget):
             f" solid rgba(128,128,128,0.5);")
         g.addRow(SettingRow(
             FluentIcon.PALETTE, "主题颜色",
-            "全局强调色（按钮 / 选中态 / 进度条 / 链接，即时生效）",
+            "按钮、选中态和进度条的强调色，即时生效",
             [self._color_chip,
              make_button("更改…", win._on_theme_color, width=76),
              make_button("还原默认", win._on_theme_color_reset, width=88)]))
 
+        # 字号大小：SpinBox 内联直接调节（2026-09-07 由「更改…」弹窗内联化）
+        self._spin_font_size = make_spinbox(
+            int(settings.get("font_size", 10)), 10, 20, " pt",
+            win._set_font_size_inline)
         g.addRow(SettingRow(
-            FluentIcon.FONT_SIZE, "字号大小", "全局界面字号（pt）",
-            make_button("更改…", win._on_font_size, width=76)))
-        g.addRow(SettingRow(
-            FluentIcon.FONT, "字体", "全局界面字体族",
-            make_button("更改…", win._on_font_family, width=76)))
-        g.addRow(SettingRow(
-            FluentIcon.ZOOM, "界面缩放", "DPI 缩放百分比（重启后生效）",
-            make_button("更改…", win._on_dpi_scale, width=76)))
+            FluentIcon.FONT_SIZE, "字号大小", "界面文字大小",
+            self._spin_font_size))
 
-        classic = bool(win._load_settings().get("classic_layout", True))
+        # 字体：ComboBox 内联（默认 + 系统全部字体族，同上内联化）
+        families = sorted(set(QFontDatabase.families()))
+        current_family = settings.get("font_family", "")
+        font_items = [("默认", "")]
+        cur_idx = 0
+        for i, fam in enumerate(families):
+            font_items.append((fam, fam))
+            if fam == current_family:
+                cur_idx = i + 1
+        self._combo_font_family = make_combo(
+            font_items, cur_idx,
+            lambda v: win._set_font_family_inline(v), width=230)
         g.addRow(SettingRow(
-            FluentIcon.TILES, "布局模式", "面板布局（三列 Splitter）/ 经典布局",
+            FluentIcon.FONT, "字体", "界面文字使用的字体",
+            self._combo_font_family))
+
+        # 界面缩放：ComboBox 内联（保存后提示重启生效，同上内联化）
+        dpi = int(settings.get("dpi_scale", 100))
+        dpi_options = [100, 125, 150, 175, 200]
+        self._combo_dpi = make_combo(
+            [(f"{o}%", o) for o in dpi_options],
+            dpi_options.index(dpi) if dpi in dpi_options else 0,
+            lambda v: win._set_dpi_scale_inline(v), width=110)
+        g.addRow(SettingRow(
+            FluentIcon.ZOOM, "界面缩放", "整体缩放界面，重启后生效",
+            self._combo_dpi))
+
+        classic = bool(settings.get("classic_layout", True))
+        g.addRow(SettingRow(
+            FluentIcon.TILES, "布局模式", "面板布局或经典布局",
             make_combo([("面板布局", False), ("经典布局", True)],
                        1 if classic else 0,
                        lambda v: win._on_layout_selected(
@@ -322,39 +350,46 @@ class SettingsHubPage(QWidget):
                                set_animation_enabled,
                                set_table_smooth_scroll_enabled,
                                set_table_smooth)
-        win = self._win
+        # 面板级覆盖 4 个开关收进 Win11 设置式折叠卡（ExpandSettingCard，
+        # 默认收起、点击标题行展开）
         g = SettingGroup("性能", parent)
-
-        def smooth_row(title, desc, panel):
-            return SettingRow(
-                FluentIcon.SPEED_HIGH, title, desc,
-                make_switch(
-                    get_table_smooth(panel) if panel
-                    else is_table_smooth_scroll_enabled(),
-                    lambda v, p=panel: (
-                        set_table_smooth_scroll_enabled(v) if p is None
-                        else set_table_smooth(p, v),
-                        self.table_smooth_changed.emit("all"))))
 
         g.addRow(SettingRow(
             FluentIcon.TRANSPARENT, "亚克力效果",
-            "导航栏亚克力背景（截屏→高斯模糊，核显开销大，低配机器建议关闭）",
+            "导航栏背景模糊效果，低配电脑建议关闭",
             make_switch(is_acrylic_enabled(), set_acrylic_enabled)))
         g.addRow(SettingRow(
             FluentIcon.QUIET_HOURS, "动画效果",
-            "菜单弹出 / 弹窗淡入淡出（关闭后弹窗秒开）",
+            "菜单和弹窗的过渡动画，关闭后立即显示",
             make_switch(is_animation_enabled(), set_animation_enabled)))
-        g.addRow(smooth_row(
-            "表格平滑滚动（全局）",
-            "默认关闭：大表格逐帧重绘卡顿；关闭后走原生滚动", None))
-        g.addRow(smooth_row(
-            "售后面板表格平滑滚动", "面板级覆盖（未开启回退全局）", "aftersale"))
-        g.addRow(smooth_row(
-            "跑视频面板表格平滑滚动", "面板级覆盖（未开启回退全局）", "video"))
-        g.addRow(smooth_row(
-            "运维管理表格平滑滚动", "球桌/设备/健康度三页生效", "management"))
-        g.addRow(smooth_row(
-            "远程会话表格平滑滚动", "隧道列表 / 连接诊断窗口生效", "remote"))
+        g.addRow(SettingRow(
+            FluentIcon.SPEED_HIGH, "表格平滑滚动",
+            "大表格逐帧重绘容易卡顿，关闭后滚动更跟手",
+            make_switch(
+                is_table_smooth_scroll_enabled(),
+                lambda v: (set_table_smooth_scroll_enabled(v),
+                           self.table_smooth_changed.emit("all")))))
+
+        # 面板级覆盖折叠卡：默认收起，展开后为 4 个面板级开关
+        cover = ExpandSettingCard(
+            FluentIcon.SPEED_HIGH, "面板表格平滑滚动", parent=parent)
+        body = QWidget(cover)
+        v = QVBoxLayout(body)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        for title, panel in (("售后面板", "aftersale"),
+                             ("跑视频面板", "video"),
+                             ("运维管理", "management"),
+                             ("远程会话", "remote")):
+            v.addWidget(SubRow(
+                title,
+                make_switch(
+                    get_table_smooth(panel),
+                    lambda checked, p=panel: (
+                        set_table_smooth(p, checked),
+                        self.table_smooth_changed.emit("all")))))
+        cover.addWidget(body)
+        g.addWidget(cover)
         return g
 
     def _group_tools(self, parent):
@@ -365,28 +400,24 @@ class SettingsHubPage(QWidget):
             return g.addRow(SettingRow(
                 icon, title, desc, make_button(btn_text, cb, width=76)))
 
-        row(FluentIcon.EDIT, "修改快捷键", "12 个全局快捷键自定义",
+        row(FluentIcon.EDIT, "修改快捷键", "自定义全局快捷键",
             "修改…", win._on_modify_shortcuts)
-        row(FluentIcon.LIBRARY, "上传清单",
-            "查看已收集待上传的文件（视频/日志目录/upload）",
+        row(FluentIcon.LIBRARY, "上传清单", "查看已收集待上传的视频和日志",
             "查看", win._on_show_upload_list)
-        row(FluentIcon.DEVELOPER_TOOLS, "连接诊断",
-            "SSH/SFTP 连接日志与失败记录（含归档）",
+        row(FluentIcon.DEVELOPER_TOOLS, "连接诊断", "查看连接日志与失败记录",
             "打开", win._on_open_conn_diag)
         row(FluentIcon.VIDEO, "单杆视频",
             "从日志解析单杆得分，生成带计分水印的单杆视频",
             "打开", win._on_open_single_video)
-        row(FluentIcon.CONNECT, "端口占用",
-            "真实监听指定端口模拟服务占用（netstat 可见 LISTENING）",
+        row(FluentIcon.CONNECT, "端口占用", "占用指定端口模拟服务，用于联调测试",
             "打开", win._on_open_port_fake)
-        row(FluentIcon.LIBRARY, "视频/日志批量整理",
-            "按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog）",
+        row(FluentIcon.LIBRARY, "视频与日志批量整理", "按署名批量归类视频和日志",
             "打开", win._on_newlog_organize)
         return g
 
     def _group_database(self, parent):
         g = SettingGroup("数据库与接口", parent)
-        # 原管理设置页整体迁入（数据源 / 接口1·2 账号 / 收集上传 / MySQL 配置）；
+        # 原管理设置页整体迁入（数据源/接口1·2 账号/收集上传/MySQL 配置）；
         # embedded=True 去掉内部滚动与性能卡（性能组已有同款开关），统一页统一滚动
         from windows.management.settings_page import AdminSettingsPage
         self.admin_settings = AdminSettingsPage(parent, embedded=True)
@@ -422,13 +453,12 @@ class SettingsHubPage(QWidget):
                 make_button("打开", lambda: win._open_config_file(name),
                             width=76)))
 
-        row(FluentIcon.FOLDER, "配置目录",
-            "config/ 分域配置（settings.json 已迁移为 settings.json.bak）",
+        row(FluentIcon.FOLDER, "配置目录", "应用分域配置目录",
             "settings.json")
-        row(FluentIcon.DOCUMENT, "cfg.json", "识别端程序配置（exe 目录）",
+        row(FluentIcon.DOCUMENT, "cfg.json", "识别端程序的配置文件",
             "cfg.json")
-        row(FluentIcon.DOCUMENT, "frpc_xtcp_panel.toml",
-            "frp 持久化配置（远程会话注册表）", "frpc_xtcp_panel.toml")
+        row(FluentIcon.DOCUMENT, "frpc_xtcp_panel.toml", "远程会话穿透配置",
+            "frpc_xtcp_panel.toml")
         return g
 
 

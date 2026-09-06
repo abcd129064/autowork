@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
 from PySide6.QtCore import Slot, QTimer, Qt, QDate, QDateTime, QProcess, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QTextCharFormat
 from qfluentwidgets import (FluentTitleBar, FluentIcon,
-    MessageBoxBase, BodyLabel, ComboBox)
+    MessageBoxBase, BodyLabel, ComboBox, isDarkTheme)
 # FluentWindow = FluentWindowBase + NavigationInterface（侧边导航）。
 # 基类同层替换：FluentWindowBase 已自带 stackedWidget，只是 navigationInterface=None
 # 且 addSubInterface 抛 NotImplementedError；FluentWindow 补上导航并接管页面切换。
@@ -192,6 +192,21 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.connect_signals()
 
         self.titleBar.raise_()
+
+    def showEvent(self, event):
+        """显示事件：qfw 已在 showEvent 内 reapply 云母；主窗口构造流程复杂
+        （qss unpolish/polish、布局、恢复远程会话等），DWM backdrop 可能被
+        后续操作清掉——显示后 400ms 再补一次（幂等，多次触发无害）"""
+        super().showEvent(event)
+        QTimer.singleShot(400, self._reapply_mica)
+
+    def _reapply_mica(self):
+        """兜底重设云母（DWMWA_SYSTEMBACKDROP_TYPE + HOSTBACKDROP）"""
+        try:
+            if self.isMicaEffectEnabled() and self.isVisible():
+                self.windowEffect.setMicaEffect(self.winId(), isDarkTheme())
+        except Exception:
+            pass
 
     def _build_hub_pages(self):
         """按 2026-09-06 修订装配导航：

@@ -266,14 +266,23 @@ try:
 except Exception as e:
     check("14.x SegmentedWidget 切换", False, repr(e))
 
-print("\n[15] 云母（Mica）链路：窗口透明、主题 qss 不再画死窗口底色")
+print("\n[15] 云母（Mica）链路：窗口透明、业务 qss 挂 stackedWidget（不碰窗口表面）")
 try:
     # FluentWidget.__init__ 默认 setMicaEffectEnabled(True)（Win11 build>=22000 生效）
     check("15.1 窗口 Mica 已启用", w.isMicaEffectEnabled() is True)
-    check("15.2 主题 qss 未设窗口不透明底色（MainWindow 选择器已移除）",
-          "MainWindow {" not in w.styleSheet())
-    check("15.3 主题 qss 已加载（仍覆盖工作台底色）",
-          len(w.styleSheet()) > 1000, f"len={len(w.styleSheet())}")
+    # 2026-09-07 洋红壁纸对照实证：窗口级 setStyleSheet 会永久改变原生表面
+    # 合成格式，云母被盖死且不可恢复（DWM 重设/hide+show 均无效）。
+    # 业务 qss 必须挂在 stackedWidget；窗口自身不得含业务 qss。
+    # 注：qfw 框架自身在 init 早期设置的 37 字符 'AcrylicWindow{background:transparent}'
+    # 常驻窗口 stylesheet（时序在表面创建前，实测无害），故只断言业务 qss 不在窗口。
+    check("15.2 窗口自身无业务 stylesheet（表面格式不被污染）",
+          "QWidget#centralwidget" not in w.styleSheet(),
+          f"len={len(w.styleSheet())}")
+    check("15.3 业务 qss 挂在 stackedWidget（合并 qfw FLUENT_WINDOW qss）",
+          len(w.stackedWidget.styleSheet()) > 1000
+          and "StackedWidget {" in w.stackedWidget.styleSheet()
+          and "QWidget#centralwidget" in w.stackedWidget.styleSheet(),
+          f"len={len(w.stackedWidget.styleSheet())}")
     # Mica 开启时 qfw 窗口背景色应为全透明（_normalBackgroundColor）
     from PySide6.QtGui import QColor as _QC
     check("15.4 窗口背景色为透明（DWM 云母可见）",

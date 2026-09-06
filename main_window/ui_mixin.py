@@ -1042,6 +1042,29 @@ class UIMixin:
         self._append_log(f"[配置] 已更新主题强调色: {color}")
         self._show_info_bar(f"[配置] 已更新主题强调色: {color}")
 
+    def _set_font_size_inline(self, val):
+        """内联字号回调（设置页 SpinBox 直接改动；字号弹窗确定也走此单源逻辑）"""
+        val = int(val)
+        self._save_settings({"font_size": val})
+        self._apply_font_size()
+        self._append_log(f"[配置] 已更新字号: {val}pt")
+        self._show_info_bar(f"[配置] 已更新字号: {val}pt")
+
+    def _set_font_family_inline(self, family):
+        """内联字体回调（family 传空串 = 恢复默认字体族；字体弹窗确定同源）"""
+        self._save_settings({"font_family": family})
+        self._apply_font_family()
+        label = family if family else "默认"
+        self._append_log(f"[配置] 已更新字体: {label}")
+        self._show_info_bar(f"[配置] 已更新字体: {label}")
+
+    def _set_dpi_scale_inline(self, val):
+        """内联缩放回调：持久化 + info bar 重启提示（2026-09-07 由弹窗改为内联）"""
+        val = int(val)
+        self._save_settings({"dpi_scale": val})
+        self._append_log(f"[配置] 已设置缩放: {val}%（重启后生效）")
+        self._show_info_bar(f"[配置] 已设置缩放: {val}%,需重启")
+
     def _on_font_size(self):
         """弹出字号选择对话框（Fluent SpinBox）"""
 
@@ -1063,11 +1086,7 @@ class UIMixin:
         dlg.cancelButton.setText("取消")
         dlg.widget.setMinimumWidth(320)
         if dlg.exec():
-            val = dlg.spinBox.value()
-            self._save_settings({"font_size": val})
-            self._apply_font_size()
-            self._append_log(f"[配置] 已更新字号: {val}pt")
-            self._show_info_bar(f"[配置] 已更新字号: {val}pt")
+            self._set_font_size_inline(dlg.spinBox.value())
 
     def _on_dpi_scale(self):
         """弹出 DPI 缩放比例选择对话框（Fluent ComboBox）"""
@@ -1092,13 +1111,7 @@ class UIMixin:
         dlg.widget.setMinimumWidth(320)
         if dlg.exec():
             val = int(dlg.comboBox.currentText().replace("%", ""))
-            self._save_settings({"dpi_scale": val})
-            w = MessageBox("界面缩放", "缩放设置已保存，重启应用后生效。", self)
-            w.yesButton.setText("确定")
-            w.cancelButton.hide()
-            w.exec()
-            self._append_log(f"[配置] 已设置缩放: {val}%（重启后生效）")
-            self._show_info_bar(f"[配置] 已设置缩放: {val}%,需重启")
+            self._set_dpi_scale_inline(val)
 
     def _on_font_family(self):
         """弹出字体选择对话框（Fluent ComboBox 列出系统字体）"""
@@ -1124,11 +1137,7 @@ class UIMixin:
         dlg.cancelButton.setText("取消")
         dlg.widget.setMinimumWidth(380)
         if dlg.exec():
-            family = dlg.comboBox.currentText()
-            self._save_settings({"font_family": family})
-            self._apply_font_family()
-            self._show_info_bar(f"[配置] 已更新字体: {family}")
-            self._append_log(f"[配置] 已更新字体: {family}")
+            self._set_font_family_inline(dlg.comboBox.currentText())
 
     def _on_add_table_record(self):
         """手动添加球桌记录（API 失效时的兜底录入入口）"""
@@ -1753,8 +1762,13 @@ class UIMixin:
         QApplication.styleHints().setColorScheme(
             Qt.ColorScheme.Dark if is_dark else Qt.ColorScheme.Light)
 
-        stylesheet = self._load_qss('dark' if is_dark else 'light')
-        self.setStyleSheet(stylesheet)
+        # 云母修复（2026-09-07）：业务 QSS 禁止挂在 FluentWindow 窗口自身。
+        # 真机洋红壁纸对照实证：窗口级 setStyleSheet 会永久改变原生窗口
+        # 表面的合成格式（不可逆——setStyleSheet("")、DWM setMicaEffect 重设、
+        # hide+show、setWindowFlags 重建均无法恢复），云母从此被纯色表面盖死。
+        # 全部业务页面都位于 stackedWidget 之下，故把 QSS 挂到 stackedWidget，
+        # 子控件样式效果与原先完全一致。
+        self._apply_business_qss()
         if not is_dark:
             self.style().unpolish(self)
             self.style().polish(self)
@@ -1767,6 +1781,29 @@ class UIMixin:
         # 构造时 _apply_theme 执行尚早，故用 singleShot(0) 排队到事件循环，在 show/主题重 polish 之后
         # 再强制按钮 32px，min=max=32、geometry 被 clamp 到 32，底部不再露 1-2px 背景带。
         QTimer.singleShot(0, self._enforce_toolbar_button_height)
+
+    def _apply_business_qss(self):
+        """业务 QSS 挂载到 stackedWidget（云母修复，2026-09-07）。
+
+        真机洋红壁纸对照实证：任何窗口级 setStyleSheet 都会永久改变原生窗口
+        表面的合成格式、杀死 DWM 云母渲染（不可逆：清空/DWM 重设/hide+show/
+        setWindowFlags 重建均无法恢复）。所有业务页面均位于 stackedWidget
+        之下，故业务 QSS 挂到 stackedWidget，子控件样式效果与原先一致。
+
+        必须走 qfw 的 CustomStyleSheet 机制（qfluentwidgets/common/style_sheet.py）：
+        setCustomStyleSheet 把业务 qss 写入 widget 的 light/darkCustomQss 动态属性，
+        styleSheetManager 里 stackedWidget 的源是
+        StyleSheetCompose([FLUENT_WINDOW, CustomStyleSheet])，渲染结果 =
+        FLUENT_WINDOW qss + 业务 qss 合并（这正是挂载时必须补齐 StackedWidget
+        半透明底规则的原因）。此后 qfw 主题切换/updateStyleSheet/dirty-qss 重设
+        的全部路径都渲染合并表，业务 qss 永不被覆盖——冒烟曾实证：直接
+        setStyleSheet(合并串) 会在第一个 Paint 事件被 dirty watcher 打回纯
+        FLUENT_WINDOW qss（7445 → 1969），与信号连接顺序无关。
+
+        light/dark 双槽一次写入两套 qss，主题切换由 qfw 自动选择对应槽；
+        强调色变化时 _apply_theme 再次调用本方法刷新槽内容。"""
+        setCustomStyleSheet(self.stackedWidget,
+                            self._load_qss('light'), self._load_qss('dark'))
 
     def _enforce_toolbar_radio_height(self):
         """工具栏 RadioButton 固定 32px 行高（与按钮中线对齐）。

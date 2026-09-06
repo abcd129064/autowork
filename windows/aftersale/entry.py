@@ -47,23 +47,14 @@ class EntryPage(QWidget):
         root.setContentsMargins(20, 16, 20, 12)
         root.setSpacing(10)
 
-        # 页头：标题 + 说明左对齐，周期指示芯片右对齐
-        head = QHBoxLayout()
-        head.setSpacing(12)
-        head_l = QVBoxLayout()
-        head_l.setSpacing(2)
-        # head_l.addWidget(TitleLabel("填写录入", self))
-        # head_l.addWidget(CaptionLabel(
-        #     "提交后写入数据库，多人刷新", self))
-        head.addLayout(head_l)
-        head.addStretch(1)
+        # 周期指示芯片（2026-09-07 从页头移到底部操作条、与必填进度同行：
+        # 页头左侧标题早已删除，原行只剩右侧一个小芯片、单独占一行浪费
+        # 垂直空间）
         self._cycle_chip = CaptionLabel(self)
         self._cycle_chip.setStyleSheet(
             "background: %s; color: %s; border-radius: 10px;"
             " padding: 3px 10px;" % (
                 _hex_rgba(SEMANTIC["info"], 18), SEMANTIC["info"]))
-        head.addWidget(self._cycle_chip)
-        root.addLayout(head)
 
         # 表单滚动区：内容按自身高度排布，不拉伸铺满整页；
         # 操作条随内容放在最后一栏控件下方（与修改前一致）
@@ -95,6 +86,9 @@ class EntryPage(QWidget):
         bar.addWidget(self._prog)
         self._prog_text = CaptionLabel("必填项 0/%d 已填写" % _total_required, view)
         bar.addWidget(self._prog_text)
+        # 周期指示芯片（本周期 mm/dd – mm/dd · 按发生时间自动归属）：
+        # 与必填进度同行（2026-09-07 上移页头取消，减少单独一行）
+        bar.addWidget(self._cycle_chip)
         bar.addStretch(1)
         self._btn_clear = PushButton(FluentIcon.DELETE, "清空", view)
         self._btn_clear.setToolTip("清空表单全部内容")
