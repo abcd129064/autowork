@@ -1,0 +1,18 @@
+{
+  "mysql_sync": {
+    "enabled": true,
+    "host": "49.235.34.253",
+    "port": 3306,
+    "user": "root",
+    "password": "enc:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAvPBrYgmwNUugsvn0eRtVJAAAAAACAAAAAAAQZgAAAAEAACAAAADNUIe3/4CRQ/hF0RZ0Wygx5lS4CvaMwwSEh8HpIzb2OQAAAAAOgAAAAAIAACAAAAB8thhRjS2aruIefsNAO4121INZn5CwHkTw3vrpT3JpjxAAAABzKlFlJrhu8K2kbAjauGD2QAAAAPIf6MDky9EjxybB9DvBDD9WzKXO9ZcgALvrsJCEUb+JeJbRYcJa9HcryChkho5HOrXWIZ+HfoermkafdPJo6rU=",
+    "database": "autowork"
+  },
+  "data_retention": {
+    "enabled": true,
+    "age_days": 60,
+    "check_interval_days": 60,
+    "max_size_gb": 3,
+    "min_size_gb": 2,
+    "min_keep_days": 30
+  }
+}

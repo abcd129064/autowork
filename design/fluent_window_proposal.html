@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="b5wux2ovTQgT9kbT3k9L8z">
+<head data-page-node-id="Ek9wg59EprXACa6ddCW6fZ">
+<meta charset="UTF-8" data-page-node-id="n0PuCVxh1EftyLN8OcoeBh">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="Fufx6vuBope4zhbgCnpf6c">
+<title>AutoWork · FluentWindow 重构设计稿</title>
+<style>
+:root{
+  --accent:#00BCD4;          /* design_tokens.ACCENT_FALLBACK */
+  --accent-dark:#009faa;
+  --success:#1a9e6c;
+  --warning:#c98a2d;
+  --danger:#cf4452;
+  --info:#0078d4;
+  --neutral:#5c6675;
+
+  --win-bg:#f3f3f3;
+  --nav-bg:#f2f2f2;
+  --card:#ffffff;
+  --card-border:#e5e5e5;
+  --text:#1a1a1a;
+  --text-2:#616161;
+  --text-3:#9e9e9e;
+  --hover:rgba(0,0,0,.0373);
+  --pressed:rgba(0,0,0,.0640);
+  --divider:#e5e5e5;
+  --row-alt:#fafafa;
+
+  --nav-w:200px;
+  --titlebar-h:34px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:"Segoe UI","Microsoft YaHei",-apple-system,sans-serif;
+  background:#dcdcdc;
+  padding:28px;
+  color:var(--text);
+  font-size:13px;
+}
+
+/* ---------- 说明区 ---------- */
+.doc{max-width:1560px;margin:0 auto 26px;background:#fff;border-radius:8px;padding:22px 26px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.doc h1{font-size:19px;font-weight:600;margin-bottom:4px}
+.doc .sub{color:var(--text-2);font-size:12.5px;margin-bottom:16px}
+.doc .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-top:14px}
+.doc .kpi{background:var(--win-bg);border-radius:6px;padding:11px 13px;border-left:3px solid var(--accent)}
+.doc .kpi b{display:block;font-size:17px;color:var(--accent-dark);margin-bottom:2px}
+.doc .kpi span{font-size:11.5px;color:var(--text-2)}
+.doc ul{margin:10px 0 0 18px;line-height:1.85;font-size:12.5px;color:var(--text-2)}
+.doc code{background:#eef6f8;color:#00707f;padding:1px 5px;border-radius:3px;font-size:11.5px;font-family:Consolas,monospace}
+.badge{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10.5px;font-weight:600;vertical-align:middle}
+.b-ok{background:#e6f4ed;color:var(--success)}
+.b-warn{background:#fdf3e3;color:var(--warning)}
+.b-risk{background:#fbeaec;color:var(--danger)}
+
+/* ---------- 窗口外框 ---------- */
+.stage{max-width:1560px;margin:0 auto}
+.stage-label{font-size:12px;color:var(--text-2);margin-bottom:8px;font-weight:600}
+
+.window{
+  width:1500px;max-width:100%;height:880px;
+  background:var(--win-bg);
+  border-radius:8px;
+  overflow:hidden;
+  box-shadow:0 8px 32px rgba(0,0,0,.22),0 0 0 1px rgba(0,0,0,.10);
+  display:flex;flex-direction:column;
+  position:relative;
+}
+
+/* 标题栏 */
+.titlebar{
+  height:var(--titlebar-h);min-height:var(--titlebar-h);
+  display:flex;align-items:center;
+  padding-left:10px;
+  background:transparent;
+  user-select:none;
+  position:relative;z-index:20;
+}
+.titlebar .icon{width:16px;height:16px;border-radius:3px;background:linear-gradient(135deg,var(--accent),var(--accent-dark));margin-right:9px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:9px;font-weight:700}
+.titlebar .title{font-size:12px;color:var(--text);opacity:.92}
+.titlebar .spacer{flex:1}
+.tb-btn{width:45px;height:var(--titlebar-h);display:flex;align-items:center;justify-content:center;color:var(--text);font-size:10px}
+.tb-btn:hover{background:var(--hover)}
+.tb-btn.close:hover{background:#c42b1c;color:#fff}
+
+/* 主体 */
+.body{flex:1;display:flex;min-height:0}
+
+/* ---------- 导航栏 ---------- */
+.nav{
+  width:var(--nav-w);min-width:var(--nav-w);
+  background:var(--nav-bg);
+  display:flex;flex-direction:column;
+  padding:2px 6px 8px;
+  transition:width .18s ease,min-width .18s ease;
+  border-right:1px solid rgba(0,0,0,.05);
+}
+.window.collapsed .nav{width:48px;min-width:48px}
+.nav-hamburger{padding:6px 0 8px 4px}
+.nav-hamburger .hb{width:30px;height:26px;border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;background:transparent;border:none}
+.nav-hamburger .hb:hover{background:var(--hover)}
+.nav-hamburger .hb i{display:block;width:14px;height:1.5px;background:var(--text);border-radius:1px}
+
+.nav-scroll{flex:1;overflow-y:auto;overflow-x:hidden}
+.nav-item{
+  position:relative;height:37px;border-radius:4px;
+  display:flex;align-items:center;gap:11px;
+  padding:0 11px;margin-bottom:2px;
+  cursor:pointer;color:var(--text);
+  white-space:nowrap;font-size:13px;
+}
+.nav-item:hover{background:var(--hover)}
+.nav-item.active{background:var(--pressed);font-weight:500}
+.nav-item.active::before{
+  content:"";position:absolute;left:0;top:9px;bottom:9px;
+  width:3px;border-radius:2px;background:var(--accent);
+}
+.nav-item .ico{width:16px;min-width:16px;height:16px;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-2)}
+.nav-item.active .ico{color:var(--accent-dark)}
+.nav-item .lbl{overflow:hidden;text-overflow:ellipsis}
+.window.collapsed .nav-item .lbl{display:none}
+.window.collapsed .nav-item{justify-content:center;padding:0}
+.nav-sep{height:1px;background:var(--divider);margin:6px 10px}
+.nav-bottom{padding-top:2px;border-top:1px solid var(--divider);margin-top:6px}
+.window.collapsed .nav-bottom .nav-item .lbl{display:none}
+.nav-grp{font-size:11px;color:var(--text-3);padding:10px 12px 4px;font-weight:600;letter-spacing:.3px}
+.window.collapsed .nav-grp{display:none}
+
+/* ---------- 页面区 ---------- */
+.page-area{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.pages{flex:1;position:relative;min-height:0;overflow:hidden}
+.page{position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden}
+.page.active{display:flex;animation:fade .16s ease}
+@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+/* 页面头：标题 + 二级 Pivot */
+.page-head{padding:16px 20px 0;min-height:auto}
+.page-title{font-size:20px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:8px}
+.page-desc{font-size:12px;color:var(--text-2);margin-bottom:12px}
+.pivot{display:flex;gap:2px;border-bottom:1px solid var(--divider);position:relative}
+.pivot-item{
+  padding:6px 12px 8px;cursor:pointer;color:var(--text-2);
+  font-size:13px;position:relative;border-radius:4px 4px 0 0;
+}
+.pivot-item:hover{color:var(--text)}
+.pivot-item.active{color:var(--text);font-weight:600}
+.pivot-item.active::after{
+  content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:2px;
+  background:var(--accent);border-radius:2px;
+}
+.pivot-spacer{flex:1;border-bottom:1px solid var(--divider)}
+.subpage{display:none;flex:1;min-height:0;flex-direction:column;padding:14px 20px 18px;overflow:auto}
+.subpage.active{display:flex}
+
+/* ---------- 通用组件 ---------- */
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 12px;background:var(--card);border:1px solid var(--card-border);border-radius:6px;margin-bottom:10px}
+.btn{height:32px;padding:0 13px;border-radius:4px;border:1px solid rgba(0,0,0,.10);background:#fff;cursor:pointer;font-size:12.5px;display:inline-flex;align-items:center;gap:6px;color:var(--text);font-family:inherit}
+.btn:hover{background:var(--hover)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
+.btn.primary:hover{background:var(--accent-dark)}
+.btn.icon{width:32px;padding:0;justify-content:center}
+.sep-v{width:1px;height:20px;background:var(--divider);margin:0 3px}
+.field{height:32px;border-radius:4px;border:1px solid rgba(0,0,0,.12);background:#fff;padding:0 10px;display:inline-flex;align-items:center;font-size:12.5px;min-width:110px;color:var(--text)}
+.field.gray{background:#f5f5f5;color:var(--text-2)}
+
+.splitter{display:flex;gap:10px;flex:1;min-height:0}
+.pane{background:var(--card);border:1px solid var(--card-border);border-radius:6px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.pane-h{padding:9px 13px;font-size:12.5px;font-weight:600;border-bottom:1px solid var(--divider);display:flex;align-items:center;gap:7px;color:var(--text)}
+.pane-h .cnt{font-size:11px;color:var(--text-3);font-weight:400}
+.pane-b{flex:1;overflow:auto;padding:6px 4px}
+
+/* 设备树 */
+.tree-item{padding:5px 11px;border-radius:4px;display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12.5px}
+.tree-item:hover{background:var(--hover)}
+.tree-item.sel{background:var(--pressed);font-weight:500}
+.dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.dot.on{background:var(--success)}
+.dot.off{background:var(--neutral)}
+.dot.warn{background:var(--warning)}
+
+/* 日志 */
+.log{font-family:Consolas,"Cascadia Mono",monospace;font-size:11.5px;line-height:1.65;padding:8px 11px}
+.log div{white-space:pre-wrap;word-break:break-all}
+.lv{color:var(--info);font-weight:600}
+.lv.err{color:var(--danger)}
+.lv.ok{color:var(--success)}
+.lv.warn{color:var(--warning)}
+.log .ts{color:var(--text-3)}
+
+/* 表格 */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{
+  text-align:left;padding:8px 10px;font-weight:600;font-size:12px;
+  color:var(--text-2);border-bottom:1px solid var(--divider);
+  position:sticky;top:0;background:var(--card);z-index:2;white-space:nowrap;
+}
+tbody td{padding:7px 10px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
+tbody tr:hover{background:var(--hover)}
+tbody tr:nth-child(even){background:var(--row-alt)}
+tbody tr:nth-child(even):hover{background:var(--hover)}
+.tag{padding:1.5px 7px;border-radius:9px;font-size:11px;font-weight:500;display:inline-block}
+.t-ok{background:#e6f4ed;color:var(--success)}
+.t-warn{background:#fdf3e3;color:var(--warning)}
+.t-err{background:#fbeaec;color:var(--danger)}
+.t-info{background:#e8f1fb;color:var(--info)}
+.t-gray{background:#f0f0f0;color:var(--neutral)}
+.mono{font-family:Consolas,monospace;font-size:11.5px;color:var(--text-2)}
+
+/* 设置卡片 */
+.set-group{margin-bottom:16px}
+.set-group-t{font-size:12.5px;font-weight:600;margin-bottom:7px;color:var(--text)}
+.set-card{background:var(--card);border:1px solid var(--card-border);border-radius:6px;padding:12px 15px;display:flex;align-items:center;gap:13px;margin-bottom:7px}
+.set-card .sc-t{font-size:13px;font-weight:500}
+.set-card .sc-d{font-size:11.5px;color:var(--text-2);margin-top:2px;line-height:1.5}
+.set-card .spacer{flex:1}
+.switch{width:40px;height:20px;border-radius:10px;background:#c9c9c9;position:relative;cursor:pointer;transition:background .15s}
+.switch.on{background:var(--accent)}
+.switch i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.switch.on i{left:22px}
+
+/* 状态栏 */
+.statusbar{
+  height:26px;min-height:26px;display:flex;align-items:center;gap:14px;
+  padding:0 14px;font-size:11.5px;color:var(--text-2);
+  border-top:1px solid var(--divider);background:var(--card);
+}
+.statusbar .sb-i{display:flex;align-items:center;gap:5px}
+
+/* 标注 */
+.anno{
+  position:absolute;background:#fff8e1;border:1.5px solid #f0a020;
+  border-radius:6px;padding:7px 11px;font-size:11.5px;line-height:1.6;
+  max-width:270px;box-shadow:0 3px 10px rgba(0,0,0,.13);z-index:50;
+}
+.anno b{color:#8a5a00;display:block;margin-bottom:3px;font-size:11.5px}
+.anno::before{content:"";position:absolute;width:9px;height:9px;background:#fff8e1;border-left:1.5px solid #f0a020;border-bottom:1.5px solid #f0a020;transform:rotate(45deg)}
+.anno.a-left::before{left:-6px;top:14px}
+.anno.a-top::before{top:-6px;left:20px}
+
+.ctrl-bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.ctrl-bar label{font-size:12px;color:var(--text-2)}
+</style>
+</head>
+<body data-page-node-id="CUsHijuXmNdsKTV8EUl0RA">
+
+<div class="doc" data-page-node-id="aCaxDEXffpNErWlbFMa00Q">
+  <h1 data-page-node-id="WPvwg0elcCie1JmYF5xY6C">AutoWork → FluentWindow 重构 · 设计稿</h1>
+  <div class="sub" data-page-node-id="MNE9PxJuDv8otrZ6A54v4A">基于源码静态调研 + PySide6 6.11 / qfluentwidgets 1.11 offscreen 实测（1500×880 窗口）</div>
+
+  <div class="grid" data-page-node-id="0NLE8MilsHwO4WTQzi5uO9">
+    <div class="kpi" data-page-node-id="IK3BBqAnpMw2jTceOHvV2W"><b data-page-node-id="AB3GbZy9oUNvJoRBpHJoEx">11 / 11</b><span data-page-node-id="ObcNXvT6NgN0XpBmPaNXHW">offscreen 实测全通过（<code data-page-node-id="OGDlGWxwFFEoCqmAMvvQKa">tools/verify_fluent_refactor.py</code> 可重复执行）</span></div>
+    <div class="kpi" data-page-node-id="APqM4RWSUGrbiBR5ZmokrV"><b data-page-node-id="T07PMHwP2AZAQN5T1BuLnS">200px</b><span data-page-node-id="tZRnC1Biw3rbBR3gs0AFrU">建议导航展开宽度 → 页面可用 1199px</span></div>
+    <div class="kpi" data-page-node-id="GSiHzvNFJ1Tp5i63iVuRGq"><b data-page-node-id="dEh7vkdOGN0dr5L6AElBGY">+52~92px</b><span data-page-node-id="LiaLF8Z5MqFMcIsxzXZAVe">业务表列宽溢出量（可通过窗口 1500+ 或列策略化解）</span></div>
+    <div class="kpi" data-page-node-id="SMf0b2lXIc3vA44bxFQ5JJ"><b data-page-node-id="D4vtwkM4nOb3THmMEKLY6w">1 处</b><span data-page-node-id="7Z2puldiEa8rdxaw7WMCsl">主窗口基类改动点（main_window.py:121）</span></div>
+  </div>
+
+  <ul data-page-node-id="vx99JCkVNg2nzR1uPfuQ8m">
+    <li data-page-node-id="yvMNdSl0GHQAGVKUIHav10"><b data-page-node-id="pZ3X3a5DY1Cg9g5KGnF3i3">最关键发现：</b><code data-page-node-id="FSzUbrYCjpE4qFEMWQGuHd">MainWindow</code> 已继承 <code data-page-node-id="t1M7xxHBIHENbSjdBCsKLf">FluentWindowBase</code>（QWidget 系，非 QMainWindow），自带 <code data-page-node-id="wIliaGIqJEOC2isZxGgePf">stackedWidget</code>，只是 <code data-page-node-id="mMBf1m4OyWDc8uo15Vo1aW">navigationInterface = None</code>。换 <code data-page-node-id="JnBxXrv0Aj8Zecek2QWtJJ">FluentWindow</code> 属<b data-page-node-id="QWQqsi6G5IXVoF6FHALo2o">同层基类替换</b>，不是跨层级重构。</li>
+    <li data-page-node-id="KnHXe6WhTBwpMUF8gsrCeW"><b data-page-node-id="G1FGs89O9gA3tZ2h6zCAEb">实测坑 1：</b><code data-page-node-id="Y0JtSKY5Bbrtp6psmBHx46">addSubInterface()</code> 要求 interface 的 <code data-page-node-id="lxMUp0ej1AbkCnEdG173FF">objectName</code> 非空，否则抛 <code data-page-node-id="zZgZHeQVQUNGlgOCa3sRhz">ValueError</code>。</li>
+    <li data-page-node-id="jseA8VS1GaAOdQ5BOMCuyD"><b data-page-node-id="FEhBSxuTqsAfG3f1IvWsyY">实测坑 2：</b>直接换基类不改布局，<code data-page-node-id="uUwPdjhbStULNPhGCVZObj">hBoxLayout</code> 会变成 3 槽位 <code data-page-node-id="ZtOskp9VtMDLzTf1kVxpAh">[导航 | 原vBoxLayout | 空stackedWidget]</code>，页面区留白、内容错位。</li>
+    <li data-page-node-id="bXt5Nrjgf4FgGEf3kQ4D6T"><b data-page-node-id="vDlVflsQihe2ppjVimGIuZ">实测好消息：</b>Qt QSS 沿父链继承，挂在顶层窗口的 objectName 选择器（<code data-page-node-id="2jo6l8CZy5rkNaITDCCSxR">#centralwidget</code> 等 14 个）<b data-page-node-id="CtR8XOsEFjUQhU9wvNIWWp">在子页面内仍然命中</b>，无需重写。</li>
+    <li data-page-node-id="YSAzR618m2P6rZLbh9yPhH"><b data-page-node-id="HMnoBkKlYeLa8z7BhcPpCa">实测好消息：</b>嵌套 FluentWindow 技术可行（子面板 1302px 可用宽），但会出现第二个标题栏 → 建议<b data-page-node-id="8K4cYcnWpVYgxo33MQ1Uf3">降层为 QWidget + 内部 Pivot</b>。</li>
+  </ul>
+</div>
+
+<div class="stage" data-page-node-id="CO9HK8nXywMRfgngzt96uh">
+  <div class="stage-label" data-page-node-id="a9iIN7DwJ4X7en5FEVFVmm">设计稿 · 主窗口 1500×880 · 浅色主题 · 强调色 #00BCD4</div>
+
+  <div class="ctrl-bar" data-page-node-id="yKKV2uiGph0hH1uJGjjGET">
+    <button class="btn" onclick="toggleNav()" data-page-node-id="82tM8CASMYw46sEEwgCo1E">⟷ 切换导航折叠 / 展开</button>
+    <button class="btn" onclick="toggleAnno()" data-page-node-id="62O53yYDH6KBVFIVDrcixE">◈ 显示 / 隐藏设计标注</button>
+    <span class="field gray" id="wReadout" data-page-node-id="xQw0Iyt0WReHvhyEMuNRWR">导航 200px → 页面可用 1199px</span>
+  </div>
+
+  <div class="window" id="win" data-page-node-id="8koMl4In5pJYZY2D1IKpEs">
+    <!-- 标题栏 -->
+    <div class="titlebar" data-page-node-id="U9TneRIB9943XLZoJ9vg2a">
+      <div class="icon" data-page-node-id="PpiRsaHqv2Q0tY6swVBiE1">A</div>
+      <div class="title" data-page-node-id="tuvBacDkeMtI0PqVGXk7x3">AutoWork - 自动化工作工具</div>
+      <div class="spacer" data-page-node-id="CHyJBPDe4TVtqNwjime558"></div>
+      <div class="tb-btn" data-page-node-id="2VfZxpudxHRiKydv5so6YK">─</div>
+      <div class="tb-btn" data-page-node-id="xMYV06ZB7X3fiCYpPU172n">□</div>
+      <div class="tb-btn close" data-page-node-id="J4thDpSNbAxa7byvs69TCd">✕</div>
+    </div>
+
+    <div class="body" data-page-node-id="K1ZUMPUJtpGF23WWjsFpEv">
+      <!-- 导航栏 -->
+      <nav class="nav" data-page-node-id="SUPB18mVwp1iN3oCKWhxFD">
+        <div class="nav-hamburger" data-page-node-id="73UkpFDU4pWoZqpagZlDTx"><button class="hb" onclick="toggleNav()" data-page-node-id="HA3ODPOcHGEz2LNPONXDcd"><i data-page-node-id="vaorNjch76En6R46Ocl4PC"></i><i data-page-node-id="WpVPVGfSQJrLd0k632EJTE"></i><i data-page-node-id="vD2IwFggDLVSBVDCAoFMyg"></i></button></div>
+        <div class="nav-scroll" data-page-node-id="E41ixvYCUbjP3T0gfhiKt3">
+          <div class="nav-grp" data-page-node-id="wzAZgIgSr3xlNYxoWaPopn">工作区</div>
+          <div class="nav-item active" data-page="home" onclick="go('home')" data-page-node-id="1E2oIr109crVs3yqB0CgbT">
+            <span class="ico" data-page-node-id="n9GiDaHnAy4qAOf1QPNbrr">⌂</span><span class="lbl" data-page-node-id="DTtGg1QEEwXTjuxOcc1q9p">工作台</span>
+          </div>
+          <div class="nav-item" data-page="ops" onclick="go('ops')" data-page-node-id="YhfBPWI4wSeEazZP8rNYq1">
+            <span class="ico" data-page-node-id="U874C6OqfArL6NDEfEdjYs">▤</span><span class="lbl" data-page-node-id="T6LxtVWgCIla5OAoTlYl41">运维管理</span>
+          </div>
+          <div class="nav-item" data-page="aftersale" onclick="go('aftersale')" data-page-node-id="4koPgvxQ2pd5cuDFDKZVCk">
+            <span class="ico" data-page-node-id="H1lklQEhDvS1UMCRTZbSjK">☺</span><span class="lbl" data-page-node-id="67twnDML8v3Y8mpDpTmbvy">售后</span>
+          </div>
+          <div class="nav-item" data-page="video" onclick="go('video')" data-page-node-id="PBahF1p1YRjpGrgtv8HH9A">
+            <span class="ico" data-page-node-id="2kghgGEIVKQTAHhtKjUKSL">▶</span><span class="lbl" data-page-node-id="rbffyALPp2ZLeLRA3QvbHz">跑视频</span>
+          </div>
+          <div class="nav-item" data-page="remote" onclick="go('remote')" data-page-node-id="mUHpX5pMVOs4vmxonsGJyi">
+            <span class="ico" data-page-node-id="DXALxMZ3r06Y0FLBTk6QkQ">⇄</span><span class="lbl" data-page-node-id="B8ATQplzPbt2SozXnA7Sm2">远程会话</span>
+          </div>
+          <div class="nav-item" data-page="chart" onclick="go('chart')" data-page-node-id="qtN2v2nTTk7aaBybYrY30c">
+            <span class="ico" data-page-node-id="86Rfecpfc9j9UECtCQVunn">◫</span><span class="lbl" data-page-node-id="j2BKv8eMSD0SebmBAZQ4Hb">统计图表</span>
+          </div>
+        </div>
+        <div class="nav-sep" data-page-node-id="i8j3TVUY0USNgB9mY96x4t"></div>
+        <div class="nav-bottom" data-page-node-id="F9wdqBgzWP5NBbaHAgD0WC">
+          <div class="nav-item" data-page="settings" onclick="go('settings')" data-page-node-id="ibd80uwDPbpyWV7TYT6bbs">
+            <span class="ico" data-page-node-id="TSCwDng9nofefGWpeaWbQW">⚙</span><span class="lbl" data-page-node-id="s2jTxr5UXBVEkYxq7eAchA">设置</span>
+          </div>
+          <div class="nav-item" data-page="about" onclick="go('about')" data-page-node-id="IytrP04CcAqmtgoeqTIeCm">
+            <span class="ico" data-page-node-id="XbVictdu1uC4KCHy4DyiYJ">ⓘ</span><span class="lbl" data-page-node-id="Z2pnefi3EooeA8Hx4F5B5Q">关于</span>
+          </div>
+        </div>
+      </nav>
+
+      <!-- 页面区 -->
+      <div class="page-area" data-page-node-id="LM8lZBd4dmsQPGd5bKRi1y">
+        <div class="pages" data-page-node-id="hMUYE8ox2gDUEcDMFY7evS">
+
+          <!-- ============ 工作台 ============ -->
+          <section class="page active" id="page-home" data-page-node-id="7y9uFGZQPwy1OMfsoFmpZ4">
+            <div class="page-head" data-page-node-id="l3uDzYRHcEr6dA2UhAh3Xi">
+              <div class="page-title" data-page-node-id="0DYAIikvBnGT7ujqFdOIuT">工作台</div>
+              <div class="page-desc" data-page-node-id="K8lVhTC0wpNHY3JbfGZaEu">程序启动 / 日志采集 / 文件整理 / 远程控制 —— 原 MainWindow 全部能力原样保留</div>
+            </div>
+            <div class="subpage active" style="padding-top:12px" data-page-node-id="iq9PLCpHrtdBlxuTvrzYe1">
+              <div class="toolbar" data-page-node-id="XtMoBuTEQwkxYp4mnTWb1R">
+                <button class="btn primary" data-page-node-id="9qvPLOAo0fxhlgMwj48OFw">▶ 开始</button>
+                <button class="btn" data-page-node-id="fxeCSSkPBd4PT14y7IxKAe">■ 结束</button>
+                <button class="btn" data-page-node-id="EB4Bhw2XHlJuZsQcgo7T3W">↻ 刷新</button>
+                <div class="sep-v" data-page-node-id="vQxJ6c9tUDYOai0UfGElvJ"></div>
+                <div class="field" data-page-node-id="bF6KWDk17virI4RJZUOGJx">📅 2026-09-05</div>
+                <button class="btn icon" data-page-node-id="SG4Jvpkyq4xIPqZ2DbtTYi">‹</button><button class="btn icon" data-page-node-id="8dU9F06FuppackIidmKCLP">›</button>
+                <div class="sep-v" data-page-node-id="dVErzWd03InrDwe2dSYJEG"></div>
+                <div class="field gray" data-page-node-id="1wj5Ko24MSdp1rGJiUDJi7">📁 videos / 2026-09-05</div>
+                <button class="btn" data-page-node-id="ZzJFkuJTNCZUIAUYdDm03F">写入表格</button>
+                <div class="sep-v" data-page-node-id="vu3FgLGxRKwFUEmZL1oqbl"></div>
+                <button class="btn" data-page-node-id="8WDBJI01s1OG9foouhwT2m">▤ 球桌面板</button>
+                <button class="btn" data-page-node-id="LSdZGB8H7fFYaclmjPS6Cy">☺ 售后面板</button>
+                <button class="btn" data-page-node-id="B9CprcAacokGgXihgTb6eD">▶ 跑视频</button>
+                <button class="btn" data-page-node-id="9qC1fjGVynr887H95fZfTX">⇄ 远程</button>
+                <div class="sep-v" data-page-node-id="uK8w1enED11xhZS7BVBK34"></div>
+                <div class="field gray" data-page-node-id="FkzAPyeUEo3BjkvyUQfOFA">⏱ 12:04:33</div>
+                <div class="field gray" data-page-node-id="FRhXeOfoDaQUwVelxRcPrr">🗄 MySQL 已连接</div>
+              </div>
+              <div class="splitter" data-page-node-id="ZpLcIxw0EG4Oj9A1kxwDKM">
+                <div class="pane" style="width:230px;min-width:230px" data-page-node-id="obEAi8ITN8nNYpFJG5Fwc6">
+                  <div class="pane-h" data-page-node-id="eyL7iB0deg3ehaFuvFPTDu">设备树 <span class="cnt" data-page-node-id="F7O4cIAE0NOqlKleNtJOAK">8 台</span></div>
+                  <div class="pane-b" data-page-node-id="hAafj4D5PLDj0B1D2Pzteb">
+                    <div class="tree-item sel" data-page-node-id="lFrLJiWKuFDAjaW7Mtus1w"><span class="dot on" data-page-node-id="abFXsHc9NZxz3PmDfrgqrb"></span> SNK-8801 · A01</div>
+                    <div class="tree-item" data-page-node-id="RB0205TQMXqF3i1LCEMj7u"><span class="dot on" data-page-node-id="YZiQFsTaLwAfBMP4puyStt"></span> SNK-8802 · A02</div>
+                    <div class="tree-item" data-page-node-id="5a1ZxoxnASKHUaCiG36jmV"><span class="dot warn" data-page-node-id="67SQGfXHX3kcIdNXHrjCSE"></span> SNK-8803 · A03</div>
+                    <div class="tree-item" data-page-node-id="6Z0k5C006dOoDuppINeFuE"><span class="dot on" data-page-node-id="YIyXNMwkwimkVwU0u8UHfi"></span> SNK-8804 · B01</div>
+                    <div class="tree-item" data-page-node-id="0qBVSptIZXhAtCkcLzzyPc"><span class="dot off" data-page-node-id="mWqXB9Z3OOWyS38njxAl9F"></span> SNK-8805 · B02</div>
+                    <div class="tree-item" data-page-node-id="OGCFmTDLt5USxr9V3pA45Z"><span class="dot on" data-page-node-id="RY1qsDDRxsJDKGzBN0Sp0V"></span> SNK-8806 · B03</div>
+                    <div class="tree-item" data-page-node-id="4chpmLitvxDFTTgsb03s1l"><span class="dot warn" data-page-node-id="5TPTigrJxNukNCtlFjlK2k"></span> SNK-8807 · C01</div>
+                    <div class="tree-item" data-page-node-id="2MVaEuoXV3XLRmW7Mg0xdI"><span class="dot off" data-page-node-id="YNtEvIGTiEzoEH2PRvMZN8"></span> SNK-8808 · C02</div>
+                  </div>
+                </div>
+                <div class="pane" style="flex:1" data-page-node-id="KI4oiPbr9zyB06e14iPYO4">
+                  <div class="pane-h" data-page-node-id="NXRThkBFfqjmvrnHH8SKMM">日志控制台 <span class="cnt" data-page-node-id="2sCOFv753d2tR6T0D8aYwI">自动滚动 · 已加载 1,284 行</span></div>
+                  <div class="pane-b" data-page-node-id="OtlwXot9zirUwtNO0COOJw">
+                    <div class="log" data-page-node-id="cj7J6etNXOYI4HL396sosH">
+<div data-page-node-id="F7fY8bjPqUnUgOPrHB9f9I"><span class="ts" data-page-node-id="VGVEN10ak3T3S5SRCq1ZdF">12:04:31</span> <span class="lv" data-page-node-id="iK3HxpfWIrJfHt8zeQkDpG">[INFO]</span> 欢迎使用 AutoWork 工具！</div>
+<div data-page-node-id="5gWH7hIxoWMHeybZMsDend"><span class="ts" data-page-node-id="mH85qibgEe22NsQDm3F2Ms">12:04:31</span> <span class="lv" data-page-node-id="JELbqr9CYOtDENm8xqAu6T">[INFO]</span> 程序目录: D:\snooker\bin64</div>
+<div data-page-node-id="gUvcxuVZD2fdBI7B1kbIfV"><span class="ts" data-page-node-id="AyM8hPbuBKW46nQhVwFls4">12:04:32</span> <span class="lv" data-page-node-id="SnBcq2WbMVujCWNaCrwbdb">[INFO]</span> 视频目录: D:\videos\2026-09-05</div>
+<div data-page-node-id="nHIGjALL2TA7CBr25GgnUc"><span class="ts" data-page-node-id="jnYn5jpiOC0Ar9PzgMGUN0">12:04:32</span> <span class="lv ok" data-page-node-id="Z6kMUfSquCX1c5iX3xTWRb">[ OK ]</span> 设备 SNK-8801 连接成功</div>
+<div data-page-node-id="VcnkttjdyzaM3g5cDHVjzC"><span class="ts" data-page-node-id="rNmcHC4833UNlde4zom8NX">12:04:33</span> <span class="lv warn" data-page-node-id="8QCELPDkyoxwsBvQIMZX1W">[WARN]</span> SNK-8803 校准偏差 0.4px，建议重新标定</div>
+<div data-page-node-id="BW3BcC6lpChWxPJrqSs8xS"><span class="ts" data-page-node-id="rjyNsZoZ26P7PHBlNOgBav">12:04:33</span> <span class="lv" data-page-node-id="2tURJeS0op9bubsC5bXTfL">[INFO]</span> 开始采集 frame_id:1024</div>
+<div data-page-node-id="PCFCtBeWH8pdoSBtiYxzmo"><span class="ts" data-page-node-id="WFwNkfBWHmHgdT5y025Yl2">12:04:34</span> <span class="lv err" data-page-node-id="BsOUnwOj8UqgnL5EVZthWO">[ERR ]</span> SNK-8805 心跳超时（3 次重试后放弃）</div>
+<div data-page-node-id="k5QCWsWInUOhakbW2AO3qE"><span class="ts" data-page-node-id="ER7dQwRwiMlPZbsIB6EPGy">12:04:35</span> <span class="lv ok" data-page-node-id="9TC64zmQEvHnhJZbUEqAaK">[ OK ]</span> 上传清单已同步至 MySQL</div>
+<div data-page-node-id="zDQXnZnZ5zMV2NOPvQqieK"><span class="ts" data-page-node-id="MGewIkmV41uQPngURSDCQV">12:04:36</span> <span class="lv" data-page-node-id="s8x2BD08sHwsuZtWvnloaj">[INFO]</span> 请选择程序并开始工作...</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pane" style="width:250px;min-width:250px" data-page-node-id="Y6As6HXmB7yElDZPXOqhfz">
+                  <div class="pane-h" data-page-node-id="Fqdi37xrNKBWCrLYmbdr2l">远程面板 <span class="cnt" data-page-node-id="fVEXZ4HEUtBeVLGihHUIkS">P2P · frpc xtcp</span></div>
+                  <div class="pane-b" style="padding:10px 12px;font-size:12px" data-page-node-id="ePFjsL8QfEz1HWDoB76b93">
+                    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0" data-page-node-id="agkiP6jX5sh8IQ8biPlQjh">
+                      <span style="color:var(--text-2)" data-page-node-id="UVICTlNvavzxqbm9JcCSDD">隧道状态</span><span class="tag t-ok" data-page-node-id="8ulQZmODXW8ZYzYeGkXwZx">已建立</span></div>
+                    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0" data-page-node-id="7d68gHVen49sf7eH9CyJzT">
+                      <span style="color:var(--text-2)" data-page-node-id="iKS1T5Yej5uxL7hw7tgvKn">本地端口</span><span class="mono" data-page-node-id="GWlMrd8VwBBU6onrAPJsfM">127.0.0.1:63389</span></div>
+                    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0" data-page-node-id="7Nz9Awkqvoa2HAvbrsNuUA">
+                      <span style="color:var(--text-2)" data-page-node-id="b1l10x9ZRkrhlnEDHBMVZ9">对端</span><span class="mono" data-page-node-id="EotD5kw5IvyRSgjmy4y8jP">SNK-8801</span></div>
+                    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0" data-page-node-id="6TpX9lxZ4AxHpYZo3v82VU">
+                      <span style="color:var(--text-2)" data-page-node-id="j9hk6RarZPIosIBB657RvT">延迟</span><span data-page-node-id="RP92o5o0qcwvpaH45od1qo">18 ms</span></div>
+                    <div style="margin-top:11px;display:flex;gap:6px;flex-wrap:wrap" data-page-node-id="jrFK29qzp7kvcmpCgrE2Be">
+                      <button class="btn" style="height:28px" data-page-node-id="aD0NgN8r95OWBUXREhI8Qm">SSH</button>
+                      <button class="btn" style="height:28px" data-page-node-id="kKbLnILT7hjoKFyHYAIac7">SFTP</button>
+                      <button class="btn" style="height:28px" data-page-node-id="7rTIyPMQYbbDbYBSOzGGNf">RDP</button>
+                      <button class="btn" style="height:28px" data-page-node-id="fsxNtemBf30nctHBbhXOFi">诊断</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ============ 运维管理 ============ -->
+          <section class="page" id="page-ops" data-page-node-id="8uX4GF1V2FslZfojATaBB2">
+            <div class="page-head" data-page-node-id="pqx0p0pjeDZ3DbA4esdqFD">
+              <div class="page-title" data-page-node-id="9mEz1MmjpEjtmBmDvT8o6w">运维管理 <span class="badge b-ok" data-page-node-id="0TafyEjdOcfbrCeEz8Ztfj">零改造</span></div>
+              <div class="page-desc" data-page-node-id="G8CRkziICKWRyHcEvPzvh9">原 ManagementPanelWindow 的 6 个子页直接平铺为一级导航 —— 它们本就是 QWidget，无需降层</div>
+              <div class="pivot" data-page-node-id="DXUmcaSBDsTLh2kyCHzisS">
+                <div class="pivot-item active" onclick="sub(this,'sp-ops-table')" data-page-node-id="OATVv20APxiP1sJyR1cL8X">球桌管理</div>
+                <div class="pivot-item" onclick="sub(this,'sp-ops-device')" data-page-node-id="A6TCRtw1HLcfMUXZSU2RIW">设备状态</div>
+                <div class="pivot-item" onclick="sub(this,'sp-ops-health')" data-page-node-id="SJEVXYCwzhTyEy1MWGppFd">设备健康度</div>
+                <div class="pivot-item" onclick="sub(this,'sp-ops-test')" data-page-node-id="2RRoHKfuxzcSrwYYjXEwbq">组件测试</div>
+                <div class="pivot-spacer" data-page-node-id="h6xWLDr7XBqZLAYx9B6vqm"></div>
+              </div>
+            </div>
+            <div class="subpage active" id="sp-ops-table" data-page-node-id="JEQDAOR7r0ptAND0NKCcAL">
+              <div class="toolbar" data-page-node-id="ug7Jept3lha8VdeLtHIIQb">
+                <div class="field" style="min-width:210px" data-page-node-id="KoeAqu9wgMPbJJGLRCCbsm">🔍 搜索 snk / 主机名 / 门店</div>
+                <button class="btn" data-page-node-id="0cNHIulxWs64FXwSu8cKf6">↻ 刷新</button><button class="btn" data-page-node-id="CiQJEQkk6uaE5brz30nTif">＋ 新增</button>
+                <button class="btn" data-page-node-id="nWwLBIC88sMVmk6psJqK4W">⇅ 导入 Excel</button><button class="btn" data-page-node-id="pdABFnC20sF5cbdwD3ZXKi">⇓ 导出</button>
+                <div class="sep-v" data-page-node-id="6VOrg6B0qblUnvLdkAILld"></div>
+                <div class="field gray" data-page-node-id="EDBBaBbxnaTjkgIyDWnaIU">共 248 条</div>
+              </div>
+              <div class="pane" style="flex:1" data-page-node-id="n7ZwFFj9oRIpnk1i3qYCCw">
+                <div class="pane-b" style="padding:0" data-page-node-id="HsthBbaRQC9EF727A5TH9l">
+                  <table data-page-node-id="ijpepdIgfIgCCD3KslKwK6">
+                    <thead data-page-node-id="dvnZBitGcVfnR2TMdMuPsv"><tr data-page-node-id="rnG3NYDuoDST3HelB3ncww"><th style="width:36px" data-page-node-id="T9XjBNvFTx7bMcI927i4rb"></th><th data-page-node-id="LwOlWTIcCdeZHxM0XvdJym">SNK</th><th data-page-node-id="iGUnR3RGcaqqIgdtdcF7ir">主机名</th><th data-page-node-id="Pf0BgVVf5qnHUBbHMnNsHT">门店</th><th data-page-node-id="WW4oqHVCi7fXtAa4Ds12kA">桌号</th><th data-page-node-id="z4DRY4riboXTg8QJzXFwCK">状态</th><th data-page-node-id="Zl15XCOYFuOYqdP09YFXy7">最后同步</th><th data-page-node-id="rmtrHNrV87f75cZtxioY9f">操作</th></tr></thead>
+                    <tbody data-page-node-id="zGp99xpndV7RbXHj26RkVr">
+                      <tr data-page-node-id="0avLCZF9SRGCKmXWycFzo6"><td data-page-node-id="WEKvEjJuSz3LyJkpfmXODa">☐</td><td class="mono" data-page-node-id="FymmCt6ARgBuSZHofHvA2G">SNK-8801</td><td data-page-node-id="bqrOeXb512tFbtQUYtPGiE">DESKTOP-A01</td><td data-page-node-id="tB7cKIVohh2teileunvQOr">望京旗舰店</td><td data-page-node-id="cHVUSTjFpof50tY0GaNLof">A01</td><td data-page-node-id="X5MAP27nMe0ypXcvuykUXc"><span class="tag t-ok" data-page-node-id="eWN9tpRPAbpUANhAaspGRU">在线</span></td><td class="mono" data-page-node-id="HGQ8wG45jng8DJCtdBgfH4">12:04:02</td><td style="color:var(--accent-dark)" data-page-node-id="CtaPtboUhdk3F5vp6HnmDr">编辑 · 远程</td></tr>
+                      <tr data-page-node-id="ViSr0OvRuOHtenbyDWvGAy"><td data-page-node-id="v89OZPAGb7J04DscE023Ac">☐</td><td class="mono" data-page-node-id="PFmdQoUsgxMm1TM7Q1NAvp">SNK-8802</td><td data-page-node-id="Bz86Qfe7nIM3azL63pWVEQ">DESKTOP-A02</td><td data-page-node-id="o6xp0L5EZiwHPllpKV6Vgt">望京旗舰店</td><td data-page-node-id="PIBeBuIirZo0Sq9WHOFQTy">A02</td><td data-page-node-id="dkJ9ESRgyqY0OimvREJmst"><span class="tag t-ok" data-page-node-id="mBCFDCBHBTcMYC6aE8FQ7E">在线</span></td><td class="mono" data-page-node-id="n5vFJs6xNTcSd8gKFR5c2H">12:03:58</td><td style="color:var(--accent-dark)" data-page-node-id="E0HL08xWKi5YvKOO6A9yja">编辑 · 远程</td></tr>
+                      <tr data-page-node-id="vy3s8MjkVshLSgrlwWg0iS"><td data-page-node-id="JowrO5y6BX1q5Y9X71sCls">☐</td><td class="mono" data-page-node-id="ZVDhrWFX1y9yCOf9XS0o0Q">SNK-8803</td><td data-page-node-id="4vLDRahkGcOMtNJfIe2laX">DESKTOP-A03</td><td data-page-node-id="ZjfFvpal31Hq2WtSyEbpPk">三里屯店</td><td data-page-node-id="osuzzibvvr1n4qhmUGGEP1">A03</td><td data-page-node-id="OsQpeszbOxBs82EJgICjOb"><span class="tag t-warn" data-page-node-id="IdFzgh8YzXWC0CWh9XP3Gy">校准</span></td><td class="mono" data-page-node-id="4oEIsqOOCR23oii5aZwjW6">12:01:44</td><td style="color:var(--accent-dark)" data-page-node-id="ouZqBPuhQc4D3UVgUWlYY1">编辑 · 远程</td></tr>
+                      <tr data-page-node-id="hoQIo8b5ZJfmcNhKvPgq7a"><td data-page-node-id="7HdQiQPkZMMAytCBZlNBft">☐</td><td class="mono" data-page-node-id="hZDuaBo5uWaGI9uvyhWEMj">SNK-8805</td><td data-page-node-id="2VGncj0T7hlghDEsBxJUCj">DESKTOP-B02</td><td data-page-node-id="oNdU70sKSaosEM13VFa6is">三里屯店</td><td data-page-node-id="Xb4KHlRTmYG9F3A9rW3eoz">B02</td><td data-page-node-id="EtyCVZt4qEEhFzbxOyUCCk"><span class="tag t-err" data-page-node-id="MzjzDXOmwNThtBPTcQVUZo">离线</span></td><td class="mono" data-page-node-id="uiW2cjDcMpxoXbepM5WRtb">11:22:09</td><td style="color:var(--accent-dark)" data-page-node-id="KLjuDQtitBcaj0FUFhPrRT">编辑 · 远程</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="subpage" id="sp-ops-device" data-page-node-id="EVPw5LhYm8NBpKNII4bGxg">
+              <div class="toolbar" data-page-node-id="f5ZAZQFO8haTQVM2jVi8SH">
+                <div class="field" style="min-width:210px" data-page-node-id="218YcpmQCZZuhhBCqwGH3s">🔍 搜索设备 / 文件</div>
+                <button class="btn" data-page-node-id="xVxSKjySUtQDOWWlAcIOUu">↻ 刷新</button><button class="btn" data-page-node-id="NDRlCCHySQUUwpeduGfKfB">⇑ 收集上传</button><button class="btn" data-page-node-id="HFC70WrTCR0hg1FJkLAoUy">◫ 目录修复</button>
+              </div>
+              <div class="splitter" data-page-node-id="SfBdwg4CqBvKhe9rhaVJAh">
+                <div class="pane" style="width:270px;min-width:270px" data-page-node-id="PWcvbJW2JHHDEntQ3A8DHo">
+                  <div class="pane-h" data-page-node-id="UqQ58CCRcWbMJLxUVlBC3A">设备列表</div>
+                  <div class="pane-b" data-page-node-id="kM7VRyVaQfuYvOim7I8CBe">
+                    <div class="tree-item sel" data-page-node-id="h9a6B0im5WjUiRZhRwj8kB"><span class="dot on" data-page-node-id="Hzo0P7Zr7YHI4NUDdntuAV"></span> SNK-8801</div>
+                    <div class="tree-item" data-page-node-id="7zoG6GVe85YsxQvPWNAkjW"><span class="dot on" data-page-node-id="dGMvsDONJrtzuMqXqBxJ6l"></span> SNK-8802</div>
+                    <div class="tree-item" data-page-node-id="mBpA7uxLn7G7PDhKB3VpUc"><span class="dot warn" data-page-node-id="fxJH70FWwEwxRby71NDA2X"></span> SNK-8803</div>
+                    <div class="tree-item" data-page-node-id="6WPIepHWOQWDC5w59BvEC9"><span class="dot off" data-page-node-id="XuonK5mHH4qqcSxTAjM9w9"></span> SNK-8805</div>
+                  </div>
+                </div>
+                <div class="pane" style="flex:1" data-page-node-id="cKiWbLBBHDs6nxMd5aCQyb">
+                  <div class="pane-h" data-page-node-id="y7XY0SGTwL66PscLCh5A3R">文件清单 <span class="cnt" data-page-node-id="kRPzVVgCOmyuK8RaEVxTcY">2026/09/05</span></div>
+                  <div class="pane-b" style="padding:0" data-page-node-id="AfTpsRkixmiUUobrDKIfas">
+                    <table data-page-node-id="FsKfgWBNfyEzZwXefWhWfP">
+                      <thead data-page-node-id="ynARJ8Ps3Y4BmHbzr622N5"><tr data-page-node-id="XiYg92Z8RFrafXIBjNcnXI"><th data-page-node-id="QCeNIWX6HvGMkIvH5RJzY0">文件名</th><th data-page-node-id="sZeKbBQRqXF7VveSQPtfd2">类型</th><th data-page-node-id="9f7t4RY8QdPUMQgB4uKG1X">大小</th><th data-page-node-id="fLqbJ17olCOZXos1cbddbO">修改时间</th><th data-page-node-id="sIyyr9sbWIACgP5i9JZeeo">上传状态</th></tr></thead>
+                      <tbody data-page-node-id="YHuvRg3jXSvq9XEmUbrSZC">
+                        <tr data-page-node-id="mGHXIWq62Sqpzls4FBqvv5"><td class="mono" data-page-node-id="uECprEqFsxqzXzdn1YaxDE">clip_0001.mp4</td><td data-page-node-id="lvNQjtyGMXSkiGB3JKquJk">视频</td><td class="mono" data-page-node-id="z0WTLG9PgMdlutjNEywGrZ">128.4 MB</td><td class="mono" data-page-node-id="W2bsybT6NQwx13GGpH6reL">09-05 22:14</td><td data-page-node-id="3lgh5azr3Ff5m3Kioa7SEQ"><span class="tag t-ok" data-page-node-id="plLVW9CdUrornKTPETydNW">已上传</span></td></tr>
+                        <tr data-page-node-id="iKyNbYi7ZKYGbirshDGh3e"><td class="mono" data-page-node-id="pd0zekR8JTlhbeodCLIzpa">clip_0002.mp4</td><td data-page-node-id="N2l2O33WgGV9hfRSXgDyVz">视频</td><td class="mono" data-page-node-id="q6TsnZg65i2pX9BicIr8Ig">96.1 MB</td><td class="mono" data-page-node-id="emRMpLWrtks0e5go6mMVrO">09-05 22:31</td><td data-page-node-id="IfAjPG5ALdP1SPJ1ukOMWc"><span class="tag t-ok" data-page-node-id="hrlSUWZOrwMbuXbLxmbVNC">已上传</span></td></tr>
+                        <tr data-page-node-id="f5Mxcab6b3jT9xKvgEn4PL"><td class="mono" data-page-node-id="H5EvU72ig6pfzizELD2t5R">tracking.log</td><td data-page-node-id="pHqv27ZW1n3nrzAazFjtQm">日志</td><td class="mono" data-page-node-id="lviBI8cPgHDrnGS6CHPpt2">4.2 MB</td><td class="mono" data-page-node-id="IXiLp3Es9gkX5dGL8vAXqg">09-05 23:00</td><td data-page-node-id="r7L54StkZOrlaYsgOpQBnt"><span class="tag t-warn" data-page-node-id="kO7bhm6AVIEfCuPCQLodi3">待上传</span></td></tr>
+                        <tr data-page-node-id="0LAzWGA7JApYR567g4qdqQ"><td class="mono" data-page-node-id="13tXyvc401wKi8V3TjXaGA">config.json</td><td data-page-node-id="3Nx4ODMt5vo1CyTuvYr79P">配置</td><td class="mono" data-page-node-id="F0VUsN7FglVLzg8616kZfY">2 KB</td><td class="mono" data-page-node-id="eZOEASdNzeI3Tv9LpoXWUH">09-05 20:11</td><td data-page-node-id="wGPRQtMuQwrtGeaCaKG3HM"><span class="tag t-gray" data-page-node-id="MszJVZkNXd6DHVwv6jSJxP">跳过</span></td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="subpage" id="sp-ops-health" data-page-node-id="banPIRtrbsrHIb5SEUQLs2">
+              <div class="toolbar" data-page-node-id="0iNLxCfSnWx1IoFKAmczuC">
+                <div class="field" data-page-node-id="MlJQ6uvF4LC999HpBb9yFx">📅 2026-09-01 ~ 2026-09-06</div>
+                <button class="btn" data-page-node-id="DqZk98YayFlSFtCyLkh5eN">↻ 刷新</button><button class="btn" data-page-node-id="cVRkoK9VrDoQTxAVOK2ujb">◫ 生成报告</button>
+                <div class="sep-v" data-page-node-id="P2kp7XxAvfmP0wuXE32DXg"></div><div class="field gray" data-page-node-id="OqpZBpWdBsVAflq8ClxXKF">阈值：离线 &gt; 3 次告警</div>
+              </div>
+              <div class="pane" style="flex:1" data-page-node-id="3xRNtavmUOzhnK7EVGvUu6"><div class="pane-b" style="padding:16px" data-page-node-id="ahPR9G99ykeaG0E3EAVcKa">
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px" data-page-node-id="g0mYh9arBFbVwSSEgsqnIn">
+                  <div style="background:var(--win-bg);border-radius:6px;padding:12px" data-page-node-id="riqI5q3tz1d6LkEYNOH5Ec"><div style="font-size:11.5px;color:var(--text-2)" data-page-node-id="r2Z4fFH4f7HGEyFUwIxH81">在线率</div><div style="font-size:21px;font-weight:600;color:var(--success)" data-page-node-id="EqUcGZdc5bIjSRRTmwgCEh">94.2%</div></div>
+                  <div style="background:var(--win-bg);border-radius:6px;padding:12px" data-page-node-id="mDvUKv3HDd4GmwPsZTFhEt"><div style="font-size:11.5px;color:var(--text-2)" data-page-node-id="J3NzTxSiIgJQC8SW3Lj5si">告警设备</div><div style="font-size:21px;font-weight:600;color:var(--warning)" data-page-node-id="HmXsf4nHmf644j7k2I73aX">3</div></div>
+                  <div style="background:var(--win-bg);border-radius:6px;padding:12px" data-page-node-id="uUSMsvAxRDZxiyMEUUFw8Q"><div style="font-size:11.5px;color:var(--text-2)" data-page-node-id="oiUyltMiV5WDI5iUsn7nmW">离线设备</div><div style="font-size:21px;font-weight:600;color:var(--danger)" data-page-node-id="XG427CubloEr6rIB301m21">2</div></div>
+                  <div style="background:var(--win-bg);border-radius:6px;padding:12px" data-page-node-id="HKEjzOseqnTA2gM7UXET6J"><div style="font-size:11.5px;color:var(--text-2)" data-page-node-id="TKpLSK1XIGdWzhYjomD4TY">平均延迟</div><div style="font-size:21px;font-weight:600" data-page-node-id="j0baHpBb3dbh0u36w4tYEF">21 ms</div></div>
+                </div>
+                <div style="height:150px;background:linear-gradient(180deg,rgba(0,188,212,.16),rgba(0,188,212,0));border-radius:6px;position:relative;border:1px solid var(--card-border)" data-page-node-id="gn8VemhqkIE9PfAQRqqWHv">
+                  <svg viewBox="0 0 800 150" style="width:100%;height:100%" data-page-node-id="z1lBcBEwjcyykA7724PtiM">
+                    <polyline fill="none" stroke="#00BCD4" stroke-width="2" points="0,110 90,95 180,100 270,70 360,80 450,55 540,60 630,38 720,45 800,30" data-page-node-id="suMsEzhONMphOu1HOC8fbu"/>
+                    <polyline fill="none" stroke="#cf4452" stroke-width="1.5" stroke-dasharray="4 3" points="0,125 90,120 180,118 270,105 360,110 450,98 540,101 630,92 720,88 800,85" data-page-node-id="Pa2XwKuT6eu677AvN6Pzah"/>
+                  </svg>
+                  <div style="position:absolute;right:12px;top:8px;font-size:11px;color:var(--text-2)" data-page-node-id="6Op2qvVEUoJJm1afW1GTth">— 在线率　-- 离线数</div>
+                </div>
+              </div></div>
+            </div>
+            <div class="subpage" id="sp-ops-test" data-page-node-id="AFnAbAT3zeQiq910SoiDqe">
+              <div style="padding:18px;background:var(--card);border:1px solid var(--card-border);border-radius:6px" data-page-node-id="gmA9qHlBXKYuJ0PYCfAg83">
+                <b style="font-size:13px" data-page-node-id="WJE0oxVEGzE4JgJ4DcAOu7">组件测试页（TestPage）</b>
+                <div style="font-size:12px;color:var(--text-2);margin-top:6px;line-height:1.7" data-page-node-id="PRmapJct4RHIGlHWuMWeHp">
+                  该页内部曾嵌套 <code data-page-node-id="xlhRGkx0FsnKW9iwDVbYZT">_DemoFluentWindow</code> / <code data-page-node-id="vPSvcDPKOwTGC3q6LH0ZEL">_DemoSplitWindow</code> 做组件演示。<br data-page-node-id="buSxFdQBnjbnvxCgEfbAc5">
+                  重构为 SubInterface 后会产生<b data-page-node-id="1FoRuqt7V6ZfAi298c8DZc">三层 FluentWindow 嵌套</b> —— 建议改为静态截图或独立弹窗演示。
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ============ 售后 ============ -->
+          <section class="page" id="page-aftersale" data-page-node-id="IxPaQxPNdle0DB4X6noDsF">
+            <div class="page-head" data-page-node-id="XG63DMab9ntvRt2kYgBAPC">
+              <div class="page-title" data-page-node-id="7VZcUzWSXsz74WkjazoVIO">售后 <span class="badge b-warn" data-page-node-id="rq5E82Kp9QcXy4ZPRI49U7">需降层</span></div>
+              <div class="page-desc" data-page-node-id="rqkGlFxOIFUCKBl7jNhY0z">原 AftersalePanelWindow（FluentWindow 1680×900）→ 降为 QWidget 容器 + Pivot 二级导航</div>
+              <div class="pivot" data-page-node-id="oZwB6MnCVHY2ixeXWz7QKC">
+                <div class="pivot-item active" onclick="sub(this,'sp-as-entry')" data-page-node-id="q82BfnfEiYyokF0JzSqxGc">问题登记</div>
+                <div class="pivot-item" onclick="sub(this,'sp-as-records')" data-page-node-id="KUrsBk9H8tkHtXtPKXEKJ6">记录查询</div>
+                <div class="pivot-item" onclick="sub(this,'sp-as-stat')" data-page-node-id="TIFT2EevRqt20JH5XeUA3A">统计</div>
+                <div class="pivot-spacer" data-page-node-id="lNAONgg6Gj1YmCHvmFpAED"></div>
+              </div>
+            </div>
+            <div class="subpage active" id="sp-as-entry" data-page-node-id="VUQTN1SzpUb6qmDwDNUZsQ">
+              <div style="background:var(--card);border:1px solid var(--card-border);border-radius:6px;padding:16px" data-page-node-id="HjcBBfDiyBph37qeaVr9QU">
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px" data-page-node-id="po8sT3bGbUjmPQJu92AyZh">
+                  <div data-page-node-id="ucakkCh38lUWk1CKalJZ8B"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="Xue7R0cRBNqZfNrnzmGcHJ">设备 SNK *</div><div class="field" style="width:100%" data-page-node-id="tVcLM7WtlyLGqUX17CWrAm">SNK-8803</div></div>
+                  <div data-page-node-id="LDcu7j3hayLAiBNzd6w3zc"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="Mupqi8PGldTAMX1PjLLNg9">问题类别 *</div><div class="field" style="width:100%" data-page-node-id="lzO50bcI6NaqbrXbUsTF39">识别偏差</div></div>
+                  <div data-page-node-id="0hiycT0GaGs718NrTAhOfM"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="aRRCJMApc2FvKIF8GimUOJ">发生日期 *</div><div class="field" style="width:100%" data-page-node-id="JjGjsD57tnjJbgZDevL2PN">📅 2026-09-05</div></div>
+                  <div data-page-node-id="MUdrS52TylvC7hNHvyEuKF"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="Y92GYviWYA5XvZqHAhkd1T">帧号</div><div class="field" style="width:100%" data-page-node-id="S3aKsS1qIbrNEFRjgCORGJ">1024</div></div>
+                  <div data-page-node-id="pzxHJPbHvDUtZo7CDwGdLW"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="CkX1cbcT5Q41eXEM1piKhW">处理人</div><div class="field" style="width:100%" data-page-node-id="CqVIeP72FbCycmjokNjXKo">沈哲</div></div>
+                  <div data-page-node-id="BVt3VGoNn6GSX0ylb1r12s"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="eASnpe5wp9aLp1Qlox53HA">严重程度</div><div class="field" style="width:100%" data-page-node-id="IgxoC8WbxZq4dvAMiuCdbD">⚠ 中</div></div>
+                  <div style="grid-column:1/-1" data-page-node-id="Qy1NGeBjDHOynBktTqJQma"><div style="font-size:12px;color:var(--text-2);margin-bottom:4px" data-page-node-id="OT5ZkeWvkk0UKkS7UUSDy4">问题描述</div>
+                    <div class="field" style="width:100%;height:64px;align-items:flex-start;padding-top:8px;color:var(--text-3)" data-page-node-id="ZSGYqFjyPdw8cYKtRgbwDH">母球落袋后未触发计分，疑似遮挡导致丢帧…</div></div>
+                </div>
+                <div style="margin-top:14px;display:flex;gap:8px" data-page-node-id="fmVMkbu0KGWj25jYRqJIoi">
+                  <button class="btn primary" data-page-node-id="xvJ23TNpkG1RwxQJYDNU4H">提交登记</button>
+                  <button class="btn" data-page-node-id="cEmuzMBUIWAHP3kMzpgcnZ">清空</button>
+                  <button class="btn" data-page-node-id="AbH6preTG7fSmKRSfeBLR7">📎 附加视频</button>
+                </div>
+              </div>
+            </div>
+            <div class="subpage" id="sp-as-records" data-page-node-id="rGOWJ4GetMxe9LFS0EY78C">
+              <div class="toolbar" data-page-node-id="OsummshO3DZbG2AyJjtAI6">
+                <div class="field" style="min-width:200px" data-page-node-id="B6JLuJwDUZpiW0bBlHFoK8">🔍 搜索 SNK / 描述 / 处理人</div>
+                <div class="field" data-page-node-id="7UgERjNl9BFHR8sCAGzBh2">类别 ▾</div><div class="field" data-page-node-id="KgYPJoTzDk5OFgcIGE0nkM">状态 ▾</div>
+                <div class="field" data-page-node-id="7mjInFa0mgp0YejlxLnzHU">📅 今天 ▾</div>
+                <button class="btn" data-page-node-id="8yuKeoLetmJMCCYxA9C161">↻ 刷新</button><button class="btn" data-page-node-id="INnp2BvwQUXsapZJQSqClD">⇓ 导出</button>
+                <div class="sep-v" data-page-node-id="7nokniB53sjvJ41t89qr5k"></div><div class="field gray" data-page-node-id="yfR3QkoM4EbfzN7KdWUw4k">1,024 条 · 查询 0.14ms</div>
+              </div>
+              <div class="pane" style="flex:1" data-page-node-id="CD69zsYhYvKM2sCK9kyhMy">
+                <div class="pane-b" style="padding:0" data-page-node-id="YkDLqSmtVfUAUhesHMaZ6w">
+                  <table data-page-node-id="QOT3HKOkgvpIACoEGdsVOd">
+                    <thead data-page-node-id="f6qRgkQr3I1azG49Orr8BX"><tr data-page-node-id="HIoj3nTH7ACVBAGbvaIxv7">
+                      <th style="width:36px" data-page-node-id="lE9wMIC3e3xN4AGZ7CJhDe"></th><th data-page-node-id="AZSVhYUkGt33WQDFIe49qP">ID</th><th data-page-node-id="sk9SHNiQ0xpkZHEJ7IGbB6">SNK</th><th data-page-node-id="ALEgTnLx2j3gjJDGZOCVzS">类别</th><th data-page-node-id="QzNm4J4WEktqMyo2pACg7V">描述</th><th data-page-node-id="AtEMGwjIvKvHy1prwg7BwB">帧号</th>
+                      <th data-page-node-id="89eclKBxDgYNleS9JJ1kAy">状态</th><th data-page-node-id="Z3NhULfeTIZkkFPamdUzvR">处理人</th><th data-page-node-id="g5uaV0sjRqGqMBHdeEOfn1">发生日期</th><th data-page-node-id="pX2zZ5bE9jaHrnnBXMFmFn">创建时间</th><th data-page-node-id="AfcTt21MRUI5hrOsxre7bP">最近更新</th>
+                    </tr></thead>
+                    <tbody data-page-node-id="pjxHSsiA5vfUek5zwqt2Lm">
+                      <tr data-page-node-id="n57I2BWRoEyHsQswM6k7JS"><td data-page-node-id="dg1BIH6q7KlKDVPr7wHWwn">☐</td><td class="mono" data-page-node-id="BAmA9zGqjpTvPz0GFSS31k">1042</td><td class="mono" data-page-node-id="gmNHnLbDibOlCCS3MK7pHV">SNK-8803</td><td data-page-node-id="Ukw6nEM8hxFU5JQvVWahlU">识别偏差</td><td data-page-node-id="5GYyCdbJhSZsduEJWEo9hH">母球落袋未计分</td><td class="mono" data-page-node-id="DQCBxOrlzYTu5AQPTQAMlf">1024</td><td data-page-node-id="BUgkGlwMVtzy0koIDzdTLA"><span class="tag t-warn" data-page-node-id="rtOjJhGvE3eqthMfCgk5y6">处理中</span></td><td data-page-node-id="gVxO1DtFbsITVaEt727Np5">沈哲</td><td class="mono" data-page-node-id="yrrbzkAoEup7gl4rJg7MyE">09-05</td><td class="mono" data-page-node-id="xRA1Vm8mpcS8f5Imdvx3Q5">09-05 22:41</td><td class="mono" data-page-node-id="jKLN9dGPAaDzjbH1rc0m1V">09-06 09:12</td></tr>
+                      <tr data-page-node-id="JJJblYU3sQMvC2KpgpNPLU"><td data-page-node-id="TrPhhqk65v0hI7NAGg0yON">☐</td><td class="mono" data-page-node-id="xtoZWdWhONCHeivLwzGpF8">1041</td><td class="mono" data-page-node-id="xWbmAePCEyo1rXYwY0YEmn">SNK-8801</td><td data-page-node-id="QZOuoIJDO1MFau0uAL92UV">硬件故障</td><td data-page-node-id="T0K2AXqOyvjCVpeKVM94J6">摄像头离线</td><td class="mono" data-page-node-id="jG4chPNP8bSSIT2OrhSYpJ">—</td><td data-page-node-id="udnLiMDECaYFlo5kJs5EK2"><span class="tag t-ok" data-page-node-id="YgfMUFPg9YEqqYceJ0NWly">已解决</span></td><td data-page-node-id="xnwPDpkO9btJwm4AbkJtCB">李工</td><td class="mono" data-page-node-id="yNLEjmZvOOlMAbAVyFgobe">09-05</td><td class="mono" data-page-node-id="jpwTWIo3vCLOBMYMbuWyS9">09-05 18:02</td><td class="mono" data-page-node-id="77g1ZXzv1Fhtfw8dEydVtL">09-05 19:33</td></tr>
+                      <tr data-page-node-id="SXNCGbAGov6lMW0x0jFD7K"><td data-page-node-id="R3gqweHLNXhQgOTVM8mY1n">☐</td><td class="mono" data-page-node-id="80r9KgggHd92cCWE2q3dn8">1040</td><td class="mono" data-page-node-id="uP9GXwCV1X1YGfbvCOfBGr">SNK-8807</td><td data-page-node-id="59AzQWM8CtnnWx1BrspBYl">软件异常</td><td data-page-node-id="8MEaqz73rkY79UsAixQCHz">追踪进程崩溃</td><td class="mono" data-page-node-id="wt91jCUKunHlvOakHZsAIb">884</td><td data-page-node-id="e9aFLEiktq8v7txQftz5kP"><span class="tag t-err" data-page-node-id="eHVimOjC1m6XqpXBLMCNFW">待处理</span></td><td data-page-node-id="z3zEhptElKyG1kE8Z3zr1K">—</td><td class="mono" data-page-node-id="Ol5wXERDIQf1IqtHdWr34t">09-05</td><td class="mono" data-page-node-id="e6FNvKUJiMSHVkbZMfoJeA">09-05 15:20</td><td class="mono" data-page-node-id="T9oUaFyVf3iHJGBKiyFOHA">09-05 15:20</td></tr>
+                      <tr data-page-node-id="4QDbdudlGJwgROE5CFEep4"><td data-page-node-id="lBC5kOnJqQT2X3FlynvHsE">☐</td><td class="mono" data-page-node-id="MSGP2O1MY43yl8IIXqwUMr">1039</td><td class="mono" data-page-node-id="HKK5tPFo93O1aqsiKMt5OP">SNK-8802</td><td data-page-node-id="wY2BngG3EX5GlmERXRhC3L">网络问题</td><td data-page-node-id="HQqJnOEG369nYv8TfAuBy5">上传超时</td><td class="mono" data-page-node-id="Flde8SxXFDmbzsdg6deo5l">—</td><td data-page-node-id="YRyGN3Dr4oJrSou06bpaks"><span class="tag t-ok" data-page-node-id="rKOi6Dkx65pnz0Rp6MtNlJ">已解决</span></td><td data-page-node-id="b34OOTYIGpygAya3ghD0uU">王工</td><td class="mono" data-page-node-id="7BCUgy2oFgGixRlYDY2cOy">09-04</td><td class="mono" data-page-node-id="Ub6fSciF8KPsN4uk9ddPsI">09-04 11:07</td><td class="mono" data-page-node-id="67WUqrDwWpzJZMcztMGKcp">09-04 14:22</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="subpage" id="sp-as-stat" data-page-node-id="dDdIQ4HUil1DacI0n93FXf">
+              <div style="padding:18px;background:var(--card);border:1px solid var(--card-border);border-radius:6px" data-page-node-id="so74PX1vKCyYjcjiiTHb0z">
+                <b style="font-size:13px" data-page-node-id="ssdbY63AIpSK3078Y1fGfM">统计（stats_dialog.py）</b>
+                <div style="font-size:12px;color:var(--text-2);margin-top:6px;line-height:1.7" data-page-node-id="RCnH2LE4BkDvtUJ6MlHALE">
+                  该弹窗 minSize <b data-page-node-id="FzesFiAlGGbhFbYxhW26jU">960×580</b>，且底层用 pygwalker + QWebEngineView。<br data-page-node-id="UKBd9kvqXQTvvsi4sAFbGY">
+                  项目已实测 QWebEngineView 与 Mica 背景冲突 → <b data-page-node-id="Ks8DJS2cCdX9M51EoAWcH4">建议保持独立弹窗</b>，同时作为页面内嵌入口提供。
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ============ 跑视频 ============ -->
+          <section class="page" id="page-video" data-page-node-id="FsyCrD6424kvcwnOLuPwOA">
+            <div class="page-head" data-page-node-id="grVquErlF5kVBIFpGa8V1n">
+              <div class="page-title" data-page-node-id="Davf9pVgjGi06zkY2r4tim">跑视频 <span class="badge b-warn" data-page-node-id="ItwCYMYtEIS8d4CZGiNUQJ">需降层</span></div>
+              <div class="page-desc" data-page-node-id="ole8Gv6Miijspho19sO1pJ">原 LedgerPanelWindow（FluentWindow 1680×900）→ 同样降为 QWidget + Pivot</div>
+              <div class="pivot" data-page-node-id="bbrXnTdcWSAXUCqCW6Tz13">
+                <div class="pivot-item active" onclick="sub(this,'sp-vd-entry')" data-page-node-id="vbyXVRFsi1ImAZEpYJGbbD">视频登记</div>
+                <div class="pivot-item" onclick="sub(this,'sp-vd-records')" data-page-node-id="1KCXAN1SdmDsmqNOd6GA7C">记录查询</div>
+                <div class="pivot-item" onclick="sub(this,'sp-vd-set')" data-page-node-id="U5xXfbZLXoVtHNeG2GH5ZE">周期设置</div>
+                <div class="pivot-spacer" data-page-node-id="ah1wQhi64CeUoxmtNvQScD"></div>
+              </div>
+            </div>
+            <div class="subpage active" id="sp-vd-entry" data-page-node-id="M011LoZ0806pv06aL5XyEV">
+              <div class="toolbar" data-page-node-id="w6MfRRGnHUOHEPAp4LQ709">
+                <div class="field" data-page-node-id="e7MRolEsbDFSXcPexNaZB1">📅 2026-09-05</div><button class="btn" data-page-node-id="QjRbHNJZvMXZFSsgpKE8XC">↻ 刷新</button>
+                <div class="sep-v" data-page-node-id="bmqLQrR2HnYnPz6hYjjOwm"></div><button class="btn primary" data-page-node-id="j5arpaccFdxCf7XL3BbkOu">＋ 新建记录</button>
+              </div>
+              <div class="pane" style="flex:1" data-page-node-id="E6wJCUCnY4bDcrIpz90DGq"><div class="pane-b" style="padding:16px;color:var(--text-2);font-size:12.5px" data-page-node-id="7LnClO2DpCnA5WLI1BxJh0">
+                登记表单（LedgerForm）— 与售后 EntryPage 同构，复用同一套表单骨架。
+              </div></div>
+            </div>
+            <div class="subpage" id="sp-vd-records" data-page-node-id="Jv1LZtuTA3GgxzOZSAUb1a">
+              <div class="toolbar" data-page-node-id="7O1YX0UcLdcqXf34cUuN5u">
+                <div class="field" style="min-width:190px" data-page-node-id="eiovBBXb9KxH3c1hGlVxbH">🔍 搜索署名 / 设备</div>
+                <div class="field" data-page-node-id="agUJzOApzvUbejZgiEBdoR">📅 今天 ▾</div><button class="btn" data-page-node-id="2GpO0A88CjbbbuovIBAamC">↻ 刷新</button><button class="btn" data-page-node-id="fwU7PQXJ6mEVyPtp7BDfaR">⇓ 导出</button>
+                <div class="sep-v" data-page-node-id="Sq1VPClH0mutv6fxDlp9hU"></div><div class="field gray" data-page-node-id="B2dqM04zUPHik14kRICgen">署名统计：沈哲 42 · 李工 38 · 王工 25</div>
+              </div>
+              <div class="pane" style="flex:1" data-page-node-id="MwWgmgXIXa5WSVOcVFjmKV"><div class="pane-b" style="padding:0" data-page-node-id="JX2hCMmlRvPdek4Ot1yCMj">
+                <table data-page-node-id="GCq5tUwe5mkBkirzBujiDK">
+                  <thead data-page-node-id="DBYYkEqtCfg6SuNqptfECF"><tr data-page-node-id="ZLhSCLSgyWDzfxb2cdskcz"><th style="width:36px" data-page-node-id="QyuMhq7yLjfRByod5DeoOS"></th><th data-page-node-id="HY6rwoWR6dnQkTpgrfBtqo">ID</th><th data-page-node-id="zUQQ5GkzdnPYUTLFUgPlhF">日期</th><th data-page-node-id="9LFeXFc3rjLCBzMyqjbukV">署名</th><th data-page-node-id="FmoNlGoDYdpouuQxnOZ9iP">设备</th><th data-page-node-id="Yh6zEuOE1mL86hfcHqwSUz">视频数</th><th data-page-node-id="xSRi3iQvR1EhPpPB5xitDR">合格数</th><th data-page-node-id="Wjs5Tq4ANt1HwChot1Zdpt">合格率</th><th data-page-node-id="UYLwF8fBZnEMXuYvTVlcxY">耗时</th><th data-page-node-id="ai9nHow4un1sy91TMJx1PI">备注</th></tr></thead>
+                  <tbody data-page-node-id="JDh3nC1W6Q3ziweGBDTrl7">
+                    <tr data-page-node-id="N0INu9sw7KLQAGe9HkwCST"><td data-page-node-id="LTJnCrI8Yjy7c4CYgIzvFq">☐</td><td class="mono" data-page-node-id="yWxgvFHNVaBxex3GAY568o">221</td><td class="mono" data-page-node-id="Mj3FQzADcV78ZGjXvBR7FK">09-05</td><td data-page-node-id="SxmIg4C91MRmkvZxV9aVDF">沈哲</td><td class="mono" data-page-node-id="vDd60c1HfYEn4G9UFoXuYH">SNK-8801</td><td class="mono" data-page-node-id="ZKbJECKgE9aXSrX8hQulDx">128</td><td class="mono" data-page-node-id="l6CIttHQmtV4T7lpneapug">121</td><td data-page-node-id="nSufTYLU9NWSLen7eWEYsW"><span class="tag t-ok" data-page-node-id="f6TBB1lX9KR5dTllTzJSLE">94.5%</span></td><td class="mono" data-page-node-id="c9uyryRgNF3hYkaJ13sNjX">3h12m</td><td data-page-node-id="VfHHXvdDQd09eNpPxhqCoH">—</td></tr>
+                    <tr data-page-node-id="rZtFeI36MhRMWqRsHwCRd8"><td data-page-node-id="sXq8AqEFoUFOI2vvfQ8DvR">☐</td><td class="mono" data-page-node-id="j1a8OpcQkbdGCUhLe7qrM4">220</td><td class="mono" data-page-node-id="GetX23jhxhJPEfESEcX6tl">09-05</td><td data-page-node-id="yixhixHc9Vk2AiDaRPpHHE">李工</td><td class="mono" data-page-node-id="EXx5kCsf6iBolmh4xoLEbd">SNK-8803</td><td class="mono" data-page-node-id="KF1WtySxtnGUQ3AFlEpZvJ">96</td><td class="mono" data-page-node-id="2EkuO3oa93AbC5JmdIvxZ7">80</td><td data-page-node-id="dRIbPqlXqQTOyG0hxMCdd2"><span class="tag t-warn" data-page-node-id="2WF1XB0zijnbrIMNNUQQxC">83.3%</span></td><td class="mono" data-page-node-id="pdkdKomcCDj2cYTzbfU5bS">2h48m</td><td data-page-node-id="ZISLAG7PstUnDHrv0ouw3s">存在丢帧</td></tr>
+                    <tr data-page-node-id="G8hApd1Ir4ADcss4judZDT"><td data-page-node-id="M2WLGEyEDE9O7dgBf71FRB">☐</td><td class="mono" data-page-node-id="aisBZ8GMdnsSo0IrrHPTYN">219</td><td class="mono" data-page-node-id="tuzIiz9eUSOD031NxlOBpC">09-04</td><td data-page-node-id="EC2Nu1BckQSFYSFHdC9tPR">王工</td><td class="mono" data-page-node-id="RGXA9nkCiUGOaEuIDjGCtD">SNK-8802</td><td class="mono" data-page-node-id="h9gOlmN9xG7QRVGiKTE7V4">144</td><td class="mono" data-page-node-id="sa822qpr7XlEz2TMKzhyjD">139</td><td data-page-node-id="ZaJGnqe0TeyMLyTAs5xaAM"><span class="tag t-ok" data-page-node-id="FUCUnU4DyXkXdehd8D6ZEr">96.5%</span></td><td class="mono" data-page-node-id="Q3RSMUVHEs7MPApkHgCXse">3h40m</td><td data-page-node-id="bIe7OyAWBkGCVTf6mv6vvO">—</td></tr>
+                  </tbody>
+                </table>
+              </div></div>
+            </div>
+            <div class="subpage" id="sp-vd-set" data-page-node-id="qKkO1GEikUl7uMwFQrngBF">
+              <div class="set-group" data-page-node-id="OmSVXb35pVmhAnCnXZfNqc">
+                <div class="set-group-t" data-page-node-id="zp0lb909eLfiNdlkECOIwr">统计周期</div>
+                <div class="set-card" data-page-node-id="G3HlsGr1HuM9C2A8st8Jxq"><div data-page-node-id="DQFya6bLxeoHnHTG9oR75F"><div class="sc-t" data-page-node-id="y0wls9b1RnrmN6rPPyzI74">周期模式</div><div class="sc-d" data-page-node-id="YjLyzPkmoB3UEqxJFOnC0x">按周 / 按月统计跑视频工作量</div></div><div class="spacer" data-page-node-id="qUqolBOJqwC9gLe28AeI4m"></div><div class="field" data-page-node-id="3QO7mCxc0JCvxEF3bb4FCf">按周 ▾</div></div>
+                <div class="set-card" data-page-node-id="0RLtsvBBc77L5K5ZP4GgZw"><div data-page-node-id="xiaYiWNnZZLgWj9SGXfrAF"><div class="sc-t" data-page-node-id="TGHRMTRwZ7ezFgcr3a7zwX">每日目标视频数</div><div class="sc-d" data-page-node-id="IF6lm7o3DuCJzqV8GnwxQX">用于合格率与进度提示</div></div><div class="spacer" data-page-node-id="gPVE15HbD0qrDmBCWixOZz"></div><div class="field" style="text-align:right" data-page-node-id="ZKuG8yK29nozRSXAyMAk8w">120</div></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ============ 远程会话 ============ -->
+          <section class="page" id="page-remote" data-page-node-id="2cY60dSkYsm7KvHhILM4Ag">
+            <div class="page-head" data-page-node-id="cdD9TCCLktbGTaDRbazpXj">
+              <div class="page-title" data-page-node-id="1lzGXZGnSoFMb0ZiLnUfzy">远程会话 <span class="badge b-risk" data-page-node-id="M7ttEq4LrzBFHDlsrbliBY">保持独立窗口</span></div>
+              <div class="page-desc" data-page-node-id="2lsBUqcu8IDYM5foQHoknS">RDP 依赖 WA_NativeWindow + winId() 做 SetParent 嵌入；SSH/SFTP 为 FramelessWindow —— 内嵌会破坏原生句柄机制</div>
+              <div class="pivot" data-page-node-id="s6NkIGQNv6TZgPTjyhBXU8">
+                <div class="pivot-item active" onclick="sub(this,'sp-rm-tunnel')" data-page-node-id="i0dT1J8hhb9TMaIWG9gVZB">隧道</div>
+                <div class="pivot-item" onclick="sub(this,'sp-rm-ssh')" data-page-node-id="nWehZatnMFHWnG7vKQUHQ1">SSH</div>
+                <div class="pivot-item" onclick="sub(this,'sp-rm-sftp')" data-page-node-id="yqfzUMpbjC33gNiqyEbklV">SFTP</div>
+                <div class="pivot-item" onclick="sub(this,'sp-rm-rdp')" data-page-node-id="eVwDFnT5NivedWJOGo0b05">RDP</div>
+                <div class="pivot-item" onclick="sub(this,'sp-rm-diag')" data-page-node-id="dVH03VjfvENy93tK7Fd649">诊断</div>
+                <div class="pivot-spacer" data-page-node-id="3ecH1bfBysl2TApyGwNgF5"></div>
+              </div>
+            </div>
+            <div class="subpage active" id="sp-rm-tunnel" data-page-node-id="KU73BxTtc6oK0nwEEK89yt">
+              <div class="toolbar" data-page-node-id="AdZPatuax9O7nsTtJmsn7b">
+                <div class="field" style="min-width:180px" data-page-node-id="ccj3gzfWQPDnszRrizwhuD">🔍 搜索 SNK</div><button class="btn" data-page-node-id="vMEWAqCcGMG0FavMzLR87B">↻ 刷新</button>
+                <button class="btn" data-page-node-id="ng1YyuIH04ZXhfXpOQFVlp">＋ 建立隧道</button><button class="btn" data-page-node-id="yCJfGQtkafsO0RuT3gTIgZ">■ 断开全部</button>
+                <div class="sep-v" data-page-node-id="hw5xpL2Ro92f3GDgYEVJlY"></div><div class="field gray" data-page-node-id="IyML23ErAvYANnzFjiUTgP">frpc 运行中</div>
+              </div>
+              <div class="pane" style="flex:1" data-page-node-id="gI98ZdjA89a1jEEqDuQZFU"><div class="pane-b" style="padding:0" data-page-node-id="sbcy0sSWywNxynq8PzvAAe">
+                <table data-page-node-id="t0mQrP8REHYrzx8wigkkE7">
+                  <thead data-page-node-id="iEwpSoGABGZZCjVvcwvAam"><tr data-page-node-id="DjRzw1NxHuwvWjOHJQnkXr"><th data-page-node-id="o2xRUEm7yDGCDBaYP1rhnZ">SNK</th><th data-page-node-id="L5HQJNwNKyHoDelYW3FAKa">协议</th><th data-page-node-id="p1Lv98mZPzc4uyUAGiIhYV">本地端口</th><th data-page-node-id="iAMddIqHYru1kYq2c43R2X">对端</th><th data-page-node-id="sk8DipBpVeELsOABwV5ERF">延迟</th><th data-page-node-id="ndUHmgMQ5v4i5auMOx3kh4">状态</th><th data-page-node-id="77H05o1G5hJmI7WGWoDjlU">操作</th></tr></thead>
+                  <tbody data-page-node-id="0XH6Bht4LLcURd971zs4Fm">
+                    <tr data-page-node-id="lEFPMa08mQrCcNCusBviu1"><td class="mono" data-page-node-id="B97rY9CZXQu8Db7X0OBPPz">SNK-8801</td><td data-page-node-id="rJBhDhhUWDLDxlRMx18Kh1">xtcp</td><td class="mono" data-page-node-id="fPIUIS7AS4omOT0VLMGObr">63389</td><td class="mono" data-page-node-id="t66ZGvVNGKLd1CxQGsJJgW">10.0.0.11</td><td class="mono" data-page-node-id="OwIqo9GXmDFALllbh0ufhC">18 ms</td><td data-page-node-id="Zb4zh3Q0dhgX4Wz9qB58fc"><span class="tag t-ok" data-page-node-id="BzugFGIsI6F2TFy2qGFavW">已建立</span></td><td style="color:var(--accent-dark)" data-page-node-id="MuoJEG9KsqhkPlFyhY9EhK">SSH · SFTP · RDP</td></tr>
+                    <tr data-page-node-id="paTZ3dmoQOj183plexox5l"><td class="mono" data-page-node-id="4VthqAl7QWacBmxJSttTB0">SNK-8803</td><td data-page-node-id="IUCoyxvLrxE7lySRfUt7ES">xtcp</td><td class="mono" data-page-node-id="iXp9ZUXMObHVkTAfccEbvH">63390</td><td class="mono" data-page-node-id="jGLeXhTxEcxAJPP5SPyTrS">10.0.0.13</td><td class="mono" data-page-node-id="9NUauq5U75014qSIN23Tcf">42 ms</td><td data-page-node-id="l1Yrv7Y8cGGDIMNh6vECvY"><span class="tag t-warn" data-page-node-id="hYEsREcEOprwIw7Ra3iw7r">不稳定</span></td><td style="color:var(--accent-dark)" data-page-node-id="gLILuBQPVvB19dPH6XTOBv">重连</td></tr>
+                  </tbody>
+                </table>
+              </div></div>
+            </div>
+            <div class="subpage" id="sp-rm-ssh" data-page-node-id="PJRYNMvDzBpJTgCZe8e8Nw">
+              <div style="flex:1;background:#0c0c0c;border-radius:6px;padding:10px;font-family:Consolas,monospace;font-size:11.5px;color:#ccc;overflow:auto" data-page-node-id="xPujNYdRjanUCn8ffRVHLc">
+                <div style="color:#0f0" data-page-node-id="FPf9Geo052CiLqEJ10A9qI">user@SNK-8801:~$</div>
+                <div data-page-node-id="FmLRRCLSRRPqhGVa1qsuit">tail -f tracking.log</div>
+                <div style="color:#888" data-page-node-id="IS7fXmrxaLNOPzwfbiWkuL">[12:04:31] frame_id:1024 score:+1</div>
+                <div style="color:#888" data-page-node-id="3ulOGrUwcqawKunvlQ8x0H">[12:04:32] ball detected: 6</div>
+                <div style="color:#0f0" data-page-node-id="ILzYJpyoGuEkSAMj0tpswH">user@SNK-8801:~$ <span style="background:#ccc;width:7px;height:13px;display:inline-block" data-page-node-id="FMmBT7TgPbI8qWAq01wG6w"></span></div>
+              </div>
+            </div>
+            <div class="subpage" id="sp-rm-sftp" data-page-node-id="zW0ogqI53UrOlZ8GSMKp1b"><div class="pane" style="flex:1" data-page-node-id="FYYc5KNbXFF1FUqsfbbPak"><div class="pane-b" style="padding:16px;color:var(--text-2);font-size:12.5px" data-page-node-id="014OjPJFWlD2qkeieJKMf2">SFTP 双栏文件管理（1933 行）— 保持 QDialog 独立窗口</div></div></div>
+            <div class="subpage" id="sp-rm-rdp" data-page-node-id="eFRlx1uxSjEqxk4qaqK47p"><div class="pane" style="flex:1" data-page-node-id="EaymvogRzQnIBZaNEv5dHF"><div class="pane-b" style="padding:16px;color:var(--text-2);font-size:12.5px" data-page-node-id="tv5IaLdp7GGWDVmoozeZko">RDP 依赖原生 HWND（WA_NativeWindow + winId + SetParent）— 必须独立窗口</div></div></div>
+            <div class="subpage" id="sp-rm-diag" data-page-node-id="SFhtBkmf0o062pB8uQhuBV"><div class="pane" style="flex:1" data-page-node-id="z8E81s4nCnyOhTM2G6AZXG"><div class="pane-b" style="padding:16px;color:var(--text-2);font-size:12.5px" data-page-node-id="BGmyr6sMqEhl4KvLTOKPRO">连接诊断（conn_diag_panel.py 643 行）— 可降为 QWidget 内嵌</div></div></div>
+          </section>
+
+          <!-- ============ 统计图表 ============ -->
+          <section class="page" id="page-chart" data-page-node-id="8vDrh4pkBI2ROXVa3iZYev">
+            <div class="page-head" data-page-node-id="Jjxl9Uim07y0qkMGCxGeQv">
+              <div class="page-title" data-page-node-id="mixt9YqgTUyFVIf7Ln9jt7">统计图表</div>
+              <div class="page-desc" data-page-node-id="yxsRXEPBILzI2AT6HnOaeQ">stat_charts.py · pygwalker / QWebEngineView —— 与 Mica 背景存在历史冲突</div>
+            </div>
+            <div class="subpage active" data-page-node-id="krUHQt0NgMIiUqlzQ4Hn3Q">
+              <div class="pane" style="flex:1" data-page-node-id="Meu6MPzV5oHLoIoJ05yWT4"><div class="pane-b" style="padding:16px" data-page-node-id="KDIMAsJ7NwVnkC4UuDz2MT">
+                <div style="height:180px;background:var(--win-bg);border-radius:6px;padding:14px;margin-bottom:12px" data-page-node-id="WdDwGKNh1pbsO1DL3PRIX1">
+                  <div style="font-size:12px;color:var(--text-2);margin-bottom:8px" data-page-node-id="0JxHSPdTSE6jbn9lv9LYhF">每日处理量（近 14 天）</div>
+                  <div style="display:flex;align-items:flex-end;gap:5px;height:120px" data-page-node-id="UIz63trB96BqI8YhpX83Kn">
+                    <div style="flex:1;background:var(--accent);height:52%;border-radius:2px 2px 0 0" data-page-node-id="66CvnaRTAqGPLZ27la98EG"></div>
+                    <div style="flex:1;background:var(--accent);height:68%;border-radius:2px 2px 0 0" data-page-node-id="HICu1sMaYLx9Ue5TdFGPTS"></div>
+                    <div style="flex:1;background:var(--accent);height:41%;border-radius:2px 2px 0 0" data-page-node-id="4iGgODanmRQijZAPpg6AUH"></div>
+                    <div style="flex:1;background:var(--accent);height:75%;border-radius:2px 2px 0 0" data-page-node-id="t5FvNFbLDzhxjCsAEphk3D"></div>
+                    <div style="flex:1;background:var(--accent);height:60%;border-radius:2px 2px 0 0" data-page-node-id="DPLzju68EvMJ5xNzFFXCvO"></div>
+                    <div style="flex:1;background:var(--accent);height:88%;border-radius:2px 2px 0 0" data-page-node-id="A34oiG6SgwUWcBLDxndyw2"></div>
+                    <div style="flex:1;background:var(--accent);height:34%;border-radius:2px 2px 0 0" data-page-node-id="eqwITcdxXx1qI61C6cqRCm"></div>
+                    <div style="flex:1;background:var(--accent);height:70%;border-radius:2px 2px 0 0" data-page-node-id="913Mzx5GG4l9qTXtgSB9o8"></div>
+                    <div style="flex:1;background:var(--accent);height:82%;border-radius:2px 2px 0 0" data-page-node-id="bCfd5MfXyHKNbuDWmyiWbG"></div>
+                    <div style="flex:1;background:var(--accent);height:55%;border-radius:2px 2px 0 0" data-page-node-id="KIKeMGGEOgNRPLwmSJAALV"></div>
+                    <div style="flex:1;background:var(--accent);height:94%;border-radius:2px 2px 0 0" data-page-node-id="snf2lUi4LJjrfeXpbKoG7I"></div>
+                    <div style="flex:1;background:var(--accent);height:47%;border-radius:2px 2px 0 0" data-page-node-id="YSezrY24mDaPGC0FJojFJE"></div>
+                    <div style="flex:1;background:var(--accent);height:66%;border-radius:2px 2px 0 0" data-page-node-id="lMBwrisHQa2O9etlQbmDkP"></div>
+                    <div style="flex:1;background:var(--accent-dark);height:100%;border-radius:2px 2px 0 0" data-page-node-id="1eH7w1PGRyZZBAEp7c5U7k"></div>
+                  </div>
+                </div>
+                <div style="padding:12px;background:#fff8e1;border:1px solid #f0a020;border-radius:6px;font-size:12px;line-height:1.7" data-page-node-id="rkUaD1Ais7WHHzwpNEsUcH">
+                  ⚠ <b data-page-node-id="2kW91bWSdqMYKFOOjWVRYr">设计决策：</b>项目已实测 QWebEngineView 与窗口亚克力/Mica 冲突，pygwalker 目前走系统浏览器。
+                  本页建议用<b data-page-node-id="1E3mEgboz0mDlv92QMpK1J">轻量的本地图表</b>（如 QChart 或已有的 stat_charts 自绘）替代内嵌 WebView，避免重蹈覆辙。
+                </div>
+              </div></div>
+            </div>
+          </section>
+
+          <!-- ============ 设置 ============ -->
+          <section class="page" id="page-settings" data-page-node-id="b0UH5J5s8lYrmFLzgHtIPS">
+            <div class="page-head" data-page-node-id="bQbLdPnYA10XzLymh4XTcw">
+              <div class="page-title" data-page-node-id="7LP1foRRcJaLEA8GOuzbMD">设置</div>
+              <div class="page-desc" data-page-node-id="nTFBEjvUeMDdvXSuiXfqMA">原 5 个下拉菜单共 22 个 Action 收编为设置卡片组 —— 菜单不必消失，可作为快捷入口保留</div>
+            </div>
+            <div class="subpage active" data-page-node-id="GACLiiPXeWEfRGXTC0jb1G">
+              <div class="set-group" data-page-node-id="49IBvZcrQvSxzyjR0BSgvc">
+                <div class="set-group-t" data-page-node-id="3Aut5myntT6wCkqxZEh7uU">外观</div>
+                <div class="set-card" data-page-node-id="F3CGv5AHHNcX0FRecRR4AQ"><div data-page-node-id="wCEF9JD94zqekyNGjYDOXp"><div class="sc-t" data-page-node-id="pKBgFroTnSGtsp0yYGSKqF">主题模式</div><div class="sc-d" data-page-node-id="CVx5RtOPwqU9ALuGHGPYfX">跟随系统 / 浅色 / 深色</div></div><div class="spacer" data-page-node-id="TL9t1t5DgU2sPqpZyEVL3z"></div><div class="field" data-page-node-id="EqYL7p2gr2XKdzK2eYGeEa">跟随系统 ▾</div></div>
+                <div class="set-card" data-page-node-id="EwY7V9ifRXi0mxtseDsLuv"><div data-page-node-id="CKemOGvAvnI9fzoVHhuCEH"><div class="sc-t" data-page-node-id="F9SSDbSYj4QdgiqDFO0VDw">强调色</div><div class="sc-d" data-page-node-id="4QDaj5h5BBRnEqAidB2uJ5">当前 #00BCD4 · 按钮 / 选中态 / 进度条即时生效</div></div><div class="spacer" data-page-node-id="KTnGsedqoHjf5SK0Qgp0s3"></div><div style="width:22px;height:22px;border-radius:4px;background:var(--accent)" data-page-node-id="3VfwQ6K9hDJDMx3XhQYsCD"></div><div class="field" style="width:80px" data-page-node-id="DGjcejbhSo35BZFqgCr3ux">更改…</div></div>
+                <div class="set-card" data-page-node-id="YUse4uKagDwrFzFgd4i8ED"><div data-page-node-id="fL6vodFSGpWxuOXUF3miT4"><div class="sc-t" data-page-node-id="y2BXZqaEYMFAoySX1N39QE">字体与字号</div><div class="sc-d" data-page-node-id="SePNorv6X9h2yn7DH3af3p">Segoe UI · 9pt</div></div><div class="spacer" data-page-node-id="6yG54Ozg0C0y9wHahhzyh1"></div><div class="field" style="width:80px" data-page-node-id="sU7v78W7egLpHrzsMACrJL">更改…</div></div>
+                <div class="set-card" data-page-node-id="7h9EG56BZopUN0kWLxLxXy"><div data-page-node-id="NXwLeiq5tGUYD3lUL2arxR"><div class="sc-t" data-page-node-id="hScMapyqzG8XxBlSL29vgZ">界面缩放</div><div class="sc-d" data-page-node-id="CRoxxnk7tXmWN5eBhqgWd3">DPI 缩放 · 重启生效</div></div><div class="spacer" data-page-node-id="UQ64wvk6HP5UDFtWVxU3mw"></div><div class="field" style="width:80px" data-page-node-id="BBWQNGRRvBxlcCHTAFu5Eu">100%</div></div>
+                <div class="set-card" data-page-node-id="9VhVTRUrRuMMpPC9jXKPV4"><div data-page-node-id="VK0EW8Hu5pyFt4ZYfI9tW5"><div class="sc-t" data-page-node-id="9YVDsvLC4pYVWEfBqYfc7M">布局模式</div><div class="sc-d" data-page-node-id="4YG8ztL5myMcgMu0qIYyyw">面板布局 / 经典布局（原「视图」菜单）</div></div><div class="spacer" data-page-node-id="DhyStQs4PsswDEdWOgDsYl"></div><div class="field" data-page-node-id="nz0CxGNrAWUlBaPQoDCIKo">面板布局 ▾</div></div>
+              </div>
+
+              <div class="set-group" data-page-node-id="wcC2ZiylYkEwRxSrGV580T">
+                <div class="set-group-t" data-page-node-id="VebTrWBglZlu3kIyywxsWN">性能</div>
+                <div class="set-card" data-page-node-id="HeeETCVYMx3qLD3kBhqQCW"><div data-page-node-id="l43f0aEvzxDVOzsUZabkjt"><div class="sc-t" data-page-node-id="aWdvxHkwZmikz2ED1MWRAl">亚克力效果</div><div class="sc-d" data-page-node-id="QREWHjhaFCPRMVQzE5brDJ">关闭后导航栏不再有额外核显消耗</div></div><div class="spacer" data-page-node-id="2lSPabboUpGs6Kemdw4Fi5"></div><div class="switch on" onclick="this.classList.toggle('on')" data-page-node-id="8GMKp8bts35QaS4t9BqWa9"><i data-page-node-id="JN5ZuQXW2wvisCMD3lmGhA"></i></div></div>
+                <div class="set-card" data-page-node-id="VMyalQ802ACrVJMcrquOUh"><div data-page-node-id="vv52SFqaE5zhJxAy9rvZNI"><div class="sc-t" data-page-node-id="QbERYV4f6BMQFvLuHteIzV">动画效果</div><div class="sc-d" data-page-node-id="k8SaE68enF7FxiQ5wiA31O">菜单弹出 / 弹窗淡入 / 表格平滑滚动</div></div><div class="spacer" data-page-node-id="i5IrfvoawFa5FCMqaDMpLi"></div><div class="switch" onclick="this.classList.toggle('on')" data-page-node-id="E4mXYYyrQhCEyHuYb4tPAE"><i data-page-node-id="CjPQuAgGU2VzfeoEx8JjLL"></i></div></div>
+                <div class="set-card" data-page-node-id="8RCvCKnzEvcseTfX9fvDLA"><div data-page-node-id="r7zVENAubpD8V2qeDJM2mi"><div class="sc-t" data-page-node-id="6bnKzJN0wgmprOIYuvwQUC">表格平滑滚动</div><div class="sc-d" data-page-node-id="eCAqnfp5VpTgOHroHx4tFh">关闭后显著减少滚动与鼠标移动掉帧</div></div><div class="spacer" data-page-node-id="rR4V0Yf5jAB9KOpjXOeysw"></div><div class="switch" onclick="this.classList.toggle('on')" data-page-node-id="NSf2DML8aEDPeEyt5inG7x"><i data-page-node-id="iWFnFbEWD9JjMcVj06EaKj"></i></div></div>
+              </div>
+
+              <div class="set-group" data-page-node-id="zZBZbHnXgHdVsQTFRO5qS1">
+                <div class="set-group-t" data-page-node-id="eOZ0mCqL4iYjNwoBWECWkX">数据与存储</div>
+                <div class="set-card" data-page-node-id="fb8hGyqGhGL8w2SmTfoqgj"><div data-page-node-id="VvxqCbA2seQ6DvzyJmFLaM"><div class="sc-t" data-page-node-id="5AHPeIg4dutfRLrV9NYTEI">MySQL 双后端</div><div class="sc-d" data-page-node-id="aizKghBMLOxRYxYGZLP2XM">mysql_sync.enabled · 关闭则回退 SQLite</div></div><div class="spacer" data-page-node-id="uAztyiqTUy4xlEPtyr3DWC"></div><div class="switch on" onclick="this.classList.toggle('on')" data-page-node-id="PBtwzNRyXM867BdbJx5MNH"><i data-page-node-id="ohiq0oUmaqXUeUsluHF3QJ"></i></div></div>
+                <div class="set-card" data-page-node-id="jCUqRQhAeX99HojptZlGER"><div data-page-node-id="Nzw3rUl8IZkPLNuFz4Yo1e"><div class="sc-t" data-page-node-id="ekyFCBVxHKcjc5QnDcknBj">数据保留策略</div><div class="sc-d" data-page-node-id="oJYxHlTCeAnep8GD126Zga">xqzg_status / kd_status 按天清理</div></div><div class="spacer" data-page-node-id="wifmUDmJVIKVmGB9CKjey2"></div><div class="field" style="width:80px" data-page-node-id="qhD7shoLSCMJnHonf8EmHj">配置…</div></div>
+                <div class="set-card" data-page-node-id="rajvENHoJTraEt36IqZTI8"><div data-page-node-id="ft2uaiCGlXhx2O9RC3cTq4"><div class="sc-t" data-page-node-id="mhuva81C0Ih1IsGrgJKFAY">配置文件</div><div class="sc-d" data-page-node-id="i5UefZSc56JR0znCv4T5gx">settings.json · cfg.json · frpc_xtcp_panel.toml</div></div><div class="spacer" data-page-node-id="WNh1Rg5FiHQlOWl2pxqcmj"></div><div class="field" style="width:80px" data-page-node-id="3IRHNPBJkg4XuJRYXTvkhN">打开…</div></div>
+              </div>
+
+              <div class="set-group" data-page-node-id="U0ESOW2Tjc9bDSr7Dbz2Zv">
+                <div class="set-group-t" data-page-node-id="ofX2kKvKlH20hFFaKUhHbL">路径</div>
+                <div class="set-card" data-page-node-id="z6FgpTSOpClBhyVVtnvIf1"><div data-page-node-id="aIcIncKUBxYGp39IIAN9DE"><div class="sc-t" data-page-node-id="8t1MOkmcvekZJsBthFHCpH">程序目录</div><div class="sc-d" data-page-node-id="1AHk3CPQNYTkIHA13SKevD">D:\snooker\bin64</div></div><div class="spacer" data-page-node-id="QYcf8twdBOr8gAjnvfZzJk"></div><div class="field" style="width:80px" data-page-node-id="edY2nlm2gqzmsKblawEuLJ">浏览…</div></div>
+                <div class="set-card" data-page-node-id="v0NG7xpp5QQc9DunVliBNF"><div data-page-node-id="TNkP4tjPFsa6iGXzfy2xO2"><div class="sc-t" data-page-node-id="XCS6EhV5zisleGjtDRR8Cg">视频目录</div><div class="sc-d" data-page-node-id="FWCCe93x7fzbVYxyJwF505">D:\videos</div></div><div class="spacer" data-page-node-id="nVBQHHEArM2PbruNSUEUpu"></div><div class="field" style="width:80px" data-page-node-id="8UZp9jycHhboZ9kNfjlGAP">浏览…</div></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ============ 关于 ============ -->
+          <section class="page" id="page-about" data-page-node-id="s91W5kWCBgaflDpgT3KASd">
+            <div class="page-head" data-page-node-id="cSvy3fSJ3IeGuUCtboLbn5"><div class="page-title" data-page-node-id="d5H1pl5ski3zKtmvv95Wgf">关于</div></div>
+            <div class="subpage active" data-page-node-id="elxyZgY67X6GjqK8d50OjK">
+              <div style="background:var(--card);border:1px solid var(--card-border);border-radius:6px;padding:22px;text-align:center" data-page-node-id="MkwrPaliEQJUpCGaGsRaSk">
+                <div style="width:52px;height:52px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent-dark));margin:0 auto 12px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:700" data-page-node-id="ZMxOkURFSqgNuG4hqvZreO">A</div>
+                <div style="font-size:16px;font-weight:600" data-page-node-id="RQameBwgdHhbQpBfpGmXHA">AutoWork</div>
+                <div style="font-size:12px;color:var(--text-2);margin-top:4px" data-page-node-id="ypwmgsIoEGcpwfzID6TK9g">版本 2.9 · PySide6 6.11 · qfluentwidgets 1.11</div>
+                <div style="font-size:12px;color:var(--text-3);margin-top:14px;line-height:1.7" data-page-node-id="zGUAHlxyKfXMaweowYBfL1">
+                  台球追踪视频控制 · 日志采集 · 球桌设备数据<br data-page-node-id="EdjqQs4fRSvrBuMDI1cKlb">运维管理 · 售后 · P2P 远程 · MySQL 双后端
+                </div>
+              </div>
+            </div>
+          </section>
+
+        </div>
+
+        <!-- 状态栏 -->
+        <div class="statusbar" data-page-node-id="9ceAKdpErO3UqjBfQAFBfS">
+          <div class="sb-i" data-page-node-id="LDuCcGBjpCzqybF6E46RMQ"><span class="dot on" data-page-node-id="vQyyn1EZYsZSgI5eopqerY"></span> MySQL 已连接</div>
+          <div class="sb-i" data-page-node-id="rV9jwBjmssgKGK2So62NiG">📁 程序 D:\snooker\bin64</div>
+          <div class="sb-i" data-page-node-id="SGFD80zlYfCXDWdUVHrANU">🎬 视频 D:\videos\2026-09-05</div>
+          <div class="sb-i" data-page-node-id="8q1IXpvX9ABbyMDmtA7S5n">设备 8 · 在线 6</div>
+          <div style="flex:1" data-page-node-id="lob6NBIzFRDSM2gYpBNpna"></div>
+          <div class="sb-i" data-page-node-id="opmPUhzcCmoASxDxRL2El1">⏱ 12:04:33</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设计标注 -->
+    <div class="anno a-left" style="left:214px;top:58px" data-anno data-page-node-id="j2Di4Qy2WDC7crgVyDzbDN">
+      <b data-page-node-id="fCi4laiyeYdV4OCyZOL2tK">① 一级导航 6 项 + 底部 2 项</b>
+      用 NavigationItemPosition.TOP / BOTTOM 分区。设置与关于置底，符合 Fluent 规范。
+    </div>
+    <div class="anno a-left" style="left:214px;top:212px" data-anno data-page-node-id="kEwf18KMm9ApDmEdZqTAxj">
+      <b data-page-node-id="ZrzhtCf3v1PAotY3H4psbj">② 二级导航用 Pivot，不用嵌套 FluentWindow</b>
+      实测嵌套会渲染出第二个标题栏。降层为 QWidget + Pivot 后页面可用宽 1351px（单级导航）。
+    </div>
+    <div class="anno a-left" style="left:214px;top:400px" data-anno data-page-node-id="rZ9epacusBBRR7lOmDRfbW">
+      <b data-page-node-id="eJrqR70aDQ0oNIiIcP76yB">③ 页面区 = 原 centralwidget</b>
+      Ui_MainWindow 整体作为"工作台"SubInterface 注册，21 个工具栏控件与三列 Splitter 原样保留，零重写。
+    </div>
+    <div class="anno a-left" style="left:214px;top:640px" data-anno data-page-node-id="qslylpyIfIn4qVF79oCGTG">
+      <b data-page-node-id="K777nKTEJlGBDQUkzXo46u">④ 状态栏下沉到窗口底部</b>
+      原状态栏挂在 vBoxLayout 末尾，重构后移出页面、常驻窗口底部，切页不消失。
+    </div>
+  </div>
+</div>
+
+<script>
+function go(id){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===id));
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id==='page-'+id));
+}
+function sub(el,targetId){
+  el.parentElement.querySelectorAll('.pivot-item').forEach(p=>p.classList.remove('active'));
+  el.classList.add('active');
+  const page = el.closest('.page');
+  page.querySelectorAll('.subpage').forEach(s=>s.classList.remove('active'));
+  document.getElementById(targetId).classList.add('active');
+}
+function toggleNav(){
+  const w=document.getElementById('win');
+  w.classList.toggle('collapsed');
+  const collapsed=w.classList.contains('collapsed');
+  document.getElementById('wReadout').textContent =
+    collapsed ? '导航 48px（折叠）→ 页面可用 1351px' : '导航 200px（展开）→ 页面可用 1199px';
+}
+let annoVisible=true;
+function toggleAnno(){
+  annoVisible=!annoVisible;
+  document.querySelectorAll('[data-anno]').forEach(a=>a.style.display=annoVisible?'':'none');
+}
+</script>
+</body>
+</html>
