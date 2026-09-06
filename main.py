@@ -61,7 +61,7 @@ patch_dialog_animation()
 # 库默认整视口重绘），滚轮滚动 + 鼠标移动叠加场景掉帧显著减少（幂等）
 patch_table_hover_repaint()
 
-from core.app_paths import get_app_dir, get_resource_dir
+from core.app_paths import get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler
 from core.design_tokens import pt_to_px
 from main_window import MainWindow
@@ -93,16 +93,14 @@ def main():
     threading.excepthook = _thread_exception_hook
 
     # 应用 DPI 缩放（必须在 QApplication 创建前设置环境变量）
-    settings_path = os.path.join(get_app_dir(), "settings.json")
-
-    # 启动时自动迁移：明文敏感字段（密码/token）一次性 DPAPI 加密回写，用户无感
+    # 启动时自动迁移：旧整文件 settings.json 按域拆分到 config/ + 明文敏感字段 DPAPI 加密，用户无感
     try:
-        from core.secrets import migrate_settings_file
-        migrate_settings_file(settings_path)
+        from core import app_settings
+        app_settings.migrate_legacy()
+        _settings = app_settings.get_merged()
     except Exception:
-        pass
-
-    MainWindow.apply_dpi_scale(settings_path)
+        _settings = {}
+    MainWindow.apply_dpi_scale(_settings)
 
     app = QApplication(sys.argv)
 
@@ -117,12 +115,7 @@ def main():
     if os.path.isfile(_icon_path):
         app.setWindowIcon(QIcon(_icon_path))
 
-    # 【关键】在创建任何 Fluent 控件之前设定主题
-    try:
-        with open(settings_path, 'r', encoding='utf-8') as f:
-            _settings = json.load(f)
-    except Exception:
-        _settings = {}
+    # 【关键】在创建任何 Fluent 控件之前设定主题（_settings 已由配置门面在启动迁移时读取）
     _is_dark = MainWindow._effective_is_dark(_settings)
     setTheme(Theme.DARK if _is_dark else Theme.LIGHT)
     setThemeColor(MainWindow._parse_theme_color(_settings), lazy=True)

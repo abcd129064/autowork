@@ -57,28 +57,27 @@ def _safe_release_worker(w):
     w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
 
 
-# ─── settings.json 读写（常用命令条配置） ─────────────────────────────────
+# ─── 配置门面读写（常用命令条配置） ─────────────────────────────────
 
-# 常用命令默认占位示例（settings.json 无 ssh_commands 字段时使用）
+# 常用命令默认占位示例（配置门面无 ssh_commands 键时使用）
 DEFAULT_SSH_COMMANDS = ["top", "df -h", "journalctl -n 50"]
 
 
 def _load_settings() -> dict:
-    """读取 settings.json，失败时返回空字典"""
+    """读取配置门面合并视图，失败时返回空字典"""
     try:
-        with open(os.path.join(get_app_dir(), "settings.json"), "r", encoding="utf-8") as f:
-            return json.load(f)
+        from core import app_settings
+        return app_settings.get_merged()
     except Exception:
         return {}
 
 
 def _save_settings(data: dict):
-    """合并写入 settings.json"""
+    """按键合并写入配置门面（自动路由域文件；敏感字段加密落盘）"""
     try:
-        settings = _load_settings()
-        settings.update(data)
-        with open(os.path.join(get_app_dir(), "settings.json"), "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
+        from core import app_settings
+        for k, v in data.items():
+            app_settings.set(k, v)
     except Exception:
         pass
 

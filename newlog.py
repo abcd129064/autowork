@@ -26,13 +26,10 @@ _DEFAULT_OUT_DIR = os.path.expanduser(r"~\Desktop")
 
 
 def _load_settings() -> dict:
-    """读取 settings.json（与主程序同目录，敏感字段透明解密）；失败返回 {}"""
+    """读取配置门面合并视图（敏感字段透明解密）；失败返回 {}"""
     try:
-        from core.app_paths import get_app_dir
-        from core.secrets import decrypt_settings
-        path = os.path.join(get_app_dir(), "settings.json")
-        with open(path, "r", encoding="utf-8") as f:
-            return decrypt_settings(json.load(f))
+        from core import app_settings
+        return app_settings.get_merged()
     except Exception:
         return {}
 

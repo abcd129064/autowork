@@ -1158,11 +1158,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                 frame = "400"
         sig = ""
         try:
-            from core.app_paths import get_app_dir
-            import json
-            with open(os.path.join(get_app_dir(), "settings.json"),
-                      "r", encoding="utf-8") as f:
-                sig = str(json.load(f).get("newlog_target_name", "") or "")
+            from core import app_settings
+            sig = str(app_settings.get("newlog_target_name", "") or "")
         except Exception:
             pass
         return {
@@ -1200,7 +1197,18 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
     def _open_config_file(self, name: str):
         """打开指定配置文件（菜单栏「配置」下拉项 / Ctrl+, 快捷键）"""
         if name == "settings.json":
-            path = self._get_settings_path()
+            # 拆分后配置位于 config/ 目录（settings.json 已迁移为 .bak）
+            try:
+                from core import app_settings
+                path = app_settings.config_dir()
+            except Exception:
+                path = os.path.join(self._get_app_dir(), "config")
+            if not os.path.exists(path):
+                self._append_log(f"[配置] 目录不存在: {path}")
+                return
+            os.startfile(path)
+            self._append_log(f"[配置] 已打开配置目录: {path}")
+            return
         elif name == "cfg.json":
             path = os.path.join(self.exe_dir, "cfg.json")
         else:  # frpc_xtcp_panel.toml（唯一 frp 持久化配置）

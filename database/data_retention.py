@@ -82,7 +82,7 @@ _STATUS_TABLES = ("xqzg_status", "kd_status")
 _SYNC_META_KEY = "last_size_check"
 
 
-# ==================== settings.json 读取（不依赖 core，避免 PySide6 链） ====================
+# ==================== config/database.json 读取（不依赖 core，避免 PySide6 链） ====================
 
 def _app_dir() -> str:
     import sys as _sys
@@ -93,8 +93,9 @@ def _app_dir() -> str:
 
 
 def _read_settings() -> dict:
-    """读取 settings.json；缺失/损坏返回 {}（不抛异常）"""
-    path = os.path.join(_app_dir(), "settings.json")
+    """读取 config/database.json（域文件，data_retention 节点所在）；
+    缺失/损坏返回 {}（不抛异常）"""
+    path = os.path.join(_app_dir(), "config", "database.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)

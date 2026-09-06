@@ -8,28 +8,17 @@ _ensure_schema / _read_sqlite / _AFTERSALE_KEY_COLS 及各 _DDL_* /
 push 辅助函数（对应回归测试 tests/test_mysql_sync_removed.py）。
 
 本模块仅保留连接配置读取与连通性测试：
-- _load_mysql_config(): 从 settings.json 读取 mysql_sync 配置（敏感字段
+- _load_mysql_config(): 从配置门面读取 mysql_sync 配置（敏感字段
   透明解密；未启用返回 {}）
 - _get_pymysql(): 延迟导入 pymysql（未安装返回 None）
 - _connect(): 创建 MySQL 连接（供 test_connection 使用）
 - test_connection(): 测试连接是否可达（MysqlTestWorker 使用）
 """
 
-import json
-import os
-
-
 def _load_mysql_config() -> dict:
-    """从 settings.json 读取 mysql_sync 配置（敏感字段透明解密）"""
-    from core.app_paths import get_app_dir
-    from core.secrets import decrypt_settings
-    path = os.path.join(get_app_dir(), "settings.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            settings = decrypt_settings(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    cfg = settings.get("mysql_sync", {})
+    """从配置门面 database 域读取 mysql_sync 配置（敏感字段透明解密）"""
+    from core import app_settings
+    cfg = app_settings.get("mysql_sync") or {}
     if not cfg.get("enabled", False):
         return {}
     return cfg
@@ -45,7 +34,7 @@ def _get_pymysql():
 
 
 def _connect(cfg: dict = None, use_database: bool = True):
-    """创建 MySQL 连接；cfg 缺省时从 settings.json 读取
+    """创建 MySQL 连接；cfg 缺省时从配置门面读取
 
     use_database=False 时不指定 database（用于首次建库/连通性探测）
     """
@@ -75,7 +64,7 @@ def test_connection(cfg: dict = None) -> tuple:
     """测试 MySQL 连接是否可达
 
     Args:
-        cfg: 显式连接配置；缺省时从 settings.json 读取
+        cfg: 显式连接配置；缺省时从配置门面读取
 
     Returns:
         (ok: bool, message: str)

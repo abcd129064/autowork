@@ -15,10 +15,9 @@ settings.json 字段：
     # 弹出菜单/绘制时动态检查，开关切换后下一次弹出即生效
 """
 
-import json
-import os
+from core import app_settings
 
-# 模块级运行时状态（None = 尚未从 settings.json 加载）
+# 模块级运行时状态（None = 尚未从配置门面加载）
 _acrylic_enabled: bool | None = None
 _animation_enabled: bool | None = None
 _table_smooth_enabled: bool | None = None
@@ -50,30 +49,22 @@ _PANEL_WINDOW_CLASSES = {
 }
 
 
-def _settings_path() -> str:
-    from core.app_paths import get_app_dir
-    return os.path.join(get_app_dir(), "settings.json")
-
-
 def _load_perf_settings():
-    """从 settings.json 加载性能选项（首次调用时执行，含旧字段迁移）"""
+    """从配置门面 perf 域加载性能选项（首次调用时执行，含旧字段迁移）"""
     global _acrylic_enabled, _animation_enabled, _table_smooth_enabled
     acrylic, animation, table_smooth = True, True, False
     try:
-        path = _settings_path()
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if "perf_acrylic" in data:
-                acrylic = bool(data["perf_acrylic"])
-            elif data.get("performance_mode") in (True, "true"):
-                acrylic = False  # 旧字段迁移
-            if "perf_animation" in data:
-                animation = bool(data["perf_animation"])
-            elif data.get("performance_mode") in (True, "true"):
-                animation = False  # 旧字段迁移
-            if "perf_table_smooth" in data:
-                table_smooth = bool(data["perf_table_smooth"])
+        data = app_settings.get_domain("perf")
+        if "perf_acrylic" in data:
+            acrylic = bool(data["perf_acrylic"])
+        elif data.get("performance_mode") in (True, "true"):
+            acrylic = False  # 旧字段迁移
+        if "perf_animation" in data:
+            animation = bool(data["perf_animation"])
+        elif data.get("performance_mode") in (True, "true"):
+            animation = False  # 旧字段迁移
+        if "perf_table_smooth" in data:
+            table_smooth = bool(data["perf_table_smooth"])
     except Exception:
         pass
     _acrylic_enabled = acrylic
@@ -112,17 +103,14 @@ def set_table_smooth_scroll_enabled(enabled: bool):
 # ---------------- 面板级覆盖（单独影响各自面板，未设置回退全局） ----------------
 
 def _load_panel_table_overrides():
-    """从 settings.json 加载各面板的平滑滚动覆盖值（未设置的面板不在 dict 中）"""
+    """从配置门面 perf 域加载各面板的平滑滚动覆盖值（未设置的面板不在 dict 中）"""
     global _panel_table_overrides
     ov = {}
     try:
-        path = _settings_path()
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            for panel, key in _PANEL_TABLE_KEYS.items():
-                if key in data:
-                    ov[panel] = bool(data[key])
+        data = app_settings.get_domain("perf")
+        for panel, key in _PANEL_TABLE_KEYS.items():
+            if key in data:
+                ov[panel] = bool(data[key])
     except Exception:
         pass
     _panel_table_overrides = ov
@@ -203,17 +191,14 @@ def apply_table_smooth_globally():
 
 
 def _load_panel_animation_overrides():
-    """从 settings.json 加载各面板的动画覆盖值（未设置的面板不在 dict 中）"""
+    """从配置门面 perf 域加载各面板的动画覆盖值（未设置的面板不在 dict 中）"""
     global _panel_animation_overrides
     ov = {}
     try:
-        path = _settings_path()
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            for panel, key in _PANEL_ANIMATION_KEYS.items():
-                if key in data:
-                    ov[panel] = bool(data[key])
+        data = app_settings.get_domain("perf")
+        for panel, key in _PANEL_ANIMATION_KEYS.items():
+            if key in data:
+                ov[panel] = bool(data[key])
     except Exception:
         pass
     _panel_animation_overrides = ov
@@ -391,18 +376,11 @@ def set_animation_enabled(enabled: bool):
 
 
 def _persist(key: str, value: bool):
-    """将单个性能选项写入 settings.json（保留其余字段不变）"""
+    """将单个性能选项写入配置门面 perf 域（其余字段不受影响）"""
     try:
-        path = _settings_path()
-        data = {}
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        data[key] = value
+        app_settings.set(key, value)
         # 迁移完成后移除旧字段，避免歧义
-        data.pop("performance_mode", None)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        app_settings.remove("performance_mode")
     except Exception:
         pass
 

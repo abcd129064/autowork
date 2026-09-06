@@ -71,12 +71,11 @@ _PANEL_SOURCES = (SOURCE_MANUAL, SOURCE_TABLE)
 
 
 def _load_settings() -> dict:
-    """读取 settings.json（敏感字段透明解密），失败时返回空字典"""
-    path = os.path.join(get_app_dir(), "settings.json")
+    """读取配置门面合并视图（敏感字段透明解密），失败时返回空字典"""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return decrypt_settings(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        from core import app_settings
+        return app_settings.get_merged()
+    except Exception:
         return {}
 
 

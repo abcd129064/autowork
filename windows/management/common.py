@@ -246,38 +246,21 @@ _DEVICE_STATUS_MAP = {
 }
 
 
-# ==================== settings.json 读写（带内存缓存） ====================
-
-_settings_cache = None
-_settings_mtime = 0
+# ==================== 配置门面读写（缓存由门面统一管理） ====================
 
 
 def _load_settings() -> dict:
-    """读取 settings.json（带内存缓存，文件未变时直接返回缓存；敏感字段透明解密）"""
-    global _settings_cache, _settings_mtime
-    path = os.path.join(get_app_dir(), "settings.json")
-    try:
-        mtime = os.path.getmtime(path)
-        if _settings_cache is not None and mtime == _settings_mtime:
-            return _settings_cache
-        with open(path, "r", encoding="utf-8") as f:
-            _settings_cache = decrypt_settings(json.load(f))
-        _settings_mtime = mtime
-        return _settings_cache
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    """读取配置门面合并视图（门面自带进程缓存与加解密；外部手改文件后
+    可调用 core.app_settings.invalidate_cache() 刷新）"""
+    from core import app_settings
+    return app_settings.get_merged()
 
 
 def _save_settings(data: dict):
-    """合并写入 settings.json（同步更新缓存；敏感字段加密后落盘）"""
-    global _settings_cache, _settings_mtime
-    path = os.path.join(get_app_dir(), "settings.json")
-    settings = _load_settings()
-    settings.update(data)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(encrypt_settings(settings), f, ensure_ascii=False, indent=2)
-    _settings_cache = settings
-    _settings_mtime = os.path.getmtime(path)
+    """按键合并写入配置门面（自动路由到所属域文件；敏感字段加密落盘）"""
+    from core import app_settings
+    for k, v in data.items():
+        app_settings.set(k, v)
 
 
 # ==================== MySQL 自动推送已下线 ====================

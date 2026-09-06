@@ -51,21 +51,35 @@ _build('AutoWork.spec')   # 完整应用（onedir，aftersale/管理面板内置
 _build('AfterSale.spec')  # 售后面板（onefile 单文件，独立分发）
 
 # ---- 构建后处理：复制 exe 旁边的运行时文件 ----
-# 完整版目录：settings.json + frpc.exe（P2P 远程会话）
-# 单文件售后面板：settings.json 复制到 dist/（aftersale.exe 旁）
+# 完整版目录：config/（分域配置）+ frpc.exe（P2P 远程会话）
+# 单文件售后面板：config/ 复制到 dist/（aftersale.exe 旁）
+# settings.json 已迁移为 settings.json.bak；若仓库根仍存在旧版 settings.json
+#（如旧版升级包构建场景），一并复制作为首启自动迁移的迁移源
 dist_dir = os.path.join(ROOT, 'dist', 'AutoWork')
-for name in ('settings.json', 'frpc.exe'):
-    src = os.path.join(ROOT, name)
-    if os.path.isfile(src):
-        shutil.copy2(src, os.path.join(dist_dir, name))
-        print(f'[build_exe] 已复制 {name} -> dist/AutoWork/')
-    else:
-        print(f'[build_exe] 跳过 {name}（源文件不存在）')
+root_config = os.path.join(ROOT, 'config')
+if os.path.isdir(root_config):
+    for dest in (dist_dir, os.path.join(ROOT, 'dist')):
+        dst_config = os.path.join(dest, 'config')
+        if os.path.isdir(dst_config):
+            shutil.rmtree(dst_config)
+        shutil.copytree(root_config, dst_config)
+        print(f'[build_exe] 已复制 config/ -> {os.path.relpath(dest, ROOT)}/')
+else:
+    print('[build_exe] 跳过 config/（目录不存在，首次构建后产物将走首启迁移）')
 
-aftersale_settings = os.path.join(ROOT, 'settings.json')
-if os.path.isfile(aftersale_settings):
-    shutil.copy2(aftersale_settings, os.path.join(ROOT, 'dist', 'settings.json'))
-    print('[build_exe] 已复制 settings.json -> dist/（aftersale.exe 旁）')
+root_settings = os.path.join(ROOT, 'settings.json')
+if os.path.isfile(root_settings):
+    # 旧版 settings.json 保留场景：复制为迁移源（应用首启自动分拣到 config/）
+    for dest in (dist_dir, os.path.join(ROOT, 'dist')):
+        shutil.copy2(root_settings, os.path.join(dest, 'settings.json'))
+    print('[build_exe] 已复制 settings.json（迁移源）-> dist/AutoWork/ 与 dist/')
+
+frpc_src = os.path.join(ROOT, 'frpc.exe')
+if os.path.isfile(frpc_src):
+    shutil.copy2(frpc_src, os.path.join(dist_dir, 'frpc.exe'))
+    print('[build_exe] 已复制 frpc.exe -> dist/AutoWork/')
+else:
+    print('[build_exe] 跳过 frpc.exe（源文件不存在）')
 
 # ---- 旧产物清理 ----
 # 旧版 exe 命名清理（历史产物，避免与新名混淆）。注意：Windows 文件系统
@@ -90,13 +104,14 @@ print('\n[build_exe] 产物校验：')
 expected = [
     ('dist/AutoWork/autowork.exe', '主程序（完整版，aftersale/管理面板内置）'),
     ('dist/AutoWork/frpc.exe', 'P2P 工具（与主程序同目录）'),
-    ('dist/AutoWork/settings.json', '主程序配置'),
+    ('dist/AutoWork/config', '主程序分域配置目录'),
     ('dist/aftersale.exe', '售后面板（单文件独立版，与主程序互不关联）'),
-    ('dist/settings.json', '售后面板配置（exe 旁）'),
+    ('dist/config', '售后面板分域配置目录（exe 旁）'),
 ]
 all_ok = True
 for rel, desc in expected:
-    ok = os.path.isfile(os.path.join(ROOT, rel))
+    p = os.path.join(ROOT, rel)
+    ok = os.path.isdir(p) if os.path.isdir(p) else os.path.isfile(p)
     all_ok = all_ok and ok
     print(f'  [{"OK" if ok else "缺失"}] {rel}（{desc}）')
 

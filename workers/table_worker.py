@@ -13,20 +13,12 @@ import os
 import requests
 from PySide6.QtCore import QThread, Signal
 
-from core.app_paths import get_app_dir
-from core.secrets import decrypt_settings
-
 # ==================== 配置读取 ====================
 
 def _load_api_credentials():
-    """从 settings.json 读取 API 账号密码配置（敏感字段透明解密）"""
-    settings_path = os.path.join(get_app_dir(), "settings.json")
-    try:
-        with open(settings_path, "r", encoding="utf-8") as f:
-            settings = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        settings = {}
-    return decrypt_settings(settings).get("api_credentials", {})
+    """从配置门面 credentials 域读取 API 账号密码配置（敏感字段透明解密）"""
+    from core import app_settings
+    return app_settings.get("api_credentials") or {}
 
 
 def get_active_api_source() -> str:

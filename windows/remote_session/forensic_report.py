@@ -185,11 +185,10 @@ def collect_conn_log(host: str, limit: int = CONN_LOG_ENTRIES) -> str:
 # ─── AI 智能分析（后台线程调用，失败不影响报告生成） ──────────────
 
 def _load_forensic_settings() -> dict:
-    """读取 settings.json（AI 分析相关配置，敏感字段解密），失败时返回空字典"""
+    """读取配置门面合并视图（AI 分析相关配置，敏感字段解密），失败时返回空字典"""
     try:
-        with open(os.path.join(get_app_dir(), "settings.json"),
-                  "r", encoding="utf-8") as f:
-            return decrypt_settings(json.load(f) or {})
+        from core import app_settings
+        return app_settings.get_merged()
     except Exception:
         return {}
 

@@ -28,7 +28,7 @@ _mysql_settings_generation = 0
 
 
 def is_mysql_test_mode() -> bool:
-    """MySQL 主库模式是否开启（settings.json → mysql_sync.enabled）。
+    """MySQL 主库模式是否开启（config/database.json → mysql_sync.enabled）。
 
     此函数位于每次数据库访问的热路径；配置由 ``_load_mysql_settings``
     进程内缓存，保存 MySQL 配置时必须调用
@@ -66,7 +66,7 @@ def _load_mysql_settings() -> dict:
 
 
 def _read_mysql_settings() -> dict:
-    """从 settings.json 读取 mysql_sync 配置节点（敏感字段透明解密）。"""
+    """从 config/database.json 读取 mysql_sync 配置节点（敏感字段透明解密）。"""
     # 内联 app_dir 逻辑，避免导入 core 包时触发 PySide6 依赖链
     import sys as _sys
     if getattr(_sys, 'frozen', False):
@@ -74,11 +74,13 @@ def _read_mysql_settings() -> dict:
     else:
         # backend.py 位于 database/，向上一级即项目根目录
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(app_dir, "settings.json")
+    path = os.path.join(app_dir, "config", "database.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(raw, dict):
         return {}
     try:
         from core.secrets import decrypt_settings

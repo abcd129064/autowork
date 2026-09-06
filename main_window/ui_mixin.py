@@ -1887,11 +1887,9 @@ class UIMixin:
             self.ui.switch_layout(classic=True)
 
     @staticmethod
-    def apply_dpi_scale(settings_path):
-        """在 QApplication 创建后应用 DPI 缩放"""
+    def apply_dpi_scale(settings):
+        """在 QApplication 创建后应用 DPI 缩放（settings 为合并配置 dict，经配置门面获取）"""
         try:
-            with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
             scale = settings.get("dpi_scale", 100)
             if scale != 100:
                 os.environ["QT_SCALE_FACTOR"] = str(scale / 100.0)

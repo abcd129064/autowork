@@ -51,19 +51,21 @@ class SettingsMixin:
         return get_app_dir()
 
     def _get_settings_path(self):
-        """获取配置文件路径，与 main.py / .exe 同目录"""
+        """获取配置文件路径，与 main.py / .exe 同目录
+
+        拆分后各域文件位于 config/ 目录；此方法仅为兼容保留，
+        新代码请使用 core.app_settings。
+        """
         return os.path.join(self._get_app_dir(), "settings.json")
 
     def _reload_settings_cache(self):
-        """从 settings.json 一次性加载到内存缓存（敏感字段透明解密）"""
-        path = self._get_settings_path()
+        """从配置门面一次性加载合并视图到内存缓存（敏感字段透明解密）"""
         self._settings_cache = dict(self.DEFAULT_PATHS)  # 默认值作为基础
-        if os.path.exists(path):
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    self._settings_cache.update(decrypt_settings(json.load(f)))
-            except Exception:
-                pass
+        try:
+            from core import app_settings
+            self._settings_cache.update(app_settings.get_merged())
+        except Exception:
+            pass
 
     def _load_settings(self):
         """返回缓存的配置（不再读磁盘，如需刷新请调用 _reload_settings_cache）"""
@@ -72,29 +74,17 @@ class SettingsMixin:
         return self._settings_cache
 
     def _save_settings(self, data):
-        """将配置写入 settings.json，同时更新内存缓存
+        """将配置写入配置门面（按键自动路由到所属域文件），同时更新内存缓存
 
         内存缓存保存明文供各调用方直接使用；落盘时对敏感字段统一加密。
-
-        【防覆盖】写盘前以磁盘最新内容为基础合并，而非直接回写启动时的
-        内存缓存：管理面板等其他模块可能在会话中途保存了新键（如
-        upload_pass/api_credentials），若用启动时一次性加载的旧缓存整体
-        回写，会把这些新保存的配置静默冲掉（重启后表现为"密码丢失"）。
+        门面按键合并写，天然不会覆盖其他键/域的配置（旧版防覆盖问题已消除）。
         """
-        path = self._get_settings_path()
         try:
-            base = dict(self.DEFAULT_PATHS)
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        base.update(decrypt_settings(json.load(f)))
-                except Exception:
-                    pass  # 文件损坏时以默认值+本次数据重建，不影响保存
-            base.update(data)
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(encrypt_settings(base), f,
-                          ensure_ascii=False, indent=2)
-            self._settings_cache = base
+            from core import app_settings
+            for k, v in data.items():
+                app_settings.set(k, v)
+            self._settings_cache = dict(self.DEFAULT_PATHS)
+            self._settings_cache.update(app_settings.get_merged())
         except Exception as e:
             self._append_log(f"[警告] 保存配置失败: {e}")
 
@@ -106,8 +96,13 @@ class SettingsMixin:
         self.cipher_tool = settings.get("cipher_tool", self.DEFAULT_PATHS["cipher_tool"])
         self.front_exe = settings.get("front_exe", self.DEFAULT_PATHS["front_exe"])
         self.backend_exe = settings.get("backend_exe", self.DEFAULT_PATHS["backend_exe"])
-        # 确保首次运行时将默认路径写入 settings.json
-        if not os.path.exists(self._get_settings_path()):
+        # 确保首次运行时将默认路径写入配置门面（config/ 目录尚不存在即首启）
+        try:
+            from core import app_settings
+            first_run = not os.path.isdir(app_settings.config_dir())
+        except Exception:
+            first_run = False
+        if first_run:
             self._save_settings(self.DEFAULT_PATHS)
 
     def _restore_exe_selection(self):

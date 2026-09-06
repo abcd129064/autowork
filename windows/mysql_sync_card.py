@@ -7,8 +7,6 @@
 - 镜像推送（自动同步/立即同步）已随机制 B 下线：仅保留连接测试与配置保存
 """
 
-import json
-import os
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                                QLabel)
@@ -16,37 +14,21 @@ from qfluentwidgets import (CardWidget, BodyLabel, CaptionLabel, LineEdit,
                             PasswordLineEdit, SwitchButton, PushButton,
                             PrimaryPushButton, FluentIcon)
 
-from core.app_paths import get_app_dir
-from core.secrets import decrypt_settings, encrypt_settings
+from core import app_settings
 from core.utils import show_info_bar
 from database import backend
 from database.mysql_sync_card_logic import should_attempt_test
 from workers.mysql_sync_worker import MysqlTestWorker
 
 
-def _settings_path() -> str:
-    """settings.json 绝对路径"""
-    return os.path.join(get_app_dir(), "settings.json")
-
-
 def _load_settings() -> dict:
-    """读取 settings.json（敏感字段透明解密）；缺失/损坏返回 {}"""
-    try:
-        with open(_settings_path(), "r", encoding="utf-8") as f:
-            return decrypt_settings(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+    """读取 database 域配置（敏感字段透明解密）；缺失返回 {}"""
+    return app_settings.get_domain("database")
 
 
 def _save_settings(data: dict):
-    """合并写 settings.json：以磁盘最新内容为 base（防双缓存覆盖 bug）
-
-    先重新读盘再合并，避免内存缓存过期把其他页面的新配置覆盖掉。
-    """
-    settings = _load_settings()
-    settings.update(data)
-    with open(_settings_path(), "w", encoding="utf-8") as f:
-        json.dump(encrypt_settings(settings), f, ensure_ascii=False, indent=2)
+    """合并写 database 域（门面锁内读现值合并，天然防覆盖其他键）"""
+    app_settings.update_domain("database", data)
 
 
 class MysqlSyncCard(CardWidget):
@@ -121,7 +103,7 @@ class MysqlSyncCard(CardWidget):
         self._btn_test.clicked.connect(self._on_test)
         btn_row.addWidget(self._btn_test)
         self._btn_save = PushButton(FluentIcon.SAVE, "保存配置", self)
-        self._btn_save.setToolTip("写入 settings.json 即时生效")
+        self._btn_save.setToolTip("写入 config/database.json 即时生效")
         self._btn_save.clicked.connect(self._on_save)
         btn_row.addWidget(self._btn_save)
         vbox.addLayout(btn_row)
@@ -129,7 +111,7 @@ class MysqlSyncCard(CardWidget):
     # ---------- 配置读写 ----------
 
     def load(self):
-        """从 settings.json 加载当前配置填充表单（进入页面/保存后调用）"""
+        """从配置门面加载当前配置填充表单（进入页面/保存后调用）"""
         cfg = _load_settings().get("mysql_sync", {})
         self._edit_host.setText(str(cfg.get("host", "")))
         self._edit_port.setText(str(cfg.get("port", 3306)))
@@ -155,7 +137,7 @@ class MysqlSyncCard(CardWidget):
         }
 
     def _on_save(self):
-        """保存配置：合并写 settings.json 并提示
+        """保存配置：合并写 database 域并提示
 
         实时主库模式下写入直接进 MySQL，本地无新增，「立即同步」/自动
         推送已随镜像推送机制 B 下线；保存只负责写配置并让 backend 各线程
@@ -171,7 +153,7 @@ class MysqlSyncCard(CardWidget):
                 hint = "已启用 远程SQL，将直接读写服务器SQL"
             else:
                 hint = "已关闭 远程SQL，将使用本地SQLite"
-            show_info_bar(f"配置已写入 settings.json，即时生效；{hint}",
+            show_info_bar(f"配置已保存，即时生效；{hint}",
                           "success",
                           title="已保存", parent=self, duration=3000)
         except Exception as e:

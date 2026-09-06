@@ -50,12 +50,10 @@ if __name__ == "__main__":
     from qfluentwidgets import setTheme, setThemeColor, Theme
 
     def _debug_theme():
-        """读取 settings.json 主题配置（打包后从 exe 旁读取，与主程序入口一致）"""
+        """读取配置门面主题配置（与主程序入口一致）"""
         try:
-            from core.app_paths import get_app_dir
-            p = os.path.join(get_app_dir(), "settings.json")
-            with open(p, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
+            from core import app_settings
+            cfg = app_settings.get_merged()
             return (Theme.DARK if cfg.get("dark_theme") else Theme.LIGHT,
                     cfg.get("theme_color", "#00BCD4"))
         except Exception:

@@ -53,19 +53,9 @@ diff = abs(br.center().y() - lr.center().y())
 check("文字垂直对齐（中心差<3px）", diff < 3, f"btn.cy={br.center().y()} lbl.cy={lr.center().y()} btnH={br.height()} lblH={lr.height()}")
 check("与标签同高（无裁切风险）", abs(br.height() - lr.height()) <= 1, f"btnH={br.height()} lblH={lr.height()}")
 
-# settings 覆盖：enabled=false → 回退线上
-cfg_path = os.path.join(os.getcwd(), "settings.json")
-with open(cfg_path, "r", encoding="utf-8") as f:
-    real_cfg = json.load(f)
-fake = dict(real_cfg)
-fake["local_web"] = {"enabled": False}
+# settings 覆盖：enabled=false → 回退线上（配置门面 get 打桩，不触碰真实 config/）
 import unittest.mock as mock
-import io
-def patched(file, *a, **kw):
-    if str(file).endswith("settings.json"):
-        return io.StringIO(json.dumps(fake))
-    return open(file, *a, **kw)
-with mock.patch("builtins.open", patched):
+with mock.patch("core.app_settings.get", return_value={"enabled": False}):
     url2 = _web_entry_url()
     html2 = _web_link_html()
 check("disabled 时回退线上", url2 == "http://49.235.34.253/" and "49.235.34.253" in html2, html2[:90])

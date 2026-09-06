@@ -50,13 +50,10 @@ def _popup_ani_type():
 
 
 def _default_creator() -> str:
-    """填写人默认值：settings.json 的 newlog_target_name"""
-    import json
-    from core.app_paths import get_app_dir
+    """填写人默认值：配置门面的 newlog_target_name"""
     try:
-        with open(os.path.join(get_app_dir(), "settings.json"),
-                  "r", encoding="utf-8") as f:
-            return str(json.load(f).get("newlog_target_name", "") or "")
+        from core import app_settings
+        return str(app_settings.get("newlog_target_name", "") or "")
     except Exception:
         return ""
 

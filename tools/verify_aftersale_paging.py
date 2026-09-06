@@ -132,6 +132,10 @@ fails = []
 checks = 0
 for mname, mode in mode_sets.items():
     adb.save_cycle_mode(mode)
+    # S3（2026-09-06）：周期筛选走 cycle_start 物化列等值过滤，模式切换后
+    # 物化值需按新配置重算，保证「物化列过滤」与旧 Python 动态口径
+    # （_match_cycle）在同一配置下全量对照（对照强度不弱化）
+    adb.recalc_cycle_starts()
     # 取库中几个真实周期作为筛选目标
     cyc = set()
     for (occ, cre) in conn.execute("SELECT occurred_at, created_at FROM aftersale_records"):

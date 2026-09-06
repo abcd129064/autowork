@@ -55,12 +55,10 @@ if __name__ == "__main__":
     from qfluentwidgets import setTheme, setThemeColor, Theme
 
     def _debug_theme_color():
-        """调试入口读取 settings.json 主题强调色（打包后从 exe 旁读取）"""
+        """调试入口读取配置门面主题强调色（与主程序入口一致）"""
         try:
-            from core.app_paths import get_app_dir
-            p = os.path.join(get_app_dir(), "settings.json")
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f).get("theme_color", "#00BCD4")
+            from core import app_settings
+            return app_settings.get("theme_color", "#00BCD4")
         except Exception:
             return "#00BCD4"
 
