@@ -1,7 +1,8 @@
 /* ===== 窗口自身底色（标题栏透明区域下方） ===== */
-MainWindow {
-    background-color: #202020;
-}
+/* 2026-09-07 移除窗口自身底色段（原 MainWindow 选择器）：
+   FluentWindow 云母依赖窗口背景透明（DWM 绘制），qss 不透明底色
+   会把云母盖死。工作台底色由下方 QWidget#centralwidget 段承载；
+   Win10 无 Mica 时 qfw 自行回退纯色窗口背景，不会露白。 */
 
 /* ===== 主窗口背景 ===== */
 QWidget#centralwidget {

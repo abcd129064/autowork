@@ -19,7 +19,7 @@
 ### 运维管理面板（球桌管理按钮打开）
 - **球桌管理**：对接 wechat2-billiard 接口，表格/搜索/分页/列筛选/右键复制/手动添加记录；接口 `code` 字段（设备编码）同步入库，界面默认隐藏，可在「筛选」菜单勾选显示
 - **设备状态**：对接 kd / xqzg 双接口，数据源可切换，按日期分区查看设备状态；总数/正常/操作列点击可查看文件清单，双击/右键预览图片（左右键翻页，支持分类迁移）
-- **设备健康度管理**：基于接口 `health` 字段的健康度异常告警（每 30 分钟自动拉取，阈值 4000/5000/40 万），支持标记已处理，异常恢复后自动重新告警
+- **设备健康度管理**：基于接口 `health` 字段的健康度异常告警（每 30 分钟自动拉取，阈值 4000/5000/40 万），支持标记已处理、一键归零（逐台把服务端健康度重置为 4000），异常恢复后自动重新告警
 - **图片迁移**：点击总数/正常/操作单元格右侧滑出文件列表，点击文件选择目标分类（问题/精度/使用/废弃）即可在服务器上移动图片
 - **控件测试**：FluentIcon 图标库（搜索过滤、点击复制枚举名）+ qfluentwidgets 控件墙（按钮/输入/日期/弹窗分组演示，可直接交互）
 - **管理设置**：配置双接口 API 账号密码、选择启用数据源、测试连接
@@ -36,13 +36,14 @@
 ### 数据保留自动清理（防数据无限增长）
 - **过期清理（每日执行）**：`xqzg_status` / `kd_status` 两表按日期分区（`file_path`=`yyyy/MM/dd`）自动删除超过 60 天的数据
 - **按大小清理（每 60 天检查）**：`aftersale_records` / `ledger_records` / `submission_log` / `health_alerts` 四张流水表，表大小超过 3GB 时从最早日期开始逐日删除，直到小于 2GB；最近 30 天数据受保护不删
-- **双后端生效**：MySQL 主库与本地 SQLite 兜底均执行同一套清理；参数在 `settings.json` 的 `data_retention` 节点配置（见下文）
+- **双后端生效**：MySQL 主库与本地 SQLite 兜底均执行同一套清理；参数在 `config/database.json` 的 `data_retention` 键配置（见下文）
 - 清理在后台线程执行（启动后延迟 8s 首次检查 + 每 24h 一次），仅在确有删除时提示
 
 ### 售后面板（售后问题登记与统计）
 - **填写录入**：售后问题登记表单（字段对齐售后汇总 Excel），球房输入搜索球桌库自动带出桌号/SNK/地区，发生时间步进补录历史日期；「是否我们发起售后」「是否我方问题」两个判定开关参与筛选与统计
 - **记录与统计**：按周期/类型/状态/是否我们发起/是否我方问题/关键词筛选 + 分页 + 已解决/未解决统计，支持编辑/删除/批量标记已解决/批量删除/导出 xlsx/导入 Excel（导入前预览确认）
-- **周期管理**：统计周期可配置（周二起默认/自然周/自定义起始日+天数/自然月），记录按发生时间动态归属周期，列表/统计/周期下拉/导出四处口径一致
+- **周期管理**：统计周期可配置（周二起默认/自然周/自定义起始日+天数/自然月），记录归属周期物化落库（查询走覆盖索引，10 万条记录周期筛选毫秒级），列表/统计/周期下拉/导出四处口径一致
+- **统计图表**：记录页一键打开 pygwalker 自助分析窗口（默认预置图表可拖拽探索，数据源与面板筛选同口径）
 - **多后端存储**：本地 SQLite / 远程 MySQL 双后端，跟随数据库设置开关切换；MySQL 模式下多人各自提交即落库，刷新可见
 - **数据库设置**：MySQL 连接配置、测试连接；启用后直接读写远程库，不可用时自动降级本地 SQLite
 
@@ -90,7 +91,16 @@ autowork/
 ├── autowork_with_table.py     # UI 定义（由 .ui 编译生成，勿手动修改）
 ├── autowork_with_table.ui     # Qt Designer 界面文件
 ├── p2p.py                     # P2P 工具（端口生成/检测）
-├── settings.json              # 运行时配置文件
+├── config/                    # 分域配置目录（原 settings.json，2026-09-06 拆分）
+│   ├── aftersale.json         #   售后：周期模式/常用句/署名记忆
+│   ├── perf.json              #   性能开关（亚克力/动画/表格平滑滚动）
+│   ├── database.json          #   数据库：MySQL 连接/数据保留清理（密码 DPAPI 加密）
+│   ├── credentials.json       #   凭据：SSH/上传/API/AI（DPAPI 加密）
+│   ├── ui.json                #   界面：主题/字体/DPI/高亮规则
+│   ├── paths.json             #   路径：程序目录/视频目录等
+│   ├── remote.json            #   远程：会话列表/隧道密钥
+│   └── misc.json              #   兜底：web_port/快捷键等未登记键
+├── settings.json.bak          # 旧单文件配置（拆分迁移后自动改名，可回滚）
 ├── frpc.exe                   # frp 客户端（P2P 穿透）
 ├── frpc_xtcp.toml             # frp XTCP 连接配置（运行时生成）
 ├── requirements.txt           # Python 依赖
@@ -103,11 +113,13 @@ autowork/
 │   ├── acrylic_patch.py       #   亚克力效果 PIL 替代补丁
 │   ├── ai_providers.py        #   AI 厂商注册表（六家 OpenAI 兼容接入）
 │   ├── app_paths.py           #   应用路径解析（兼容 PyInstaller）
+│   ├── app_settings.py        #   配置门面（config/ 分域读写，原 settings.json）
 │   ├── conn_logger.py         #   连接日志记录器 + Qt 消息处理器
 │   ├── design_tokens.py       #   设计令牌（语义色/间距/字号单一来源）
 │   ├── flow_widgets.py        #   流式工具栏共享组件（FlowToolbarScrollArea）
 │   ├── frp_remote.py          #   frpc 管理、统一远程会话中心（RemoteSessionManager）
-│   ├── perf.py                #   低性能模式开关（亚克力/动画运行时控制）
+│   ├── local_web_server.py    #   本地售后面板 Web 服务（静态页 + 云端 API 反代）
+│   ├── perf.py                #   性能开关中心（亚克力/动画/表格平滑滚动 + 中央补丁）
 │   ├── secrets.py             #   配置加解密（DPAPI，SSH/upload/AI 凭据）
 │   ├── theme_qss.py           #   窗口级 QSS 应用（apply_window_qss/current_accent_hex）
 │   ├── utils.py               #   错误分类、自然排序、统一提示 show_info_bar
@@ -221,7 +233,7 @@ python build_exe.py
    无需安装环境即可运行。数据落盘在 exe 旁边的 `database/tables.db`，
    与完整版的数据相互独立。
 
-> 构建脚本会自动复制 `settings.json` 到两个产物旁，并复制 `frpc.exe` 到完整版目录。
+> 构建脚本会自动复制 `config/` 分域配置目录到两个产物旁（旧版 `settings.json` 若存在则一并复制作为迁移源），并复制 `frpc.exe` 到完整版目录。
 > 单文件版不包含 P2P/SSH/运维/AI 等主程序功能，仅售后面板。
 
 ## 快捷键
@@ -235,7 +247,7 @@ python build_exe.py
 | 聚焦帧数框 | `Ctrl+G` | 聚焦并全选帧数输入框 |
 | 启动三端 | `Ctrl+T` | 启动/关闭三端程序 |
 | 查看CPP日志 | `Ctrl+L` | 打开 daily 日志文件 |
-| 打开配置 | `Ctrl+,` | 打开配置文件选择对话框 |
+| 打开配置 | `Ctrl+,` | 打开 config/ 配置目录 |
 | P2P面板 | `F9` | 切换远程面板显隐 |
 | 设备搜索 | `Ctrl+F` | 切换设备搜索框 |
 | 跑视频面板 | `Ctrl+1` | 打开跑视频面板（预填当前球桌会话） |
@@ -246,9 +258,9 @@ python build_exe.py
 
 ## 配置说明
 
-配置文件 `settings.json` 位于 exe 同目录，首次运行自动生成。详见 [接口文档 - 配置文件](docs/API.md#配置文件-settingsjson)。
+配置自 2026-09-06 起按域拆分到 `config/` 目录（原单文件 `settings.json` 自动迁移为 `settings.json.bak`，旧文件若重新出现会在应用首启自动分拣），读写统一经 `core/app_settings.py` 配置门面（键自动路由 + 进程缓存 + 敏感域 DPAPI 加密）。详见 [接口文档 - 配置门面](docs/API.md#配置门面-config原-settingsjson2026-09-06-拆分)。
 
-运维管理面板相关的 API 配置存于 `api_credentials` 节点：
+运维管理面板相关的 API 配置存于 `config/credentials.json` 的 `api_credentials` 键（DPAPI 加密）：
 
 ```json
 "api_credentials": {
@@ -264,7 +276,7 @@ python build_exe.py
 
 也可直接在「运维管理面板 → 管理设置」页中修改并测试连接。
 
-低性能模式（设置 → 性能）：
+低性能模式（设置 → 性能，键位于 `config/perf.json`）：
 
 ```json
 "perf_acrylic": false,
@@ -276,7 +288,7 @@ python build_exe.py
 
 均为运行时即时生效，无需重启，低配机器可全部关闭提升流畅度。
 
-上传与 NewLog 批量整理配置（设置 → 收集与上传）：
+上传与 NewLog 批量整理配置（设置 → 收集与上传，键位于 `config/credentials.json`，密码 DPAPI 加密）：
 
 ```json
 "upload_host": "你的上传服务器地址",

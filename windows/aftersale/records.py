@@ -145,14 +145,13 @@ class RecordsPage(QWidget):
         root.setContentsMargins(20, 14, 20, 12)
         root.setSpacing(8)
 
-        # --- 页头：标题 + 说明 + 数据源状态（右对齐） ---
+        # --- 页头：标题 + 数据源状态（右对齐） ---
+        # 副标题「售后问题上报」已删除（2026-09-06）：与二级页签重复
         head = QHBoxLayout()
         head.setSpacing(10)
         head_box = QVBoxLayout()
         head_box.setSpacing(1)
-        head_box.addWidget(TitleLabel("记录与统计", self))
-        head_box.addWidget(CaptionLabel(
-            "售后问题上报", self))
+        # head_box.addWidget(TitleLabel("记录与统计", self))
         head.addLayout(head_box)
         head.addStretch(1)
         # 网页版入口：浏览器打开售后面板网页（本地 8787 / 线上兜底）。
@@ -267,7 +266,7 @@ class RecordsPage(QWidget):
         toolbar.addWidget(self._search_edit)
 
         self._btn_add = PrimaryPushButton(FluentIcon.ADD, "新增", self)
-        self._btn_add.setToolTip("新增一条售后记录（点击直接填写并提交）")
+        self._btn_add.setToolTip("新增一条售后记录")
         self._btn_add.clicked.connect(self._on_add)
         toolbar.addWidget(self._btn_add)
 
@@ -286,11 +285,11 @@ class RecordsPage(QWidget):
         self._btn_refresh.clicked.connect(self._on_refresh)
         toolbar.addWidget(self._btn_refresh)
 
-        # pygwalker 自助分析入口（浏览器独立窗口，拖拽字段出图）
+        # pygwalker 自助分析入口
         self._btn_stats_chart = PushButton(
             FluentIcon.HISTORY, "统计图表", self)
         self._btn_stats_chart.setToolTip(
-            "打开 pygwalker 自助分析窗口（浏览器独立窗口，拖拽字段出图）")
+            "打开 pygwalker 自助分析窗口")
         self._btn_stats_chart.clicked.connect(self._on_open_stats_chart)
         toolbar.addWidget(self._btn_stats_chart)
 
@@ -417,7 +416,7 @@ class RecordsPage(QWidget):
 
     @staticmethod
     def _short_dt(val: str) -> str:
-        """2026-08-22 21:14:33 → 08-22 21:14（表格内紧凑展示，完整值放 tooltip）"""
+        """2026-08-22 21:14:33 → 08-22 21:14"""
         s = str(val or "").strip()
         return s[5:16] if len(s) >= 16 else s
 
@@ -450,7 +449,7 @@ class RecordsPage(QWidget):
 
         - MySQL 开启且可用：绿色「数据源: MySQL」
         - MySQL 未开启：灰色「数据源: 本地 SQLite」
-        - MySQL 开启但不可用（降级兜底）：橙色「本地 SQLite（MySQL 不可用，降级兜底）」
+        - MySQL 开启但不可用：橙色「本地 SQLite」
         """
         from database import backend
         if not backend.is_mysql_test_mode():
@@ -458,7 +457,7 @@ class RecordsPage(QWidget):
         elif backend.get_state() == backend.STATE_ONLINE:
             text, color = "数据源: MySQL", SEMANTIC["success"]
         else:
-            text, color = ("数据源: 本地 SQLite（MySQL 不可用，降级兜底）",
+            text, color = ("数据源: 本地 SQLite 原因：服务器 MySQL 连接不可达",
                            SEMANTIC["warning"])
         self._lbl_source.setText(text)
         self._lbl_source.setStyleSheet(f"color: {color};")
@@ -518,9 +517,17 @@ class RecordsPage(QWidget):
             self._type_combo.blockSignals(False)
             self._search_edit.blockSignals(False)
         self._on_filter_changed()
-        # 确保记录页可见（弹窗为非模态，期间可能已切到其他页）
+        # 确保记录页可见（弹窗为非模态，期间可能已切到其他页）。
+        # 宿主兼容：主窗口单窗口导航走 switch_to_page 路由（本页在
+        # AftersaleHub 的 Pivot 内）；独立面板走 FluentWindow.switchTo
         win = self.window()
-        if win is not None and hasattr(win, "switchTo"):
+        router = getattr(win, "switch_to_page", None) if win is not None else None
+        if router is not None:
+            try:
+                router(self)
+            except Exception:
+                pass
+        elif win is not None and hasattr(win, "switchTo"):
             try:
                 win.switchTo(self)
             except Exception:

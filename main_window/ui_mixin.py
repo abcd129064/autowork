@@ -1148,27 +1148,24 @@ class UIMixin:
         self._append_log("[添加] 手动添加一条球桌记录到本地数据库")
 
     def _on_open_table_panel(self):
-        """打开球桌管理面板：内置窗口（与独立 management.exe 解耦，不再拉起外部进程）"""
-        from windows.management_panel import ManagementPanelWindow
-        if not hasattr(self, '_table_panel') or self._table_panel is None:
-            # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上（始终置顶）
-            self._table_panel = ManagementPanelWindow()
-            self._table_panel.destroyed.connect(
-                lambda: setattr(self, '_table_panel', None))
-        self._table_panel.show()
-        self._table_panel.raise_()
-        self._table_panel.activateWindow()
+        """打开球桌管理：跳转主窗口「运维管理」页（单窗口导航版）
+
+        原 FluentWindow 独立面板保留（windows/management_panel.py shim 仍可
+        独立进程启动），主窗口入口统一收敛到侧边导航。
+        """
+        hub = getattr(self, "management_hub", None)
+        if hub is not None:
+            self.switchTo(hub)
 
     def _on_open_aftersale(self):
-        """打开售后面板：内置窗口（与单文件 aftersale.exe 相互独立，不拉起外部进程）"""
-        from windows.aftersale_panel import AftersalePanelWindow
-        if not hasattr(self, '_aftersale_panel') or self._aftersale_panel is None:
-            self._aftersale_panel = AftersalePanelWindow()
-            self._aftersale_panel.destroyed.connect(
-                lambda: setattr(self, '_aftersale_panel', None))
-        self._aftersale_panel.show()
-        self._aftersale_panel.raise_()
-        self._aftersale_panel.activateWindow()
+        """打开售后面板：跳转主窗口「售后」页（单窗口导航版）
+
+        原 AftersalePanelWindow 独立面板保留（windows/aftersale_panel.py shim
+        仍可独立进程启动），主窗口入口统一收敛到侧边导航。
+        """
+        hub = getattr(self, "aftersale_hub", None)
+        if hub is not None:
+            self.switchTo(hub)
 
     def _on_open_conn_diag(self):
         """打开连接诊断面板（非模态独立窗口，单例：已打开则激活）"""

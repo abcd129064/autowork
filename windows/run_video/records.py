@@ -149,15 +149,13 @@ class RecordsPage(QWidget):
         root.setContentsMargins(20, 14, 20, 12)
         root.setSpacing(8)
 
-        # --- 页头：标题 + 说明 + 数据源状态 ---
+        # --- 页头：标题 + 数据源状态 ---
         head = QHBoxLayout()
         head.setSpacing(10)
         head_box = QVBoxLayout()
         head_box.setSpacing(1)
-        head_box.addWidget(TitleLabel("记录与统计", self))
-        head_box.addWidget(CaptionLabel(
-            "跑视频记录：分类（问题/未复现/精度/使用）与在线模板同口径", self))
-        head.addLayout(head_box)
+        # head_box.addWidget(TitleLabel("记录与统计", self))
+        # head.addLayout(head_box)
         head.addStretch(1)
         self._lbl_source = CaptionLabel("", self)
         head.addWidget(self._lbl_source, 0, Qt.AlignmentFlag.AlignTop)

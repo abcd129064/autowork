@@ -1,7 +1,9 @@
 /* ===== 窗口自身底色（浅色主题） ===== */
-MainWindow {
-    background-color: #F5F6F8;
-}
+/* 2026-09-07 移除窗口自身底色段（原 MainWindow 选择器）：
+   主窗口已迁移为 FluentWindow（云母/Mica 依赖窗口背景透明，由 DWM
+   绘制系统级云母），qss 不透明底色会把云母完全盖死（深色=深灰、
+   浅色=纯白的根因）。工作台底色由下方 QWidget#centralwidget 段承载；
+   Win10 无 Mica 时 qfw 会自行回退绘制纯色窗口背景，不会露白。 */
 
 /* ===== 主窗口背景 ===== */
 QWidget#centralwidget {

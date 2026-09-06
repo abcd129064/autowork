@@ -14,7 +14,7 @@
 - [win_api/ Windows API 层](#win_api-windows-api-层)
 - [tools/ 独立工具模块](#tools-独立工具模块)
 - [p2p.py P2P 工具模块](#p2ppy-p2p-工具模块)
-- [配置文件 settings.json](#配置文件-settingsjson)
+- [配置门面 config/（原 settings.json）](#配置门面-config原-settingsjson2026-09-06-拆分)
 
 ---
 
@@ -68,6 +68,7 @@ Qt 消息处理器，将 Warning/Critical/Fatal 级别消息落盘。通过 `qIn
 | `safe_close_transport(transport, join_timeout=3)` | 安全关闭 paramiko Transport | close + join 等待线程退出 |
 | `cleanup_log_dir(dir_path, max_files=500, max_age_days=30, suffix='.log')` | `(str, int, int, str) -> int` | 日志目录闭环清理（超龄/超量），返回删除文件数，失败静默降级 |
 | `show_info_bar(message, message_type="info", title=None, duration=2500, parent=None)` | `(...) -> InfoBar` | **统一 InfoBar 提示**：位置固定 BOTTOM_RIGHT，标题按类型自动映射（success→成功/info→提示/warning→警告/error→错误），默认时长 2500ms（<=0 常驻）；parent 缺省取当前活动窗口；返回 bar 实例供追加 Action/Widget |
+| `launch_sibling_app(exe_name, args=None)` | `(str, list?) -> bool` | 拉起同包分发的独立 exe（如 aftersale.exe），开发环境自动映射到 dist/，失败返回 False |
 | `PARAMIKO_AVAILABLE` | `bool` | paramiko 是否可用（环境探测） |
 | `RETRYABLE_KEYWORDS` | `tuple` | 可重试错误关键词 |
 | `RETRY_MAX` | `int = 5` | 最大重试次数 |
@@ -93,18 +94,87 @@ import core.acrylic_patch  # noqa: F401
 
 ### core.perf
 
-低性能模式运行时开关（亚克力/动画即时生效，`settings.json` 持久化，兼容旧字段 `performance_mode`）。
+运行时性能开关中心（亚克力/动画/表格平滑滚动，切换即时生效，经 `core.app_settings` 门面持久化到 `config/perf.json`；兼容旧字段 `performance_mode` 与旧 settings.json 键位自动迁移）。
+
+#### 全局开关
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `is_acrylic_enabled()` | `() -> bool` | 亚克力磨砂效果是否开启 |
-| `is_animation_enabled()` | `() -> bool` | 界面动画是否开启 |
+| `is_acrylic_enabled()` | `() -> bool` | 亚克力磨砂效果是否开启（默认 true） |
 | `set_acrylic_enabled(enabled)` | `(bool)` | 设置亚克力开关（持久化 + 生效） |
+| `is_animation_enabled()` | `() -> bool` | 菜单弹出动画是否开启（默认 true） |
 | `set_animation_enabled(enabled)` | `(bool)` | 设置动画开关（持久化 + 生效） |
-| `is_performance_mode()` | `() -> bool` | 低性能模式（两者均关闭） |
-| `invalidate_cache()` | `()` | 使配置缓存失效（下次读取重载） |
+| `is_performance_mode()` | `() -> bool` | 兼容旧接口：亚克力关闭即视为性能模式 |
+| `is_table_smooth_scroll_enabled()` | `() -> bool` | TableWidget 平滑滚动动画是否开启（**默认关闭**：大表格逐帧重绘卡顿） |
+| `set_table_smooth_scroll_enabled(enabled)` | `(bool)` | 设置全局表格平滑滚动开关（持久化 + 生效） |
+| `invalidate_cache()` | `()` | 使运行时缓存失效（下次读取重载 config/perf.json） |
+
+#### 面板级覆盖（面板开关单独生效，未设置回退全局）
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `get_table_smooth(panel=None)` | `(str?) -> bool` | 生效的表格平滑滚动；panel ∈ aftersale/video/management/remote |
+| `set_table_smooth(panel, enabled)` | `(str?, bool)` | 设置面板级（panel 非空，键 `perf_table_smooth_<panel>`）或全局开关 |
+| `apply_table_smooth_mode(table, panel=None)` | `(TableWidget, str?)` | 把当前生效值应用到单个 TableWidget（开=LINEAR / 关=NO_SMOOTH，即时） |
+| `apply_table_smooth_globally()` | `()` | 全局开关变更后刷新所有已打开窗口的表格（按 覆盖→全局 逐窗生效） |
+| `get_animation(panel=None)` | `(str?) -> bool` | 生效的弹出动画；panel ∈ aftersale/video |
+| `set_animation(panel, enabled)` | `(str?, bool)` | 设置面板级或全局动画开关 |
+
+#### 中央补丁（main.py 启动时调用一次，幂等）
+
+| 函数 | 说明 |
+|------|------|
+| `patch_menu_animation()` | 拦截 qfluentwidgets 菜单/ComboBox 下拉弹出动画，按「面板覆盖→全局」生效值降级 |
+| `patch_dialog_animation()` | 拦截 MaskDialogBase 弹窗淡入/淡出：动画关闭时直接显示（规避整窗离屏渲染卡顿） |
+| `patch_table_hover_repaint()` | 拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代库默认整视口重绘，≈1/23 面积） |
 
 ---
+
+### core.app_settings
+
+**配置门面（2026-09-06 起 settings.json 已拆分下线）**：原单文件 settings.json 的 51+ 顶层键按域拆分为 `config/` 目录 8 个域文件，本模块是唯一读写入口（按键自动路由 + 进程缓存 + RLock + 敏感域透明 DPAPI 加解密）。
+
+#### 域文件映射（`DOMAIN_FILES`）
+
+| 域 | 文件 | 代表键 | 加密 |
+|----|------|--------|------|
+| aftersale | config/aftersale.json | `aftersale_cycle`、`aftersale_quick_phrases`、`aftersale_last_creator/resolver` | 否 |
+| perf | config/perf.json | `perf_acrylic`、`perf_animation`、`perf_table_smooth*` | 否 |
+| database | config/database.json | `mysql_sync`、`data_retention` | ✅ DPAPI |
+| credentials | config/credentials.json | `ssh_pass`、`upload_*`、`api_credentials`、`ai_api_keys`、`frpc_server`、`deepseek_api_key` | ✅ DPAPI |
+| ui | config/ui.json | `theme_*`、`font_*`、`dpi_scale`、`classic_layout`、`log_highlight_rules` | 否 |
+| paths | config/paths.json | `exe_dir`、`videos_dir` 等 11 个路径键 | 否 |
+| remote | config/remote.json | `remote_sessions`、`tcp_servers`、`restore_remote_sessions` | 否 |
+| misc | config/misc.json | `web_port` 及一切未登记键兜底 | 否 |
+
+未在 `KEY_DOMAIN` 登记的键一律归 misc 域（动态键如 `shortcut_*`、`ssh_commands`、`local_web` 即走此兜底，调用方无需登记）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `get(key, default=None)` | `(str, Any) -> Any` | 按键读配置（自动路由所属域；容器值返回深拷贝防缓存污染） |
+| `set(key, value)` | `(str, Any) -> bool` | 按键合并写（域内其他键不动；加密域自动加密落盘） |
+| `remove(key)` | `(str) -> bool` | 按键删除（迁移清理旧字段等场景） |
+| `get_domain(domain)` | `(str) -> dict` | 整域明文副本（深拷贝） |
+| `update_domain(domain, data)` | `(str, dict) -> bool` | 锁内读现值→覆盖同键→落盘→失效缓存 |
+| `replace_domain(domain, data)` | `(str, dict) -> bool` | 整域覆写（不合并） |
+| `get_merged()` | `() -> dict` | 全域合并视图，**语义等同旧 settings.json 整文件**（明文），供「读整文件后多处取键」的调用点零逻辑改动迁移 |
+| `invalidate_cache()` | `()` | 清空进程缓存（外部手改配置文件后的刷新入口） |
+| `domain_of(key)` | `(str) -> str` | 键所属域 |
+| `config_dir()` / `domain_path(domain)` / `legacy_settings_path()` | `() -> str` | config/ 目录 / 域文件路径 / 旧 settings.json 路径 |
+| `migrate_legacy()` | `() -> bool` | 旧 settings.json 按域分拣 + 敏感字段加密 + 改名 `.bak`（幂等，只补缺键不覆盖新值） |
+
+**迁移约定**：任何读写前惰性触发 `_ensure_migrated()`——应用首启自动完成拆分（旧文件保留为 settings.json.bak 可回滚），升级用户无感。**例外**：`database/backend.py` 与 `database/data_retention.py` 为避免导入 core 包触发 PySide6 依赖链，直接读 `config/database.json`（字段级只读，不经门面）。
+
+---
+
+### core.local_web_server
+
+本地售后面板 Web 服务：daemon 线程托管前端静态页 + 反代云端 API，浏览器访问 `http://localhost:<port>`。GUI 主程序启动时调用，失败仅记日志不影响桌面功能。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `start_local_web_server(settings)` | `(dict) -> dict` | 按 `settings['local_web']`（缺省 enabled=True, port=8787）启动，幂等；返回 `{started, url, ...}` |
+| `stop_local_web_server()` | `()` | 停止服务（程序退出时由 atexit 自动调用） |
 
 ### core.frp_remote
 
@@ -149,9 +219,9 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 | `encrypt_settings(settings)` | `(dict) -> dict` | 返回敏感字段已加密的副本（不修改入参） |
 | `decrypt_settings(settings)` | `(dict) -> dict` | 返回敏感字段已解密的副本（不修改入参） |
 | `has_plaintext_secret(settings)` | `(dict) -> bool` | 检测是否存在未加密的敏感值（自动迁移判断用） |
-| `migrate_settings_file(path=None)` | `(str?) -> bool` | 启动时自动迁移：明文敏感字段加密回写一次（幂等） |
+| `migrate_settings_file(path=None)` | `(str?) -> bool` | **已由 `core.app_settings.migrate_legacy()` 接管**（拆分迁移时统一加密分拣）；本函数保留为兼容入口，主流程不再调用 |
 
-敏感字段集合：顶层键（`ssh_pass` 等）+ 嵌套路径（`api_credentials.api1.password` 等）统一由 `SENSITIVE_KEYS` / `NESTED_SENSITIVE_PATHS` 维护。
+敏感字段集合：顶层键（`ssh_pass` 等）+ 嵌套路径（`api_credentials.api1.password` 等）统一由 `SENSITIVE_KEYS` / `NESTED_SENSITIVE_PATHS` 维护。**2026-09-06 起**：加密落盘由 `core.app_settings` 门面在写 `config/credentials.json`、`config/database.json` 时统一执行（`ENCRYPTED_DOMAINS`），本模块的 encrypt/decrypt_settings 被门面复用。
 
 ---
 
@@ -191,6 +261,8 @@ AI 厂商注册表：统一各厂商的 OpenAI 兼容接入参数（DeepSeek / �
 | 函数 | 说明 |
 |------|------|
 | `apply_window_qss(window)` | 按当前 Fluent 主题加载 `styles/{dark\|light}.qss` 应用到窗口并订阅主题切换自动重应用 |
+| `load_window_qss()` | 按当前主题加载窗口 QSS 文本（强调色已替换），找不到文件返回空串 |
+| `substitute_accent(qss_text)` | 把 QSS 中的固定青色锚点替换为当前主题强调色 |
 | `current_accent_hex()` | 当前主题强调色 hex（`qconfig.themeColor`，带容错回退） |
 
 ### core.design_tokens
@@ -200,7 +272,8 @@ AI 厂商注册表：统一各厂商的 OpenAI 兼容接入参数（DeepSeek / �
 | 常量 | 说明 |
 |------|------|
 | `SEMANTIC` | 语义色（success/info/warning/danger/neutral 等） |
-| `lighten(color, ratio)` / `darken(color, ratio)` | 颜色明暗工具 |
+| `lighten(color, ratio)` / `darken(color, ratio)` | 颜色明暗工具（hover +10~15% / pressed -15~20%） |
+| `pt_to_px(pt_size, min_px=12)` | pt→px 换算单一来源（1pt≈4/3px，最小 12px），替代 main.py / ui_mixin.py 的重复逻辑 |
 
 ### core.flow_widgets
 
@@ -355,7 +428,7 @@ SSHExecWorker(client: paramiko.SSHClient, command: str)
 
 ## workers/table_worker.py 球桌/设备数据 Worker
 
-球桌与设备数据 API 异步请求 Worker（均继承 `QThread`），账号密码统一从 `settings.json` 的 `api_credentials` 节点读取。
+球桌与设备数据 API 异步请求 Worker（均继承 `QThread`），账号密码统一从配置门面 `core.app_settings` 的 `api_credentials` 键读取（credentials 域，DPAPI 加密落盘）。
 
 #### 模块级函数与常量
 
@@ -447,7 +520,23 @@ LoginTestWorker(api_name, username=None, password=None)
 | `success` | `Signal(str)` | 成功提示 |
 | `error` | `Signal(str)` | 失败原因 |
 
+### HealthUpdateWorker
+
+异步重置设备健康度（健康度告警面板「一键归零」）：逐台 POST xqzg `/api/snooker_om/update_health/` 把服务端健康度写为 4000（接口默认值，等于清零告警）。Session + CSRF 认证，401/403 自动重登重试一次。**成功判定**：HTTP 200 且响应体 `code == 200`（只看状态码会假成功）。
+
+```python
+HealthUpdateWorker(items, username=None, password=None)
+# items: [(球桌名, device_code), ...]
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `result_ready` | `Signal(list, list)` | (成功球桌名列表, 失败列表 `[(球桌名, 失败描述), ...]`) |
+| `error` | `Signal(str)` | 账号未配置 / 登录失败等整体错误 |
+
 ### SingleVideoWorker
+
+> 2026-09 起迁移至独立模块 [workers/single_video_worker.py](#workerssingle_video_workerpy-单杆视频生成-worker)（信号签名不变）。
 
 单杆视频生成工作线程（工具菜单「单杆视频」）。日志解析（帧级计分提取）、视频水印合成均在子线程执行，逐行进度通过信号回传。
 
@@ -616,6 +705,50 @@ MysqlTestWorker(cfg, parent=None)
 
 worker 可能从非主线程的 `_trigger_merge_back` 创建：result 通过 `QApplication` 顶层窗口找 MainWindow 弹 InfoBar，找不到则降级 conn_logger 落盘。
 
+## workers/network_workers.py 网络连接 Worker 集
+
+SSH/SFTP/TCP 底层异步连接 Worker（无 UI，供 ssh_terminal / SFTPWindow / 远程面板等调用）。
+
+### TCPWorker
+
+TCP 连通性测试（连接即断），`result(bool, str)` 返回是否可达与耗时描述。
+
+### SFTPConnectWorker / SSHConnectWorker
+
+异步建立 paramiko Transport / SSH client 连接（继承 `_BaseConnectWorker` 重试基类：可重试错误自动重试 RETRY_MAX 次、间隔递增），信号 `success(conn)` / `error(str)`。
+
+### SFTPListWorker
+
+异步列目录（含权限/大小/修改时间），信号 `result(list)` / `error(str)`。
+
+### SFTPOperationWorker
+
+异步 SFTP 单文件操作（上传/下载/删除/创建目录），支持传输进度：信号 `progress(cur, total)`、`result(ok, msg)`。
+
+### SFTPDirTransferWorker
+
+异步 SFTP 整目录递归传输（上传/下载，含子目录与队列进度），信号 `progress(cur, total, name)` / `result(ok, msg)`。
+
+### SSHExecWorker
+
+异步执行 SSH 命令（exec_command，无持久 shell），信号 `result(ok, output)`。
+
+## workers/single_video_worker.py 单杆视频生成 Worker
+
+### SingleVideoWorker
+
+后台执行单杆视频生成（工具菜单「单杆视频」；单杆模块自 table_json 收编后由本模块承载）。日志解析（帧级计分提取）、视频水印合成均在子线程执行，模块级 logger（`SingleShotVideo`）经 `_LineSignalHandler` 逐行转发为信号回传。
+
+```python
+SingleVideoWorker(params: dict, parent=None)
+```
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `line` | `Signal(str)` | 处理进度日志（追加到对话框输出区） |
+| `finished_ok` | `Signal(str)` | 生成成功，返回视频路径 |
+| `error` | `Signal(str)` | 生成失败，返回错误首行 |
+
 ---
 
 ## database/ 数据层
@@ -658,7 +791,52 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 | `get_kd_row_full(row_id)` / `get_xqzg_row_full(row_id)` | 按 id 查完整行（含文件清单反序列化，配合轻量列表页懒加载） |
 | `get_kd_dates()` / `get_xqzg_dates()` / `get_xqzg_synced_dates()` | 本地已有的日期分区列表（降序）/ xqzg 本地分区 / xqzg 已同步分区 |
 
-kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动清理过期分区。
+kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动清理过期分区；手动/配置化清理入口 `prune_kd_history(keep_days=60)`（数据保留清理 Worker 兜底执行），返回删除条数。
+
+#### 跨面板联动查询（球房 ↔ 球桌 ↔ 设备）
+
+| 函数 | 说明 |
+|------|------|
+| `parse_city(item)` | 从接口记录解析城市（字段 `roomCity`，容错大小写/别名），售后面板球房带出地区用 |
+| `query_tables_by_room(room_kw, limit=30)` | 按球房名模糊查询球桌列表（售后面板：输入球房带出桌号/SNK/地区候选） |
+| `get_table_name_by_snk(snk)` | 按 snk 标识反查球桌号（隧道面板「关联球桌」展示用） |
+| `get_table_info_by_snk_or_host(snk="", host_hint="")` | 按 snk 或 host 反查球桌信息 dict（取证报告「关联球桌」用；双后端安全 API） |
+| `get_meta()` | 返回球桌表 `(总条数, 最后同步时间字符串)`，无数据时 `(0, "")` |
+| `close()` | 关闭数据库连接（应用退出时调用） |
+
+#### 设备状态扩展查询与统计（kd_status）
+
+| 函数 | 说明 |
+|------|------|
+| `get_kd_synced_dates()` | 从 sync_meta 提取曾同步过的 kd 日期（含接口返回空数据的日期，与本地分区 `get_kd_dates()` 区分） |
+| `get_latest_kd_status(table_id)` | 查指定球桌最近一次上报的设备状态（轻量单条 SQL，远程连接前置检查用） |
+| `get_latest_kd_status_by_code(device_code)` | 按设备码模糊匹配最新分区设备状态（球桌面板离线前置检查降级用） |
+| `query_latest_kd_full(table_id="", device_code="")` | 查指定球桌/设备码最新分区的完整 kd 行（含文件清单，取证报告用） |
+| `query_kd_by_device(device_code, file_path="")` | 按 device_code 精确查询单台设备完整信息（缺省最新分区） |
+| `find_kd_file_status(device_code, date, clip_base)` | 按 设备码+日期分区+文件基础名 反查所属分类（C6 文件归类迁移用） |
+| `query_kd_trend(device_code, days=30)` | 单设备近 N 天按日期的指标序列（单条 SQL，趋势折线图数据源） |
+| `query_kd_ranking(date="", top=10, by="error_rate")` | 指定日期设备指标 TOP N 排行（排序字段白名单校验） |
+| `query_kd_alerts(days=7)` | 突增预警：最新分区 error_rate > 前 N 日均值×2 的设备（单条 CTE SQL） |
+
+#### 提交台账（submission_log）
+
+| 函数 | 说明 |
+|------|------|
+| `log_submission(device_code="", table_id="", club_name="", category="", file_name="", file_path_date="", collect_ok=False)` | 写入一条精度/问题提交台账，返回新记录 id |
+| `update_submission_collect(log_id, ok)` | 回填收集结果（collect_ok），log_id 无效返回 0 |
+| `update_submission_upload(upload_zip, ok, within_hours=24)` | 回填上传结果：打包上传是整目录 zip（多设备合并），按时间窗匹配当日未上传记录批量回填 |
+| `get_submission_stats(device_code=None, days=30)` | 近 N 天提交次数聚合（单条 GROUP BY，列表页批量匹配无 N+1） |
+
+#### 设备映射（device_mapping）
+
+设备码 → 本地目录映射（收集/上传入口按映射定位文件，替代历史硬编码）。
+
+| 函数 | 说明 |
+|------|------|
+| `get_device_mapping(device_code)` | 按设备码查映射，返回 dict（无记录返回空 dict） |
+| `set_device_mapping(device_code, local_dir, source='auto')` | 写入/更新映射（source: auto=自动发现 / manual=手动指定） |
+| `get_all_device_mappings()` | 全部映射 `{device_code: local_dir}`（收集入口批量预取） |
+| `delete_device_mapping(device_code)` | 删除指定映射（清除错误映射入口），返回受影响行数 |
 
 **两数据源字段对照（同套接口字段，无独有字段）**：
 
@@ -689,14 +867,19 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 
 | 函数/常量 | 签名 | 说明 |
 |-----------|------|------|
-| `is_mysql_test_mode()` | `() -> bool` | MySQL 测试模式是否开启（读 `settings.json` → `mysql_sync.enabled`） |
+| `is_mysql_test_mode()` | `() -> bool` | MySQL 测试模式是否开启（读 `config/database.json` → `mysql_sync.enabled`；热路径函数，配置进程内缓存） |
+| `invalidate_mysql_settings_cache()` | `()` | 使 MySQL 配置缓存与已有线程连接失效（保存 MySQL 配置后必须调用，generation 递增驱动各线程重建连接） |
+| `mysql_settings_generation()` | `() -> int` | 当前配置代次，连接层据此判断是否需重建连接 |
+| `get_state()` | `() -> str` | 当前后端状态：`ONLINE`=MySQL 主库 / `DEGRADED`=SQLite 兜底（降级期间本地写入，恢复后由 merge_back 合并） |
+| `mark_degraded()` / `mark_online()` | `() -> bool` | 标记降级/恢复，返回是否发生状态切换（切换时触发合并回写/状态提示） |
 | `create_mysql_connection()` | `() -> MysqlConnectionAdapter` | 创建 MySQL 连接适配器；pymysql 未安装抛 RuntimeError。关键参数：`autocommit=True`（QThread 结束后 thread-local 连接被丢弃，若留未提交事务会持元数据锁级联卡死）、读写超时 60s |
 | `convert_placeholders(sql)` | `(str) -> str` | SQLite 占位符 `?` → MySQL `%s`（跳过字符串字面量内的 `?`） |
 | `convert_on_conflict(sql)` | `(str) -> str` | `ON CONFLICT(col) DO UPDATE SET ...=excluded.x` → `ON DUPLICATE KEY UPDATE ...=VALUES(x)` |
 | `convert_insert_or_replace(sql)` | `(str) -> str` | `INSERT OR REPLACE` → `INSERT`（MySQL 无此语法） |
+| `escape_literal_percent(sql)` | `(str) -> str` | 字符串字面量内的单个 `%` → `%%`（pymysql 参数化执行所需） |
 | `MYSQL_DDL` | `dict` | 8 张表的 MySQL 建表语句（IF NOT EXISTS 幂等，与 SQLite DDL 一一对应） |
 
-**类 `MysqlConnectionAdapter`**：模拟 `sqlite3.Connection` 接口。`execute`/`executemany` 自动套用全部方言转换；`PRAGMA` 静默跳过；`executescript` 按分号拆条执行；附 `column_exists` / `table_exists`（替代 `PRAGMA table_info`）。
+**类 `MysqlConnectionAdapter`**：模拟 `sqlite3.Connection` 接口。`execute`/`executemany` 自动套用全部方言转换；`PRAGMA` 静默跳过；`executescript` 按分号拆条执行；附 `healthy()`（连接是否仍可复用，连接级错误后由 table_db 重建）、`begin()`（显式开启原子批量写事务）、`column_exists` / `table_exists`（替代 `PRAGMA table_info`）。
 
 **类 `MysqlCursorAdapter`**：模拟 `sqlite3.Cursor` 接口（`fetchone`/`fetchall`/`description`/`rowcount`/`lastrowid`/可迭代）。
 
@@ -717,45 +900,65 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `RESPONSE_TIME_PRESET` | 响应时间预置档位（5 档，允许自由输入） |
 | `RECORD_FIELDS` | 记录字段元组（与建表 DDL 一致，不含 id） |
 
-#### 周期计算（可配置模式）
+#### 周期计算（可配置模式 + 物化列）
 
-周期模式：`tue`=周二起（默认）/ `mon`=自然周（周一起）/ `custom`=自定义起始日+周期天数。配置存于 `settings.json` 的 `aftersale_cycle` 节点。
+周期模式：`tue`=周二起（默认）/ `mon`=自然周（周一起）/ `custom`=自定义起始日+周期天数 / `month`=自然月。配置经 `core.app_settings` 门面持久化到 `config/aftersale.json` 的 `aftersale_cycle` 键。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `load_cycle_mode()` | `() -> dict` | 读取周期模式 `{type, start, span}`，缺省/非法回退周二起 |
-| `save_cycle_mode(mode)` | `(dict) -> dict` | 合并写周期配置（保留 settings.json 其余字段），返回规范化配置 |
-| `cycle_span_days()` | `() -> int` | 当前模式周期天数：tue/mon 固定 7，custom 取配置值（≥1） |
+| `load_cycle_mode()` | `() -> dict` | 读取周期模式 `{type, start, span}`，缺省/非法回退周二起。**进程内缓存**（`_cycle_mode_cache`），`save_cycle_mode` 成功后失效重读；外部手改配置文件需 `app_settings.invalidate_cache()` |
+| `save_cycle_mode(mode)` | `(dict) -> dict` | 经门面合并写（域内其余键不动），成功后失效缓存并置重算待办标志 `aftersale_cycle_recalc_pending=true`，返回规范化配置 |
+| `cycle_span_days()` | `() -> int` | 当前模式周期天数：tue/mon 固定 7，custom 取配置值（≥1），month 取当月实际天数 |
 | `cycle_start_of(dt)` | `(datetime) -> str` | 计算给定时间所属周期起始日（`yyyy/MM/dd`），按当前模式分发 |
 | `current_cycle_start()` | `() -> str` | 当前周期起始日 |
-| `cycle_label(cycle_start)` | `(str) -> str` | 周期展示标签 `08/18 - 08/24`（起始日 + span-1 天） |
+| `cycle_label(cycle_start)` | `(str) -> str` | 周期展示标签：周模式 `08/18 - 08/24`；month 模式 `2026-08` |
+| `cycle_date_range(cycle_start)` | `(str) -> (date, date)` | 周期起止日期：month 模式为整月，其余为起始日 + span-1 天 |
 
-**周期归属统一按记录发生时间动态计算**：列表筛选、统计、周期下拉、导出四处共用 `_record_cycle(occurred_at, created_at)`（occurred_at 缺失/非法时回退 created_at）→ `cycle_start_of`，不依赖冗余落库的 `cycle_start` 字段（该字段仅作导出展示，可能因周期配置变更与实际归属不一致）。SQL 侧只过滤类型/状态/关键词，周期在 Python 侧按同一规则过滤，保证列表与统计口径一致。
+**周期归属 = 物化列等值过滤（2026-09-06 S3 优化，替代旧 Python 侧动态计算）**：`aftersale_records.cycle_start` 物化列在写入时按当时周期口径落库（`insert_record`/`update_record`/导入均维护），查询侧 `cycle_start = ?` 等值过滤直接走 `idx_aftersale_cycle` 覆盖索引（24.2ms → 0.9ms）。周期口径变更（`save_cycle_mode`）后触发全表重算 `recalc_cycle_starts`（分批幂等）；重算失败自愈：`aftersale_cycle_recalc_pending` 标志残留，下次面板首载 `recalc_cycle_starts_on_load` 全量追平。存量空值行由 `_ensure_cycle_materialized` 在首次周期筛选时自动兜底回填。
+
+> 旧版「周期在 Python 侧按 occurred_at 动态归属、SQL 不落库」方案已整体替代；occurred_at 缺失/非法的记录归属空串（不进任何周期），与旧口径一致。
 
 #### 增删改
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `insert_record(record)` | `(dict) -> int` | 新增记录返回 id。created_at 取填写时刻；occurred_at 缺省取当日；cycle_start 按发生时间归属（缺失回退填写时间）；snk_code/device_code 未提供时按桌号精确匹配球桌库自动带出 |
-| `update_record(record)` | `(dict) -> int` | 按 id 更新（created_at 保留原值），cycle_start 缺失时按发生时间重算 |
-| `delete_record(rec_id)` | `(id) -> int` | 按 id 删除，返回受影响行数 |
+| `insert_record(record)` | `(dict) -> int` | 新增记录返回 id。created_at 取填写时刻；occurred_at 缺省取当日；cycle_start 按发生时间归属物化；snk_code/device_code 未提供时按桌号精确匹配球桌库自动带出；成功后失效动态候选缓存 |
+| `update_record(record)` | `(dict) -> int` | 按 id 更新（created_at 保留原值），cycle_start 按新发生时间重算；成功后失效候选缓存 |
+| `delete_record(rec_id)` | `(id) -> int` | 按 id 删除，返回受影响行数；成功后失效候选缓存 |
+| `delete_records(rec_ids)` | `(list) -> int` | 批量删除（记录页多选），返回受影响行数；成功后失效候选缓存 |
+| `mark_resolved_batch(rec_ids)` | `(list) -> int` | 批量标记已解决（resolved=是 + resolved_at 戳），返回受影响行数 |
 
-#### 查询
+#### 查询与统计
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `query_page(page_no, page_size, keyword="", cycle_start="", issue_type="", resolved="")` | `-> (total, rows)` | 分页查询。周期在 Python 侧按记录时间动态归属（`_match_cycle`），SQL 仅过滤类型/状态/关键词 |
-| `query_with_stats(...)` | `-> (total, rows, stats)` | 分页 + 同口径统计。stats 不带 resolved 筛选（避免已解决/未解决计数退化），返回 `{total, resolved, unresolved}` |
-| `get_cycle_options()` | `() -> list` | 周期下拉选项：库中记录实际归属周期（按 occurred_at 动态计算）去重降序。**仅返回确有数据的周期，不额外插入库中不存在的当前周期** |
-| `get_field_candidates()` | `() -> dict` | 动态候选 `{problems, resolvers, regions}`（按使用频次降序各取前 60），问题候选为空时合并预置常见项 |
+| `query_page(page_no, page_size, keyword="", cycle_start="", issue_type="", resolved="", is_initiative="", is_our_problem="")` | `-> (total, rows)` | 分页查询。周期为物化列等值过滤（走覆盖索引），其余为类型/状态/判定开关/关键词过滤 |
+| `query_with_stats(...)` | `-> (total, rows, stats)` | 分页 + 同口径统计，参数同上。stats 不带 resolved 筛选（避免已解决/未解决计数退化），返回 `{total, resolved, unresolved}` |
+| `query_stats_detail(keyword="", cycle_start="", issue_type="", trend_start="", trend_end="")` | `-> dict` | 售后统计弹窗详细统计（分类分布/解决率/按日趋势/按周期汇总），与四卡片/列表完全同口径 |
+| `get_cycle_options()` | `() -> list` | 周期下拉选项：`SELECT DISTINCT cycle_start`（物化列，走索引）去重降序。**仅返回确有数据的周期**；触发 `_ensure_cycle_materialized` 存量兜底 |
+| `get_field_candidates()` | `() -> dict` | 动态候选 `{problems, resolvers, regions, creators}`（按使用频次降序各取前 60），问题候选为空时合并预置常见项。**写后失效缓存**（insert/update/delete/导入后重建，命中 0.001ms） |
+
+#### 周期物化维护（S3 自愈机制）
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `recalc_cycle_starts(batch=2000)` | `(int) -> int` | 按当前周期配置全表重算 cycle_start 物化列（分批提交，幂等），返回更新行数 |
+| `recalc_cycle_starts_on_load()` | `() -> int` | 面板首载兜底：有待办标志或存量空值行才全量重算，否则仅索引探测（干净库微秒级）；重算失败标志残留、下次再试 |
+
+#### 常用句 / 署名记忆（config/aftersale.json 持久化）
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `load_quick_phrases()` / `add_quick_phrase(text)` | `-> list` | 常用句列表（录入页快捷输入）；新增去重置顶并写回配置 |
+| `load_last_creator()` / `load_last_resolver()` / `save_last_people(creator, resolver)` | `-> str` | 上次填写的填写人/解决人记忆（非空才写，下次打开面板预填） |
 
 #### 导出 / 导入
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `export_xlsx(path, keyword="", cycle_start="", issue_type="", resolved="")` | `-> int` | 按筛选条件导出全部记录为 xlsx，返回条数。表头与售后汇总 Excel 对齐，附加填写时间/填写人/周期列；周期列按发生时间动态归属展示 |
+| `export_xlsx(path, keyword="", cycle_start="", issue_type="", resolved="", is_initiative="", is_our_problem="")` | `-> int` | 按筛选条件导出全部记录为 xlsx（不分页），返回条数。表头与售后汇总 Excel 对齐，附加填写时间/填写人/周期列；周期列取物化值 |
 | `parse_excel_rows(xlsx_path)` | `-> (headers, rows)` | 解析售后汇总 Excel（不写库），供导入预览与正式导入共用。表头按中文名定位，类型列分组首行向下填充，空行跳过，是否解决默认「否」，缺必需列抛 ValueError |
-| `import_excel_rows(xlsx_path)` | `-> int` | 一次性导入历史 Excel，返回导入条数（内部调 `parse_excel_rows` 后批量写库） |
+| `import_excel_rows(xlsx_path)` | `-> int` | 一次性导入历史 Excel，返回导入条数（内部调 `parse_excel_rows` 后批量写库，cycle_start 按导入时周期口径物化，成功后失效候选缓存） |
 
 ---
 
@@ -765,7 +968,7 @@ MySQL 连接工具。镜像推送（push_all/push_table/push_aftersale 及 `_DDL
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `_load_mysql_config()` | `() -> dict` | 读 settings.json 的 mysql_sync 节点（password 解密） |
+| `_load_mysql_config()` | `() -> dict` | 经 `core.app_settings` 门面读 database 域的 mysql_sync 节点（password 解密；未启用返回 {}） |
 | `_get_pymysql()` | `() -> module` | 取 pymysql，未安装返回 None |
 | `_connect(cfg=None, use_database=True)` | `() -> conn` | 建立连接；`use_database=False` 不选库（测基础连通性） |
 | `test_connection(cfg=None)` | `() -> (ok, msg)` | 先无 database 连测基础连通性，再连目标库，返回 (是否成功, 描述) |
@@ -829,7 +1032,7 @@ MySQL → SQLite 周备份（兜底基线刷新）：ONLINE 期间每周拉全�
 - 表大小统计：MySQL 用 `information_schema.tables`（`data_length + index_length`）；SQLite 用 `dbstat` 虚表（不可用时跳过该表）。
 - 日期桶提取：`substr(COALESCE(NULLIF(occurred_at,''), created_at),1,10)`（与跑视频面板筛选同口径）；`submission_log` 用 `created_at`；`health_alerts` 用 `updated_at`。
 
-配置读取 `settings.json` 的 `data_retention` 节点（缺省回落模块内 `DEFAULT_CONFIG`；`tables` 白名单过滤未知表名）。
+配置读取 `config/database.json` 的 `data_retention` 节点（经 `backend._read_mysql_settings` 同款免 core 直读，规避 PySide6 依赖链；缺省回落模块内 `DEFAULT_CONFIG`；`tables` 白名单过滤未知表名）。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
@@ -1159,6 +1362,23 @@ PortFakeWidget(parent=None)
 
 ---
 
+### windows/stat_charts
+
+统计图表自助分析窗口（pygwalker Graphic Walker）：售后/跑视频记录页「统计图表」按钮触发，独立窗口内拖拽式自助分析与预置图表。
+
+#### 类 `StatsOpener`
+
+无 UI 宿主的打开器（QObject），记录页持有实例，信号驱动窗口生命周期。
+
+| 方法 | 说明 |
+|------|------|
+| `open_aftersale(filters)` / `open_ledger(filters)` | 按当前筛选取数（复用 `aftersale_db` / `ledger_db` 同口径查询）→ 列名中文化 → pygwalker HTML 渲染到独立窗口 |
+| `_build_default_spec(kind)` | 预置图表 spec（打开即有默认图表，无需手动拖拽；`_gw_*` 辅助函数构造 Graphic Walker 字段/度量/图表模型） |
+
+> pygwalker 首次 import 在主线程执行（约 1-2s，已知权衡，后续打开走 import 缓存）；数据导出走 DataFrame（记录量大时取数受分页查询同口径约束）。
+
+---
+
 ## main_window/ 主窗口层
 
 ### MainWindow
@@ -1305,6 +1525,8 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 |------|------|
 | `win_suspend_process(pid)` | 挂起进程所有线程 |
 | `win_resume_process(pid)` | 恢复进程所有线程 |
+| `win_set_process_threads(pid, thread_action)` | 枚举进程全部线程逐个执行 thread_action（挂起/恢复句柄函数），上述两者的通用底座 |
+| `get_process_name(pid)` | 按 PID 获取进程名（小写，失败返回空字符串），进程识别辅助 |
 
 #### 显示设置
 
@@ -1336,9 +1558,19 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 
 单杆视频渲染服务（计分水印合成）。
 
+| 符号 | 说明 |
+|------|------|
+| `SingleShotVideoServer` | 渲染服务封装：接收场次参数（日志路径/帧范围/输出目录）执行帧级计分提取与水印视频合成 |
+| `resource_path(rel)` | 打包/开发环境自适应资源路径（字体/模板等随包资源） |
+
 ### tools.single_video_tool
 
-单杆 json 生成：`generate_json`（按日志解析场次信息）/ `extract_break`（开球局提取）。
+单杆 json 生成工具。
+
+| 函数 | 说明 |
+|------|------|
+| `generate_json(...)` | 按日志解析场次信息并生成单杆 json（帧级计分数据） |
+| `extract_break(...)` | 开球局提取（从日志帧序列中定位有效局段） |
 
 ---
 
@@ -1352,52 +1584,64 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 
 ---
 
-## 配置文件 settings.json
+## 配置门面 config/（原 settings.json，2026-09-06 拆分）
 
-运行时配置文件，位于 exe 同目录。
+> **单文件 settings.json 已下线**（自动迁移为 `settings.json.bak` 兜底保留）。配置现按域拆分为 `config/` 目录 8 个域文件，唯一读写入口为 [`core.app_settings`](#coreapp_settings) 门面：按键自动路由、进程缓存 + RLock、`credentials`/`database` 两域落盘自动 DPAPI 加密。旧配置在应用首启自动分拣（幂等，只补缺键），升级用户无感。表结构头部注释/文档中出现的「settings.json 某键」一律按本表路由到对应域文件。
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `exe_dir` | str | — | SnookerTracking 程序目录 |
-| `videos_dir` | str | — | 视频/日志文件目录 |
-| `cipher_tool` | str | — | AES 解码工具路径 |
-| `front_exe` | str | — | 前端程序路径 |
-| `backend_exe` | str | — | 后端程序路径 |
-| `newlog_excel_dir` | str | `~/Desktop/excel` | NewLog 批量整理 Excel 目录 |
-| `newlog_out_dir` | str | `~/Desktop` | NewLog 批量整理输出目录 |
-| `last_exe` | str | — | 上次选择的程序名 |
-| `dpi_scale` | int | 100 | DPI 缩放百分比 |
-| `font_size` | int | 10 | 全局字号 |
-| `font_family` | str | `Microsoft YaHei UI` | 全局字体 |
-| `dark_theme` | bool | false | 深色主题开关（旧字段） |
-| `theme_mode` | str | "auto" | 主题模式：auto/light/dark |
-| `classic_layout` | bool | false | 经典布局模式 |
-| `theme_color` | str | "#00BCD4" | 主题强调色（功能菜单「主题颜色设置」修改、「还原默认主题色」恢复，即时生效） |
-| `highlight_color` | [r,g,b] | [220,80,20] | 日志高亮颜色（旧字段，已废弃，仅作 theme_color 兼容回退） |
-| `log_highlight_rules` | [object] | 见默认 | 日志高亮规则列表 `[{name, pattern, color, notify}]` |
-| `ssh_user` | str | — | SSH 默认用户名 |
-| `ssh_pass` | str | — | SSH 默认密码（DPAPI 加密） |
-| `tcp_servers` | [str] | [] | 保存的 TCP 服务器列表（ip:port） |
-| `sftp_default_remote_path` | str | — | SFTP 默认远程路径 |
-| `frpc_server` | object | — | frp 服务器配置（serverAddr/serverPort/auth_method/auth_token） |
-| `upload_host` / `upload_port` | str/int | — | 上传 SFTP 服务器地址与端口（部署时配置） |
-| `upload_remote_dir` | str | — | 上传远端目录 |
-| `upload_user` / `upload_pass` | str | — | 上传专用账号密码（DPAPI 加密，不复用 SSH 凭据） |
-| `ai_vendor` | str | "deepseek" | AI 厂商标识（deepseek/qwen/kimi/zhipu/openai/gemini） |
-| `ai_model` | str | — | AI 模型名（空则用厂商默认） |
-| `ai_api_keys` | object | — | 各厂商 API Key 字典（DPAPI 加密） |
-| `forensic_ai_analysis` | bool | true | 取证报告 AI 分析开关 |
-| `remote_sessions` | [object] | [] | 保存的远程会话列表 |
-| `perf_acrylic` | bool | true | 亚克力效果性能开关 |
-| `perf_animation` | bool | true | 界面动画性能开关 |
-| `api_credentials` | object | — | 运维面板 API 配置（见下表） |
-| `mysql_sync` | object | — | MySQL 同步配置（见下表，售后面板/运维面板共用） |
-| `aftersale_cycle` | object | `{type:tue}` | 售后统计周期模式（见下表） |
-| `data_retention` | object | 见下表 | 数据保留自动清理配置（见下表） |
-| `newlog_target_name` | str | — | NewLog 整理署名，同时作为售后面板填写人默认值 |
-| `shortcut_*` | str | 见上表 | 快捷键配置（共 12 项） |
+### 键 → 域文件路由总表
 
-**api_credentials 子结构**（由管理设置页维护）：
+| 域文件 | 键 | 类型/默认值 | 说明 |
+|--------|-----|------------|------|
+| paths.json | `exe_dir` | str | SnookerTracking 程序目录 |
+| paths.json | `videos_dir` | str | 视频/日志文件目录 |
+| paths.json | `cipher_tool` | str | AES 解码工具路径 |
+| paths.json | `front_exe` / `backend_exe` | str | 前端/后端程序路径 |
+| paths.json | `newlog_excel_dir` / `newlog_out_dir` | str | NewLog 批量整理 Excel 目录 / 输出目录 |
+| paths.json | `last_exe` | str | 上次选择的程序名 |
+| paths.json | `single_pending_root` / `single_videos_root` | str | 单杆视频待处理/产出根目录 |
+| paths.json | `newlog_target_name` | str | NewLog 整理署名，同时作为售后面板填写人默认值 |
+| ui.json | `dpi_scale` | int = 100 | DPI 缩放百分比 |
+| ui.json | `font_size` / `font_family` | int = 10 / `Microsoft YaHei UI` | 全局字号/字体 |
+| ui.json | `theme_mode` | str = "auto" | 主题模式 auto/light/dark |
+| ui.json | `dark_theme` | bool = false | 深色主题开关（旧字段，theme_mode 兼容回退） |
+| ui.json | `classic_layout` | bool = false | 经典布局模式 |
+| ui.json | `theme_color` | str = "#00BCD4" | 主题强调色（即时生效） |
+| ui.json | `highlight_color` | [r,g,b] | 日志高亮颜色（旧字段，仅作 theme_color 兼容回退） |
+| ui.json | `log_highlight_rules` | [object] | 日志高亮规则 `[{name, pattern, color, notify}]` |
+| credentials.json 🔒 | `ssh_user` / `ssh_pass` | str | SSH 默认账号密码（密码 DPAPI 加密） |
+| credentials.json 🔒 | `tcp_servers` | [str] | 保存的 TCP 服务器列表（ip:port） |
+| credentials.json 🔒 | `sftp_default_remote_path` | str | SFTP 默认远程路径 |
+| credentials.json 🔒 | `frpc_server` | object | frp 服务器配置（serverAddr/serverPort/auth_method/auth_token） |
+| credentials.json 🔒 | `upload_host` / `upload_port` / `upload_remote_dir` | str/int | 上传 SFTP 服务器与远端目录 |
+| credentials.json 🔒 | `upload_user` / `upload_pass` | str | 上传专用账号密码（不复用 SSH 凭据） |
+| credentials.json 🔒 | `api_credentials` | object | 运维面板 API 配置（见下） |
+| credentials.json 🔒 | `ai_vendor` | str = "deepseek" | AI 厂商标识（deepseek/qwen/kimi/zhipu/openai/gemini） |
+| credentials.json 🔒 | `ai_model` | str | AI 模型名（空用厂商默认） |
+| credentials.json 🔒 | `ai_api_keys` | object | 各厂商 API Key 字典（DPAPI 加密） |
+| credentials.json 🔒 | `forensic_ai_analysis` | bool = true | 取证报告 AI 分析开关 |
+| credentials.json 🔒 | `deepseek_api_key` | str | 旧版单厂商 Key（`ai_api_keys` 优先级更高，兼容保留） |
+| database.json 🔒 | `mysql_sync` | object | MySQL 连接配置（见下） |
+| database.json 🔒 | `data_retention` | object | 数据保留自动清理配置（见下） |
+| aftersale.json | `aftersale_cycle` | object | 售后统计周期模式（见下） |
+| aftersale.json | `aftersale_quick_phrases` | [str] | 售后录入页常用句（去重置顶） |
+| aftersale.json | `aftersale_last_creator` / `aftersale_last_resolver` | str | 上次填写的填写人/解决人（预填记忆） |
+| aftersale.json | `aftersale_cycle_recalc_pending` | bool | 重算待办标志（自愈机制内部键，勿手改） |
+| perf.json | `perf_acrylic` / `perf_animation` | bool = true | 亚克力/动画性能开关 |
+| perf.json | `perf_table_smooth` | bool = false | 全局表格平滑滚动（默认关） |
+| perf.json | `perf_table_smooth_aftersale` / `_video` / `_management` / `_remote` | bool | 面板级平滑滚动覆盖（未设置回退全局） |
+| perf.json | `perf_animation_aftersale` / `_video` | bool | 面板级动画覆盖 |
+| perf.json | `performance_mode` | bool | 旧字段（首次读取后自动移除，迁移为前两项关闭） |
+| remote.json | `remote_sessions` | [object] | 保存的远程会话列表 |
+| remote.json | `restore_remote_sessions` | bool = false | 启动时自动恢复远程会话 |
+| remote.json | `xtcp_secret_key` | str | XTCP 隧道密钥（frpc_token，DPAPI 加密） |
+| misc.json | `web_port` | int = 8069 | 售后面板 Web 服务端口 |
+| misc.json | `shortcut_*` | str | 快捷键配置（共 12 项，动态键兜底走 misc） |
+| misc.json | `local_web` | object | 本地 Web 服务 `{enabled: true, port: 8787}`（缺省即启用） |
+| misc.json | `ssh_commands` | [str] | SSH 终端常用命令条 |
+
+🔒 = 加密域（落盘自动 DPAPI 加密、读取透明解密，密钥绑定当前 Windows 用户）。
+
+### api_credentials 子结构（credentials.json，管理设置页维护）
 
 | 字段 | 说明 |
 |------|------|
@@ -1405,7 +1649,7 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `api1.username` / `api1.password` | 接口1 xqzg（Session 认证）账号密码 |
 | `api2.username` / `api2.password` | 接口2 kd（JWT 认证）账号密码 |
 
-**mysql_sync 子结构**（由运维面板/售后面板的 MySQL 同步卡片维护，密码 DPAPI 加密）：
+### mysql_sync 子结构（database.json，MySQL 同步卡片维护）
 
 | 字段 | 说明 |
 |------|------|
@@ -1413,17 +1657,17 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `host` / `port` | MySQL 服务器地址与端口（默认 3306） |
 | `user` / `password` | 账号密码（密码 DPAPI 加密） |
 | `database` | 数据库名（默认 autowork） |
-| `auto_sync` | 已废弃（镜像推送机制 B 于 2026-08-23 下线，代码不再读取该字段，旧配置残留可忽略） |
+| `auto_sync` | 已废弃（镜像推送机制 B 于 2026-08-23 下线，代码不再读取） |
 
-**aftersale_cycle 子结构**（由售后面板「设置 → 统计周期设置」维护）：
+### aftersale_cycle 子结构（aftersale.json，售后面板「统计周期设置」维护）
 
 | 字段 | 说明 |
 |------|------|
-| `type` | 周期模式：`tue`（周二起，默认）/ `mon`（自然周）/ `custom`（自定义） |
+| `type` | 周期模式：`tue`（周二起，默认）/ `mon`（自然周）/ `custom`（自定义）/ `month`（自然月） |
 | `start` | custom 模式的周期起始日（`yyyy-MM-dd`） |
 | `span` | custom 模式的周期天数（≥1，默认 7） |
 
-**data_retention 子结构**（数据保留自动清理，后台自动执行）：
+### data_retention 子结构（database.json，后台自动执行）
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
@@ -1447,3 +1691,5 @@ core ← win_api ← workers ← windows ← main_window ← main.py
 ```
 
 严格单向依赖，禁止循环导入。`database/` 仅被 `windows/management_panel.py` 等上层模块引用。
+
+**配置读取约定（2026-09-06 拆分后）**：各层统一经 `core.app_settings` 门面读写 `config/*.json`；**例外**：`database/backend.py` 与 `database/data_retention.py` 为避免导入 core 包触发 PySide6 依赖链，直接只读 `config/database.json`（不经门面）。

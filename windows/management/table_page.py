@@ -424,12 +424,17 @@ class TablePage(QWidget):
         menu.exec_(self._table.viewport().mapToGlobal(pos), aniType=_popup_ani_type())
 
     def _open_aftersale_for_table(self, table_name):
-        """打开售后面板并按桌号预筛选（球桌 → 售后记录反查）
+        """打开售后记录并按桌号预筛选（球桌 → 售后记录反查）
 
-        内置打开（与单文件 aftersale.exe 解耦，不再拉起外部进程）。
+        优先走主窗口内嵌路由（售后 Hub 记录页，单窗口导航）；
+        宿主无内嵌路由时兜底打开独立售后面板（shim 独立进程场景）。
         """
-        from windows.aftersale_panel import AftersalePanelWindow
         win = self.window()
+        router = getattr(win, "open_aftersale_records_for", None)
+        if router is not None:
+            router(table_name)
+            return
+        from windows.aftersale_panel import AftersalePanelWindow
         panel = getattr(win, "_aftersale_panel_ref", None)
         if panel is None:
             panel = AftersalePanelWindow()

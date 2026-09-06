@@ -478,7 +478,13 @@ class TrendPage(QWidget):
         device_page = getattr(win, "device_page", None)
         if device_page is None:
             return
-        win.switchTo(device_page)
+        # 宿主兼容：独立面板走 FluentWindow.switchTo；主窗口单窗口导航走
+        # switch_to_page 路由（设备页在 ManagementHub 的 Pivot 内）
+        router = getattr(win, "switch_to_page", None)
+        if router is not None:
+            router(device_page)
+        else:
+            win.switchTo(device_page)
         device_page.focus_search(str(info.get("device_code") or ""),
                                  str(info.get("file_path") or ""))
 
@@ -661,12 +667,12 @@ class HealthPage(QWidget):
         header.addWidget(self._lbl_sync)
         layout.addLayout(header)
 
-        hint = CaptionLabel(
-            "基准 4000；>4000~5000 为健康度异常；"
-            ">5000 为严重异常。"
-            "勾选条目后点「已处理」，调用 xqzg 接口将健康度重置为 4000；"
-            "使用服务器 MySQL 时，他人标记的已处理在同步后自动对齐", self)
-        layout.addWidget(hint)
+        # hint = CaptionLabel(
+        #     "基准 4000；>4000~5000 为健康度异常；"
+        #     ">5000 为严重异常。"
+        #     "勾选条目后点「已处理」，调用 xqzg 接口将健康度重置为 4000；"
+        #     "使用服务器 MySQL 时，他人标记的已处理在同步后自动对齐", self)
+        # layout.addWidget(hint)
 
         self._table = TableWidget(self)
         # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）

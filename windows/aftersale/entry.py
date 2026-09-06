@@ -52,9 +52,9 @@ class EntryPage(QWidget):
         head.setSpacing(12)
         head_l = QVBoxLayout()
         head_l.setSpacing(2)
-        head_l.addWidget(TitleLabel("填写录入", self))
-        head_l.addWidget(CaptionLabel(
-            "提交后写入数据库，多人协作刷新可见", self))
+        # head_l.addWidget(TitleLabel("填写录入", self))
+        # head_l.addWidget(CaptionLabel(
+        #     "提交后写入数据库，多人刷新", self))
         head.addLayout(head_l)
         head.addStretch(1)
         self._cycle_chip = CaptionLabel(self)

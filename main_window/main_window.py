@@ -10,13 +10,17 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem, QSplitter)
 from PySide6.QtCore import Slot, QTimer, Qt, QDate, QDateTime, QProcess, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QTextCharFormat
-from qfluentwidgets import (FluentTitleBar,
+from qfluentwidgets import (FluentTitleBar, FluentIcon,
     MessageBoxBase, BodyLabel, ComboBox)
-from qfluentwidgets.window.fluent_window import FluentWindowBase
+# FluentWindow = FluentWindowBase + NavigationInterface（侧边导航）。
+# 基类同层替换：FluentWindowBase 已自带 stackedWidget，只是 navigationInterface=None
+# 且 addSubInterface 抛 NotImplementedError；FluentWindow 补上导航并接管页面切换。
+from qfluentwidgets.window.fluent_window import FluentWindow
 
 from autowork_with_table import Ui_MainWindow
 from core.utils import natural_sort_key, show_info_bar
 from core.design_tokens import SEMANTIC
+from core.perf import is_acrylic_enabled
 from main_window.settings_dialog import _DEFAULT_LOG_RULES, _compile_log_rules
 
 from .settings_mixin import SettingsMixin
@@ -118,8 +122,18 @@ class _KdStatusQueryWorker(QThread):
         self.done.emit(info)
 
 
-class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindowBase):
-    """主窗口：组合 SettingsMixin / ProcessMixin / RemoteMixin / UIMixin"""
+class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow):
+    """主窗口：组合 SettingsMixin / ProcessMixin / RemoteMixin / UIMixin
+
+    导航结构（2026-09-06 修订，FluentWindow 侧边导航）：
+        工作台     ← 原 centralwidget 整体（状态栏 + 工具栏 + 三列 Splitter；
+                     菜单栏已整体移入统一设置页）
+        运维管理   ← ManagementHub（球桌/设备/健康度/组件测试/小游戏）
+        售后       ← AftersaleHub（填写录入/记录与统计）
+        跑视频     ← LedgerHub（填写录入/记录与统计）
+        设置 / 关于（底部；统一设置页收编菜单栏 Action + 三面板设置项）
+    远程会话列入二期（design/remote_session_v2.html）；统计图表不单独建页。
+    """
 
     def __init__(self):
         super().__init__()
@@ -128,15 +142,23 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 压缩标题栏高度：默认 48px → 34px，与菜单栏/工具栏形成紧凑顶部
         self.titleBar.setFixedHeight(34)
 
-        # 主内容垂直布局：菜单栏 + 中心内容 + 状态栏
-        # （顶部 34px 留给 Fluent 标题栏）
-        self.vBoxLayout = QVBoxLayout()
-        self.vBoxLayout.setContentsMargins(0, 34, 0, 0)
-        self.vBoxLayout.setSpacing(0)
-        self.hBoxLayout.addLayout(self.vBoxLayout)
-        self.hBoxLayout.setStretchFactor(self.vBoxLayout, 1)
+        # ===== 工作台页面容器 =====
+        # FluentWindow 的 hBoxLayout 已由基类装配为 [导航 | 页面区]；
+        # 原写法把 vBoxLayout 直接 addLayout 进去会挤成三槽位
+        # [导航 | vBoxLayout | 空 stackedWidget]，导致内容错位、页面区留白
+        # （offscreen 实测 A1/A3）。改为把内容装进 homeInterface 再注册为子页面。
+        self.homeInterface = QWidget(self)
+        # addSubInterface 强制要求非空 objectName，否则抛 ValueError
+        self.homeInterface.setObjectName("homeInterface")
+        self.home_vbox = QVBoxLayout(self.homeInterface)
+        self.home_vbox.setContentsMargins(0, 0, 0, 0)
+        self.home_vbox.setSpacing(0)
+        # 兼容别名：Ui_MainWindow.setupUi 会把 centralwidget 加到 MainWindow.vBoxLayout
+        # （见 autowork_with_table.py:288-295 的非 QMainWindow 分支）。
+        # 保留该分支不动，必要时可直接回退到无导航布局。
+        self.vBoxLayout = self.home_vbox
 
-        # 构建 UI（centralwidget 挂到 vBoxLayout 内）
+        # 构建 UI（centralwidget 挂到 home_vbox 内）
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         # 跑视频面板单例（延迟创建，与售后面板同模式）
@@ -148,14 +170,128 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         # 初始化UI（内部创建菜单栏/状态栏控件）
         self.init_ui()
 
-        # 菜单栏插到内容最上方，状态栏追加到最下方
-        self.vBoxLayout.insertWidget(0, self._menubar_widget)
+        # 状态栏追加到最下方；菜单栏按 2026-09-06 需求整体移入统一设置页
+        # （_init_menubar 仍执行，只为复用 Action 对象与状态，不再插入工作台顶部）
         self.vBoxLayout.addWidget(self._statusbar_widget)
+
+        # ===== 注册侧边导航 =====
+        self.addSubInterface(self.homeInterface, FluentIcon.HOME, "工作台")
+        # 展开宽度 200px；窗口宽度不足时自动折叠为 48px
+        # （qfw 1.11 的 NavigationInterface 无 setDisplayMode API）
+        self.navigationInterface.setExpandWidth(200)
+        self.navigationInterface.setCollapsible(True)
+        # 亚克力与「性能选项」联动（与运维管理面板同策略）
+        self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
+        # 侧边导航占用横向空间，默认窗口加宽以容纳业务表格（列宽 1250~1292px）
+        self.resize(1500, 900)
+
+        # 业务域容器页（完整版导航：6 个一级页 + 底部设置/关于）
+        self._build_hub_pages()
 
         # 连接信号和槽
         self.connect_signals()
 
         self.titleBar.raise_()
+
+    def _build_hub_pages(self):
+        """按 2026-09-06 修订装配导航：
+
+            ⌂ 工作台 │ ▤ 运维管理 │ ☺ 售后 │ ▶ 跑视频
+            底部：⚙ 设置 │ ⓘ 关于
+
+        运维管理/售后/跑视频为 Pivot 二级容器（原 FluentWindow 面板降层，
+        不再含各自设置页）；远程会话列入二期（design/remote_session_v2.html）；
+        统计图表不单独建页（记录页工具栏按钮直开，与重构前一致）。
+        """
+        from core.frp_remote import get_session_manager
+        from qfluentwidgets import NavigationItemPosition
+        from main_window.hub_pages import (ManagementHub, AftersaleHub,
+                                           LedgerHub, SettingsHubPage, AboutPage)
+
+        # 页面通过 getattr(self.window(), "_remote_bridge", None) 取远程会话中心
+        # （全局单例，与球桌面板/主窗口远程面板共享同一 frpc 进程）
+        self._remote_bridge = get_session_manager()
+
+        self.management_hub = ManagementHub(self)
+        self.aftersale_hub = AftersaleHub(self)
+        self.ledger_hub = LedgerHub(self)
+        self.settings_hub = SettingsHubPage(self)
+        self.about_page = AboutPage(self)
+
+        # 统一设置页 → 各 Hub 刷新（替代原面板内部信号连线）
+        self.settings_hub.aftersale_cycle_saved.connect(
+            self.aftersale_hub.reload_cycles)
+        self.settings_hub.table_smooth_changed.connect(
+            self._apply_all_table_smooth)
+
+        for hub, icon, text in (
+                (self.management_hub, FluentIcon.LIBRARY, "运维管理"),
+                (self.aftersale_hub, FluentIcon.PEOPLE, "售后"),
+                (self.ledger_hub, FluentIcon.VIDEO, "跑视频")):
+            self.addSubInterface(hub, icon, text)
+
+        self.navigationInterface.addSeparator()
+        self.addSubInterface(self.settings_hub, FluentIcon.SETTING, "设置",
+                             NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.about_page, FluentIcon.INFO, "关于",
+                             NavigationItemPosition.BOTTOM)
+
+    def _apply_all_table_smooth(self, scope: str = "all"):
+        """统一设置页任意表格平滑开关变更 → 刷新三个 Hub + 已打开远程窗口"""
+        self.management_hub._apply_table_smooth_all()
+        self.ledger_hub._apply_table_smooth_all()
+        self.aftersale_hub.refresh_smooth()
+        self.management_hub._apply_remote_table_smooth()
+
+    # ---------- 页面路由与既有调用兼容 ----------
+
+    def switch_to_page(self, page):
+        """统一页面路由：Hub 子页 → 切一级 Hub 再容器内切换；其余走 stackedWidget
+
+        页面代码里既有的 `win.switchTo(某子页)`（如健康度页跳设备状态、
+        售后统计联动跳记录页）在单窗口导航下必须经过此路由才能真正切换。
+        """
+        if page is None:
+            return
+        hub = getattr(page, "_hub_container", None)
+        if hub is not None:
+            self.switchTo(hub)
+            hub.switchTo(page)
+        else:
+            self.switchTo(page)
+
+    def open_aftersale_records_for(self, table_no: str):
+        """球桌右键「查看售后记录」→ 售后 Hub 记录页按桌号预筛选"""
+        self.switchTo(self.aftersale_hub)
+        self.aftersale_hub.open_records_for_table(table_no)
+
+    # 统计图表不单独建页（2026-09-06）：售后/跑视频记录页工具栏按钮
+    # 直开图表窗口（_on_open_stats_chart），与重构前呈现一致。
+
+    # ---------- 既有页面代码的宿主属性别名 ----------
+    # 页面通过 getattr(self.window(), "table_page" / "records_page" ...) 反查
+    # 兄弟页面（settings_page 保存球桌后刷表格、售后 entry 提交后刷记录页）。
+    # 面板迁入后 window() 是主窗口，用 property 把调用转发到对应 Hub。
+
+    @property
+    def table_page(self):
+        """ManagementHub.table_page（settings_page 保存球桌后刷新用）"""
+        return getattr(self.management_hub, "table_page", None)
+
+    @property
+    def device_page(self):
+        """ManagementHub.device_page（health_page 预警跳转用）"""
+        return getattr(self.management_hub, "device_page", None)
+
+    @property
+    def health_page(self):
+        return getattr(self.management_hub, "health_page", None)
+
+    @property
+    def records_page(self):
+        """AftersaleHub.records_page（售后 entry 提交成功后刷新记录页）"""
+        return getattr(self.aftersale_hub, "records_page", None)
+
 
     # ==================== 初始化 ====================
 
@@ -1172,25 +1308,20 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     @Slot()
     def _on_open_ledger(self):
-        """跑视频：打开跑视频面板并预填当前球桌会话（表单确认后入库）
+        """跑视频：跳转主窗口「跑视频」页并预填当前球桌会话（表单确认后入库）
 
-        未选设备时也可打开（球房预填空），面板内可手填/修改；
-        数据经 ledger_db 双后端路由写入（MySQL 开启时即服务器），
-        面板内可编辑字段、筛选/分页/统计，多人协作刷新可见。
+        未选设备时也可打开（球房预填空），表单内可手填/修改；
+        数据经 ledger_db 双后端路由写入（MySQL 开启时即服务器）。
+        原 LedgerPanelWindow 独立面板保留（shim 独立进程仍可用）。
         """
-        from windows.ledger_panel import LedgerPanelWindow
-        if not hasattr(self, '_ledger_panel') or self._ledger_panel is None:
-            # 不传 parent：避免成为主窗口的 owned window 而始终盖在主窗口之上
-            self._ledger_panel = LedgerPanelWindow()
-            self._ledger_panel.destroyed.connect(
-                lambda: setattr(self, '_ledger_panel', None))
-        self._ledger_panel.show()
-        self._ledger_panel.raise_()
-        self._ledger_panel.activateWindow()
+        hub = getattr(self, 'ledger_hub', None)
+        if hub is None:
+            return
         ctx = self._current_ledger_context()
-        self._ledger_panel.open_entry_with_context(ctx)
+        self.switchTo(hub)
+        hub.open_entry_with_context(ctx)
         self._append_log(
-            f"[跑视频] 已打开跑视频面板并预填会话: 球房={ctx['room_name'] or '-'} "
+            f"[跑视频] 已切换到跑视频页并预填会话: 球房={ctx['room_name'] or '-'} "
             f"视频={ctx['video_name'] or '-'} 帧={ctx['frame']}")
 
     @Slot()
@@ -1628,6 +1759,25 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     def closeEvent(self, event):
         """主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程"""
+        # -1. 先停掉迁入侧边导航的业务子页后台线程
+        # 运维/售后/跑视频各 Hub 子页的 worker 挂页面属性上，原先由各
+        # FluentWindow 面板的 closeEvent 统一 detach；迁入主窗口后必须在此
+        # 补上，否则关闭时线程仍在跑会报 QThread: Destroyed while running
+        for hub_name in ("management_hub", "aftersale_hub", "ledger_hub"):
+            hub = getattr(self, hub_name, None)
+            if hub is not None:
+                try:
+                    hub.detach_workers()
+                except Exception:
+                    pass
+        # 一次性短等待：给所有 worker 200ms 自行收尾。绝不在关闭路径上串行
+        # wait（旧实现对每个运行中 worker 各 wait(2000)，是无事件循环线程的
+        # 干等，累积出 ~2s 关闭卡顿的根因）
+        try:
+            QThread.msleep(200)
+        except Exception:
+            pass
+
         # 0. 关闭运维管理面板（独立窗口，不随主窗口自动销毁）
         panel = getattr(self, '_table_panel', None)
         if panel is not None:

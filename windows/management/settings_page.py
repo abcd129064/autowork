@@ -79,8 +79,11 @@ class AdminSettingsPage(QWidget):
     # 远程会话表格平滑滚动开关变更（管理窗口据此刷新已打开隧道/诊断窗口）
     remote_smooth_changed = Signal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, embedded: bool = False):
         super().__init__(parent)
+        # embedded=True：嵌入统一设置页（2026-09-06）——去掉内部滚动区与
+        # 性能卡（统一页性能组已有同款开关），由外层统一滚动
+        self._embedded = embedded
         # 懒加载：首次进入本页才构建 UI 与读取配置（管理面板打开更快）
         self._lazy_built = False
 
@@ -100,44 +103,57 @@ class AdminSettingsPage(QWidget):
             self._lazy_init()
 
     def _init_ui(self):
-        """构建滚动区 + 数据源/接口/上传/添加四张卡片 + 保存按钮"""
+        """构建数据源/接口/上传/添加卡片 + 保存按钮
+
+        独立页模式：外层包 ScrollArea 由本页自行滚动；
+        embedded 模式（嵌入统一设置页）：直接平铺卡片，跳过性能卡
+        （统一页性能组已有同款开关），滚动由外层统一处理。
+        """
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
 
-        scroll = ScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # 滚动区自身不参与焦点：避免点击后焦点转移触发 ensureVisible 自动滚动（画面跳动）
-        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        view = QWidget()
-        view.setStyleSheet("QWidget { background: transparent; }")
-        scroll.setWidget(view)
-        root.addWidget(scroll)
+        if self._embedded:
+            layout = root
+            host = self
+        else:
+            scroll = ScrollArea(self)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            # 滚动区自身不参与焦点：避免点击后焦点转移触发 ensureVisible 自动滚动（画面跳动）
+            scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+            view = QWidget()
+            view.setStyleSheet("QWidget { background: transparent; }")
+            scroll.setWidget(view)
+            root.addWidget(scroll)
 
-        layout = QVBoxLayout(view)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
+            layout = QVBoxLayout(view)
+            layout.setContentsMargins(24, 20, 24, 20)
+            layout.setSpacing(14)
+            host = view
 
-        layout.addWidget(self._build_source_card(view))
+        layout.addWidget(self._build_source_card(host))
         layout.addWidget(self._build_api_card(
             # （Session 认证）
-            view, "api1", "接口1 · xqzg", "xqzg.newbv.cn"))
+            host, "api1", "接口1 · xqzg", "xqzg.newbv.cn"))
         layout.addWidget(self._build_api_card(
             # （JWT 认证）
-            view, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
-        layout.addWidget(self._build_upload_card(view))
-        layout.addWidget(self._build_add_card(view))
-        # 性能卡片：管理/远程表格平滑滚动开关（面板级覆盖→全局）
-        layout.addWidget(self._build_perf_card(view))
+            host, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
+        layout.addWidget(self._build_upload_card(host))
+        layout.addWidget(self._build_add_card(host))
+        if not self._embedded:
+            # 性能卡片：管理/远程表格平滑滚动开关（面板级覆盖→全局）；
+            # embedded 模式由统一设置页的性能组承载，此处跳过
+            layout.addWidget(self._build_perf_card(host))
         # MySQL 远程同步配置（可复用组件，独立保存 settings.json）
-        self._mysql_card = MysqlSyncCard(view, sync_scope="ops")
+        self._mysql_card = MysqlSyncCard(host, sync_scope="ops")
         self._mysql_card.load()
         layout.addWidget(self._mysql_card)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        self._btn_save = PrimaryPushButton(FluentIcon.SAVE, "保存设置", view)
+        self._btn_save = PrimaryPushButton(FluentIcon.SAVE, "保存设置", host)
         self._btn_save.setToolTip("将以上配置写入 settings.json，保存后即时生效")
         self._btn_save.clicked.connect(self._on_save)
         btn_row.addWidget(self._btn_save)
