@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="CWgM2yxcDXuvErSkPF1F5l">
+<head data-page-node-id="L8ZZ8AtFtifxH5fVajet5Q">
+<meta charset="UTF-8" data-page-node-id="s2niTZYfNicNaGRT3e6cma">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="57uhdhNqHaeu4tGPOyWvSM">
+<title>远程会话页 · 二期设计稿（Remote Session v2）</title>
+<style>
+  :root {
+    --bg: #f6f7fa;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #1f2329;
+    --text-2: #646a73;
+    --text-3: #8f959e;
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --green: #16a34a;
+    --green-soft: #f0fdf4;
+    --red: #dc2626;
+    --red-soft: #fef2f2;
+    --amber: #d97706;
+    --amber-soft: #fffbeb;
+    --radius: 10px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+    padding: 32px 40px; font-size: 14px;
+  }
+  .doc-header { max-width: 1120px; margin: 0 auto 24px; }
+  .doc-header h1 { font-size: 22px; margin-bottom: 6px; }
+  .doc-header .meta { color: var(--text-3); font-size: 13px; line-height: 1.7; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; background: var(--accent-soft); color: var(--accent);
+           margin-right: 8px; font-weight: 600; }
+  .canvas {
+    max-width: 1120px; margin: 0 auto; background: var(--card);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 28px 32px;
+  }
+  .page-title { font-size: 20px; font-weight: 700; }
+  .page-sub { color: var(--text-3); font-size: 13px; margin: 4px 0 20px; }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px;
+         border-radius: 6px; border: 1px solid var(--border); background: #fff;
+         font-size: 13px; color: var(--text); cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .search { margin-left: auto; padding: 7px 12px; border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text-3); min-width: 220px; font-size: 13px; }
+  .stat-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .stat .num { font-size: 20px; font-weight: 700; }
+  .stat .lbl { color: var(--text-3); font-size: 12px; margin-top: 2px; }
+  .stat .num.green { color: var(--green); }
+  .stat .num.amber { color: var(--amber); }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; color: var(--text-3); font-weight: 600;
+       padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 10px; border-bottom: 1px solid #f0f1f3; font-size: 13px; vertical-align: middle; }
+  tr:hover td { background: #fafbfc; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px;
+          border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+  .pill.ok { background: var(--green-soft); color: var(--green); }
+  .pill.ok::before { background: var(--green); }
+  .pill.warn { background: var(--amber-soft); color: var(--amber); }
+  .pill.warn::before { background: var(--amber); }
+  .pill.err { background: var(--red-soft); color: var(--red); }
+  .pill.err::before { background: var(--red); }
+  .pill.idle { background: #f2f3f5; color: var(--text-2); }
+  .pill.idle::before { background: var(--text-3); }
+  .mono { font-family: Consolas, "Courier New", monospace; font-size: 12.5px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px;
+         background: var(--accent-soft); color: var(--accent); margin-right: 4px; }
+  .row-actions a { color: var(--accent); text-decoration: none; margin-right: 10px; font-size: 13px; }
+  .row-actions a.danger { color: var(--red); }
+  .annos { max-width: 1120px; margin: 20px auto 0; display: grid;
+           grid-template-columns: 1fr 1fr; gap: 12px; }
+  .anno { background: var(--card); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 14px 16px; font-size: 13px;
+          color: var(--text-2); line-height: 1.7; }
+  .anno b { color: var(--text); display: block; margin-bottom: 4px; }
+  .anno .no { display: inline-block; width: 18px; height: 18px; border-radius: 50%;
+              background: var(--accent); color: #fff; text-align: center;
+              line-height: 18px; font-size: 11px; margin-right: 6px; }
+  @media (max-width: 900px) { .stat-strip, .annos { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body data-page-node-id="CW9c5d1rXiKWNjtYKlaezN">
+
+<div class="doc-header" data-page-node-id="rF6WEfXouLnDGQlslAcdT2">
+  <h1 data-page-node-id="SVSCvK1BLH1Wcqf7Owhj0q"><span class="badge" data-page-node-id="brqoQeZC6QUziEyWvTaFPT">二期设计稿</span>远程会话页 · Remote Session v2</h1>
+  <div class="meta" data-page-node-id="sB2BXKnpneytezHLV9N46I">
+    位置：FluentWindow 侧边导航一级页（⇄ 远程会话，位于「跑视频」之后） · 容器：PivotPage 二级导航<br data-page-node-id="rz5Y7FDuLVWAa11HmSM1uD">
+    迁移来源：原主界面远程面板（P2P 访客 / frpc 隧道 / 连接诊断）+ 会话中心窗口 · 设计基线：design/fluent_window_proposal.html
+  </div>
+</div>
+
+<div class="canvas" data-page-node-id="9lQ7JbsoMyEjusgUzD3rAW">
+  <div class="page-title" data-page-node-id="ChGfyeqYEEprH5PRPGOJAf">⇄ 远程会话</div>
+  <div class="page-sub" data-page-node-id="FGVpt3unEzqs0ponMDYL2B">frpc 隧道会话 / P2P 直连访客 / 连接诊断 —— 恢复上次会话、实时流量与日志归档</div>
+
+  <!-- 二级 Pivot -->
+  <div style="display:flex; gap:22px; border-bottom:1px solid var(--border); margin-bottom:18px;
+              font-weight:600; color:var(--text-3); font-size:14px;" data-page-node-id="TCixXDoBQfZvjnjYOBcrWR">
+    <span style="color:var(--accent); border-bottom:2px solid var(--accent); padding-bottom:8px;" data-page-node-id="IICZxLkkfuaFUEDCDhTmIL">会话总览</span>
+    <span style="padding-bottom:8px;" data-page-node-id="5NnDqXd3oa82NNDK39B8pv">P2P 访客</span>
+    <span style="padding-bottom:8px;" data-page-node-id="3nInY2F4C8zi2agDBqEaRy">连接诊断</span>
+    <span style="padding-bottom:8px;" data-page-node-id="DWfYgHk0ie25uL9p37Tm7Y">隧道配置</span>
+  </div>
+
+  <div class="toolbar" data-page-node-id="Kuvgm3AnUsiP6ofrH0igmV">
+    <span class="btn primary" data-page-node-id="RMEePHuiad2wyVU48XdsnG">＋ 新建隧道会话</span>
+    <span class="btn" data-page-node-id="PGIB8Ra3KQZ6XYgtyMYCPH">↻ 恢复上次会话</span>
+    <span class="btn" data-page-node-id="EOlg2UzAwgAjnYrXVD3N84">⏸ 全部挂起</span>
+    <span class="search" data-page-node-id="B1nDqgFmiiVwKKG3eP3Zl9">🔍 搜索设备 / 主机 / 端口…</span>
+  </div>
+
+  <div class="stat-strip" data-page-node-id="4gM0oOGZijSl7mYrCZh9a4">
+    <div class="stat" data-page-node-id="5N1T9vcTCwj5SwhdA9fyGo"><div class="num green" data-page-node-id="5T1uXFhr2vMtUC2YOA9e4T">3</div><div class="lbl" data-page-node-id="z4h92re8y3r6hbXAzOOAul">活跃会话</div></div>
+    <div class="stat" data-page-node-id="wZOlrdGZBFNHYDA36QIfFB"><div class="num" data-page-node-id="5WlnXBOY0nj6W4prP3Kg8a">2</div><div class="lbl" data-page-node-id="jVZuOSQJb5FzwOGYO1CEfw">P2P 访客在线</div></div>
+    <div class="stat" data-page-node-id="fZDUp94jsH47MsBqQn8DNt"><div class="num amber" data-page-node-id="EBVpwOONEA6JZlj5wQUXpo">1</div><div class="lbl" data-page-node-id="2eVUH0fpP2XSPpEh7jbVSO">待重连（断线）</div></div>
+    <div class="stat" data-page-node-id="iVc09whxlfSGl4kLNIcv8S"><div class="num" data-page-node-id="IpPl6IlAfqXRPGoOlUouLe">↓ 1.2 MB/s ↑ 380 KB/s</div><div class="lbl" data-page-node-id="Eu9PtRKcgNkdRSypSqU9PU">实时流量（frpc 汇总）</div></div>
+  </div>
+
+  <table data-page-node-id="gRkq34dPT7NEtD1qZumky8">
+    <thead data-page-node-id="CWTQMmGTMB0HDdf9KUS7Z6">
+      <tr data-page-node-id="uc8gS3dME8nLAmDVm91BLO">
+        <th data-page-node-id="VWpgxuudKNdPkJPbzfx0f3">状态</th><th data-page-node-id="WSle80qdufp8obyPYgVfZ9">会话名称</th><th data-page-node-id="wwDSs58jg5nknLXMrZhBcn">设备 / 主机</th><th data-page-node-id="oGjHY6to55UbzHQfOlOmOT">本地端口</th>
+        <th data-page-node-id="qj0RbADaHLRA9Q3lXyUoLx">类型</th><th data-page-node-id="vyxj5HYYz1hoD7tGdwic92">流量</th><th data-page-node-id="wByucLVmJmFmm3C8X3CQT7">持续时间</th><th data-page-node-id="SHjywYH08HUERBRCYYrgfK">操作</th>
+      </tr>
+    </thead>
+    <tbody data-page-node-id="Znyt0tSvMQvR6h1WwiPd9l">
+      <tr data-page-node-id="cY6r6hqk6zcTenWcHa5hUp">
+        <td data-page-node-id="LEC0ymmvTl0qVVps2DU7FZ"><span class="pill ok" data-page-node-id="M5u2CqxQlOzfWNq7si4BDC">已连接</span></td>
+        <td data-page-node-id="Ivq6WD0D9qlshTCYElGbXs">球桌 A 区 · 运维 SSH</td>
+        <td class="mono" data-page-node-id="a9KDOJASySSLM0MCvtGDv5">FT-01 → kd.newbv.cn:30005</td>
+        <td class="mono" data-page-node-id="c4gjqEnbeAM3sIBJueVV84">6001</td>
+        <td data-page-node-id="guZBpQqLoDqoeOrv9oWfl5"><span class="tag" data-page-node-id="0ZasQcwU8X7nFPk4fomzyl">xtcp</span><span class="tag" data-page-node-id="eSSTO6FClscvqZkf5vScod">P2P</span></td>
+        <td class="mono" data-page-node-id="pP8rLu6BT2NqZ32xsuND6k">↓ 820 KB/s ↑ 210 KB/s</td>
+        <td class="mono" data-page-node-id="PHvmc4hbWkEEtgtTDxOdD2">02:14:36</td>
+        <td class="row-actions" data-page-node-id="YGrEtjlyUW1ldBQFyNHABN"><a data-page-node-id="XHdy7jCGH1ngaFDlp8c9x9">打开终端</a><a data-page-node-id="I3bfjy2Q0lWDiTLLEF2RZJ">日志</a><a class="danger" data-page-node-id="oHkm4TtErtOENGMvu6jpgK">断开</a></td>
+      </tr>
+      <tr data-page-node-id="espq6FYch1zZrY1Wm090v0">
+        <td data-page-node-id="Whd0UIvPUyTeXHjgW61gdC"><span class="pill ok" data-page-node-id="yFLCJgVMKsPeui8SSxJZDG">已连接</span></td>
+        <td data-page-node-id="5iGaXfeAPpwskyjAlkylb5">球桌 B 区 · 文件上传 SFTP</td>
+        <td class="mono" data-page-node-id="DLBYDqwyEQ4fxAZl3BoxQW">FT-02 → 49.235.34.253</td>
+        <td class="mono" data-page-node-id="uthatBeOKA0JUgUm9GOYBR">6002</td>
+        <td data-page-node-id="Y2QaL4JsBAEkom4tmHjhSr"><span class="tag" data-page-node-id="BM95dgxrgVfx3CHD0S3r2g">stcp</span></td>
+        <td class="mono" data-page-node-id="lP5coIJmDYuQy1Zu7d7iGV">↓ 360 KB/s ↑ 150 KB/s</td>
+        <td class="mono" data-page-node-id="GRNUiJo8PPZycec9rdsuzU">00:47:02</td>
+        <td class="row-actions" data-page-node-id="kw2HcdV2BfaoBWV6dS3m1F"><a data-page-node-id="1cGJ4h2QpBtrJBjLnVL52v">打开文件窗</a><a data-page-node-id="3AP97sqNKOzTyMPEI7ZuRx">日志</a><a class="danger" data-page-node-id="N43i4ECUuFKSpst2K57yhF">断开</a></td>
+      </tr>
+      <tr data-page-node-id="g1b1LaC5HEhKNIyXTWSGlI">
+        <td data-page-node-id="HWsxukHu4GevKknJX3dqw4"><span class="pill warn" data-page-node-id="dzNnZeE9CFxC34PlEjMW8V">重连中</span></td>
+        <td data-page-node-id="htFRp3CRqwFD8Fqb0Ap4Y6">诊断台 · RDP 远程桌面</td>
+        <td class="mono" data-page-node-id="UjPyAlFeTCBL92DoDQEwDC">FT-05 → 192.168.1.60</td>
+        <td class="mono" data-page-node-id="lSpLFJDGZXVCKyKYcB7Hlx">6005</td>
+        <td data-page-node-id="qhY4EUfvjbvl8Db7EjKDR0"><span class="tag" data-page-node-id="LxJrwK3JpvUTEUEJmNKsFL">tcp</span></td>
+        <td class="mono" data-page-node-id="o1W20ZQ2HvSwJBp6YJfQJu">—</td>
+        <td class="mono" data-page-node-id="pjj9uQazTD8JQgQW1zmbXA">—</td>
+        <td class="row-actions" data-page-node-id="LSf7sF55ob54FsTHdsK7U1"><a data-page-node-id="DWoZjlt2CnBtRnDNI3T85B">立即重连</a><a data-page-node-id="QkeHsbaIJGucooq7qa2KME">日志</a><a class="danger" data-page-node-id="mS4nIY2ziMVlmY4RICoD3u">删除</a></td>
+      </tr>
+      <tr data-page-node-id="fTZNyW03mYFeLBHv3xkLHT">
+        <td data-page-node-id="H5tqB8CEF6ovsRlOsR8k3C"><span class="pill idle" data-page-node-id="dkTC6JUWpSwE2sURLI1rXX">已挂起</span></td>
+        <td data-page-node-id="wUx6d5gswzBhBWotbIvvBg">球桌 C 区 · 临时排查</td>
+        <td class="mono" data-page-node-id="8GhGILMWef1THzq7gML0Ci">FT-07 → xqzg.newbv.cn</td>
+        <td class="mono" data-page-node-id="DhbWLWtbmJF3q5C0VBbqcY">6007</td>
+        <td data-page-node-id="rrPAZjWNrSJfqJbswXCdYL"><span class="tag" data-page-node-id="nOFIBueIHHSyiljR2orTuX">tcp</span></td>
+        <td class="mono" data-page-node-id="dUN5GWRczMLkpoYmMpYUvw">—</td>
+        <td class="mono" data-page-node-id="Er4BqO8TdhxY3Dm6kGi6nU">累计 00:12:44</td>
+        <td class="row-actions" data-page-node-id="TPG7AEdyHRaUm4Lx97vNyQ"><a data-page-node-id="2ExPX46sxnWEWnMvqUxjMG">恢复</a><a class="danger" data-page-node-id="Qk2fCIonctuTVj5StKaZP8">删除</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="annos" data-page-node-id="nlQiBlx5Q7wZ6Nkesvexcr">
+  <div class="anno" data-page-node-id="HYF1UWiqhEGJRghiWHvRJS"><b data-page-node-id="hzGHtHIwfQwSLSqih9hAiz"><span class="no" data-page-node-id="xCNtzse3qlu4LqTrAOTtI0">1</span>信息架构：一级导航 + 四个二级页</b>
+    「远程会话」回归一级导航（本期已移除）；页内 Pivot 分四页：会话总览 / P2P 访客 / 连接诊断 / 隧道配置。原 RemoteSessionWindow 独立窗口降层为页内容器，与运维/售后的 Hub 模式一致。</div>
+  <div class="anno" data-page-node-id="TtOIjRlTKlAa29AK6XPP7e"><b data-page-node-id="FCIF62bHw60DKF7h8zkON1"><span class="no" data-page-node-id="oJrsD8ECcvZ9DBi4oxVeqn">2</span>会话总览 = 表格化会话中心</b>
+    每行一个 frpc 会话：状态灯 + 流量 + 持续时间实时刷新（复用现有 _p2p_visitors / session_manager 单例）。行内直达终端 / SFTP 文件窗 / RDP，避免往返弹窗。</div>
+  <div class="anno" data-page-node-id="xMwiT3FT8GuTZlrbvHIwGE"><b data-page-node-id="i1f4EBGE4wMU0fEaqhGU9g"><span class="no" data-page-node-id="GlFchovOAGgCkH7uZdrE6R">3</span>原生 HWND 约束的处理</b>
+    SSH 终端 / RDP 依赖原生窗口句柄，无法真正嵌入 Qt 页——采用「页内启动卡片 + 独立窗口跟随」：点击行内动作弹独立窗口，本页表格保持状态同步（对照一期启动卡片页的过渡方案）。</div>
+  <div class="anno" data-page-node-id="LvcMRsP3SFTB9qYpRojyXc"><b data-page-node-id="lwQtbgHa3xLpFxFfeCSV0W"><span class="no" data-page-node-id="hQymesZak1fshGYRCskMjZ">4</span>连接诊断页迁入</b>
+    原 ConnDiagPanel 整体迁入第三页（SSH/SFTP 失败记录、归档查询），保留现有 _apply_smooth_mode 平滑滚动开关口径，归全局「性能 → 远程会话表格平滑滚动」。</div>
+  <div class="anno" data-page-node-id="cVVckUhCDeRFHx437lL7PD"><b data-page-node-id="lzSOuo8dFzWkr0uu62ArSb"><span class="no" data-page-node-id="UyltU4FGSpx2NleAo77OYd">5</span>隧道配置页 = frpc_xtcp_panel.toml 可视化</b>
+    只读表格 + 「打开 toml」按钮（复用 _open_config_file），新增/编辑仍走既有对话框，避免两套持久化路径。</div>
+  <div class="anno" data-page-node-id="VwDmFqITkWwoGfVBDT0ri6"><b data-page-node-id="s9sPJc8668l0tmEhafF7j8"><span class="no" data-page-node-id="tKMfee1eJkFzivJCU8hjKy">6</span>实施顺序建议</b>
+    ① 会话总览（迁移 session_manager 列表 + 状态轮询）→ ② P2P 访客迁入 → ③ 连接诊断迁入 → ④ 隧道配置可视化。每步独立冒烟 + pytest 回归，不阻塞一期功能。</div>
+</div>
+
+</body>
+</html>
