@@ -106,10 +106,11 @@ for attr in ("id_list", "log_list", "date"):
     node = getattr(w.ui, attr, None)
     check(f"7.x ui.{attr} 仍存在", node is not None)
 
-print("\n[8] 导航形态（2026-09-06 修订：4 一级页 + 底部 2 页）")
+print("\n[8] 导航形态（2026-09-07 二期：6 一级页 + 底部 2 页）")
 expect_pages = [
     ("homeInterface", "工作台"), ("management_hub", "运维管理"),
     ("aftersale_hub", "售后"), ("ledger_hub", "跑视频"),
+    ("remote_hub", "远程"), ("tool_hub", "工具"),
     ("settings_hub", "设置(底部)"), ("about_page", "关于(底部)"),
 ]
 for attr, label in expect_pages:
@@ -120,9 +121,95 @@ for attr, label in expect_pages:
     in_stack = w.stackedWidget.indexOf(page) >= 0
     check(f"8.x {label} 在 stackedWidget", in_stack,
           f"count={w.stackedWidget.count()}")
-# 远程会话（二期）/ 统计图表（不单独建页）不应再注册
-check("8.9 remote_hub 已移除", getattr(w, "remote_hub", None) is None)
+# 统计图表（不单独建页）不应注册；remote_hub 二期已回归为会话中心页
 check("8.10 stats_page_hub 已移除", getattr(w, "stats_page_hub", None) is None)
+
+print("\n[8b] 工具页 ToolHub（二期 2026-09-07 横排 Pivot 版）")
+th = getattr(w, "tool_hub", None)
+check("8b.1 ToolHub 四工作区", th is not None and th.stack.count() == 4)
+check("8b.2 Pivot 4 项无图标风格", th is not None
+      and len(th.pivot.items) == 4 and not hasattr(th, "tool_list"))
+if th is not None:
+    th.switchTo(th.newlog_work)
+    for _ in range(3):
+        app.processEvents()
+    check("8b.3 switchTo 联动", th.stack.currentWidget() is th.newlog_work)
+    th.switchTo(th.single_video_work)
+    # 端口占用表格版（五列）与上传清单复选表格版（四列）
+    check("8b.6 端口占用五列表格", th.port_fake_work.table.columnCount() == 5)
+    check("8b.7 上传清单四列表格+全选框",
+          th.upload_list_work.table.columnCount() == 4
+          and th.upload_list_work.chk_all is not None)
+# 设置-工具瘦身：4 条已迁功能行不再出现在 _group_tools 源码里
+import inspect as _inspect
+from main_window.hub_pages import SettingsHubPage as _SHP
+_gt_src = _inspect.getsource(_SHP._group_tools)
+for gone in ("_on_open_single_video", "_on_open_port_fake",
+             "_on_newlog_organize"):
+    check(f"8b.4 设置-工具已移除 {gone}", gone not in _gt_src)
+check("8b.5 设置-工具保留快捷键/诊断/前往",
+      "_on_modify_shortcuts" in _gt_src and "_on_open_conn_diag" in _gt_src
+      and "_on_open_tool_hub" in _gt_src)
+
+print("\n[8c] 远程页 RemoteHub（二期 2026-09-07 三视图 Pivot，design/remote_page_v2.html）")
+rh = getattr(w, "remote_hub", None)
+check("8c.1 RemoteHub 三视图工作区",
+      rh is not None and rh.stack.count() == 3)
+check("8c.2 Pivot 3 项", rh is not None
+      and len(rh.pivot.items) == 3)
+if rh is not None:
+    check("8c.2b 连接诊断不内嵌（入口在设置-工具）",
+          getattr(rh, "diag_work", None) is None)
+    check("8c.3 默认视图=会话总览",
+          rh.stack.currentWidget() is rh.session_work)
+    rh.switchTo(rh.visitor_work)
+    for _ in range(3):
+        app.processEvents()
+    check("8c.4 switchTo 联动 P2P 访客",
+          rh.stack.currentWidget() is rh.visitor_work)
+    check("8c.5 会话总览表 7 列", rh.session_work.table.columnCount() == 7)
+    check("8c.6 访客表 6 列+定宽控件",
+          rh.visitor_work.table.columnCount() == 6
+          and rh.visitor_work.edit_name.width() == 260)
+    # 回归（真机首崩）：非空表 _add_row 行渲染（tooltip f-string 曾用错变量 s）
+    _mgr = rh.session_work._mgr
+    _tmp_sn = "__smoke_tmp_tunnel__"
+    _base_rows = len(_mgr.records())
+    _mgr.register_visitor(_tmp_sn)
+    try:
+        rh.session_work.refresh()
+        check("8c.7 会话总览非空表行渲染无异常",
+              rh.session_work.table.rowCount() == _base_rows + 1
+              and _base_rows + 1 >= 1)
+        rh.visitor_work.refresh()
+        check("8c.8 访客表非空表行渲染无异常",
+              rh.visitor_work.table.rowCount() == _base_rows + 1)
+    finally:
+        _mgr.remove_visitor(_tmp_sn)
+        rh.session_work.refresh()
+        rh.visitor_work.refresh()
+    # 连接诊断独立弹窗仍可用（ConnDiagWidget 抽取后兼容属性）
+    from windows.remote_session.conn_diag_panel import ConnDiagPanel
+    dlg_probe = ConnDiagPanel()
+    check("8c.9 ConnDiagPanel 兼容属性 _table/_body",
+          dlg_probe._table is dlg_probe._body._table)
+    dlg_probe.deleteLater()
+    # 隧道配置：frpc 服务器卡 + 日志终端 + 平滑联动可调
+    check("8c.10 隧道配置控件齐备",
+          rh.tunnel_conf_work.log_view is not None
+          and rh.tunnel_conf_work.edit_addr.width() == 200)
+    try:
+        rh._apply_table_smooth_all()
+        check("8c.11 平滑联动 _apply_table_smooth_all 无异常", True)
+    except Exception as e:
+        check("8c.11 平滑联动 _apply_table_smooth_all 无异常", False, repr(e))
+    # 主窗口路由联动：设置页开关联动应包含远程 Hub
+    import inspect as _ins2
+    from main_window.main_window import MainWindow as _MW
+    _ats_src = _ins2.getsource(_MW._apply_all_table_smooth)
+    check("8c.12 _apply_all_table_smooth 已接 remote_hub",
+          "remote_hub" in _ats_src)
+    rh.switchTo(rh.session_work)
 
 print("\n[9] Pivot 二级容器（各 Hub 不再含设置页）")
 hubs = [("management_hub", [("table_page", "球桌管理"),
@@ -231,12 +318,33 @@ print("\n[14] 统一设置页（左标题 + 右 SegmentedWidget 分页切换）"
 from qfluentwidgets.components.navigation.segmented_widget import (  # noqa: E402
     SegmentedItem)
 sh = w.settings_hub
-check("14.1 分组存在（应用配置5组/远程连接/工具/性能/数据库/面板设置3组/外观）",
+check("14.1 分组存在（应用配置3组/远程连接/工具2组含AI/性能/数据库/面板设置3组含上传/外观）",
       all(hasattr(sh, m) for m in ("_group_appearance", "_group_perf",
           "_group_tools", "_group_paths", "_group_remote", "_group_ai",
-          "_group_upload", "_group_log_rules", "_group_database",
+          "_add_upload_rows", "_group_log_rules", "_group_database",
           "_group_aftersale", "_group_ledger", "_group_management",
           "_group_files")))
+# 2026-09-07：AI 分析组自应用配置迁入工具页（行为断言：切分段查组标题）
+def _page_has_group(page_widget, title):
+    from qfluentwidgets import CaptionLabel as _CL
+    return any(l.text() == title for l in page_widget.findChildren(_CL))
+def _page_has_text(page_widget, text):
+    from qfluentwidgets import BodyLabel as _BL
+    return any(l.text() == text for l in page_widget.findChildren(_BL))
+_sh = sh._stack
+_sh.setCurrentIndex(sh._keys.index("tools"))
+_t = _sh.currentWidget()
+check("14.1b AI 组在工具分段页", _page_has_group(_t, "AI 分析"))
+_sh.setCurrentIndex(sh._keys.index("config"))
+_c = _sh.currentWidget()
+check("14.1c AI 组不在应用配置页", not _page_has_group(_c, "AI 分析"))
+# 2026-09-07：收集与上传自应用配置并入面板设置「运维」组
+_sh.setCurrentIndex(sh._keys.index("panels"))
+_p = _sh.currentWidget()
+check("14.1d 上传行在面板设置运维组内", _page_has_text(_p, "上传服务器")
+      and _page_has_text(_p, "上传密码"))
+check("14.1e 上传行不在应用配置页", not _page_has_text(_c, "上传服务器"))
+_sh.setCurrentIndex(sh._keys.index("config"))
 check("14.2 分段控件 + 内容页栈存在",
       getattr(sh, "_seg", None) is not None
       and getattr(sh, "_stack", None) is not None)
@@ -293,6 +401,52 @@ try:
           f"alpha={w.backgroundColor.alpha()}")
 except Exception as e:
     check("15.x 云母链路", False, repr(e))
+
+print("\n[16] 弹出面板（2026-09-07 需求：每个 Hub 可复刻为独立窗口=重构前形态）")
+try:
+    check("16.1 open_hub_popout 存在", hasattr(w, "open_hub_popout"))
+    check("16.2 五个 Hub 均有 btn_popout",
+          all(hasattr(getattr(w, h), "btn_popout")
+              for h in ("management_hub", "aftersale_hub", "ledger_hub",
+                        "tool_hub", "remote_hub")))
+    _t = w.open_hub_popout(w.tool_hub)   # 二期页 → 通用 HubPopoutWindow
+    for _ in range(6):
+        app.processEvents()
+    check("16.3 工具弹出=HubPopoutWindow+独立hub实例",
+          _t is not None and type(_t).__name__ == "HubPopoutWindow"
+          and _t.hub is not w.tool_hub)
+    check("16.4 嵌入 hub 隐藏二次弹出按钮", not _t.hub.btn_popout.isVisible())
+    _t._single_video_worker = "X"
+    check("16.5 busy 守卫属性写透主窗口",
+          getattr(w, "_single_video_worker", None) == "X")
+    w._single_video_worker = None
+    check("16.6 _load_settings 代理返回 dict",
+          isinstance(_t._load_settings(), dict))
+    check("16.7 二次弹出复用同实例", w.open_hub_popout(w.tool_hub) is _t)
+    _a = w.open_hub_popout(w.aftersale_hub)  # 旧面板类原样复活
+    for _ in range(6):
+        app.processEvents()
+    check("16.8 售后弹出走旧 AftersalePanelWindow",
+          _a is not None and type(_a).__name__ == "AftersalePanelWindow")
+    check("16.9 登记表收录弹出口", len(getattr(w, "_hub_popouts", {})) == 2)
+    _t.close()
+    for _ in range(4):
+        app.processEvents()
+    # close 仅隐藏（未销毁），登记表保留 → 再弹复用同实例并置顶
+    check("16.10 关闭后再弹复用同实例",
+          w.open_hub_popout(w.tool_hub) is _t)
+    _t.hide()
+    _t2 = w._hub_popouts.get("toolHub")
+    if _t2 is not None:
+        _t2.close()
+    _a2 = w._hub_popouts.get("aftersaleHub")
+    if _a2 is not None:
+        _a2.close()
+    for _ in range(4):
+        app.processEvents()
+    check("16.11 收尾关闭弹出窗口无异常", True)
+except Exception as e:
+    check("16.x 弹出面板", False, repr(e))
 
 print("\n" + "=" * 56)
 print("冒烟结论：" + ("全部通过" if ok else "存在失败项"))

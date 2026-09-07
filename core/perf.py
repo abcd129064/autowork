@@ -21,6 +21,7 @@ from core import app_settings
 _acrylic_enabled: bool | None = None
 _animation_enabled: bool | None = None
 _table_smooth_enabled: bool | None = None
+_lean_delegate_enabled: bool | None = None
 
 # 表格平滑滚动的「面板级覆盖」：面板开关单独影响各自面板，未设置则回退全局。
 # key 为面板标识，value 为 settings.json 字段名。
@@ -52,6 +53,7 @@ _PANEL_WINDOW_CLASSES = {
 def _load_perf_settings():
     """从配置门面 perf 域加载性能选项（首次调用时执行，含旧字段迁移）"""
     global _acrylic_enabled, _animation_enabled, _table_smooth_enabled
+    global _lean_delegate_enabled
     acrylic, animation, table_smooth = True, True, False
     try:
         data = app_settings.get_domain("perf")
@@ -65,11 +67,15 @@ def _load_perf_settings():
             animation = False  # 旧字段迁移
         if "perf_table_smooth" in data:
             table_smooth = bool(data["perf_table_smooth"])
+        # 轻量表格委托（P0-1）：默认开启，关闭即回退库自带 delegate
+        _lean = data.get("perf_lean_delegate", True)
+        _lean = _lean if isinstance(_lean, bool) else str(_lean) != "false"
     except Exception:
-        pass
+        _lean = True
     _acrylic_enabled = acrylic
     _animation_enabled = animation
     _table_smooth_enabled = table_smooth
+    _lean_delegate_enabled = _lean
 
 
 def is_acrylic_enabled() -> bool:
@@ -298,6 +304,85 @@ def patch_table_hover_repaint():
     TableBase._perf_hover_patched = True
 
 
+# ==================== 轻量表格委托（P0-1） ====================
+
+def is_lean_delegate_enabled() -> bool:
+    """是否启用轻量表格委托（默认开启；关闭即回退 qfluentwidgets 自带委托）"""
+    if _lean_delegate_enabled is None:
+        _load_perf_settings()
+    return bool(_lean_delegate_enabled)
+
+
+def set_lean_delegate_enabled(enabled: bool):
+    """设置轻量委托开关并持久化；已打开的表格一并切换（即时生效）"""
+    global _lean_delegate_enabled
+    _lean_delegate_enabled = bool(enabled)
+    _persist("perf_lean_delegate", _lean_delegate_enabled)
+    apply_lean_delegate_globally()
+
+
+def patch_lean_table_delegate():
+    """新建的 qfluentwidgets 表格自动挂轻量委托（幂等，启动时调用一次）
+
+    背景：库 ``TableBase.__init__`` 里硬编码 ``setItemDelegate(
+    TableItemDelegate(self))``，无法从外部预置；这里在原始 __init__ 之后
+    换成 ``LeanTableDelegate``（其子类，保留全部视觉与能力）。
+    """
+    try:
+        from qfluentwidgets.components.widgets.table_view import TableBase
+    except Exception:
+        return
+    if getattr(TableBase, "_perf_lean_patched", False):
+        return
+
+    _orig_init = TableBase.__init__
+
+    def _init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        try:
+            if is_lean_delegate_enabled():
+                from core.lean_table_delegate import LeanTableDelegate
+                self.setItemDelegate(LeanTableDelegate(self))
+        except Exception:
+            pass
+
+    TableBase.__init__ = _init
+    TableBase._perf_lean_patched = True
+
+
+def apply_lean_delegate_globally():
+    """按当前开关刷新所有已存在表格的委托（设置页切换后立即生效）"""
+    try:
+        from PySide6.QtWidgets import (QApplication, QTableView,
+                                       QTableWidget)
+        from qfluentwidgets.components.widgets.table_view import (
+            TableBase, TableItemDelegate)
+        from core.lean_table_delegate import LeanTableDelegate
+    except Exception:
+        return
+
+    enabled = is_lean_delegate_enabled()
+    seen = set()
+    tables = []
+    for w in QApplication.topLevelWidgets():
+        for cls in (QTableWidget, QTableView):
+            for t in w.findChildren(cls):
+                if id(t) not in seen and isinstance(t, TableBase):
+                    seen.add(id(t))
+                    tables.append(t)
+
+    for t in tables:
+        try:
+            is_lean = isinstance(t.delegate, LeanTableDelegate)
+            if enabled and not is_lean:
+                t.setItemDelegate(LeanTableDelegate(t))
+            elif not enabled and is_lean:
+                t.setItemDelegate(TableItemDelegate(t))
+            t.viewport().update()
+        except Exception:
+            pass
+
+
 def patch_dialog_animation():
     """中央拦截 MaskDialogBase 淡入/淡出动画：动画关闭时跳过（幂等）
 
@@ -410,8 +495,10 @@ def invalidate_cache():
     """兼容旧接口：重新从 settings.json 加载"""
     global _acrylic_enabled, _animation_enabled, _table_smooth_enabled
     global _panel_table_overrides, _panel_animation_overrides
+    global _lean_delegate_enabled
     _acrylic_enabled = None
     _animation_enabled = None
     _table_smooth_enabled = None
+    _lean_delegate_enabled = None
     _panel_table_overrides = None
     _panel_animation_overrides = None

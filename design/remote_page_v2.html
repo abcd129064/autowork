@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="qlv8mzdMDXQAfJd6AwEg2Q">
+<head data-page-node-id="14q2XHT7JtATZGSNZDKcVu">
+<meta charset="UTF-8" data-page-node-id="BEa2TbmEuhBdmseawVFDNS">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="oNjYvHZLcfBs5lJgejbSCq">
+<title>远程页 · 二期设计稿（RemoteHub v2 · qfw 控件还原）</title>
+<style>
+  :root{
+    --accent:#00BCD4; --accent-hover:#00ACC1; --accent-press:#00838F;
+    --accent-soft:rgba(0,188,212,.15);
+    --bg:#F5F6F8; --surface:#FFFFFF; --border:#E0E0E0;
+    --text:#20242B; --text2:#6B7280; --text3:#9CA3AF;
+    --success:#1a9e6c; --warning:#c98a2d; --danger:#cf4452; --info:#0078d4; --neutral:#5c6675;
+    --radius:6px; --radius-lg:8px; --term-bg:#1b1e23; --term-fg:#d4d8de;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#dfe3e8;color:var(--text);padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1180px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header .meta{color:#5b6470;font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--accent-soft);color:var(--accent-press);margin-right:6px;}
+  .badge.g{background:rgba(26,158,108,.12);color:var(--success);}
+  .badge.w{background:rgba(201,138,45,.14);color:var(--warning);}
+  .note{max-width:1180px;margin:0 auto 22px;background:#fff;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;font-size:13px;color:var(--text2);line-height:1.75;}
+  .note b{color:var(--text);} .note code{font-family:var(--mono);background:var(--bg);padding:1px 6px;border-radius:4px;font-size:12px;color:var(--accent-press);}
+  .section-label{max-width:1180px;margin:34px auto 12px;font-size:15px;font-weight:700;color:#333;}
+  .section-label span{font-weight:400;color:#6b7280;font-size:13px;margin-left:8px;}
+
+  .win{max-width:1180px;margin:0 auto;background:var(--bg);border-radius:10px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.18);border:1px solid #c9ced5;}
+  .titlebar{height:40px;background:linear-gradient(180deg,#fbfcfd,#f4f6f8);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 0 0 16px;gap:8px;}
+  .titlebar .app-ico{width:16px;height:16px;border-radius:3px;background:linear-gradient(135deg,var(--accent),#4dd0e1);}
+  .titlebar .app-name{font-size:12px;color:var(--text2);}
+  .titlebar .tb-btns{margin-left:auto;display:flex;height:100%;}
+  .titlebar .tb-btns i{width:46px;height:100%;display:flex;align-items:center;justify-content:center;color:var(--text2);font-style:normal;font-size:14px;}
+  .titlebar .tb-btns i.close:hover{background:var(--danger);color:#fff;}
+  .app{display:flex;height:660px;}
+  .nav{width:200px;background:rgba(255,255,255,.7);border-right:1px solid var(--border);padding:8px;flex-shrink:0;display:flex;flex-direction:column;}
+  .nav-item{display:flex;align-items:center;gap:12px;height:38px;padding:0 12px;border-radius:var(--radius);color:var(--text);font-size:13.5px;position:relative;margin-bottom:2px;}
+  .nav-item .ni{width:17px;height:17px;display:flex;align-items:center;justify-content:center;color:var(--neutral);font-size:15px;}
+  .nav-item:hover{background:rgba(0,0,0,.045);}
+  .nav-item.active{background:rgba(0,0,0,.05);font-weight:600;}
+  .nav-item.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:2px;background:var(--text);}
+  .nav-item.new{color:var(--accent-press);} .nav-item.new .ni{color:var(--accent);}
+  .nav-sep{height:1px;background:var(--border);margin:8px 6px;}
+  .nav-bottom{margin-top:auto;}
+  .nav-tag{font-size:10px;background:var(--accent);color:#fff;border-radius:4px;padding:0 5px;margin-left:auto;font-weight:600;}
+  .content{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+  .page-head{padding:22px 28px 6px;display:flex;align-items:flex-end;justify-content:space-between;}
+  .page-title{font-size:24px;font-weight:700;}
+  .page-sub{color:var(--text3);font-size:13px;margin-top:3px;}
+
+  /* 二级 Pivot（qfw SegmentedWidget） */
+  .pivot{display:flex;gap:4px;padding:8px 28px 0;}
+  .pv{padding:7px 14px;font-size:13.5px;color:var(--text2);border-radius:var(--radius);position:relative;}
+  .pv:hover{background:rgba(0,0,0,.045);}
+  .pv.on{color:var(--text);font-weight:600;}
+  .pv.on::after{content:"";position:absolute;left:14px;right:14px;bottom:-2px;height:3px;border-radius:2px;background:var(--accent);}
+
+  .tool-work{flex:1;overflow:auto;padding:16px 26px 26px;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;margin-bottom:14px;}
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .card-h .ch-ico{width:22px;height:22px;border-radius:6px;background:var(--accent-soft);color:var(--accent-press);display:flex;align-items:center;justify-content:center;font-size:13px;}
+  .card-h h3{font-size:15px;font-weight:600;} .card-h .ch-sub{font-size:12px;color:var(--text3);margin-left:2px;}
+  .card-h .ch-right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+  .fld{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+  .fld>label{width:96px;flex-shrink:0;font-size:13px;color:var(--text);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;}
+  .mini-lbl{font-size:12px;color:var(--text2);margin-bottom:4px;}
+  .inp{height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;border-radius:var(--radius);background:var(--surface);padding:0 11px;font-size:13px;color:var(--text);width:100%;font-family:var(--font);}
+  .inp::placeholder{color:var(--text3);} .inp.mono{font-family:var(--mono);}
+  .inp:focus,.inp.f{outline:none;border-color:var(--accent);border-bottom-color:var(--accent);}
+  .spin{display:inline-flex;align-items:center;height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;border-radius:var(--radius);background:var(--surface);font-size:13px;overflow:hidden;}
+  .spin .sv{padding:0 12px;min-width:56px;text-align:center;color:var(--text);}
+  .spin .ss{display:flex;flex-direction:column;border-left:1px solid var(--border);height:100%;}
+  .spin .ss b{flex:1;width:22px;display:flex;align-items:center;justify-content:center;font-size:8px;color:var(--text2);font-weight:400;border-bottom:1px solid var(--border);}
+  .combo{position:relative;height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;border-radius:var(--radius);background:var(--surface);display:flex;align-items:center;padding:0 34px 0 11px;font-size:13px;color:var(--text);}
+  .combo::after{content:"⌄";position:absolute;right:11px;top:50%;transform:translateY(-52%);color:var(--text2);font-size:14px;}
+  .btn{height:33px;padding:0 15px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:13px;display:inline-flex;align-items:center;gap:7px;white-space:nowrap;}
+  .btn:hover{background:#f6f7f9;} .btn .bi{font-size:14px;}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  .btn.primary:hover{background:var(--accent-hover);}
+  .btn.danger{color:var(--danger);border-color:#f0c8cc;} .btn.danger:hover{background:#fef2f3;}
+  .btn.sm{height:28px;padding:0 11px;font-size:12px;}
+  .btn.ghost{border-color:transparent;background:transparent;} .btn.ghost:hover{background:rgba(0,0,0,.05);}
+  .sw{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text);}
+  .sw .track{width:40px;height:20px;border-radius:999px;background:var(--accent);position:relative;border:1px solid var(--accent-press);}
+  .sw .track::after{content:"";position:absolute;right:3px;top:2.5px;width:13px;height:13px;border-radius:50%;background:#fff;}
+  table{width:100%;border-collapse:collapse;}
+  thead th{text-align:left;font-size:12px;color:var(--text2);font-weight:600;padding:9px 12px;border-bottom:1px solid var(--border);white-space:nowrap;background:var(--surface);}
+  tbody td{padding:11px 12px;border-bottom:1px solid #f0f1f3;font-size:13px;color:var(--text);vertical-align:middle;}
+  tbody tr:hover{background:#fafbfc;} tbody tr:last-child td{border-bottom:none;}
+  .mono{font-family:var(--mono);font-size:12.5px;}
+  .row-acts{display:flex;gap:6px;justify-content:flex-end;}
+  .tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 9px;border-radius:999px;font-weight:600;}
+  .tag::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+  .tag.on{background:rgba(26,158,108,.12);color:var(--success);}
+  .tag.warn{background:rgba(201,138,45,.14);color:var(--warning);}
+  .tag.off{background:rgba(92,102,117,.12);color:var(--neutral);}
+  .tag.err{background:rgba(207,68,82,.12);color:var(--danger);}
+  .tag.info{background:rgba(0,120,212,.12);color:var(--info);}
+  .tag.acc{background:var(--accent-soft);color:var(--accent-press);}
+  .stat-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;}
+  .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;}
+  .stat .num{font-size:24px;font-weight:700;line-height:1.1;}
+  .stat .num.g{color:var(--success);} .stat .num.a{color:var(--warning);} .stat .num.d{color:var(--danger);} .stat .num.c{color:var(--accent-press);}
+  .stat .lbl{color:var(--text3);font-size:12px;margin-top:4px;}
+  .term{background:var(--term-bg);border-radius:var(--radius);padding:12px 14px;font-family:var(--mono);font-size:12.5px;color:var(--term-fg);line-height:1.7;height:150px;overflow:auto;}
+  .term .ln{white-space:pre-wrap;} .term .ok{color:#5fd08a;} .term .er{color:#ff7b72;} .term .wn{color:#e3b341;} .term .dim{color:#7d8590;} .term .ac{color:#4dd0e1;}
+  .term-h{display:flex;align-items:center;gap:8px;background:#22262c;border-radius:var(--radius) var(--radius) 0 0;padding:7px 12px;font-size:12px;color:#aeb6c2;font-family:var(--mono);}
+  .term-h .dots{display:flex;gap:5px;} .term-h .dots i{width:9px;height:9px;border-radius:50%;display:block;}
+  .term-wrap{border-radius:var(--radius);overflow:hidden;border:1px solid #000;} .term-wrap .term{border-radius:0;}
+  .flow{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;color:var(--text2);}
+  .flow b{color:var(--text);font-weight:600;}
+  .spark{display:inline-flex;align-items:flex-end;gap:2px;height:22px;}
+  .spark i{width:3px;background:var(--accent);border-radius:1px;display:block;opacity:.8;}
+  .infobar{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);margin-bottom:12px;font-size:13px;}
+  .infobar.warn{border-left:3px solid var(--warning);} .infobar.succ{border-left:3px solid var(--success);}
+  .infobar .ib-ico{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;}
+  .infobar.warn .ib-ico{background:var(--warning);} .infobar.succ .ib-ico{background:var(--success);}
+  .hint{font-size:12px;color:var(--text3);} .flex{display:flex;align-items:center;gap:10px;} .between{justify-content:space-between;} .mt{margin-top:14px;}
+  .dot-live{width:7px;height:7px;border-radius:50%;background:var(--success);display:inline-block;box-shadow:0 0 0 3px rgba(26,158,108,.18);}
+  .foot{max-width:1180px;margin:26px auto 40px;color:#6b7280;font-size:12.5px;line-height:1.8;background:#fff;border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 20px;}
+  .foot h4{font-size:13px;color:var(--text);margin-bottom:6px;} .foot ul{margin-left:18px;} .foot li{margin-bottom:3px;}
+</style>
+</head>
+<body data-page-node-id="1RaH0cbjbf72GPEhSkrvA1">
+
+<div class="doc-header" data-page-node-id="btvIlo6jKBdlW8EOXzOTso">
+  <h1 data-page-node-id="rgqyxObkOvvHysaJGPvshz">远程页 · 二期设计稿 <span style="font-weight:400;color:#8f959e;font-size:16px;" data-page-node-id="wAsQUBsfQDCc9TdiXT1G9g">RemoteHub v2</span></h1>
+  <div class="meta" data-page-node-id="kGwIGjd2xnHNwMZbqonioR">
+    <span class="badge" data-page-node-id="SsnJSppxshstlJLr8sU6ya">qfw 控件还原</span><span class="badge g" data-page-node-id="b70uglPNe2JJejzxgASAhc">主色 #00BCD4</span>
+    <span class="badge" data-page-node-id="dPEIENbDgkhwOJxnXdLmmb">圆角 6/8px</span><span class="badge w" data-page-node-id="eJkClDPBT6RIJXMA2NhwKa">承接 remote_session_v2 蓝图</span>
+    <br data-page-node-id="DM2dfE5A3kZEsxetGctph6">2026-09-07 · 挂载于主窗口左侧导航（跑视频之后、工具之前）· 数据源：core/frp_remote.py 统一 visitor 注册表 + remote_session 包（SSH/SFTP/RDP）
+  </div>
+</div>
+
+<div class="note" data-page-node-id="MTYbsMYcxvF6nwC0cjSyXv">
+  <b data-page-node-id="KyelxDIVpCKoUraAd7cGnS">设计目标：</b>把散落在各球桌面板的「一键直连」与主窗口远程面板收敛为<b data-page-node-id="uzHnSwEWIFDP60lGSgJ5LQ">统一远程会话中心</b>。
+  一级入口「远程」→ 页内 <code data-page-node-id="dpnOIsHLG7MtzcyQiuBsPr">Pivot</code> 四视图：<b data-page-node-id="cpfIcw7yUWE9RrHEv46XRe">会话总览</b>（活跃 SSH/SFTP/RDP 会话表格）· <b data-page-node-id="k4fMM8PS7IX8DlEQAZw1iq">P2P 访客</b>（xtcp visitor 注册表）· <b data-page-node-id="mjI8jazuBOEGPcIFjxdB3w">连接诊断</b>（迁入 ConnDiagPanel）· <b data-page-node-id="g17llKpie8d0qdqYNSMbak">隧道配置</b>（frpc_xtcp_panel.toml 可视化）。
+  与「工具页」共用同一 qfw 视觉外壳；设置-远程连接分页保留凭据/FRP 服务器等<b data-page-node-id="Vipt2GESQBuYBDQgZJ5aIE">配置项</b>，本页只做<b data-page-node-id="TDX9jiMCqdEIXxmhXV4e9X">会话与隧道的操作面</b>。
+</div>
+
+<!-- ============ 画布 1：会话总览 ============ -->
+<div class="section-label" data-page-node-id="uwK9yqWaOmaw3c2YTkP6UW">画布 1 <span data-page-node-id="E6jid36wcGMo8GiHrTZIlC">远程页 · 会话总览（默认落地）</span></div>
+<div class="win" data-page-node-id="vBcJD3xgKUhNrEEFSXkGCM">
+  <div class="titlebar" data-page-node-id="alifRboNDw6aKBlFZRbv3h"><span class="app-ico" data-page-node-id="YQQEc7BZH33o5Jc8gH2r3w"></span><span class="app-name" data-page-node-id="dN7nZjjWgiqbv8jiTIFyiW">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="HjSP8Fc0QDTtFWffOSg52x"><i data-page-node-id="OcCYJjG8foeoz4FAXxYT7f">&#9472;</i><i data-page-node-id="trbR4WXUfo2tY5n0uMh6eS">&#9633;</i><i class="close" data-page-node-id="9oE2EldD9BriEMWAWAMsl0">&#10005;</i></span></div>
+  <div class="app" data-page-node-id="Y7xEl5cgmNEnDiUS4CtOnC">
+    <div class="nav" data-page-node-id="8XOREJvuSXKjgKKwVKQuM5">
+      <div class="nav-item" data-page-node-id="bEpOTZhzXEw62kiTG8wUqa"><span class="ni" data-page-node-id="pRh0BGNX26meq8lQl9RA17">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="gdjlOiTs9Q8XSK6SGbwD74"><span class="ni" data-page-node-id="qvR3jaGbuS43BN2CNKgxA0">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="dCFajUawhaY2Gy50VfA4Y1"><span class="ni" data-page-node-id="7TkO4kieyGIuq1S6nLi3ek">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="4C8G02wK0yBhbk2RoePEYu"><span class="ni" data-page-node-id="vFGT7ADb7oYy9EXw7JAP4t">&#9654;</span>跑视频</div>
+      <div class="nav-item active new" data-page-node-id="wU4SPSOnWfeeLiKfDprACs"><span class="ni" data-page-node-id="MAy2naq65r3i2HohEN3HNl">&#8644;</span>远程<span class="nav-tag" data-page-node-id="d9RVIA4QZn6IxOfHTueXON">二期</span></div>
+      <div class="nav-item new" data-page-node-id="uUVxT2Gv6uyiz9y2Ui4G0s"><span class="ni" data-page-node-id="TH78v6mpNNIdaNgNgav87u">&#9881;</span>工具<span class="nav-tag" data-page-node-id="6BT1I0vGNLw19ojcdVxf8x">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="BH8zFsaDxJUX6pUosyStCX"><div class="nav-sep" data-page-node-id="aESpeM5G59SS8bgv7REeNa"></div>
+        <div class="nav-item" data-page-node-id="PJhQAbkE6vqFe9BVaDqSt2"><span class="ni" data-page-node-id="fsXitE6p29QRKF4DFPYyXj">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="D73fbyqYaidOKWoNHGOrdl"><span class="ni" data-page-node-id="4cyIS3LpANpXBEXYMilNQO">&#9432;</span>关于</div></div>
+    </div>
+    <div class="content" data-page-node-id="mryjuH42qDtguHRHZk6q2r">
+      <div class="page-head" data-page-node-id="pb45tvUcQXHzVBuO8A2rIW">
+        <div data-page-node-id="fkEHGBaAEBFlmGnP5VEVty"><div class="page-title" data-page-node-id="6cA0Ik6kM3i75Gim6bDZT6">远程</div>
+          <div class="page-sub" data-page-node-id="1V8RFtKdz6n8Z7PjAeJpLJ">统一远程会话中心 · 单一 frpc 进程 + 全局隧道/会话窗口</div></div>
+        <div class="flex" data-page-node-id="txwOHPmklz9AqHmJVBB3iu">
+          <button class="btn" data-page-node-id="CyeWMOBY4yo0H4UjiCL5Ik"><span class="bi" data-page-node-id="atPqK7PA8zfIgAPvuWF4SW">&#8635;</span>恢复上次会话</button>
+          <button class="btn primary" data-page-node-id="IUOdYN7sydH0yOkmOiz4tn"><span class="bi" data-page-node-id="FXwvC7NScNfOAXb531iays">&#65291;</span>新建隧道会话</button>
+        </div>
+      </div>
+      <div class="pivot" data-page-node-id="cJRGNLa5gp1P7TtiDi9icc">
+        <div class="pv on" data-page-node-id="aJV2x7edLAf39i21LQusqH">会话总览</div><div class="pv" data-page-node-id="FkFPZ9GHTpzozmrC2scwWo">P2P 访客</div><div class="pv" data-page-node-id="kuKOXXT1IgS13LSGeM1wEw">连接诊断</div><div class="pv" data-page-node-id="LYFp34OeFVNGUL4hGkMeRf">隧道配置</div>
+      </div>
+      <div class="tool-work" data-page-node-id="OdaC9LgiEbFfu29wT3Jvwt">
+        <div class="stat-strip" data-page-node-id="TW1hIRbitcnwLYnQMLlAAy">
+          <div class="stat" data-page-node-id="uTX4nhUZxhxQHAHaAMFJeH"><div class="num g" data-page-node-id="qnOfAVBSElDyyhYr2KPHEJ">2</div><div class="lbl" data-page-node-id="QYlVmlVURBnyDE1EixqcQ8"><span class="dot-live" data-page-node-id="IETs0Uw0sJcbO3WAHeLNxm"></span> 活跃会话</div></div>
+          <div class="stat" data-page-node-id="jAZ4jxAsqaKprSHRxWkZ0M"><div class="num a" data-page-node-id="bUJLMQf4XEeC2ZCwmNT5pj">1</div><div class="lbl" data-page-node-id="0k0K8ZpgEkEfBdhDOEnqla">重连中 / 挂起</div></div>
+          <div class="stat" data-page-node-id="i6BSMQ0NIMxrz43q8Gs5pF"><div class="num c" data-page-node-id="1sKTw4l7YUgtxUCtSC1Wht">6</div><div class="lbl" data-page-node-id="9ISfaRF5seXEroXKHu32jV">已注册 visitor</div></div>
+          <div class="stat" data-page-node-id="eytssO1dAND2dAcwFr4eIS"><div class="num" style="font-size:19px;" data-page-node-id="W0HAP7gYsditCaCuMy4VZm"><span class="flow" data-page-node-id="MzOIBPXTpsbPhTC9KNuDMO"><b data-page-node-id="XQqE7aXBxCIFm1rK6B79Eq">↓1.2</b> <span class="hint" data-page-node-id="U7e2YiwctDW1KWp91RdBjK">MB/s</span>　<b data-page-node-id="QiMXKe7TIBu6kAYRihn0HN">↑380</b> <span class="hint" data-page-node-id="0YD3cUeHrL8dszikXe2b4i">KB/s</span></span></div><div class="lbl" data-page-node-id="RmWT76A862pebqSNMqFQd4">实时流量（frpc 汇总）</div></div>
+        </div>
+
+        <div class="card" style="padding:0;overflow:hidden;" data-page-node-id="fkotbA2ybFzFAAEeqmJAsx">
+          <table data-page-node-id="ZijFrF467DQsC2t9jdPLw3">
+            <thead data-page-node-id="aRTBxiMFvDPgkxb58Oh18q"><tr data-page-node-id="m9XmUoQm0EdxCVYNAgFS81"><th style="width:96px;" data-page-node-id="9gAbIF0GEQer5xzhiLClhj">状态</th><th data-page-node-id="DaBc1iQGXhkZg9VEMcJXPn">会话名称</th><th style="width:210px;" data-page-node-id="qViVqImkUZHNWTi2fT2E5F">设备 / 主机</th>
+              <th style="width:64px;" data-page-node-id="UNJ3VI9LjYj73eaX1wy7Hd">本地端口</th><th style="width:88px;" data-page-node-id="qbz4STYfnYPlDU6rGEsGwd">类型</th><th style="width:150px;" data-page-node-id="ApQ2zHLaAVXEq9K0swdDUa">流量</th>
+              <th style="width:86px;" data-page-node-id="grlHmCgAVsPsIkELB10Nbp">持续</th><th style="text-align:right;" data-page-node-id="wDdPMvDu1KCsBXKfw5COrE">操作</th></tr></thead>
+            <tbody data-page-node-id="pXCheI99L6oQXXBDwuDPEO">
+              <tr data-page-node-id="cN9s7CvGQqhQVsR5CMhj90"><td data-page-node-id="Amm0gCcxFesyDdNL47NA5w"><span class="tag on" data-page-node-id="mtBY7aUFXrOnX0teY7OwAt">已连接</span></td><td data-page-node-id="XAwVAJcGpPr3dSSGTgbioI">球桌 A 区 · 运维 SSH</td>
+                <td class="mono" data-page-node-id="UmvZ2d6rHONhQxsCDtKZjN">FT-01 → kd.newbv.cn:30005</td><td class="mono" data-page-node-id="pCW9bRDAdtYT2ffRsJ98gI">6001</td>
+                <td data-page-node-id="pZQDH3QnVXy13PaIEkK5wS"><span class="tag acc" data-page-node-id="vXLNqZ5ut0kxN8wi6lAXBW">xtcp · P2P</span></td>
+                <td data-page-node-id="SJuGLjR8HhjSuIRTG38BjT"><span class="flow" data-page-node-id="vOMtDqZfKeoD1HZFKViJED">↓<b data-page-node-id="O52bU65l1qBlJhFCeJP6Mb">820KB</b> ↑<b data-page-node-id="E0IIqLTGcMDXsYZRPTX6sE">210KB</b> <span class="spark" data-page-node-id="8rzXSMaxggVOKq26wB9bAC"><i style="height:8px" data-page-node-id="JXke5OcEo6bVG6WmYByFAw"></i><i style="height:14px" data-page-node-id="Al3U0cKL0CqvbpkKGpBQRK"></i><i style="height:11px" data-page-node-id="RUlOB2WBNN7YBKppqingMk"></i><i style="height:18px" data-page-node-id="5aCxZqhmgueMKXQPHmljF7"></i><i style="height:9px" data-page-node-id="ONOiS5EqxnkpCmg6nnMAdW"></i><i style="height:13px" data-page-node-id="3wRvPBRa1ZTzULiFb5hjhZ"></i></span></span></td>
+                <td class="mono" data-page-node-id="QaXUI5kEFU5zwMdMyhSNwf">02:14:36</td>
+                <td data-page-node-id="D5e7ru6wqSBl7Bf8qg5CvJ"><div class="row-acts" data-page-node-id="9OAxZfqFACWR7HlzKKWw82"><button class="btn sm" data-page-node-id="Dd1P5dnFsWeWXgTF67TspS">打开终端</button><button class="btn sm ghost" data-page-node-id="bV6KYNmD9YQ83K92DcfXiC">日志</button><button class="btn sm danger" data-page-node-id="OpxuTVElC4uY6gwFimloe7">断开</button></div></td></tr>
+              <tr data-page-node-id="SIlVBBie1TXRAeA08jsu5K"><td data-page-node-id="RaAJMmE511co3HVmmRETHv"><span class="tag on" data-page-node-id="xD8oCP3WS0j0Y1P3qmPSBi">已连接</span></td><td data-page-node-id="K0XP5kzI517oY2OfArsMyN">球桌 B 区 · 文件上传 SFTP</td>
+                <td class="mono" data-page-node-id="ibGf5nOk3L1fpTpx0KUwgw">FT-02 → 49.235.34.253</td><td class="mono" data-page-node-id="V3LmvGaMtxF77zvd4DnzbE">6002</td>
+                <td data-page-node-id="GAfLVtMlwoS1n6ePEllBaZ"><span class="tag info" data-page-node-id="DH9q75eD97VgpSEceOflCS">stcp</span></td>
+                <td data-page-node-id="IbSACxZ4hAEishsCHfd1zz"><span class="flow" data-page-node-id="PYEt0jOBBgYvCedXveFEps">↓<b data-page-node-id="RH6AolstQDnPT0AdXHxLdb">360KB</b> ↑<b data-page-node-id="hinHVA31qGHBtm9dPR1KU1">150KB</b> <span class="spark" data-page-node-id="xW3YAvvWfkczX4mM4IVOnq"><i style="height:6px" data-page-node-id="jfYf44U4DAqWzNPUw1k5Ec"></i><i style="height:10px" data-page-node-id="SHldqPpHkJQPuHMJ8FZ7SM"></i><i style="height:15px" data-page-node-id="7NApwFz6maFZbay1f4UWYT"></i><i style="height:8px" data-page-node-id="oyhfHxEB248kPB1UivfH1W"></i><i style="height:12px" data-page-node-id="16bpjiQYBvwiiiDukR6zcP"></i><i style="height:7px" data-page-node-id="KsPYogSB1J1h1XZVASNOQ7"></i></span></span></td>
+                <td class="mono" data-page-node-id="PhyAsrKhHNXVaN0hDYPj4n">00:47:02</td>
+                <td data-page-node-id="Xon4vSMhJlAkdRf9zS7C4c"><div class="row-acts" data-page-node-id="TW8oZOB0GkdO2DGBobmhlm"><button class="btn sm" data-page-node-id="KdVWXbWCGjQnCudo9jasDP">打开文件窗</button><button class="btn sm ghost" data-page-node-id="uVgmptGyzINme6vacuTPBQ">日志</button><button class="btn sm danger" data-page-node-id="vxHXPTUUDb552tJq9RYpmn">断开</button></div></td></tr>
+              <tr data-page-node-id="ExgbqWJ6OpTXNsvs6Ubx5L"><td data-page-node-id="m9jDeDiPSJXlR0ORzT5jHi"><span class="tag warn" data-page-node-id="W8muulhkb3O2lNT62LYJAA">重连中</span></td><td data-page-node-id="YATL1WUMAWIExiS223FSkA">诊断台 · RDP 远程桌面</td>
+                <td class="mono" data-page-node-id="2JYGytDwy02ymE0hwotvNG">FT-05 → 192.168.1.60</td><td class="mono" data-page-node-id="8RRrKHFEVgMGmfC0KljPxc">6005</td>
+                <td data-page-node-id="5rsx3jLBCvcCkErroFTuG1"><span class="tag off" data-page-node-id="ktLRAplGbH05EDVmp7mnY7">tcp</span></td>
+                <td data-page-node-id="snHjkiOJk68Q9plMUHmleT"><span class="hint" data-page-node-id="Nq87upOu3AaXfFLjLZ1AsP">— 断线 3 次</span></td><td class="mono" data-page-node-id="W8n4cRZsux5KWctTGE3BVR">—</td>
+                <td data-page-node-id="ECJgZY8Y3ftnHGAGprrzsH"><div class="row-acts" data-page-node-id="4FmhuYLgvfVqt1Ul96TKpC"><button class="btn sm primary" data-page-node-id="r2mL34TQNUNdAVAioXg9Wz">立即重连</button><button class="btn sm ghost" data-page-node-id="dyst9jlVJFJMuhkFjk2kXL">日志</button><button class="btn sm danger" data-page-node-id="T0wuxICEY8KRuudtKuSliu">删除</button></div></td></tr>
+              <tr data-page-node-id="9PLAeIZ48aspJfqmnElHY7"><td data-page-node-id="brSfjImMBltbvqRCTgmhFl"><span class="tag off" data-page-node-id="Gfpp0eAex226QMJ41cZzvD">已挂起</span></td><td data-page-node-id="7YztC6YDvsNO4pJXS62w1P">球桌 C 区 · 临时排查</td>
+                <td class="mono" data-page-node-id="7yTcq58K2qZlPx4oVgIJcv">FT-07 → xqzg.newbv.cn</td><td class="mono" data-page-node-id="GRjZwFkd2RBVJ4dPzYFZvs">6007</td>
+                <td data-page-node-id="oVmeDtnJq3U70i0IGZUroq"><span class="tag off" data-page-node-id="M4Q9oJ8dHBKhqG7inSGBL7">tcp</span></td>
+                <td data-page-node-id="MVvud4OnbI3NEEJllDoEnG"><span class="hint" data-page-node-id="MvnoV0Id1sRS00GQDCIwbl">累计 00:12:44</span></td><td class="mono" data-page-node-id="1AfifuGXsjvU79EjJmTb0F">—</td>
+                <td data-page-node-id="bteMBrBY1Fyem696vRLpsL"><div class="row-acts" data-page-node-id="OMd9LvQwWt3HzPGRks76S8"><button class="btn sm" data-page-node-id="WybceVWyQ7A1ru7DCHFCCe">恢复</button><button class="btn sm ghost" data-page-node-id="q8GFvak5ozEFQPe5jE7zVI">日志</button><button class="btn sm danger" data-page-node-id="bTYjEQC325yXU8NrlGjqit">删除</button></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="hint" data-page-node-id="gQm8h5DxNo9Q9jWV21q8AT">「打开终端 / 文件窗 / 远程桌面」复用 <code style="font-family:var(--mono)" data-page-node-id="UONe8jxQY2HHR2QKDaRhyv">windows/remote_session/</code> 现有 SSH / SFTP / RDP 面板，作为独立标签窗口打开（RemoteSessionWindow TabWidget）。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 2：P2P 访客 ============ -->
+<div class="section-label" data-page-node-id="QSP7TNe1xMOjBpDMwTbwRI">画布 2 <span data-page-node-id="t23ybWGiFxJKqFjcb7by1J">远程页 · P2P 访客（切到第 2 个 Pivot）</span></div>
+<div class="win" data-page-node-id="NY1138GOiD8klku6ETt3M2">
+  <div class="titlebar" data-page-node-id="eeWl1WWLESLPEtggI4y8yk"><span class="app-ico" data-page-node-id="3kexMAguRZealAEYG7MlWk"></span><span class="app-name" data-page-node-id="tPPScxfQ1twnap1ZUTkfcw">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="fI0utza6nHUMxaJ5EJMdo9"><i data-page-node-id="aIEHTugBABxB3jt7MnUsgQ">&#9472;</i><i data-page-node-id="hYG4L1iUFefLHA4GHQReWA">&#9633;</i><i class="close" data-page-node-id="VQuSg3qFippHsvnaQkGSfd">&#10005;</i></span></div>
+  <div class="app" data-page-node-id="iDpbjREnmdEbwpB1KSGztA">
+    <div class="nav" data-page-node-id="xpO1vlHSfmCmGCIt7d3aqN">
+      <div class="nav-item" data-page-node-id="rySaH9EBy2d4NJQ5acBJRy"><span class="ni" data-page-node-id="QMDCFCuFhYWsDDLFDaGktf">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="jW5GQDcUbuAGDtjHc5C585"><span class="ni" data-page-node-id="lJe9Eqopo25J2a4JJzowaP">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="KsFoOtv5HcQE20iADLJKLR"><span class="ni" data-page-node-id="bBLNSC7l9KHWO4cQmiYIPv">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="8bOe6Q3AatyAVPCdwlupUG"><span class="ni" data-page-node-id="dJu6cQkRRFBxaty0foiLwO">&#9654;</span>跑视频</div>
+      <div class="nav-item active new" data-page-node-id="X3RZbVAHMIhTHT5ubXJGIF"><span class="ni" data-page-node-id="2aqS30vRReO1mWxf5Hmnqa">&#8644;</span>远程<span class="nav-tag" data-page-node-id="DxqaPUNT7rqvOT3HVlu5ZD">二期</span></div>
+      <div class="nav-item new" data-page-node-id="FrV0BV0giRi845etcA7tSq"><span class="ni" data-page-node-id="JsYagntTmNj2HIEa7tsax8">&#9881;</span>工具<span class="nav-tag" data-page-node-id="vEFiaCuV5oDaje90EXwLC2">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="tJmFQH6S3KXG7GDshqsDdr"><div class="nav-sep" data-page-node-id="mEhVGWDowKaWwaOvD8m0gO"></div>
+        <div class="nav-item" data-page-node-id="YuHUuvqXwMe0arvPTOObuD"><span class="ni" data-page-node-id="D6F2BnAiTqoJOEZWmxMwFf">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="4CwHDK4t1s8PVp14rhb6Vt"><span class="ni" data-page-node-id="tVnxR8jKdfhFYcBEr5yHA1">&#9432;</span>关于</div></div>
+    </div>
+    <div class="content" data-page-node-id="I6ct3DQiEm5DsfDCCIww0Q">
+      <div class="page-head" data-page-node-id="K4LpSCxmmE9LOkw4A5ssmb"><div data-page-node-id="9ESk4Q4M51sLJ4tm8TbzQM"><div class="page-title" data-page-node-id="CTDRfBqzQKVp2rd3QfYNwQ">远程</div>
+          <div class="page-sub" data-page-node-id="Mc7uazuh4cwAVBLHiGenaL">P2P 访客 · xtcp visitor 注册表（手工 + snk 快捷直连统一收敛）</div></div>
+        <div class="flex" data-page-node-id="hT5BTJinoK1Ks44pL3sV0B"><button class="btn" data-page-node-id="dfG0umIpJ11d0Ht2LBUaad"><span class="bi" data-page-node-id="LTutlAaV8dJ0pEuiWTs8v6">&#128229;</span>从球桌批量导入</button>
+          <button class="btn primary" data-page-node-id="BU6lSZOov6EFNgYMdErGRX"><span class="bi" data-page-node-id="sbsfQTz2ryRvysEB7GUkp1">&#65291;</span>添加访客</button></div></div>
+      <div class="pivot" data-page-node-id="NkkLGpmthtcYjewke6gk9H"><div class="pv" data-page-node-id="kUpbRTVtlEGIxNDRer1Z7r">会话总览</div><div class="pv on" data-page-node-id="3OuUAGDL4Oup1tB7d4iSd1">P2P 访客</div><div class="pv" data-page-node-id="OnQenDku8GaL1tG5h4xZRW">连接诊断</div><div class="pv" data-page-node-id="dBVq0cwjQUMIrfACWQzilp">隧道配置</div></div>
+      <div class="tool-work" data-page-node-id="70UO1556YzSkcHoMDnn2Jb">
+        <div class="infobar succ" data-page-node-id="0pRvATfvHfMid0nw33j70F"><span class="ib-ico" data-page-node-id="3c5W7yhwGd0JC2HIvovVDX">&#10003;</span> frpc 进程运行中（PID 18420）· 6 个 visitor 已注册 · 最近增量重启 09-06 21:12
+          <span class="hint" style="margin-left:auto;" data-page-node-id="TwW72jkau76CBZeVnqXrwA">visitor 变化时增量重写 frpc_xtcp_panel.toml 并重启</span></div>
+        <div class="card" style="padding:0;overflow:hidden;" data-page-node-id="A905wgdDhrKA3ovji9EXyD">
+          <table data-page-node-id="J5voXrM5oKLTLKZgKBzjfR">
+            <thead data-page-node-id="CNyQ7Jfznpc5A3yc9khb95"><tr data-page-node-id="C2JrYTOoIyfq5aOPkIU9Ga"><th style="width:120px;" data-page-node-id="ZJcDBUQZyvuP6zoZ0okGdL">访客名 name</th><th style="width:120px;" data-page-node-id="O1XUm0279F9B0MarPhhzkc">serverName</th>
+              <th style="width:64px;" data-page-node-id="RqnaiozPSl3lGFceKUfjW8">类型</th><th style="width:78px;" data-page-node-id="hOE7WIxPqxWgvnPCD6ObnD">bindPort</th><th data-page-node-id="Yzaf0DLSYtWkgpxsRTMosu">关联球桌 / 来源</th>
+              <th style="width:96px;" data-page-node-id="qoJprV3WHC7Rhxh25uE3pm">状态</th><th style="text-align:right;" data-page-node-id="TCmHcG2GFwbUduFgb9ON1N">操作</th></tr></thead>
+            <tbody data-page-node-id="EaT7owYbSDIC5pGg94l9RG">
+              <tr data-page-node-id="5JRrc68oIgDwFgKSsDxhxw"><td class="mono" data-page-node-id="mLCimXNB0KEuVSWBmNSN2F">snk_29800</td><td class="mono" data-page-node-id="yXbinQP4DzJcohWwe9mGA0">snk_29800</td><td data-page-node-id="BWBfGfpHgUahN4F9V1wLov"><span class="tag acc" data-page-node-id="PcepjXA6I6YSs8coRF6gni">xtcp</span></td>
+                <td class="mono" data-page-node-id="q2bCCOuaL3Jy8CDgYOEdLv">60114</td><td data-page-node-id="jHtAwadDBGqjEKHbCJDAMZ">298-00 · <span class="hint" data-page-node-id="2BoYtlpm9AxDKKH2TydALh">snk 一键直连</span></td>
+                <td data-page-node-id="wN9r03pilDFi2FeG7OBLBo"><span class="tag on" data-page-node-id="Sl7q2d71KBWVt3mldMUWh5">在线</span></td>
+                <td data-page-node-id="oDVpYqCs4WkQ5Ca9mucGla"><div class="row-acts" data-page-node-id="bkWXCeTANgjPvKeExG9J3S"><button class="btn sm primary" data-page-node-id="uiSjoJAUNvYikDm7BGFq3F">连接</button><button class="btn sm ghost" data-page-node-id="fwiNiUg6pgEnBBsozSKD6r">编辑</button><button class="btn sm danger" data-page-node-id="hhWMeZYLvNx6LGt2yGPILv">删除</button></div></td></tr>
+              <tr data-page-node-id="RRy1D0OSewOAB6IWwcxNDP"><td class="mono" data-page-node-id="gstDWm28PbyCqnRdRfJRBl">snk_11602</td><td class="mono" data-page-node-id="rnkTY9VwgqWBWTvZtfoIUd">snk_11602</td><td data-page-node-id="vqYpOLxXvxgTPzyCnPlARL"><span class="tag acc" data-page-node-id="KV1oz1uNO7uutq6zTEAxbB">xtcp</span></td>
+                <td class="mono" data-page-node-id="WKy43aMub7nTB4KGIUDVVH">42004</td><td data-page-node-id="MEAOJtZHoAjAOeFFmojxiB">116-02 · <span class="hint" data-page-node-id="DriVeOfdKEJB5Faqg7XMRI">手工添加</span></td>
+                <td data-page-node-id="JBtlqZTvdp5gSbgdiopuKO"><span class="tag off" data-page-node-id="hL7nni2G2boT1WcyOZck3f">离线</span></td>
+                <td data-page-node-id="4v6oHMWGkW3EqxV1ynRD5S"><div class="row-acts" data-page-node-id="HfmgmjoUxLDL91gsGxuDP1"><button class="btn sm" data-page-node-id="xw1QZkBem1rvXZpqrtvlrY">连接</button><button class="btn sm ghost" data-page-node-id="webqhZAjvbMYavzpRVeUyH">编辑</button><button class="btn sm danger" data-page-node-id="UuvF7K2v20xUZS473VoZPp">删除</button></div></td></tr>
+              <tr data-page-node-id="hVHI6lHAnulziqAHMLiFFA"><td class="mono" data-page-node-id="buTXpHQWgMmas8kgCWz1od">snk_31311</td><td class="mono" data-page-node-id="k3eutygmcq8OlCMhBJlsDa">snk_31311</td><td data-page-node-id="zPulm92cQQPGmHRadLOzpp"><span class="tag acc" data-page-node-id="CFL1RKKv0bGaMj5ekma3E7">xtcp</span></td>
+                <td class="mono" data-page-node-id="FZvQxE3iav69ytYkzacNNu">27762</td><td data-page-node-id="XgqRaGDBJN70Adq8cQ32e8">313-11 · <span class="hint" data-page-node-id="ZvhQVQNHRnQ6wCAJepAIZE">手工添加 · 最近 09-05</span></td>
+                <td data-page-node-id="PJDT4OczF2bxaElDGADIqe"><span class="tag warn" data-page-node-id="SslzwWlf3UeP4iYxvitOAk">重连中</span></td>
+                <td data-page-node-id="eLL6Una63bZfi38wkMH3tU"><div class="row-acts" data-page-node-id="oyk69Xwt337B53CHZkLoNN"><button class="btn sm primary" data-page-node-id="2hRQsea3OpIdGFB9Z1iHU0">连接</button><button class="btn sm ghost" data-page-node-id="coICytW8oslToHPMo2y1gT">编辑</button><button class="btn sm danger" data-page-node-id="TsrbPlyEzLdx6IMEcJJsW2">删除</button></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card" data-page-node-id="Q1RDqEUZGiuQo11u8AGH16">
+          <div class="card-h" data-page-node-id="3a3hiZgurUjzUDpDcUuM6w"><span class="ch-ico" data-page-node-id="NfwL8h6ZReySz3qXZqVENt">&#65291;</span><h3 data-page-node-id="OBh2QSnAdDXBqy9rE17Epx">添加访客</h3><span class="ch-sub" data-page-node-id="AT0zbPROMPyZiCMLICH4UD">对应 frpc_xtcp_panel.toml 的 [[visitors]] 块</span></div>
+          <div class="grid2" data-page-node-id="qodBOnUDaX7rRoXKLFalK2">
+            <div data-page-node-id="bsfGWzyB9wmpCB5r0PD8A0"><div class="mini-lbl" data-page-node-id="D2pZeehYHn7nkmJoftaiSz">访客名 name</div><input class="inp mono" placeholder="snk_XXXXX" data-page-node-id="UiIQX6te3xqsjE5wCANyvu"></div>
+            <div data-page-node-id="b9dJ27qVT54VCwRRVV56FA"><div class="mini-lbl" data-page-node-id="1yRSALG8nCwzENIJYsP1vn">类型 type</div><div class="combo" data-page-node-id="DP9DBeNISEsisVV5eBAnFU">xtcp（P2P）</div></div>
+            <div data-page-node-id="LiH4oBwsjpLDNhWFNEwHIu"><div class="mini-lbl" data-page-node-id="GNX6w8rPUXuSsIVPrCqD18">serverName（frps 侧服务名）</div><input class="inp mono" placeholder="与球桌 frps proxy 同名" data-page-node-id="SMv4BRkVle5ohR3my9Rih9"></div>
+            <div data-page-node-id="gcHgHFRe1PxZ24Ch1LTbQF"><div class="mini-lbl" data-page-node-id="IBeEzyCvrlHcgyiYw2kF0l">secretKey</div><input class="inp mono" type="password" value="abc123" data-page-node-id="vUBoPUPPXwx9h4z1DPWxYi"></div>
+            <div data-page-node-id="vFK9zI1khmzFjFCy8FTFz1"><div class="mini-lbl" data-page-node-id="FoEonW7H0OIktD11GMKECP">本地端口 bindPort</div><div class="spin" data-page-node-id="H7VWfWV9sPoGC3z0GRbVhK"><span class="sv" data-page-node-id="W43YOBstnXZExonZ6xlZKi">60114</span><span class="ss" data-page-node-id="Gx0FD6k7aQKsRzkbrZpc9O"><b data-page-node-id="MqCvG8kjIipZjQp6PFs7De">&#9650;</b><b data-page-node-id="2G79iySbzF4o8uuCwsiRKE">&#9660;</b></span></div></div>
+            <div data-page-node-id="cOxWAImCpBabDAd14DP3RV"><div class="mini-lbl" data-page-node-id="RwurJ88FOAkNcbbKJbbtZP">关联球桌 tableId（meta）</div><div class="combo" data-page-node-id="lYNN0hAg7QbOoT2i4xa9w3">298-00</div></div>
+          </div>
+          <div class="flex between mt" data-page-node-id="GAw37zu83Hm07wIHg9vEkx"><span class="hint" data-page-node-id="X0ACKpnWEb6xNBwxO4aC6X">保存后写入统一 TOML 并触发 frpc 增量重启（元数据以 # meta 注释内联）</span>
+            <div class="flex" data-page-node-id="0ycTtGi8lrqFLY3UK19R51"><button class="btn" data-page-node-id="gYlbJ4tFRHuxcqxA0tbbp3">取消</button><button class="btn primary" data-page-node-id="hg778O4C29jhIWAsZhxfvx">保存并连接</button></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 3：隧道配置 ============ -->
+<div class="section-label" data-page-node-id="LxHFVfBITRmRzv4oPJhtMC">画布 3 <span data-page-node-id="DwcmQsWCrXxBD9huKTZEdE">远程页 · 隧道配置（frpc 服务器可视化，切到第 4 个 Pivot）</span></div>
+<div class="win" data-page-node-id="ab2SfGwqp7WZCRNc5Hwq6N">
+  <div class="titlebar" data-page-node-id="5GNDxx6O1qhpUNPHpOSBKF"><span class="app-ico" data-page-node-id="eNFmzq5TpOA9aJbwRhkpxr"></span><span class="app-name" data-page-node-id="y2mVpVkzMAKHkjADlthrBG">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="BANaNWWjUeWii8IH2iAsho"><i data-page-node-id="75GWwfyIAWKxAapbENQAeB">&#9472;</i><i data-page-node-id="9xajEEa0ll8Gf6NgCtbja5">&#9633;</i><i class="close" data-page-node-id="FYhvNAERRMXHjUt6RKKHjm">&#10005;</i></span></div>
+  <div class="app" data-page-node-id="fr05KFeyDwYllfnJI6J5t9">
+    <div class="nav" data-page-node-id="TlYNRHY2PaFxPg4AebFPsp">
+      <div class="nav-item" data-page-node-id="i3j7tgprevB16wuSHjb19F"><span class="ni" data-page-node-id="JKjMfYNofoTUrtmwNnSGl6">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="1F2RSDPthxDjTe1RhyRMZZ"><span class="ni" data-page-node-id="VYGRMrzov7RP0fQL63QeGf">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="3i1QyH5DWo2XtkPHEGs4EI"><span class="ni" data-page-node-id="coCMltrOnu5AmYKGKB3X68">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="NdJnDTqEgtkwxWmuK4yr9F"><span class="ni" data-page-node-id="u21Hl2dfpC2XPWwCdnO2ST">&#9654;</span>跑视频</div>
+      <div class="nav-item active new" data-page-node-id="ZMtwx3W4tU6UTs8qyhHtNC"><span class="ni" data-page-node-id="K3CYrtnDrFU9XPD3Q97euh">&#8644;</span>远程<span class="nav-tag" data-page-node-id="laz8Lh1nYU71wgBV9hYp0r">二期</span></div>
+      <div class="nav-item new" data-page-node-id="9zO2Mi2XLKgx748RtjRZR2"><span class="ni" data-page-node-id="Ky8M6N6ciMi5mPQBWa2jpd">&#9881;</span>工具<span class="nav-tag" data-page-node-id="6RHl8SWJ4rFweWzkvyNsQq">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="YDewLkTR6WUYuOEh4UjOfZ"><div class="nav-sep" data-page-node-id="XzlOydJnc77PMjRj3gj4VC"></div>
+        <div class="nav-item" data-page-node-id="RKmkUjncA6N9u6emxkpKks"><span class="ni" data-page-node-id="jJikGRn7HEvBCXH58bFW6u">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="5Wz6SkyE2qM3RD6LgBP8Jg"><span class="ni" data-page-node-id="mk8El8AlRvkfAgxT7AMbSt">&#9432;</span>关于</div></div>
+    </div>
+    <div class="content" data-page-node-id="Z5jOj9cRTGIvA9dMkO7SEb">
+      <div class="page-head" data-page-node-id="1pO0pEoSA6Tc2CYahW1YrB"><div data-page-node-id="nL2jxebPsuZC1YfpTPwljI"><div class="page-title" data-page-node-id="OOZldrBWm4hnq5AHjnconG">远程</div>
+          <div class="page-sub" data-page-node-id="OuXrpyLRQ6tnW6fG3q8s6J">隧道配置 · frpc 服务器参数可视化（frpc_xtcp_panel.toml 头部）</div></div>
+        <div class="flex" data-page-node-id="32ovpi1An4iJvfw8YWLROo"><button class="btn" data-page-node-id="SEjedkhju9vcbxfFaASYIb"><span class="bi" data-page-node-id="FMCgzPH61wqfuCnzGBhHgn">&#128196;</span>查看原始 TOML</button>
+          <button class="btn primary" data-page-node-id="c9byYvgzmNA12FTenVb7j5"><span class="bi" data-page-node-id="0bAagIAelpmz2YTKkGp2gD">&#128190;</span>保存并重连</button></div></div>
+      <div class="pivot" data-page-node-id="VK6OGTM0Onz9hpuRcKHAuP"><div class="pv" data-page-node-id="MedqHGQxA4FJ5kYvKymoeK">会话总览</div><div class="pv" data-page-node-id="BYMPtqgw224ixgNyncA99H">P2P 访客</div><div class="pv" data-page-node-id="DwQqUUzz92vnPLcwp7VG4D">连接诊断</div><div class="pv on" data-page-node-id="Ql3j6ywLb79jP9MqBLTY0f">隧道配置</div></div>
+      <div class="tool-work" data-page-node-id="5X0Sir9hr3KcVvV3K4yk6I">
+        <div class="card" data-page-node-id="rMgq9pXLxL1yCSulPUrFSf">
+          <div class="card-h" data-page-node-id="zk1xfuK9C7hrvxrpRnk9TL"><span class="ch-ico" data-page-node-id="ZiNyNSPlLg1Z8gXppNzFfJ">&#9881;</span><h3 data-page-node-id="VzAab98An5jZK2LTTH0ewU">frpc 服务器</h3><span class="ch-sub" data-page-node-id="sOC6gj19mwsuEett9iJPIW">所有 visitor 共享的 frps 接入点</span>
+            <div class="ch-right" data-page-node-id="4uJEPId6oEx5H5st8dt5BG"><span class="tag on" data-page-node-id="D7uMILygw1PVpqXI08DlH6">已连接</span></div></div>
+          <div class="grid2" data-page-node-id="awlDrFsLhKK4aPUEeOiRQl">
+            <div data-page-node-id="7fguxAHQvEDgiFUsSErCW7"><div class="mini-lbl" data-page-node-id="d2qeKEHa29XLAmmyzIPRcN">serverAddr 服务器地址</div><input class="inp mono f" value="49.235.34.253" data-page-node-id="3DtiX6tSyDgEcPyMwxtFXK"></div>
+            <div data-page-node-id="JPJY0NJURYNSR3YlQWhnlJ"><div class="mini-lbl" data-page-node-id="YQRe6CgpZAUq0BaxCRpyPu">serverPort 端口</div><div class="spin" data-page-node-id="q3wqNJ31XSFuq91C0Ijefs"><span class="sv" data-page-node-id="VDutgiXH6IgcfyfAz0acnq">7900</span><span class="ss" data-page-node-id="PGqcFna4oGzRe2vFsJQJL8"><b data-page-node-id="YMd1WjIw0rENGxRX0YUFPt">&#9650;</b><b data-page-node-id="FAOg3jcM3Gwernnl0M1dsY">&#9660;</b></span></div></div>
+            <div data-page-node-id="2JwCMjYf37iifUKHHQrrVX"><div class="mini-lbl" data-page-node-id="QVdf2cWXFka7lO8YmBtjSa">auth.method 认证方式</div><div class="combo" data-page-node-id="le5QKXFYxLWoXReNUtV8Gs">token</div></div>
+            <div data-page-node-id="VG7WsEBQdRepw9GkP30p9B"><div class="mini-lbl" data-page-node-id="kxyQvcfAOTf5xTHlGS0tks">auth.token</div><input class="inp mono" type="password" value="123" data-page-node-id="RYSYpXjxYUIHCMQLOvcqtM"></div>
+          </div>
+        </div>
+        <div class="card" data-page-node-id="w3hAydFZRxUUASQ0iSrE3w">
+          <div class="card-h" data-page-node-id="14tZgDqGwUZcboGF2Cc36I"><span class="ch-ico" style="background:rgba(0,120,212,.12);color:var(--info);" data-page-node-id="khwGxllFLhPqOvAJ84g7gh">&#9881;</span><h3 data-page-node-id="GD4Z7zL9u52CEaeW0YIWeu">运行选项</h3></div>
+          <div class="grid2" data-page-node-id="3OIVcGWwviIJUshbgYDS5a">
+            <div class="flex" data-page-node-id="tQNEKHY1491Ln3XWuWG7AA"><span class="sw" data-page-node-id="OEfacgohUxMsgNIsmx0HNM"><span class="track" data-page-node-id="uCSpVz5ZH1xOUfhtLH9EjO"></span>启动时自动拉起 frpc</span></div>
+            <div class="flex" data-page-node-id="4MaNiMqGmJjseXnbP6W6Cs"><span class="sw" data-page-node-id="mTy5KDyKpUDNeWTAHGBCgj"><span class="track" data-page-node-id="tg5dvAT3js3tK9BNVp8DPx"></span>断线自动重连</span></div>
+            <div class="flex" data-page-node-id="onwP92zkoMAfloA01wIXGH"><span class="sw" data-page-node-id="mYOONq6T7abn1rULh09S3P"><span class="track" data-page-node-id="PqowOv9D0hDMqtLp7IZIYR"></span>visitor 变更时增量重启</span></div>
+            <div data-page-node-id="Kv0ECExlJc3ntrTIM3RsFl"><div class="mini-lbl" data-page-node-id="4YDfmrpY0wFj2p95SsN8uj">日志级别 log_level</div><div class="combo" data-page-node-id="DzgZx78SiF7CXEYYRrn2OL">info</div></div>
+          </div>
+          <div class="divider" style="height:1px;background:var(--border);margin:14px 0;" data-page-node-id="E0aKuxH8rb5XHPeylvlBKI"></div>
+          <div class="mini-lbl" style="font-weight:600;color:var(--text);font-size:13px;margin-bottom:8px;" data-page-node-id="TJYKbenUU8LCI3DmAjKjSf">frpc 运行日志</div>
+          <div class="term-wrap" data-page-node-id="FxWXU3IcZ2k4r9UJE06mPs"><div class="term-h" data-page-node-id="6L6CpvgzpEwD3v8ljykPvb"><span class="dots" data-page-node-id="o8ITGjtwDI3EccMFD9gusT"><i style="background:#ff5f57" data-page-node-id="VG34BSEBr9n4YbD7qrOT5x"></i><i style="background:#febc2e" data-page-node-id="ZO3Bn8YiaTP4CuD6wYOlnM"></i><i style="background:#28c840" data-page-node-id="LVXlDTMAWvl3ooNRXE3esQ"></i></span><span data-page-node-id="CIhpfvv10EL6KA2UM1GAwv">frpc.log</span></div>
+          <div class="term" data-page-node-id="7pogmA0SjIVFH5zKtcD8iv">
+<div class="ln dim" data-page-node-id="k1G3holrbPDGawKEQHkABg">2026-09-06 21:12:04 [ info] [visitor] snk_29800 start xtcp visitor</div>
+<div class="ln ok" data-page-node-id="kyQwHBQRU0gITPTHJEQrpx">2026-09-06 21:12:05 [ info] [p2p] snk_29800 listen on udp:60114</div>
+<div class="ln ac" data-page-node-id="MwTrpMBirnTQdsmTC6B8OF">2026-09-06 21:12:07 [ info] [control] login to server success, get run id [x7f2]</div>
+<div class="ln wn" data-page-node-id="MqtrJ5mIigiGGfP6VLVEvt">2026-09-06 21:12:40 [ warn] [snk_31311] proxy offline, reconnecting in 5s</div>
+<div class="ln dim" data-page-node-id="WxwAB5WRSinl0EW9eKsLth">...</div>
+          </div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="foot" data-page-node-id="zmW0NNG20jXMAHJfnuPqwI">
+  <h4 data-page-node-id="e7zN8BCKrUPuc2j0LBQhIs">实现落点建议（供二期开发参考，非设计约束）</h4>
+  <ul data-page-node-id="g695wdvSKEwTZNymt8pqUE">
+    <li data-page-node-id="2NYMKJiEKzDhbt0wiXttK8"><b data-page-node-id="xzLJSKvmaKg72pkaNpRrM4">页面骨架：</b>新建 <code data-page-node-id="iMPB6zxrBiX1cW7ZujDwDY">main_window/remote_hub.py</code> 内 <code data-page-node-id="FOHCLanKPXhP2Z0CMK6BTF">RemoteHub(QWidget)</code>，仿 SettingsHubPage 用 qfw <code data-page-node-id="obUSQYhaRR2PgPkBeYfyt0">SegmentedWidget</code>（Pivot）切 4 视图 + <code data-page-node-id="JaHYpLihS9ajSeRfQ3uxWW">QStackedWidget</code>；主窗口 <code data-page-node-id="ClZ0HL2qowfFg9J5r7JedQ">addSubInterface(remote_hub, FluentIcon.REMOTE, "远程")</code> 插在跑视频之后。</li>
+    <li data-page-node-id="mwczllPc72urz4k21edQd0"><b data-page-node-id="xRb0XCo2xFF4IbstJQVfkG">控件映射：</b>会话/访客表格=<code data-page-node-id="ZnRyhXsUmEq7a7RuvQ3rt0">TableWidget</code>；状态徽章沿用现有 QTableWidgetItem+setForeground 语义色（非 cellWidget，遵守 TableWidget 性能约定）；流量迷你柱状可用 <code data-page-node-id="8pEvEq0J1ZWnWDQ9ljBtAk">QPainter</code> 自绘或纯 <code data-page-node-id="keqlmG41AP6a9jzB3jsYzu">ProgressBar</code>；输入=<code data-page-node-id="a2nt5qtNKTRy6C89Em3n3g">LineEdit</code>/<code data-page-node-id="8DVoqR32dK3A44IjtMqz3p">CompactSpinBox</code>/<code data-page-node-id="roAUrgls9UZOpbkqSG7uQf">ComboBox</code>；开关=<code data-page-node-id="3cyKZXXFW1cOf9Lkua9tI4">SwitchButton</code>；日志=<code data-page-node-id="WCEDHehNhByLfY1PlaLBEa">TextEdit</code> 黑底；提示=<code data-page-node-id="3T7CqjRHbGUSkS7I3CW2Mi">InfoBar</code>。</li>
+    <li data-page-node-id="MfdDUAXgfNqXfzFwA7awMh"><b data-page-node-id="MlLvQoTm4s0UMAWWzD3RrZ">数据源复用：</b>会话表 = <code data-page-node-id="FzP3Ec7DmxNfYPB0GxKAW2">get_session_manager()</code> 活跃会话 + RemoteSessionWindow 标签；访客表/隧道配置 = <code data-page-node-id="yfzflWtL37xQa2Xqz7whtT">core/frp_remote.py</code> 统一 visitor 注册表读写 frpc_xtcp_panel.toml；连接诊断直接内嵌 <code data-page-node-id="uFfGdrDfONZu5uzzrnCXt5">ConnDiagPanel</code>（现为 QDialog，抽 widget）。</li>
+    <li data-page-node-id="09KYCWkVGreUPwO8i3a53g"><b data-page-node-id="KF0UL7HamD9DApC9LcH4yn">与设置分工：</b>设置-远程连接分页 = 凭据/FRP 服务器<b data-page-node-id="FUAzz4KSVpDf8Iz7TnjwNg">静态配置</b>（ssh_user/pass、sftp 路径、frpc addr/port/token，DPAPI 加密）；本页 = <b data-page-node-id="hum16lMadUl9vwMUb8hRxv">会话操作 + visitor 增删 + 实时状态</b>。frpc 服务器参数在两处可共享同一 settings 键，避免双写分叉。</li>
+    <li data-page-node-id="FTyIfDkdJbooOWd1oWsK4H"><b data-page-node-id="Bf9Zd6zP4ww9DHLrQgyhNV">原生窗口约束：</b>RDP 为原生 HWND 嵌入（rdp_window.py），在 TabWidget 内以独立顶层窗口承载，会话表「打开远程桌面」触发弹出而非内嵌，避免 HWND 层级冲突。</li>
+  </ul>
+</div>
+
+</body>
+</html>

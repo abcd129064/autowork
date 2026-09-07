@@ -130,6 +130,9 @@ KEY_DOMAIN = {
     "restore_remote_sessions": "remote",
     # ---- misc ----
     "web_port": "misc",
+    # 工具页·单杆视频行为开关（2026-09-07 二期）
+    "single_random_session_code": "misc",
+    "single_auto_open_dir": "misc",
 }
 
 # ==================== 运行时状态 ====================

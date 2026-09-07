@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="rEIpE6HNA5qgRoa1xamjSo">
+<head data-page-node-id="H64l03FlemiY5lAMl7ZFNr">
+<meta charset="UTF-8" data-page-node-id="PU3sUpzLRGDGXVUu4yGCQe">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="E7tmCuXp1CvXjCeo7HoSWI">
+<title>售后记录表 · 列合并设计稿 v2（P0-2）</title>
+<style>
+  :root{
+    --accent:#00BCD4; --accent-press:#00838F; --accent-soft:rgba(0,188,212,.15);
+    --bg:#F5F6F8; --surface:#FFFFFF; --border:#E0E0E0;
+    --text:#20242B; --text2:#6B7280; --text3:#9CA3AF;
+    --success:#1a9e6c; --warning:#c98a2d; --danger:#cf4452; --info:#0078d4;
+    --neutral:#5c6675;
+    --radius:6px; --radius-lg:8px;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#dfe3e8;color:var(--text);
+       padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1240px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header .meta{color:#5b6470;font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;
+         font-weight:600;background:var(--accent-soft);color:var(--accent-press);margin-right:6px;}
+  .badge.g{background:rgba(26,158,108,.12);color:var(--success);}
+  .badge.w{background:rgba(201,138,45,.14);color:var(--warning);}
+  .badge.r{background:rgba(207,68,82,.12);color:var(--danger);}
+  .note{max-width:1240px;margin:0 auto 22px;background:#fff;border:1px solid var(--border);
+        border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;
+        font-size:13px;color:var(--text2);line-height:1.8;}
+  .note b{color:var(--text);}
+  .note code{font-family:var(--mono);background:var(--bg);padding:1px 6px;border-radius:4px;
+             font-size:12px;color:var(--accent-press);}
+  .note.warn{border-left-color:var(--warning);}
+  .section-label{max-width:1240px;margin:34px auto 12px;font-size:15px;font-weight:700;color:#333;}
+  .section-label span{font-weight:400;color:#6b7280;font-size:13px;margin-left:8px;}
+
+  .card{max-width:1240px;margin:0 auto 14px;background:var(--surface);
+        border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;}
+  .card-h{padding:12px 18px;border-bottom:1px solid var(--border);background:#fafbfc;
+          display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .card-h h3{font-size:14px;font-weight:700;}
+  .card-h .sub{font-size:12px;color:var(--text3);}
+  .card-b{padding:0;}
+
+  table.grid{width:100%;border-collapse:collapse;font-size:12.5px;}
+  table.grid th{background:#f2f4f6;color:#3d4753;font-weight:600;text-align:left;
+                padding:8px 10px;border-bottom:1px solid var(--border);
+                border-right:1px solid #ececec;white-space:nowrap;}
+  table.grid th .w{display:block;font-weight:400;color:var(--text3);font-size:11px;margin-top:2px;}
+  table.grid td{padding:7px 10px;border-bottom:1px solid #f0f1f3;
+                border-right:1px solid #f4f5f7;vertical-align:top;line-height:1.55;}
+  table.grid tr:last-child td{border-bottom:none;}
+  table.grid td.mini{font-size:11.5px;}
+  table.grid tr.alt td{background:#fbfcfd;}
+  table.grid td.chk{width:34px;text-align:center;color:var(--text3);}
+  td.ops{color:var(--text3);font-size:11.5px;white-space:nowrap;}
+  .yes{color:var(--success);font-weight:600;}
+  .no{color:#a0a6ae;font-weight:600;}
+  .mine{color:var(--warning);font-weight:600;}
+  .imp{background:#fff8e1;}
+  .sec{color:var(--text3);font-size:11px;display:block;}
+  .elide{color:var(--text);}
+  .dim{color:var(--text3);}
+
+  table.cmp{width:100%;border-collapse:collapse;font-size:13px;}
+  table.cmp th{background:#f2f4f6;padding:9px 12px;text-align:left;font-weight:600;
+               border-bottom:1px solid var(--border);color:#3d4753;}
+  table.cmp td{padding:9px 12px;border-bottom:1px solid #f0f1f3;vertical-align:top;line-height:1.6;}
+  table.cmp td.num{font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .bar{display:inline-block;height:8px;border-radius:4px;background:var(--accent);
+       vertical-align:middle;margin-right:8px;}
+  .bar.g{background:var(--success);} .bar.w{background:var(--warning);}
+  .bar.r{background:var(--danger);} .bar.n{background:#c7ccd3;}
+  .rec{color:var(--success);font-weight:600;}
+  .kv{font-size:12.5px;color:var(--text2);line-height:1.9;}
+  .kv b{color:var(--text);}
+  ul.pts{margin:8px 0 0 18px;font-size:12.5px;color:var(--text2);line-height:1.9;}
+  ul.pts b{color:var(--text);}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:1240px;margin:0 auto 14px;}
+  .two .card{margin:0;}
+  @media(max-width:1000px){.two{grid-template-columns:1fr;}}
+</style>
+</head>
+<body data-page-node-id="b7i0MwxrUGxJ7PMhGVUIBw">
+
+<div class="doc-header" data-page-node-id="lBSLNzXSeWf6EoC138Uzqa">
+  <h1 data-page-node-id="s5JZgiLHzKd7qtILmqr3ub">售后记录表 · 列合并设计稿 v2</h1>
+  <div class="meta" data-page-node-id="7tXjYgbH6jam6xcFemUG5F">
+    <span class="badge" data-page-node-id="6Va3q7CUooRpFAS1YFY6C8">P0-2</span>
+    <span class="badge w" data-page-node-id="75nhrMPlZOefyOs0acbumk">需业务拍板</span>
+    目标：减少每帧绘制的单元格数，配合 P0-1（降低单格绘制成本）叠加降低滚动耗时<br data-page-node-id="AgKJw9YC4EYpiBBFuL0LVN">
+    数据口径：60 行/页 × 可见 16 行，真实 <code data-page-node-id="1qpKBAIsdZTNEj71fCKHYZ">aftersale_records</code> 数据，offscreen 实测（<code data-page-node-id="GS5lsmKqp9LD2RVjb0qa1k">tools/column_merge_probe.py</code>）
+  </div>
+</div>
+
+<div class="note" data-page-node-id="QqSa2kCNUovCcNLFnuvokS">
+  <b data-page-node-id="xTE10XzEn7bnYZuTkMkF4l">为什么做。</b>滚动耗时 ≈ 可见单元格数 × 单格绘制成本。当前 13 列 × 16 可见行 ≈
+  <b data-page-node-id="pZ4nJYdu7Qq1XtrjwG9Tcn">208 格/帧</b>。P0-1 把单格成本砍半（-49.4%），P0-2 从「格子数」这一侧再压一层。<br data-page-node-id="tYA1FbrGYrCnH8ywpmdzCC">
+  <b data-page-node-id="1OK1ohErFwAS8a93JeMcng">关键发现（务必先看）。</b>列减少的收益<b data-page-node-id="SGIS3XPARsaz0QeIWMx5T4">不是线性的</b>：合并列会让每格文本变长，
+  而文本绘制成本与字符数正相关（400 字长文本实测 +44.5%），会吃掉一部分收益。
+  实测 13→8 列只拿到 <b data-page-node-id="kmWhS0CdnytftW3bNNHGB9">-22%</b>，而非按列数外推的 -38%。因此方案必须按实测排序，不能按列数拍脑袋。
+</div>
+
+<div class="section-label" data-page-node-id="lZ7BgYBDcu9H5MFOAvyWSI">一、实测收益曲线<span data-page-node-id="6GbiczZxDmipE9tKFGwlQt">配对对照，负数=更快</span></div>
+<div class="card" data-page-node-id="Ecos5XhaQJs8kM5wz1aADF">
+  <div class="card-b" data-page-node-id="TjvK66bWBFAJgm0IbtLZGv">
+    <table class="cmp" data-page-node-id="U8WR5dhO7plJGymP8xPsUX">
+      <tr data-page-node-id="5A4VbQGS8RRLoXZLIPeSqU"><th style="width:24%" data-page-node-id="BtQnp382pVMSUx3L1FtoXR">方案</th><th style="width:9%" data-page-node-id="wmauptBhPNJOOq8ir9m1Bd">列数</th><th style="width:16%" data-page-node-id="ADOFFPrTnJtTvskkpoDOsa">每帧耗时</th>
+          <th style="width:16%" data-page-node-id="4DnE7qtG3mUD4TtYzKDOPa">相对现状</th><th data-page-node-id="V7VdbQZkP8D6HqVkq1YHEO">说明</th></tr>
+      <tr data-page-node-id="4rzqf9Qb5fgNNUIMTDMw0X"><td data-page-node-id="Ey0V5aS9pmNEUFBSeHdX3k"><b data-page-node-id="bSm3YHFtu2cy4stDP9iBUn">现状</b></td><td class="num" data-page-node-id="rhHluYHg8XH0ama1SQDFRk">13</td><td class="num" data-page-node-id="sMUbfEOFyVSi0OqebHqXrt">10.4 ms</td>
+          <td class="num" data-page-node-id="xOKteVcLwLYHWKOxL3G0qx"><span class="bar n" style="width:2px" data-page-node-id="KMhg2mosniOne4IXthRCNz"></span>基准</td>
+          <td data-page-node-id="iLBUW6p5y5WUdYkZBP5St6">勾选 + 12 数据列</td></tr>
+      <tr data-page-node-id="PCcPYoxpGkyUYL3E560V9R"><td data-page-node-id="smZZCkqYntveH7A5Rn1okA">方案 A　三否合并</td><td class="num" data-page-node-id="db9wRe6DL39vt2DmkGiPAx">11</td>
+          <td class="num" data-page-node-id="VDzuAmMwsxIhoGURW1FXj3">10.1 ms</td>
+          <td class="num" data-page-node-id="Q2jtq5hkzlhKQy10G0Yh03"><span class="bar n" style="width:6px" data-page-node-id="C1fD7zKpu9KJ7CzAIDp57H"></span>-3%</td>
+          <td data-page-node-id="XIFYPhm7JvDCR7MIae69Sj">收益极小：3 个 70px 窄列每格仅 1 字符，合并后反而变 3~5 字符</td></tr>
+      <tr data-page-node-id="9izSd4QY8NKykMkrLBC9Uh"><td data-page-node-id="Tl5CiT1OzrPCX6bKBKEfEJ">方案 B　A + 时间合并</td><td class="num" data-page-node-id="lPIjIoxFJFgnlqwaVeugZV">10</td><td class="num" data-page-node-id="llQGPzPD8RbjMjgfCl2oq3">9.7 ms</td>
+          <td class="num" data-page-node-id="PJDLBFfC9GzHmbd6yhJZWt"><span class="bar w" style="width:18px" data-page-node-id="f9TM9IenMPLRNnrCzRSsDW"></span>-9%</td>
+          <td data-page-node-id="gBTFBEokREhtCdjaCE0KMs">填写/发生时间并为一列双行</td></tr>
+      <tr data-page-node-id="mDNWQgFryMnNtubyU0HU3J"><td data-page-node-id="wFAUxQgq04SEgW0xrPi5Sj"><b data-page-node-id="sCR1PDe74oSKcDkPXtAycz">方案 C　B + 问题/原因合并</b></td><td class="num" data-page-node-id="BtiUEQ4kJZBHiYJNR37MMn">9</td><td class="num" data-page-node-id="HQhaZGJWdsEKeoVqLFf71K">8.7 ms</td>
+          <td class="num" data-page-node-id="m1yYcFdcfWEbv8j7sRoDhh"><span class="bar g" style="width:36px" data-page-node-id="DbH3X7Q456Irr9owoNcYP5"></span><b data-page-node-id="GXdhLtYhSjvDz3i3VB2GXH">-18%</b></td>
+          <td class="rec" data-page-node-id="eykJNNvYU2zYHO25scfm6v">推荐</td></tr>
+      <tr data-page-node-id="6iiSMBJdwoZ6thFshEMVI7"><td data-page-node-id="BR00O84mC3Kd7mDc9AJcUe">方案 D　C + 类型并入位置</td><td class="num" data-page-node-id="OfO7GJfmKKAEJyz3P5Uo2f">8</td><td class="num" data-page-node-id="bnxN4cbaAmVxRqfX43k4nA">7.9 ms</td>
+          <td class="num" data-page-node-id="cqMUgudStjnJGkcysOanKS"><span class="bar g" style="width:44px" data-page-node-id="DUq7kbe8xAevHc83njzCsM"></span>-22%</td>
+          <td data-page-node-id="sQ6gU1GYfgBwzbRScizaBk">收益最高，但可读性下降明显</td></tr>
+      <tr data-page-node-id="xntuSxXYbYnqzIkB3qNtZ7"><td class="dim" data-page-node-id="NT30CXMjlXRErC1jfALwdF">对照：只删三否列（不合并）</td><td class="num" data-page-node-id="112vkZn1u5Ucf6pmQJ4nny">10</td><td class="num" data-page-node-id="CmLvzZBjIOrQ5GbEBHbRhO">9.0 ms</td>
+          <td class="num" data-page-node-id="b0CltDEz4ZnEGeqEYGBjOf"><span class="bar" style="width:25px" data-page-node-id="y8jmsyh1k9kjMNVU4dkQQQ"></span>-12.5%</td>
+          <td class="dim" data-page-node-id="vNZlStVdCulo45gUIjnn0B">信息移入 tooltip；证明「合并」比「删除」少拿约 3pp</td></tr>
+      <tr data-page-node-id="GNMM3Uj898EdblrVDFiAY2"><td class="dim" data-page-node-id="amiBFCmyU9YqFZpATGXZkL">对照：只删类型+发生时间</td><td class="num" data-page-node-id="XjHP3Toe6nSeARJQN0vNFT">9</td><td class="num" data-page-node-id="mRHmVeXBMXp16tHpIGhXyY">8.3 ms</td>
+          <td class="num" data-page-node-id="ZaDriFslzRaeDmgOt2Z5bq"><span class="bar" style="width:40px" data-page-node-id="rPZEMGp65rR5xpK7Ua3GKc"></span>-20%</td>
+          <td class="dim" data-page-node-id="oSnJexneyELzrqsUpaxvSC">同列数下，纯删略优于合并（-20% vs -18%）</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="note warn" data-page-node-id="qdLjxZxDP0TFsh1mrJ6b3O">
+  <b data-page-node-id="l9MlcHNUAhu3iaPsGowdUL">结论。</b>①<b data-page-node-id="EOpagETOjopAtzhrhODwac">窄的三否列不值得合并</b>（-3%），要么保留三列，要么整组删除（信息进 tooltip，-12.5%）；
+  ②时间和问题/原因这两组「宽列」合并才有价值；③合并与删除差距仅 2~3pp，
+  所以<b data-page-node-id="5jMQdMAGUCqI6UqmhiBKXb">优先按信息价值决定删/留，性能只用来在等价方案间取舍</b>。
+</div>
+
+<div class="section-label" data-page-node-id="AYSUrw1m5Yv7MW5G89kpPu">二、现状列结构<span data-page-node-id="xsTGrwriv2v1eQKbuySFsI">13 列 · 总宽 1594px</span></div>
+<div class="card" data-page-node-id="zYGrDVysSR46ghVNUirvsQ">
+  <div class="card-h" data-page-node-id="XDuZAxaanr0TLqwjLIZZd4"><h3 data-page-node-id="nBH1aDtyfz0BXKHCBZsg8P">当前线上</h3><span class="sub" data-page-node-id="SGEY1dT57nO52PFucWLBiD">真实数据示例（id 912 / 904 / 902）</span></div>
+  <div class="card-b" data-page-node-id="WRwk5HZhe5QbAZCiu9nWf2">
+    <table class="grid" data-page-node-id="gJmtHfnV7KRCPBngHYRbyQ">
+      <tr data-page-node-id="EVl8RJHMO4nHtwLa0WkzeL">
+        <th style="width:34px" data-page-node-id="fewjLVcI5MxsvcDIv70CHU"></th>
+        <th style="width:128px" data-page-node-id="heGfoLArLHZh4wpgNl5Est">填写时间<span class="w" data-page-node-id="BGQONiPmQt76bU9EyQuOye">128</span></th>
+        <th style="width:128px" data-page-node-id="HMjWwHEaUAldVFYCAUUDHp">发生时间<span class="w" data-page-node-id="fI52SE9E7k5knh7WIvJjwo">128</span></th>
+        <th style="width:90px" data-page-node-id="dIlMIWRhS6xMG0CE36ApU4">类型<span class="w" data-page-node-id="MHiN7UJHoFm5rHd47DrPYJ">90</span></th>
+        <th style="width:200px" data-page-node-id="FLSX1xuxiwMWgpASLYzKER">位置<span class="w" data-page-node-id="1GO1D8c8QK7yA5DDaqC5Fs">200</span></th>
+        <th style="width:200px" data-page-node-id="CSb026b0yGkibLPwq3afGm">问题<span class="w" data-page-node-id="AdALoVYOGPNnPMTW7aPXzA">200</span></th>
+        <th style="width:180px" data-page-node-id="YUZS7NNpfVVhHb0fxE1zdL">发生原因<span class="w" data-page-node-id="SNmEAZiwRpf2Zaah9HEemN">180</span></th>
+        <th style="width:180px" data-page-node-id="uDAqnx1TFJT1FiVKCSi4aa">解决方案<span class="w" data-page-node-id="Yc1KCXwn3sivZJLH0u2CaH">180</span></th>
+        <th style="width:70px" data-page-node-id="w9RpQHd5l9fXeuxup2OOJk">解决<span class="w" data-page-node-id="0dE0gm1J0FjM17P1Kz0wSJ">70</span></th>
+        <th style="width:70px" data-page-node-id="f6OZ58qyGWrNA8W1QVZ6AZ">我们问题<span class="w" data-page-node-id="KDk3Zqx9Oj8xXNPp10D2R6">70</span></th>
+        <th style="width:70px" data-page-node-id="Xpw56DFqJqgDffCfwoTZwY">主动发起<span class="w" data-page-node-id="iIoVfKC4FBm1PlktDFiZ56">70</span></th>
+        <th style="width:110px" data-page-node-id="RJ5haEopqH76lv9ImF7pn0">响应<span class="w" data-page-node-id="47rd8eu0JJN27fSNImruoJ">110</span></th>
+        <th style="width:168px" data-page-node-id="SZmM1naAD8dKSYcs3xoSlO">操作<span class="w" data-page-node-id="lpcTmsdo0REahGaHYJZpiW">168</span></th>
+      </tr>
+      <tr data-page-node-id="9PByTqwyeLznrpyItGKQZN">
+        <td class="chk" data-page-node-id="uw90DI33tQFgTpPTtOEZSV">☐</td>
+        <td class="mini" data-page-node-id="2gh1A1qjITFvX3DEXTHGvM">09-03 16:57<span class="sec" data-page-node-id="dwqCI9Zo95eP0FFc4gwXpG">吴斌</span></td>
+        <td class="mini" data-page-node-id="oM42cffXW4niBYQk6Q6N8Q">2026-09-03</td>
+        <td data-page-node-id="qzxzdzAXurayezHvnQRp46">更新问题</td>
+        <td class="mini" data-page-node-id="22nL8chZjjhQoYAzRPtO3F">孙欣桌球城<span class="sec" data-page-node-id="FbHsRTPJFDZ33MmLfOLgVZ">新疆 · 199-01</span></td>
+        <td data-page-node-id="n9DiootzJ4DO5xbMJip7tz">售后呼叫</td><td data-page-node-id="w8sAXKt5XgJASJWLtkpcVQ">自动更新</td><td data-page-node-id="tljkZqtdqsG5r424Bfdmbn">重启程序</td>
+        <td class="yes" data-page-node-id="uIJF0fCnPQ4qrITZydHGVm">是</td><td class="mine" data-page-node-id="8fBePoecs8KVUmcjVkx2VH">是</td><td class="no" data-page-node-id="RB4fHPe88iqo1gyjC30l8P">否</td>
+        <td class="mini" data-page-node-id="0m7dBCn6AOhRF6dnLerTvs">1分钟内<span class="sec" data-page-node-id="ZYUKfASTCQZbd4aGFKjZ91">吴斌</span></td>
+        <td class="ops" data-page-node-id="5JMS2OiRFqj4cpO7hfKU19">编辑 · 详情</td>
+      </tr>
+      <tr class="alt" data-page-node-id="rK87ZzjmF35xO8f2HefCBC">
+        <td class="chk" data-page-node-id="2QTPVJrxQI97iBEhAM1DjL">☐</td>
+        <td class="mini" data-page-node-id="VqX5EYJTx81svCado77py9">09-03 16:50<span class="sec" data-page-node-id="Fn45PNOQh1p7Dd4Dh4ddXr">吴斌</span></td>
+        <td class="mini" data-page-node-id="qydxHascXrSCBvvWyGcWn8">2026-09-03</td>
+        <td data-page-node-id="fJLiL77DnTibW4obSMsHzS">硬件问题</td>
+        <td class="mini" data-page-node-id="zWswoAAcWaFXSOyNYMuYMA">英典台球俱乐部<span class="sec" data-page-node-id="XNsznqHEULe5hHmFGrurq4">江苏 · 72-15</span></td>
+        <td data-page-node-id="6KLvcPnwqTqTz99EbDcpQy">售后呼叫</td>
+        <td class="elide" data-page-node-id="qyZbiOtu6GWhsQryMf8qnL">电视启动之后，不显示主机画…</td>
+        <td data-page-node-id="ouyW9EqyOHPORWzx72adVI">更换主机</td>
+        <td class="yes" data-page-node-id="vys22A7m6OYI6V21aULJGs">是</td><td class="mine" data-page-node-id="cXahGv0i4lxfIXhbwg68DH">是</td><td class="no" data-page-node-id="lA6WX7w5sw0VK4itmV5592">否</td>
+        <td class="mini" data-page-node-id="qxl4CGI3GQgnXWoBHjfofu">1分钟内<span class="sec" data-page-node-id="5x2EtE5pwGa2I8hnbsRGYr">吴斌</span></td>
+        <td class="ops" data-page-node-id="kQtfOEo2E9KHMt9rr9Rwnr">编辑 · 详情</td>
+      </tr>
+      <tr data-page-node-id="3684GwsCWQthFlSnWj7RCs">
+        <td class="chk" data-page-node-id="q4dmE8ijGhWNWGhXDLTrvo">☑</td>
+        <td class="mini" data-page-node-id="Yz0C0fkJpCQ7FWoSXzf5BQ">09-03 16:27<span class="sec" data-page-node-id="CQ6S1AXcArCYuNxdupbDc9">吴斌</span></td>
+        <td class="mini" data-page-node-id="7MyY9i77QB0ncQofRKPAUL">2026-09-01</td>
+        <td data-page-node-id="CSvt0FL41EJEhXDDAbpG3A">其他问题</td>
+        <td class="mini" data-page-node-id="C2Gx5e1GoH7eOTsXXKw06N">Time Snooker<span class="sec" data-page-node-id="xPfMJA4m6EaFPgQE3HMoZQ">上海 · 131-01</span></td>
+        <td data-page-node-id="kmhodQlzHe1sgPdrp2XuTs">售后呼叫</td>
+        <td class="elide" data-page-node-id="LaDHcGh4yMHBSAt3fAVHtC">需要视频，但是NVR连接不…</td>
+        <td data-page-node-id="4zJFqpT3j3oBuZ8HUSLmsG">去现场，调出视频</td>
+        <td class="yes" data-page-node-id="nacvWoL4ELOjw9NvwwIxqV">是</td><td class="no" data-page-node-id="fR0v80B1nEzXWdVBREBKuG">否</td><td class="no" data-page-node-id="Z3g6CzrFC6XAjxozhzUe4u">否</td>
+        <td class="mini" data-page-node-id="2Rox0KGt20BmYwuSd2xE4v">30分钟内<span class="sec" data-page-node-id="e7swgOuH0hHu9ZbnpypG6N">吴斌</span></td>
+        <td class="ops" data-page-node-id="LePaGtBoJ0zIfe3FEPMddf">编辑 · 详情</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<div class="section-label" data-page-node-id="rVtr20vDSQCGNzQ2BLsBe2">三、方案 C（推荐）<span data-page-node-id="GX8lHiZuQn3cF9eMMVEffF">13 → 9 列 · -18%</span></div>
+<div class="card" data-page-node-id="j3nJYcv5J1yzNlek7xOdp4">
+  <div class="card-h" data-page-node-id="uFe3VVLuAFIPeIXGiXoSc8"><h3 data-page-node-id="19hDVNjLOh9TgOAAdXj4Ha">方案 C</h3><span class="sub" data-page-node-id="KTyexBIagGVJWNGymHcgGa">时间合并 + 问题/原因合并，三否列保留（语义色不丢）</span></div>
+  <div class="card-b" data-page-node-id="XQIK77kekfsgH698hRbqXz">
+    <table class="grid" data-page-node-id="SJDFMU6TY1Aa8aCSECCRGd">
+      <tr data-page-node-id="cTZtqXrYqlYMFDidA3Cy51">
+        <th style="width:34px" data-page-node-id="0XdZ8LIG5qzYPhC0BGpHLs"></th>
+        <th style="width:168px" data-page-node-id="bZ7FsDfj5FAnsABfnpRW2J">时间<span class="w" data-page-node-id="2CSOT4fikxlcjvmbDc8JNS">168 · 填写 + 发生 双行</span></th>
+        <th style="width:90px" data-page-node-id="bKKdCSWBqjTtf54Ohox0UR">类型<span class="w" data-page-node-id="5AiVoeuIpwXeNH1UekX7VF">90</span></th>
+        <th style="width:200px" data-page-node-id="pFTlvUJG1HToP9auNyJpDM">位置<span class="w" data-page-node-id="gWnHB4nxNJvislWSrxeu7d">200</span></th>
+        <th style="width:260px" data-page-node-id="Sg00TyExhsW6XAhc0mt7eJ">问题 / 原因<span class="w" data-page-node-id="PQcVQCdxlkx07WpBdN1ym3">260 · 双行</span></th>
+        <th style="width:180px" data-page-node-id="oqQLMDCt700ZPrFWyKfT7V">解决方案<span class="w" data-page-node-id="IMw8gN5VH4FU7GCK7miGX7">180</span></th>
+        <th style="width:70px" data-page-node-id="6PRgHiQUt4rhf4rcW0H2xN">解决<span class="w" data-page-node-id="IylehLAWUiO3oewJ3EBex1">70</span></th>
+        <th style="width:70px" data-page-node-id="jFIxS5t01l4UaNHc7mwWiu">我们问题<span class="w" data-page-node-id="RotX3KBT1TJft6anHj6R5p">70</span></th>
+        <th style="width:70px" data-page-node-id="9CCEFhCyhYuW6W3OpPBPwn">主动发起<span class="w" data-page-node-id="ygCOCmWfmdnKD2jvhBxahy">70</span></th>
+        <th style="width:110px" data-page-node-id="VWw0HHAREBtGRTqExXlwhC">响应<span class="w" data-page-node-id="BIdFQXUUHIxXZkVuTol3z1">110</span></th>
+        <th style="width:168px" data-page-node-id="MTmRi6GiqrB8SxjJHP4dkE">操作<span class="w" data-page-node-id="q60ht3MYNpgACDdCvbrMNz">168</span></th>
+      </tr>
+      <tr data-page-node-id="ZvBVtlraDKNSwTvFPq4jgO">
+        <td class="chk" data-page-node-id="NkUwa8P0CxWZpTNEO9N9OV">☐</td>
+        <td class="mini" data-page-node-id="fa3WNX5VbL5pDGEispYcYy">09-03 16:57 填 吴斌<span class="sec" data-page-node-id="nN8qE1m4ESJO1KoYNCyBVH">09-03 发生</span></td>
+        <td data-page-node-id="dnj5nafWdgxMhuRTr7bRbm">更新问题</td>
+        <td class="mini" data-page-node-id="gzLSF24SB1MZ36uHmZcCbM">孙欣桌球城<span class="sec" data-page-node-id="VhWsA9rAZkRkunHXRvhDRi">新疆 · 199-01</span></td>
+        <td class="mini" data-page-node-id="ZZzC0np2nt0NpEJnIPVLBn">售后呼叫<span class="sec" data-page-node-id="25BiYtdEfNj6BDPfyz8W31">自动更新</span></td>
+        <td data-page-node-id="NjgPhgacNWBq7JUHDyCH4D">重启程序</td>
+        <td class="yes" data-page-node-id="4qVMULA5G39edLjvPpoH1I">是</td><td class="mine" data-page-node-id="G3ADmBXwzv639S5QVPUnNk">是</td><td class="no" data-page-node-id="VwBSmwTidmRfb0q2STS5XJ">否</td>
+        <td class="mini" data-page-node-id="eS1bhhAE0uTqVZXu1H62Zu">1分钟内<span class="sec" data-page-node-id="eUcmDq1kabyOmM5xTvg8dS">吴斌</span></td>
+        <td class="ops" data-page-node-id="G7nREeFcLY5GXh4fze10uz">编辑 · 详情</td>
+      </tr>
+      <tr class="alt" data-page-node-id="QKUFcCHDfPalzpwCGSXDpG">
+        <td class="chk" data-page-node-id="qQh3HiYWuH1Vpt4nG7HXHl">☐</td>
+        <td class="mini" data-page-node-id="qqBAWMtQMaNbIidx0FDr7t">09-03 16:50 填 吴斌<span class="sec" data-page-node-id="nTGZjuoCZEBUI6J3o3gfdv">09-03 发生</span></td>
+        <td data-page-node-id="Akg3o74JnGZWGTFPff6HfK">硬件问题</td>
+        <td class="mini" data-page-node-id="DqdBZW0gl4HJM55C9ZBw6V">英典台球俱乐部<span class="sec" data-page-node-id="PRYLkZSt6nsYDE0EEC8k6T">江苏 · 72-15</span></td>
+        <td class="mini elide" data-page-node-id="oegyZ0tzzD17GinlWvZfAv">售后呼叫<span class="sec" data-page-node-id="xa504txjmCjzrVhFxLFuiz">电视启动之后，不显示主机画…</span></td>
+        <td data-page-node-id="vQXS9coAOiDXXcmNF3Yuc9">更换主机</td>
+        <td class="yes" data-page-node-id="pIrgqxoyeY5NEYByCgtHuC">是</td><td class="mine" data-page-node-id="6pBBgA0TUbeCLm8GlK0cTJ">是</td><td class="no" data-page-node-id="62vA4l7gmhk9jZzqe5qj89">否</td>
+        <td class="mini" data-page-node-id="I06RA4zYsrGtA6HraMIFyl">1分钟内<span class="sec" data-page-node-id="3VUmtAizfQljH7aBnLrFlA">吴斌</span></td>
+        <td class="ops" data-page-node-id="teFdM9728sZJTEo40og5Pn">编辑 · 详情</td>
+      </tr>
+      <tr data-page-node-id="Fzku5qrtPaCKFrNWXIALxG">
+        <td class="chk" data-page-node-id="nVjqviqMCCvYNYtmibSeuc">☑</td>
+        <td class="mini" data-page-node-id="18a3GZInpcDhATbUA4g9Xp">09-03 16:27 填 吴斌<span class="sec" data-page-node-id="5Eq8GLRKJUVpcz2vH0QAVc">09-01 发生</span></td>
+        <td data-page-node-id="1lBLhL4QDTFvWqELdNsLSx">其他问题</td>
+        <td class="mini" data-page-node-id="jNnbLnSMQ1bOArzaRJLvlJ">Time Snooker<span class="sec" data-page-node-id="Y6OYPHP48Kvgv95srr1FDs">上海 · 131-01</span></td>
+        <td class="mini elide" data-page-node-id="JecsSFhxwWDUTv6LChkNmG">售后呼叫<span class="sec" data-page-node-id="JwJWQ2vzypRKHE7DvUfxSI">需要视频，但是NVR连接不…</span></td>
+        <td data-page-node-id="UnCsScIZMJs6ba4DFEfnJI">去现场，调出视频</td>
+        <td class="yes" data-page-node-id="E0ngB2OFjybk0RUHUMnkbI">是</td><td class="no" data-page-node-id="WuICOBtPwZp30OIX0lkgPV">否</td><td class="no" data-page-node-id="jMyCdb1M8eFfgeYkHQPv0B">否</td>
+        <td class="mini" data-page-node-id="a7ed3KqolVT0Ihx3b9hhk5">30分钟内<span class="sec" data-page-node-id="lE6EdkQPdkDi3dnJ5z8CiE">吴斌</span></td>
+        <td class="ops" data-page-node-id="Q5EF5PF9QGOewHlLzmwBJQ">编辑 · 详情</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<div class="two" data-page-node-id="PaIzOz4XnE0JG87dBZ166z">
+  <div class="card" data-page-node-id="fBdw3stZfFC6lFXKpaZUTZ">
+    <div class="card-h" data-page-node-id="MJCXPtj5KjBO3arsILdbLn"><h3 data-page-node-id="LM6ETHPVhB3xDpXqAVAxgV">得</h3></div>
+    <div class="card-b" style="padding:14px 18px" data-page-node-id="j2O1AuRwzVXwDQIYOy18Qq">
+      <ul class="pts" data-page-node-id="R84hUr4gqFpVvYJd31xqk7">
+        <li data-page-node-id="hx7MdFQbR0FnlipFqb8ODE">实测 <b data-page-node-id="ZwitQlVSAtEGxwKmmQcDmQ">-18%</b> 滚动耗时，与 P0-1 叠加后约 <b data-page-node-id="A3CAeYZZnros1w0WVV3yd7">12.3 → 3.5 ms/帧</b></li>
+        <li data-page-node-id="RUicwZacOIfeabfIBynUvQ">「问题」与「原因」天然是同一次排查的因果链，放同一格双行<b data-page-node-id="Oer2wAsKmGY1hI2YF8C0pU">更好读</b></li>
+        <li data-page-node-id="w4zgJo2idWZojingduGbxL">三否列保持独立，<b data-page-node-id="vKbCPDa6wyNQtudlmMmwA1">语义色徽章不丢失</b>（绿/橙/灰区分仍在）</li>
+        <li data-page-node-id="s2Ao3w7gQzuHSdJPFthqAD">行 tooltip 已含全部原始字段，合并列的信息仍可悬停查看</li>
+      </ul>
+    </div>
+  </div>
+  <div class="card" data-page-node-id="1W7EXqwMHjB3wE2A1sjS7d">
+    <div class="card-h" data-page-node-id="BCrbxGFhcNRz5FWD0nPZng"><h3 data-page-node-id="enErRh9FKDkBEihHwrxVNw">失</h3></div>
+    <div class="card-b" style="padding:14px 18px" data-page-node-id="bdFYCJ6RDwVifm8iaGm7yE">
+      <ul class="pts" data-page-node-id="f5w1d5M24DBPiGxXW3yr2K">
+        <li data-page-node-id="1MClur7I1KHyrLc6SXUUUD">无法再<b data-page-node-id="GpJdq6hAcwXRaIZzAwSUi9">按「发生时间」单独排序</b>（改为按填写时间排序，tooltip 仍显示发生时间）</li>
+        <li data-page-node-id="AW9hnV6vsDuRrdouMqDdQW">「问题」「原因」无法分别排序列宽压缩到 260px，长原因仍需悬停</li>
+        <li data-page-node-id="GpthPHMxQaVY3BHqOnuQQD">时间列两行文字变长（填/发 + 填写人），列宽需 168px</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="section-label" data-page-node-id="jC01ov6bUkiV6HpUVCGhfs">四、方案 D（可选激进）<span data-page-node-id="zqDzZUODQUDm6poUBtitjP">13 → 8 列 · -22%</span></div>
+<div class="card" data-page-node-id="FSSth7J1TH1kjmC43b4G65">
+  <div class="card-h" data-page-node-id="GZKwAF0z2WGGMMC4A1tIlx"><h3 data-page-node-id="MpxDH9xU8AM7dgWXTUogEc">方案 D</h3><span class="sub" data-page-node-id="mBTrBv6M1hDzuyHO2pWGjg">在 C 基础上再把「类型」并入「位置」</span></div>
+  <div class="card-b" data-page-node-id="ikAohE93dav3Xw8bYmgY0X">
+    <table class="grid" data-page-node-id="ZeREHY4VIEvp5oxkRu4QkY">
+      <tr data-page-node-id="kJMwnLePrrGBZQg2Yf5cGF">
+        <th style="width:34px" data-page-node-id="tEhaRBIg7HNYT4GD4LxTqN"></th>
+        <th style="width:168px" data-page-node-id="G58VJpXsdgRP5j7nf7na7O">时间<span class="w" data-page-node-id="iGvovpsFePDnsHiBBJO9Fe">168</span></th>
+        <th style="width:250px" data-page-node-id="4qyaxKc6w8dx4Tuq82z70m">类型 / 位置<span class="w" data-page-node-id="eZbBEaR3cLFZSYBSjy6axL">250 · 双行</span></th>
+        <th style="width:260px" data-page-node-id="eJ6Ox3hWBl7QJk8Ag4BcSW">问题 / 原因<span class="w" data-page-node-id="kiFrR9I8yasT0ECELqmoPN">260 · 双行</span></th>
+        <th style="width:180px" data-page-node-id="cl0AeVkqjN2u7MtfPBf9WC">解决方案<span class="w" data-page-node-id="yPAnsQGNcCXa4oT6CnYXT8">180</span></th>
+        <th style="width:70px" data-page-node-id="C6rD8HmbDUBdVgDTkDxLnT">解决<span class="w" data-page-node-id="TrGTVg4czv4NWDX5HYuDrr">70</span></th>
+        <th style="width:70px" data-page-node-id="eBZ6AQbuko0XHF0D6sBDKU">我们问题<span class="w" data-page-node-id="ny4XRkKTDBXTe82liTymES">70</span></th>
+        <th style="width:70px" data-page-node-id="3xQLznbhKLafU5Su3kldsO">主动发起<span class="w" data-page-node-id="wKx4N4lxUNLTSXBWEBhcG2">70</span></th>
+        <th style="width:110px" data-page-node-id="L0lGyfngMAgkMmoXFDVZsn">响应<span class="w" data-page-node-id="yeBxzAR9jMuRcD2zZteDEn">110</span></th>
+        <th style="width:168px" data-page-node-id="uiKDrZ5v9RlIQ2hECDqifF">操作<span class="w" data-page-node-id="JZwq9mR8fc1ZmiHb92cHt7">168</span></th>
+      </tr>
+      <tr data-page-node-id="KYPyg85FrAi5LcVnnbpuLH">
+        <td class="chk" data-page-node-id="DJ6RfR2QFjm9jgHr8IMjVv">☐</td>
+        <td class="mini" data-page-node-id="6EG2HIU9IwEK53ZhJDhG8L">09-03 16:57 填 吴斌<span class="sec" data-page-node-id="XbqS1Ub1HzQicWvBWrxht9">09-03 发生</span></td>
+        <td class="mini" data-page-node-id="WtzU8qtcsDC5b2OvHGj5Qa">更新问题<span class="sec" data-page-node-id="q4yVNXaR2EFkPAZDJoarOy">孙欣桌球城 · 新疆 · 199-01</span></td>
+        <td class="mini" data-page-node-id="1Z5oFtt2DDBfNd4p182bck">售后呼叫<span class="sec" data-page-node-id="b5fy2sReAbLLN0vVsLueEa">自动更新</span></td>
+        <td data-page-node-id="oa9QhdB4PAlysbaIOEg5rs">重启程序</td>
+        <td class="yes" data-page-node-id="ScGMomGcmoIP0bpZE2KjWX">是</td><td class="mine" data-page-node-id="UWZH5HYReaFZVNQU1jR7C8">是</td><td class="no" data-page-node-id="nCxjiJE38DRVbMfSiatGGJ">否</td>
+        <td class="mini" data-page-node-id="06aXCCwWVDOa4d4m1GWJ8R">1分钟内<span class="sec" data-page-node-id="DMh6PLjZIfOKoGR63ReHzq">吴斌</span></td>
+        <td class="ops" data-page-node-id="o8hPsF5vwBHFSX50RYrUnX">编辑 · 详情</td>
+      </tr>
+      <tr class="alt" data-page-node-id="oG1WRtA3BtZsmtHVTzsrxD">
+        <td class="chk" data-page-node-id="RMktCZHGDWzuLI452fUiAH">☑</td>
+        <td class="mini" data-page-node-id="Z8qTJDlTR89fU24RjlzI9L">09-03 16:27 填 吴斌<span class="sec" data-page-node-id="32EcITPWARZftQL4SDW6ZG">09-01 发生</span></td>
+        <td class="mini" data-page-node-id="pkwKS0hn3WyHFkkHA7ViJ4">其他问题<span class="sec" data-page-node-id="94eu8em0WpAwbBKNGnmoLr">Time Snooker · 上海 · 131-01</span></td>
+        <td class="mini elide" data-page-node-id="QMcUDsIsloI9zJiamAhBkz">售后呼叫<span class="sec" data-page-node-id="wAYstGmKnQUjA29fWVURaz">需要视频，但是NVR连接不…</span></td>
+        <td data-page-node-id="hA5P6phsaHYLu2BXDqGTo4">去现场，调出视频</td>
+        <td class="yes" data-page-node-id="HLasm5Mroz824NNNuJZG0i">是</td><td class="no" data-page-node-id="ef3IT227w2OVOBKNMLz1P0">否</td><td class="no" data-page-node-id="OEsR9OXGlfaCzO7K5wHSfW">否</td>
+        <td class="mini" data-page-node-id="nM0jpSFlHnhyWxqZkhzJE4">30分钟内<span class="sec" data-page-node-id="qh3iWSMiERllHHE7mH0dbc">吴斌</span></td>
+        <td class="ops" data-page-node-id="g2vDELW8Vs10C3LNYU5DFo">编辑 · 详情</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<div class="note warn" data-page-node-id="TWwKPr6IhPeo5qOYUTtboO">
+  <b data-page-node-id="uob1UyzucSQ1POHm4qQBt2">不推荐作为默认。</b>「类型」是高频筛选/浏览维度，降级为位置列的副行会明显降低扫读效率；
+  相对 C 只多 <b data-page-node-id="wRM5eE9unOKCYSvWvM5vGI">4pp</b> 收益，不划算。仅建议在「低配机 / 超大屏多开」场景作为<b data-page-node-id="wKs7Bl4MZqlD7LmwrVffZY">紧凑模式</b>提供。
+</div>
+
+<div class="section-label" data-page-node-id="BnLbq7Fm23JM2T01rQlTAV">五、不推荐的方案 A<span data-page-node-id="78ErqKWsRVB2gj4BZoUZTo">13 → 11 列 · 仅 -3%</span></div>
+<div class="card" data-page-node-id="1enOWBoz2Qw35vnvCtj0cU">
+  <div class="card-h" data-page-node-id="OLjcdAGUDGnrHJUgcGxdhr"><h3 data-page-node-id="FHVpQ1zgTK9eNujX9X2mFG">三否列合并为「判定」</h3><span class="sub" data-page-node-id="wE3cWx4rshDXn2TQKRsS35">收益极低，且会丢语义色</span></div>
+  <div class="card-b" style="padding:14px 18px" data-page-node-id="DVHInmB02MeE5y75arkooD">
+    <div class="kv" data-page-node-id="35gm0JzENWIFCzo9fJwMEY">
+      合并形式：<b data-page-node-id="fJUoM2jBBVp45XqKHS4NJV">仅列出为「是」的项</b>，顿号分隔，全否显示「—」；整列颜色取「是否解决」的语义色。<br data-page-node-id="uJCcOXGyzFLD8Pb7wB4FjU">
+      示例：<span class="yes" data-page-node-id="WjoyvJNbTigWJJGcvfRsjQ">解决 · 我方</span>　/　<span class="yes" data-page-node-id="tSLbmcjGwIxan3bUGFvKae">解决</span>　/　<span class="dim" data-page-node-id="nD9BVFIUcE5FpIkX6PzCWi">—</span>
+    </div>
+    <ul class="pts" data-page-node-id="QLv6C32ZFA4ApGaAceqBvF">
+      <li data-page-node-id="Z0O2o0QQQFoH7F1Mot3StI">实测仅 <b data-page-node-id="asGAxD3Cf4OTf4DqKPiMKj">-3%</b>：3 个 70px 窄列每格只画 1 个字符，合并后变成 3~7 字符，文本成本上升抵消了减少 2 格的收益</li>
+      <li data-page-node-id="aqPwmFzXRD0k5DO85Paghs">一个 item 只能有一个前景色，三态<b data-page-node-id="SsvivKFuREciV7zOZP7vE3">独立配色（绿/橙/蓝）必然丢失</b></li>
+      <li data-page-node-id="vSph442Dl047nxkh9GDPAo">若确实要动这一组，<b data-page-node-id="DDoZxlDu1JatU0HNHX1cCE">整组删除（信息进 tooltip）可拿 -12.5%</b>，比合并更划算</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section-label" data-page-node-id="dbwx5hXnHfMMCqsjHC1zT4">六、实现影响面<span data-page-node-id="wuBoUReHkl6kJDaz8ovDtW">改动集中在售后面板显示层</span></div>
+<div class="card" data-page-node-id="sg4g98D4FvuOpCoGXeNt48">
+  <div class="card-b" data-page-node-id="S7bVmPkUbbjtfBV4PMPgGZ">
+    <table class="cmp" data-page-node-id="7GajesDbmWDl46geq8fGvD">
+      <tr data-page-node-id="lxj2gEhOiLWhBcHnvQTBES"><th style="width:34%" data-page-node-id="diU6HdhIW90q4hyvWfsa4Z">位置</th><th style="width:12%" data-page-node-id="JQAJBD3CHQ8XVIxLyJbL63">影响</th><th data-page-node-id="lSJAx4JApCb7NVrpNhMNkT">要点</th></tr>
+      <tr data-page-node-id="0C3Vpqu9SqUPF8u9fk9W0g"><td data-page-node-id="phdXnLr8phG4523HHjO8IS"><code data-page-node-id="qPrJNP2NObWABqGmvAhLvZ">windows/aftersale/common.py</code><br data-page-node-id="AiAQj0CexpPj3rrHCZQqcp"><span class="dim" data-page-node-id="1Zdpa8T1Bto46FuMQcmxkr">TABLE_COLUMNS</span></td>
+          <td data-page-node-id="CEQwU4QH3VzaWVADMDEzOI">改</td><td data-page-node-id="zW8ZW1iu25Mcad5Ptd8NGr">列定义元组；合并列用新 key（<code data-page-node-id="yDu7dBI7YULJpDaMATgMkG">time</code> / <code data-page-node-id="BwaHJugYXuKEH5tA90GJn8">problem_cause</code>）</td></tr>
+      <tr data-page-node-id="TcbRH4vFhFLMnglf8ec4Cm"><td data-page-node-id="2sYgPGUPNLQoCCyMuH6A6Y"><code data-page-node-id="SmlT55HRJleLV8LKUCsa7u">windows/aftersale/records.py</code><br data-page-node-id="r0lRHBwB2iI6yobga0LVls"><span class="dim" data-page-node-id="KawgXimi9gPWM1Tw97ME0H">_populate 的 key 分支</span></td>
+          <td data-page-node-id="0i0iiSGvoufMHK4bpdZjTb">改</td><td data-page-node-id="CmEfTWfYTRSttgy4GHW8Xf">新增 <code data-page-node-id="p0DEYqCtCe0mvJhj6FidLD">time</code>、<code data-page-node-id="CTykHgGQISNJwWdEpPabi3">problem_cause</code> 分支；双行列沿用 10.5pt 小字体</td></tr>
+      <tr data-page-node-id="SIWOt5LMxVZ0KJWybHE7BE"><td data-page-node-id="ONKktyPFPKK11W77uOfhBJ"><span class="dim" data-page-node-id="Nxoo2WE5GRqvRrre3M4Cc5">_SortKeyItem 排序键</span></td>
+          <td data-page-node-id="csU1Oms88iMDiSNIuIxmcl">改</td><td data-page-node-id="xQL5mxW5BOWMOY3PMXrLqX">合并列必须显式给排序键：<code data-page-node-id="Gzi6gVbub1RrCSnILt9l1N">time</code>→created_at，<code data-page-node-id="8ztQ9qxGCPfYy5V3MJggK8">problem_cause</code>→problem</td></tr>
+      <tr data-page-node-id="Q2meviXclCtJsEbEzGe0Ai"><td data-page-node-id="nIPvN5N3mkx2XGVhsJ860P"><span class="dim" data-page-node-id="TRg9Ccb7YsWuj2YEcvAlQx">_col_key / 双击编辑</span></td>
+          <td data-page-node-id="lGgzCOyiGECKvKuybi776C">自动</td><td data-page-node-id="AGshFlaz5K3zU9oDY5gXdA">按 <code data-page-node-id="l72BxRX3wr8SGGvgHujNWY">TABLE_COLUMNS[i][0]</code> 映射，随定义走；合并列需确认双击行为</td></tr>
+      <tr data-page-node-id="b8G3WeSA5nl1QAnnBlut67"><td data-page-node-id="jwAkaNDkDzXnwuj4MXHkLa"><code data-page-node-id="WxWpFSVCpr1HEUiFFfZ25N">_row_tooltip</code></td>
+          <td data-page-node-id="zU3cdUj9SfBapgoydq4cHZ">不动</td><td data-page-node-id="ig6opflJ7sPSzN22e4JXhm">已含全部原始字段，合并列信息不丢</td></tr>
+      <tr data-page-node-id="3XBcOWLOM4ToAxwVhto4je"><td data-page-node-id="QXFtDP0uv6lYGEqAPI7FHE">导出 / 导入预览</td>
+          <td data-page-node-id="OFqmOM3oTqyCcygKX1tBpg">不动</td><td data-page-node-id="H6qc9TXN9hE85oJGZkcbpq">走独立 <code data-page-node-id="Qvl1DMYk0JadZ6ePt4tV6Z">_PREVIEW_COLUMNS</code>，与表格列解耦</td></tr>
+      <tr data-page-node-id="zHPIDNzKpkwA2Xhd6VKKp0"><td data-page-node-id="nvlWGuh61JEaJi7D7XOoAS">DDL / 数据库</td>
+          <td data-page-node-id="9tGIVZfcEBtfZFuthTzokY">不动</td><td data-page-node-id="YRJnUG7ANAfvDOwDLnJyCt"><code data-page-node-id="LIgSl1IhdEprknyNLbsywv">database/schema.py</code> 的 TABLE_COLUMNS 是另一套（表结构），无关</td></tr>
+      <tr data-page-node-id="gSmrpJHaZjnAzFQLW5Cejy"><td data-page-node-id="CV6nGaguAdjEhUZKtV5SgY">测试</td>
+          <td data-page-node-id="RJjMFIPQBpBnE8I7HmNswU">补</td><td data-page-node-id="1VZFXwDAfwdGe5Qz2dDu23">现有冒烟无售后列数断言；建议补「列数 + 合并列排序键」断言</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="section-label" data-page-node-id="lfIZJ1hXwfy5RoR8TJCSXe">七、待确认</div>
+<div class="note" data-page-node-id="vFFvaKeFlhPv7FWVAtsF8H">
+  1. <b data-page-node-id="2J87hQ8JBf96kmiVxy6dqv">「发生时间」是否可以放弃独立排序/浏览</b>——决定时间列能否合并（方案 C 的前提）。<br data-page-node-id="oZF702GbQXXj1AKAG79LYF">
+  2. <b data-page-node-id="swRUU3LrXE2Uh7BXIJ7dR5">「问题」与「原因」同格双行是否可接受</b>——业务上两者常一起看，但列宽会从 380px 压到 260px。<br data-page-node-id="kuWPxfYbAGxwWkVkrHVYxC">
+  3. 是否需要<b data-page-node-id="WtPMyWp1TLSDns99aJTX01">列显隐/紧凑模式</b>（低配机切到方案 D 的 8 列），还是直接定死一套列。<br data-page-node-id="S4y1egsDPo2l253hk16TPW">
+  4. 与 P0-1 的先后：建议 <b data-page-node-id="EgsYMCLYgBvOL9Y6eVdD3Z">P0-1 先行</b>（不动 UI、-49%），P0-2 方案确认后再动列。
+</div>
+
+</body>
+</html>

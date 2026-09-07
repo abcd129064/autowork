@@ -124,6 +124,12 @@ class RecordsPage(QWidget):
         self._total = 0
         self._rows = []
         self._worker = None
+        # 写操作（新增/复制/更新/删除）独立槽，不与查询 worker 抢 _worker：
+        # 旧实现写 worker 覆盖 _worker 后，在跑的查询 worker 成孤儿——既无法
+        # 被打断，其 result_ready→_on_loaded 连接仍在，晚归时用「写前+旧筛选」
+        # 的过期结果压掉后续正确查询（搜索中新增→取消搜索后新记录消失，
+        # 2026-09-08 修复）。属性以 _worker 结尾，detach_workers 扫描自动覆盖。
+        self._mutate_worker = None
         self._export_worker = None
         self._import_worker = None
         self._cycles_loaded = False
@@ -644,8 +650,14 @@ class RecordsPage(QWidget):
     def _load(self):
         """按当前筛选异步查询（分页数据 + 统计一次返回）"""
         if self._worker and self._worker.isRunning():
+            # 只 interrupt 不 disconnect：worker.run() 检测到中断会静默返回
+            # 不发 result_ready；且 disconnect() 会连内部 finished→_release
+            # 一起断掉，导致保活集合泄漏。双保险：_query_seq 过期守卫。
             self._worker.requestInterruption()
-            self._worker.disconnect(self)
+        # 查询代数守卫：即便旧查询信号已入队（disconnect 拦不住 queued 调用），
+        # 回调时按 seq 丢弃过期结果（2026-09-08 搜索中新增竞态修复）
+        self._query_seq = getattr(self, "_query_seq", 0) + 1
+        seq = self._query_seq
         f = self._current_filters()
         self._worker = AftersaleDBWorker(
             aftersale_db.query_with_stats,
@@ -654,11 +666,15 @@ class RecordsPage(QWidget):
             issue_type=f["issue_type"], resolved=f["resolved"],
             is_initiative=f["is_initiative"],
             is_our_problem=f["is_our_problem"])
-        self._worker.result_ready.connect(self._on_loaded)
-        self._worker.error.connect(self._on_load_error)
+        self._worker.result_ready.connect(
+            lambda result, _s=seq: self._on_loaded(result, _s))
+        self._worker.error.connect(
+            lambda msg, _s=seq: self._on_load_error(msg, _s))
         self._worker.start()
 
-    def _on_loaded(self, result):
+    def _on_loaded(self, result, seq=None):
+        if seq is not None and seq != getattr(self, "_query_seq", None):
+            return  # 过期查询结果（已被更新的筛选/翻页取代），丢弃
         total, rows, stats = result
         self._total = total
         self._rows = rows
@@ -684,7 +700,9 @@ class RecordsPage(QWidget):
             show_info_bar(f"已刷新 · 共 {total} 条记录", "success",
                           title="刷新", parent=self, duration=2500)
 
-    def _on_load_error(self, msg):
+    def _on_load_error(self, msg, seq=None):
+        if seq is not None and seq != getattr(self, "_query_seq", None):
+            return  # 过期查询的错误，丢弃
         self._lbl_stats.setText(f"查询失败: {msg}")
         self._update_source_label()
         if self._manual_refresh:
@@ -1163,16 +1181,16 @@ class RecordsPage(QWidget):
         self._edit_cand_worker = cand_worker  # 保活引用
         if dlg.exec() and getattr(dlg, "collected", None):
             collected = dlg.collected
-            self._worker = AftersaleDBWorker(
+            self._mutate_worker = AftersaleDBWorker(
                 aftersale_db.insert_record, collected)
-            self._worker.result_ready.connect(
+            self._mutate_worker.result_ready.connect(
                 lambda _rid: (show_info_bar("记录已新增", "success",
                                             title="新增成功", parent=self,
                                             duration=2000), self._load()))
-            self._worker.error.connect(
+            self._mutate_worker.error.connect(
                 lambda m: show_info_bar(m, "error", title="新增失败",
                                         parent=self, duration=4000))
-            self._worker.start()
+            self._mutate_worker.start()
 
     def _on_duplicate(self, row: int = -1):
         """复制当前行：按原记录内容新增一条相同记录（填写时间/周期重算）"""
@@ -1184,16 +1202,16 @@ class RecordsPage(QWidget):
         rec.pop("id", None)
         rec.pop("created_at", None)    # insert_record 自动取当前填写时间
         rec.pop("cycle_start", None)   # 周期按发生时间重新归属
-        self._worker = AftersaleDBWorker(aftersale_db.insert_record, rec)
-        self._worker.result_ready.connect(
+        self._mutate_worker = AftersaleDBWorker(aftersale_db.insert_record, rec)
+        self._mutate_worker.result_ready.connect(
             lambda _rid: (show_info_bar("记录已复制并新增", "success",
                                         title="复制成功", parent=self,
                                         duration=2000),
                           self._load()))
-        self._worker.error.connect(
+        self._mutate_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="复制失败",
                                     parent=self, duration=4000))
-        self._worker.start()
+        self._mutate_worker.start()
 
     def _on_edit(self, row: int = -1):
         """编辑（按行号入口：双击/右键菜单/选中行）"""
@@ -1221,15 +1239,15 @@ class RecordsPage(QWidget):
             self._run_update(collected)
 
     def _run_update(self, record):
-        self._worker = AftersaleDBWorker(aftersale_db.update_record, record)
-        self._worker.result_ready.connect(
+        self._mutate_worker = AftersaleDBWorker(aftersale_db.update_record, record)
+        self._mutate_worker.result_ready.connect(
             lambda _n: (show_info_bar("记录已更新", "success",
                                       title="保存成功", parent=self, duration=2000),
                         self._load()))
-        self._worker.error.connect(
+        self._mutate_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="保存失败",
                                     parent=self, duration=4000))
-        self._worker.start()
+        self._mutate_worker.start()
 
     def _on_delete(self, row: int = -1):
         """删除（按行号入口：右键菜单/选中行）"""
@@ -1253,15 +1271,16 @@ class RecordsPage(QWidget):
         dlg.cancelButton.setText("取消")
         if not dlg.exec():
             return
-        self._worker = AftersaleDBWorker(aftersale_db.delete_record, rec.get("id"))
-        self._worker.result_ready.connect(
+        self._mutate_worker = AftersaleDBWorker(aftersale_db.delete_record,
+                                                rec.get("id"))
+        self._mutate_worker.result_ready.connect(
             lambda _n: (show_info_bar("记录已删除", "success",
                                       title="删除成功", parent=self, duration=2000),
                         self._load()))
-        self._worker.error.connect(
+        self._mutate_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="删除失败",
                                     parent=self, duration=4000))
-        self._worker.start()
+        self._mutate_worker.start()
 
     # ---------- 导出 / 导入 ----------
 

@@ -232,15 +232,15 @@ class SettingsHubPage(QWidget):
         self._stack = QStackedWidget(self)
         pages = (
             # 2026-09-07 二期反馈：顺序 应用配置→工具→性能→数据库→面板设置→外观；
-            # 收集与上传自数据库页迁入、配置文件自工具页迁入应用配置，
-            # 手动添加球桌记录自数据库页迁入面板设置（运维）
+            # 配置文件自工具页迁入应用配置；手动添加球桌记录自数据库页迁入面板设置；
+            # 2026-09-07：收集与上传自应用配置迁入面板设置「运维」组内
             ("config", "应用配置", (self._group_paths,
-                                    self._group_ai, self._group_upload,
                                     self._group_log_rules, self._group_files)),
             # 2026-09-07 三期衔接：远程连接独立分页（SSH/SFTP/FRP），
             # 为二期远程会话页（design/remote_session_v2.html）预留落点
             ("remote", "远程连接", (self._group_remote,)),
-            ("tools", "工具", (self._group_tools,)),
+            # 2026-09-07：AI 分析自应用配置迁入工具页
+            ("tools", "工具", (self._group_tools, self._group_ai)),
             ("perf", "性能", (self._group_perf,)),
             ("database", "数据库", (self._group_database,)),
             ("panels", "面板设置", (self._group_aftersale, self._group_ledger,
@@ -484,26 +484,39 @@ class SettingsHubPage(QWidget):
             return g.addRow(SettingRow(
                 icon, title, desc, make_button(btn_text, cb, width=76)))
 
+        # 2026-09-07 二期：单杆视频/端口占用/上传清单/批量整理已迁独立
+        # 「工具」页（main_window.tool_hub），此处仅保留纯动作入口
         row(FluentIcon.EDIT, "修改快捷键", "自定义全局快捷键",
             "修改…", win._on_modify_shortcuts)
-        row(FluentIcon.LIBRARY, "上传清单", "查看已收集待上传的视频和日志",
-            "查看", win._on_show_upload_list)
         row(FluentIcon.DEVELOPER_TOOLS, "连接诊断", "查看连接日志与失败记录",
             "打开", win._on_open_conn_diag)
-        row(FluentIcon.VIDEO, "单杆视频",
-            "从日志解析单杆得分，生成带计分水印的单杆视频",
-            "打开", win._on_open_single_video)
-        row(FluentIcon.CONNECT, "端口占用", "占用指定端口模拟服务，用于联调测试",
-            "打开", win._on_open_port_fake)
-        row(FluentIcon.LIBRARY, "视频与日志批量整理", "按署名批量归类视频和日志",
-            "打开", win._on_newlog_organize)
+        row(FluentIcon.CODE, "打开工具页",
+            "单杆视频 / 端口占用 / 上传清单 / 批量整理",
+            "前往", win._on_open_tool_hub)
+
+        # 工具页行为开关（单杆视频工作区读取，2026-09-07 二期需求）
+        settings = win._load_settings()
+
+        def _persist(key, value):
+            win._save_settings({key: bool(value)})
+
+        g.addRow(SettingRow(
+            FluentIcon.SYNC, "随机生成 session_code",
+            "选择日志文件后自动随机生成 session_code（关闭则保留当前值）",
+            make_switch(bool(settings.get("single_random_session_code", True)),
+                        lambda on: _persist("single_random_session_code", on))))
+        g.addRow(SettingRow(
+            FluentIcon.FOLDER, "生成后自动打开所在目录",
+            "单杆视频生成完成后自动用资源管理器打开输出目录",
+            make_switch(bool(settings.get("single_auto_open_dir", False)),
+                        lambda on: _persist("single_auto_open_dir", on))))
         return g
 
     def _group_database(self, parent):
         g = SettingGroup("数据库与接口", parent)
         # 原管理设置页迁入（数据源/接口1·2 账号/MySQL 配置）；2026-09-07
-        # 收集上传迁「应用配置」、手动添加球桌迁「面板设置→运维」，embedded
-        # 模式不再构建这三张卡
+        # 收集上传先迁「应用配置」再并入「面板设置→运维」组、手动添加球桌迁
+        # 「面板设置→运维」，embedded 模式不再构建这三张卡
         from windows.management.settings_page import AdminSettingsPage
         self.admin_settings = AdminSettingsPage(parent, embedded=True)
         self.admin_settings.table_smooth_changed.connect(
@@ -529,11 +542,12 @@ class SettingsHubPage(QWidget):
         return g
 
     def _group_management(self, parent):
-        """运维（2026-09-07 手动添加球桌记录自数据库页迁入，作运维面板设置）"""
+        """运维（手动添加球桌记录 + 收集与上传，2026-09-07 上传自应用配置并入）"""
         from windows.management.settings_page import AddTableRecordCard
         g = SettingGroup("运维", parent)
         self.add_record_card = AddTableRecordCard(parent)
         g.addWidget(self.add_record_card)
+        self._add_upload_rows(g)
         return g
 
     def _group_files(self, parent):
@@ -742,17 +756,16 @@ class SettingsHubPage(QWidget):
         g.addRow(url_row)
         return g
 
-    def _group_upload(self, parent):
-        """收集与上传（2026-09-07 自数据库页 AdminSettingsPage 迁入）
+    def _add_upload_rows(self, g):
+        """收集与上传行（2026-09-07 自应用配置并入「运维」组）
 
         精度/问题文件收集打包上传的 SFTP 目标；键与旧卡同（upload_*，
-        credentials 域落盘自动 DPAPI），        独立窗口模式的管理设置页仍保留
+        credentials 域落盘自动 DPAPI），独立窗口模式的管理设置页仍保留
         原集中保存卡，两处写同一批配置键。
         """
         from main_window.setting_cards import make_line_edit
         win = self._win
         settings = win._load_settings()
-        g = SettingGroup("收集与上传", parent)
 
         def _int_or(text, default):
             try:
@@ -792,7 +805,6 @@ class SettingsHubPage(QWidget):
             make_line_edit(str(settings.get("upload_pass", "") or ""),
                            lambda t: win._save_settings({"upload_pass": t}),
                            "上传密码", password=True)))
-        return g
 
     def _group_log_rules(self, parent):
         """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效"""
