@@ -193,12 +193,18 @@ class EntryPage(QWidget):
         self._btn_submit.setEnabled(False)
         record = self.form.collect()
         self._save_worker = AftersaleDBWorker(aftersale_db.insert_record, record)
-        self._save_worker.result_ready.connect(self._on_saved)
+        # 提交成功才记住本次发生日期（「记住上次发生日期」开关控制，
+        # 2026-09-16 需求：下一条默认沿用上一条的发生日期而非当日）
+        self._save_worker.result_ready.connect(
+            lambda _rid, occ=record.get("occurred_at"): self._on_saved(
+                _rid, occ))
         self._save_worker.error.connect(self._on_save_error)
         self._save_worker.start()
 
-    def _on_saved(self, rec_id):
+    def _on_saved(self, rec_id, occurred_at=None):
         self._btn_submit.setEnabled(True)
+        if occurred_at:
+            aftersale_db.save_last_occurred(str(occurred_at))
         self.form.clear_form()
         self._update_required_progress()
         show_info_bar(f"售后记录已提交（编号 {rec_id}）", "success",

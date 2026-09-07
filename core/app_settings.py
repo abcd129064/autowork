@@ -71,6 +71,12 @@ KEY_DOMAIN = {
     "aftersale_quick_phrases": "aftersale",
     "aftersale_last_creator": "aftersale",
     "aftersale_last_resolver": "aftersale",
+    # 记住上次发生日期（2026-09-16 需求，面板设置-售后台账）
+    "aftersale_remember_occurred": "aftersale",
+    "aftersale_last_occurred": "aftersale",
+    # 记录自动刷新（2026-09-16 需求，面板设置-售后台账）
+    "aftersale_auto_refresh": "aftersale",
+    "aftersale_auto_refresh_interval": "aftersale",
     # ---- perf ----
     "perf_acrylic": "perf",
     "perf_animation": "perf",
@@ -130,6 +136,9 @@ KEY_DOMAIN = {
     "restore_remote_sessions": "remote",
     # ---- misc ----
     "web_port": "misc",
+    # 工具页·单杆视频行为开关（2026-09-07 二期）
+    "single_random_session_code": "misc",
+    "single_auto_open_dir": "misc",
 }
 
 # ==================== 运行时状态 ====================

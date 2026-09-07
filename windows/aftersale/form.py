@@ -84,7 +84,9 @@ class AftersaleForm(QWidget):
         self.occurred_picker = ZhDatePicker(self)
         self.occurred_picker.setFixedWidth(150)
         self.occurred_picker.setFixedHeight(33)
-        self.occurred_picker.setDate(QDate.currentDate())
+        # 默认日期走 _default_occurred_date()：开「记住上次发生日期」时
+        # 沿用上一条新增的日期（连续补录同一天免重复拨日期），否则当日
+        self.occurred_picker.setDate(self._default_occurred_date())
         occurred_row.addWidget(self.occurred_picker)
         # 日期步进按钮（实心三角成组）：连续点击逐日前移/后移，
         # 补录历史发生日期（如 8/25 录 8/20 的售后）连续点 ◀ 即可回退
@@ -457,6 +459,17 @@ class AftersaleForm(QWidget):
         self.occurred_picker.setDate(
             self.occurred_picker.date.addDays(delta_days))
 
+    @staticmethod
+    def _default_occurred_date() -> QDate:
+        """新增/清空表单时「发生时间」的默认值。
+
+        开「记住上次发生日期」（统一设置-面板设置-售后，默认开）且已记住
+        日期时用记住值；否则回落到当日。记住值非法（格式损坏）同样回落当日。
+        """
+        last = QDate.fromString(aftersale_db.load_last_occurred(),
+                                "yyyy-MM-dd")
+        return last if last.isValid() else QDate.currentDate()
+
     # ---------- 值读写 ----------
 
     def set_values(self, rec: dict):
@@ -569,7 +582,7 @@ class AftersaleForm(QWidget):
         self.is_our_problem_combo.setValue("是")
         self.is_important_check.setChecked(False)
         self.type_combo.setCurrentIndex(-1)
-        self.occurred_picker.setDate(QDate.currentDate())  # 默认当日
+        self.occurred_picker.setDate(self._default_occurred_date())  # 记忆或当日
         self.region_combo.setText("")
         self._snk_code = ""
         self._last_city = ""

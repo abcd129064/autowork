@@ -872,6 +872,95 @@ def save_last_people(creator: str, resolver: str) -> None:
         app_settings.set(_LAST_RESOLVER_KEY, resolver)
 
 
+# ---------- 「记住上次发生日期」（2026-09-16 需求：上一条填 9/14，下一条默认仍 9/14） ----------
+_REMEMBER_OCCURRED_KEY = "aftersale_remember_occurred"
+_LAST_OCCURRED_KEY = "aftersale_last_occurred"
+
+
+def remember_occurred_enabled() -> bool:
+    """「记住上次发生日期」开关（config/aftersale.json，缺省开启）"""
+    return bool(app_settings.get(_REMEMBER_OCCURRED_KEY, True))
+
+
+def load_last_occurred() -> str:
+    """上次新增记录的发生日期（yyyy-MM-dd）；开关关闭或无记录返回空串。
+
+    供 AftersaleForm 计算发生时间默认值——表单层据此沿用上次的日期，
+    而非每次重置回当天（连续补录同一天的多条售后时免重复拨日期）。
+    """
+    if not remember_occurred_enabled():
+        return ""
+    return _load_settings_str(_LAST_OCCURRED_KEY)
+
+
+def save_last_occurred(occurred: str) -> None:
+    """记住本次新增记录的发生日期（开关关闭 / 空值时不写）"""
+    occurred = (occurred or "").strip()
+    if not occurred or not remember_occurred_enabled():
+        return
+    app_settings.set(_LAST_OCCURRED_KEY, occurred)
+
+
+def set_remember_occurred(enabled: bool) -> None:
+    """写「记住上次发生日期」开关（统一设置-面板设置-售后 联动入口）。
+
+    关闭时一并清除已记住的日期：重新打开后从「当日」重新开始，
+    不会复活几天前的旧日期。
+    """
+    app_settings.set(_REMEMBER_OCCURRED_KEY, bool(enabled))
+    if not enabled:
+        app_settings.remove(_LAST_OCCURRED_KEY)
+
+
+# ---------- 记录自动刷新（2026-09-16 需求：他人填写免手动同步） ----------
+_AUTO_REFRESH_KEY = "aftersale_auto_refresh"
+_AUTO_REFRESH_INTERVAL_KEY = "aftersale_auto_refresh_interval"
+
+
+def auto_refresh_enabled() -> bool:
+    """「自动刷新记录」开关（config/aftersale.json，缺省关闭）"""
+    return bool(app_settings.get(_AUTO_REFRESH_KEY, False))
+
+
+def auto_refresh_interval() -> int:
+    """自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数，防误配高频轮询）"""
+    try:
+        v = int(app_settings.get(_AUTO_REFRESH_INTERVAL_KEY, 30))
+    except (TypeError, ValueError):
+        return 30
+    return v if v >= 5 else 30
+
+
+def set_auto_refresh(enabled: bool) -> None:
+    """写「自动刷新记录」开关（统一设置-面板设置-售后 联动入口）"""
+    app_settings.set(_AUTO_REFRESH_KEY, bool(enabled))
+
+
+def set_auto_refresh_interval(seconds: int) -> None:
+    """写自动刷新间隔秒数（<5 秒的入参按 5 秒下限钳制）"""
+    try:
+        v = int(seconds)
+    except (TypeError, ValueError):
+        return
+    app_settings.set(_AUTO_REFRESH_INTERVAL_KEY, max(5, v))
+
+
+def change_fingerprint() -> tuple:
+    """全表轻量指纹 (条数, 最大 updated_at, 最大 id)——自动刷新判据。
+
+    轮询只跑这一条聚合 SQL（COUNT/MAX 全走不了索引也仅毫秒级），
+    与 RecordsPage 上次快照比对：一致则完全不动表格（保滚动位置、
+    勾选与展开状态），不一致才触发一次静默重查。
+    删除不改 MAX(updated_at)，故 COUNT 也入指纹；id 单调增兜底
+    同秒批量写入。MySQL autocommit 下他人提交即对本查询可见。
+    """
+    conn = _conn()
+    row = conn.execute(
+        "SELECT COUNT(*), MAX(updated_at), MAX(id) "
+        "FROM aftersale_records").fetchone()
+    return (int(row[0] or 0), str(row[1] or ""), int(row[2] or 0))
+
+
 # S4（2026-09-06）：动态候选进程内缓存（写后失效）——get_field_candidates
 # 是 4 条 GROUP BY 全表聚合（100k 内存库单次 94ms），录入页 showEvent 与
 # 新增/编辑弹窗每次打开都触发，数据未变时纯属重复劳动。写操作成功后

@@ -230,16 +230,11 @@ def _level_color(level: str):
     return color
 
 
-class ConnDiagPanel(QDialog):
-    """连接诊断面板：只读展示连接日志，失败记录置顶，支持设备/时间过滤"""
+class ConnDiagWidget(QWidget):
+    """连接诊断主体（可嵌入 RemoteHub 等容器；2026-09-07 自 QDialog 抽出）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        apply_window_qss(self)
-        self.setWindowTitle("连接诊断")
-        self.resize(1150, 600)
-        self.setMinimumSize(760, 420)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
 
         self._records = []      # 全量记录（未过滤）
         self._filtered = []     # 当前过滤后的记录（与表格行一一对应）
@@ -250,7 +245,7 @@ class ConnDiagPanel(QDialog):
         self.reload()
 
     def _apply_smooth_mode(self):
-        """按当前生效的平滑滚动设置刷新本窗口表格（远程会话设置页联动）"""
+        """按当前生效的平滑滚动设置刷新表格（远程会话设置页联动）"""
         apply_table_smooth_mode(self._table, panel="remote")
 
     # ==================== UI 构建 ====================
@@ -614,6 +609,34 @@ class ConnDiagPanel(QDialog):
         self._apply_filter()
         self._pivot.setCurrentItem('detail')
         self._lbl_info.setText(f"已过滤设备: {host}")
+
+
+class ConnDiagPanel(QDialog):
+    """连接诊断独立窗口（菜单/设置页入口保留；UI 主体在 ConnDiagWidget，
+    RemoteHub「连接诊断」视图直接嵌入该 widget 不再走本窗口）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        apply_window_qss(self)
+        self.setWindowTitle("连接诊断")
+        self.resize(1150, 600)
+        self.setMinimumSize(760, 420)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._body = ConnDiagWidget(self)
+        lay.addWidget(self._body)
+        # 兼容旧引用（core.perf / hub_pages 按属性 getattr 调用 _table 等）
+        self._table = self._body._table
+
+    def _apply_smooth_mode(self):
+        """按当前生效的平滑滚动设置刷新表格（远程会话设置页联动）"""
+        self._body._apply_smooth_mode()
+
+    def reload(self):
+        self._body.reload()
 
 
 if __name__ == '__main__':

@@ -28,7 +28,7 @@ from windows.remote_session.rdp_window import RDPPanel, RDPWindow  # noqa: F401
 from windows.remote_session.conn_diag_panel import (  # noqa: F401
     LOG_NAME, parse_log_text, load_all_records,
     is_success_record, is_conn_fail_record, aggregate_stats,
-    ConnDiagPanel,
+    ConnDiagPanel, ConnDiagWidget,
 )
 from windows.remote_session.forensic_report import (  # noqa: F401
     FORENSIC_COMMANDS, get_forensic_dir, build_forensic_report,

@@ -19,7 +19,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget,
                                QHBoxLayout, QScrollArea, QFrame)
 from qfluentwidgets import (Pivot, TitleLabel, CaptionLabel, CardWidget,
-                            PushButton, setCustomStyleSheet)
+                            PushButton, setCustomStyleSheet, ToolButton,
+                            FluentIcon)
 
 
 class PivotPage(QWidget):
@@ -30,6 +31,11 @@ class PivotPage(QWidget):
       - :meth:`switchTo` 与 FluentWindow.switchTo 同名，方便页面代码统一调用
       - 页面会带上 ``_hub_container`` 反向引用，主窗口 :meth:`switch_to_page`
         据此把「FluentWindow.switchTo(子页)」翻译为「切到本容器 + 容器内切换」
+
+    「弹出面板」（2026-09-07 需求）：切换条右端的浮动按钮把本 Hub 复刻为
+    独立窗口（即 FluentWindow 重构前主界面点导航弹出子面板的形态）。
+    弹出窗口（main_window/hub_popout.HubPopoutWindow）内嵌的 Hub 实例
+    由其构造方把 :attr:`btn_popout` 隐藏（窗口里再套一层弹出无意义）。
     """
 
     def __init__(self, parent=None):
@@ -51,6 +57,33 @@ class PivotPage(QWidget):
         lay.addWidget(self.stack, 1)
         self._pages = []
 
+        # ---------- 弹出为独立窗口按钮（叠放在切换条行右端） ----------
+        self.btn_popout = ToolButton(FluentIcon.FIT_PAGE, self)
+        self.btn_popout.setToolTip("弹出面板：在本窗口外独立打开此面板")
+        self.btn_popout.setAccessibleName("弹出面板")
+        self.btn_popout.clicked.connect(self._on_popout)
+        self.btn_popout.raise_()
+
+    def _on_popout(self):
+        win = self.window()
+        fn = getattr(win, "open_hub_popout", None)
+        if fn is not None:
+            fn(self)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.btn_popout.isVisible():
+            self._reposition_popout_btn()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.btn_popout.isVisible():
+            self._reposition_popout_btn()
+
+    def _reposition_popout_btn(self):
+        """按钮贴页面右上角（垂直对齐 Pivot 切换条行中部）"""
+        self.btn_popout.move(self.width() - self.btn_popout.width() - 16, 10)
+
     # ---------- 注册 ----------
 
     def addPage(self, page, text, icon=None):
@@ -70,6 +103,10 @@ class PivotPage(QWidget):
         self.pivot.addItem(routeKey=page.objectName(), text=text,
                            onClick=_go, icon=icon)
         self._pages.append(page)
+        # 记录页面元信息（弹出面板窗口按此重建左侧导航，2026-09-07）
+        if not hasattr(self, "_page_meta"):
+            self._page_meta = []
+        self._page_meta.append((page, text, icon))
         return page
 
     def switchTo(self, page):

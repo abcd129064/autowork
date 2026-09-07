@@ -165,3 +165,40 @@ def test_cache_isolation_between_reload(env, monkeypatch, tmp_path_factory):
     assert fas.get("web_port", "none") == "none"
     fas.set("web_port", 2222)
     assert fas.get("web_port") == 2222
+
+
+# ==================== 记住上次发生日期（2026-09-16 需求） ====================
+
+
+def test_remember_occurred_roundtrip(env):
+    """开关默认开；开启时存/取记住日期；关闭时读取为空且清除已记住值"""
+    from database import aftersale_db as adb
+    assert adb.remember_occurred_enabled() is True      # 缺省开启
+    assert adb.load_last_occurred() == ""               # 尚未记住
+    adb.save_last_occurred("2026-09-14")
+    assert adb.load_last_occurred() == "2026-09-14"
+    assert fas.get("aftersale_last_occurred") == "2026-09-14"  # 落 aftersale 域
+    adb.set_remember_occurred(False)
+    assert adb.load_last_occurred() == ""               # 关闭即失效
+    adb.save_last_occurred("2026-09-15")                # 关闭态写入无效
+    assert fas.get("aftersale_last_occurred") is None   # 关闭时已清除
+    adb.set_remember_occurred(True)                     # 重开不复活旧值
+    assert adb.load_last_occurred() == ""
+
+
+def test_auto_refresh_settings(env):
+    """自动刷新配置：缺省关闭/间隔 30；间隔钳制 ≥5；开关可往返"""
+    from database import aftersale_db as adb
+    assert adb.auto_refresh_enabled() is False           # 缺省关闭
+    assert adb.auto_refresh_interval() == 30
+    adb.set_auto_refresh_interval(1)                     # 低于下限
+    assert adb.auto_refresh_interval() == 5              # 钳制到 5
+    adb.set_auto_refresh_interval(300)
+    assert adb.auto_refresh_interval() == 300
+    assert fas.get("aftersale_auto_refresh_interval") == 300  # 落 aftersale 域
+    adb.set_auto_refresh(True)
+    assert adb.auto_refresh_enabled() is True
+    adb.set_auto_refresh(False)
+    assert adb.auto_refresh_enabled() is False
+    adb.set_auto_refresh_interval("乱码")                # 非法入参不崩溃不写
+    assert adb.auto_refresh_interval() == 300

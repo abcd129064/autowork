@@ -828,7 +828,9 @@ class UIMixin:
         func_menu.addAction(act_settings)
         act_upload_list = Action(FluentIcon.LIBRARY, "上传清单", self)
         act_upload_list.setToolTip("查看已收集待上传的文件（视频/日志目录/upload）")
-        act_upload_list.triggered.connect(lambda: QTimer.singleShot(0, self._on_show_upload_list))
+        act_upload_list.triggered.connect(
+            lambda: QTimer.singleShot(
+                0, lambda: self._on_open_tool_hub("upload_list_work")))
         func_menu.addAction(act_upload_list)
         act_conn_diag = Action(FluentIcon.DEVELOPER_TOOLS, "连接诊断", self)
         act_conn_diag.setToolTip("查看 SSH/SFTP 连接日志与失败记录（含归档）")
@@ -854,21 +856,28 @@ class UIMixin:
         func_btn.setMenu(func_menu)
         _mb_layout.addWidget(func_btn)
 
-        # 「工具」菜单：单杆视频（收编 single_json）+ 视频/日志批量整理（自「功能」菜单迁入）
+        # 「工具」菜单：2026-09-07 二期起 4 条功能入口统一跳转独立工具页
+        # （弹窗实现 _on_open_single_video/_on_open_port_fake/_on_newlog_organize
+        #  保留不删，作为回退兜底）
         tool_menu = _create_menu("工具", self)
         act_single_video = Action(FluentIcon.VIDEO, "单杆视频", self)
         act_single_video.setToolTip("从日志解析单杆得分，生成带计分水印的单杆视频（single_json）")
-        act_single_video.triggered.connect(lambda: QTimer.singleShot(0, self._on_open_single_video))
+        act_single_video.triggered.connect(
+            lambda: QTimer.singleShot(
+                0, lambda: self._on_open_tool_hub("single_video_work")))
         tool_menu.addAction(act_single_video)
         act_port_fake = Action(FluentIcon.CONNECT, "端口占用", self)
         act_port_fake.setToolTip("真实监听指定端口模拟服务占用（netstat 可见 LISTENING）")
         act_port_fake.triggered.connect(
-            lambda: QTimer.singleShot(0, self._on_open_port_fake))
+            lambda: QTimer.singleShot(
+                0, lambda: self._on_open_tool_hub("port_fake_work")))
         tool_menu.addAction(act_port_fake)
         tool_menu.addSeparator()
         act_newlog = Action(FluentIcon.LIBRARY, "视频/日志批量整理", self)
         act_newlog.setToolTip("按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog）")
-        act_newlog.triggered.connect(lambda: QTimer.singleShot(0, self._on_newlog_organize))
+        act_newlog.triggered.connect(
+            lambda: QTimer.singleShot(
+                0, lambda: self._on_open_tool_hub("newlog_work")))
         tool_menu.addAction(act_newlog)
         tool_btn = TransparentDropDownPushButton("工具", self._menubar_widget)
         tool_btn.setMenu(tool_menu)
@@ -1537,6 +1546,23 @@ class UIMixin:
         dlg.enter_organized(dlg._out_path)
         self._reactivate_newlog_dlg(dlg)
 
+    def _on_open_tool_hub(self, work=None):
+        """工具入口统一跳转二期独立工具页（main_window.tool_hub）。
+
+        work 可为工作区属性名（single_video_work/port_fake_work/
+        upload_list_work/newlog_work），缺省保持当前页。2026-09-07：
+        菜单栏/设置-工具的 4 条旧弹窗入口全部改走本方法（弹窗代码保留
+        不删，作为回退兜底）。
+        """
+        hub = getattr(self, "tool_hub", None)
+        if hub is None:
+            return
+        self.switchTo(hub)
+        if work:
+            page = getattr(hub, work, None)
+            if page is not None:
+                hub.switchTo(page)
+
     def _on_open_settings(self):
         """统一设置入口：跳转底部设置 Hub（2026-09-07 弹窗废止）
 
@@ -1736,6 +1762,12 @@ class UIMixin:
         settings = self._load_settings()
         is_dark = self._effective_is_dark(settings)
 
+        # 2026-09-07 教训留档：setTheme 勿传 lazy=True——qfw lazy 分支对
+        # 不可见控件 register(reset=True) 重建合并树 + dirty-qss 延迟到
+        # Paint 才重应用，与本项目 _reset_qss_compose_trees 交互异常（真机
+        # 不可见页白底白字 10s+）。本轮「主题切换时长优化」（lazy/冻结重绘/
+        # Mica 提前重组）经用户决定整体回退；方案与教训详见
+        # .workbuddy/memory/2026-09-07.md，二期如需再做先读后再动
         setTheme(Theme.DARK if is_dark else Theme.LIGHT)
         setThemeColor(self._parse_theme_color(settings), lazy=True)
         QApplication.styleHints().setColorScheme(

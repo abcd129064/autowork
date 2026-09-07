@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="g9CZI1armYr6hlqcWw7JwD">
+<head data-page-node-id="iPsfmUSSHk4UpDtsEzmxsM">
+<meta charset="UTF-8" data-page-node-id="ldHFs9VeIoewp8MSgzQvGf">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="wFtMxjeuBb3F2D89PKCeC9">
+<title>工具页 · 二期设计稿（ToolHub v2 · qfw 控件还原）</title>
+<style>
+  /* ===== 取自 core/design_tokens.py + styles/light.qss 真实 token ===== */
+  :root{
+    --accent:#00BCD4; --accent-hover:#00ACC1; --accent-press:#00838F;
+    --accent-soft:rgba(0,188,212,.15);
+    --bg:#F5F6F8; --surface:#FFFFFF; --border:#E0E0E0;
+    --text:#20242B; --text2:#6B7280; --text3:#9CA3AF;
+    --success:#1a9e6c; --warning:#c98a2d; --danger:#cf4452; --info:#0078d4;
+    --neutral:#5c6675;
+    --radius:6px; --radius-lg:8px;
+    --term-bg:#1b1e23; --term-fg:#d4d8de;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#dfe3e8;color:var(--text);
+       padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1180px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header .meta{color:#5b6470;font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;
+         font-weight:600;background:var(--accent-soft);color:var(--accent-press);margin-right:6px;}
+  .badge.g{background:rgba(26,158,108,.12);color:var(--success);}
+  .badge.w{background:rgba(201,138,45,.14);color:var(--warning);}
+  .note{max-width:1180px;margin:0 auto 22px;background:#fff;border:1px solid var(--border);
+        border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;
+        font-size:13px;color:var(--text2);line-height:1.75;}
+  .note b{color:var(--text);}
+  .note code{font-family:var(--mono);background:var(--bg);padding:1px 6px;border-radius:4px;
+             font-size:12px;color:var(--accent-press);}
+  .section-label{max-width:1180px;margin:34px auto 12px;font-size:15px;font-weight:700;color:#333;}
+  .section-label span{font-weight:400;color:#6b7280;font-size:13px;margin-left:8px;}
+
+  /* ===== 应用窗口外框（FluentWindow + Mica） ===== */
+  .win{max-width:1180px;margin:0 auto;background:var(--bg);border-radius:10px;
+       overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.18);border:1px solid #c9ced5;}
+  .titlebar{height:40px;background:linear-gradient(180deg,#fbfcfd,#f4f6f8);
+            border-bottom:1px solid var(--border);display:flex;align-items:center;
+            padding:0 0 0 16px;gap:8px;}
+  .titlebar .app-ico{width:16px;height:16px;border-radius:3px;
+            background:linear-gradient(135deg,var(--accent),#4dd0e1);}
+  .titlebar .app-name{font-size:12px;color:var(--text2);}
+  .titlebar .tb-btns{margin-left:auto;display:flex;height:100%;}
+  .titlebar .tb-btns i{width:46px;height:100%;display:flex;align-items:center;
+            justify-content:center;color:var(--text2);font-style:normal;font-size:14px;
+            border-left:1px solid transparent;}
+  .titlebar .tb-btns i:hover{background:rgba(0,0,0,.05);}
+  .titlebar .tb-btns i.close:hover{background:var(--danger);color:#fff;}
+
+  .app{display:flex;height:660px;}
+  /* 左侧导航（qfw NavigationInterface 展开态） */
+  .nav{width:200px;background:rgba(255,255,255,.7);border-right:1px solid var(--border);
+       padding:8px;flex-shrink:0;display:flex;flex-direction:column;}
+  .nav-item{display:flex;align-items:center;gap:12px;height:38px;padding:0 12px;
+       border-radius:var(--radius);color:var(--text);font-size:13.5px;position:relative;
+       margin-bottom:2px;}
+  .nav-item .ni{width:17px;height:17px;display:flex;align-items:center;justify-content:center;
+       color:var(--neutral);font-size:15px;}
+  .nav-item:hover{background:rgba(0,0,0,.045);}
+  .nav-item.active{background:rgba(0,0,0,.05);font-weight:600;}
+  .nav-item.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+       width:3px;height:16px;border-radius:2px;background:var(--text);}
+  .nav-item.new{color:var(--accent-press);}
+  .nav-item.new .ni{color:var(--accent);}
+  .nav-sep{height:1px;background:var(--border);margin:8px 6px;}
+  .nav-bottom{margin-top:auto;}
+  .nav-tag{font-size:10px;background:var(--accent);color:#fff;border-radius:4px;
+       padding:0 5px;margin-left:auto;font-weight:600;}
+
+  /* 内容区 */
+  .content{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+  .page-head{padding:22px 28px 6px;}
+  .page-title{font-size:24px;font-weight:700;}
+  .page-sub{color:var(--text3);font-size:13px;margin-top:3px;}
+
+  /* 工具页：左工具列表 + 右工作区 */
+  .tool-body{flex:1;display:flex;overflow:hidden;}
+  .tool-list{width:184px;padding:12px 10px;border-right:1px solid var(--border);flex-shrink:0;}
+  .tool-list .tl-cap{font-size:11px;color:var(--text3);padding:4px 10px 8px;font-weight:600;letter-spacing:.3px;}
+  .tl-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--radius);
+           font-size:13px;color:var(--text);margin-bottom:2px;}
+  .tl-item .ti{width:18px;height:18px;border-radius:5px;display:flex;align-items:center;
+           justify-content:center;font-size:11px;color:#fff;flex-shrink:0;}
+  .tl-item small{display:block;color:var(--text3);font-size:11px;margin-top:1px;}
+  .tl-item:hover{background:rgba(0,0,0,.045);}
+  .tl-item.active{background:var(--accent-soft);color:var(--accent-press);font-weight:600;}
+  .tl-item.active .ti{box-shadow:0 0 0 2px rgba(0,188,212,.25);}
+  .tool-work{flex:1;overflow:auto;padding:18px 26px 26px;}
+
+  /* qfw 卡片 */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+        padding:18px 20px;margin-bottom:14px;}
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .card-h .ch-ico{width:22px;height:22px;border-radius:6px;background:var(--accent-soft);
+        color:var(--accent-press);display:flex;align-items:center;justify-content:center;font-size:13px;}
+  .card-h h3{font-size:15px;font-weight:600;}
+  .card-h .ch-sub{font-size:12px;color:var(--text3);margin-left:2px;}
+  .card-h .ch-right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+
+  /* 表单 */
+  .fld{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+  .fld>label{width:88px;flex-shrink:0;font-size:13px;color:var(--text);}
+  .fld.col{display:block;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px 18px;}
+  .mini-lbl{font-size:12px;color:var(--text2);margin-bottom:4px;}
+
+  /* qfw 输入控件 */
+  .inp{height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+       border-radius:var(--radius);background:var(--surface);padding:0 11px;font-size:13px;
+       color:var(--text);width:100%;font-family:var(--font);}
+  .inp::placeholder{color:var(--text3);}
+  .inp.mono{font-family:var(--mono);}
+  .inp:focus,.inp.f{outline:none;border-color:var(--accent);border-bottom-color:var(--accent);}
+  .spin{display:inline-flex;align-items:center;height:33px;border:1px solid var(--border);
+        border-bottom:2px solid #cfd4da;border-radius:var(--radius);background:var(--surface);
+        font-size:13px;color:var(--text);overflow:hidden;}
+  .spin .sv{padding:0 12px;min-width:56px;text-align:center;}
+  .spin .ss{display:flex;flex-direction:column;border-left:1px solid var(--border);height:100%;}
+  .spin .ss b{flex:1;width:22px;display:flex;align-items:center;justify-content:center;
+        font-size:8px;color:var(--text2);font-weight:400;border-bottom:1px solid var(--border);}
+  .spin .ss b:last-child{border-bottom:none;}
+  .combo{position:relative;height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+        border-radius:var(--radius);background:var(--surface);display:flex;align-items:center;
+        padding:0 34px 0 11px;font-size:13px;color:var(--text);}
+  .combo::after{content:"⌄";position:absolute;right:11px;top:50%;transform:translateY(-52%);
+        color:var(--text2);font-size:14px;}
+
+  /* qfw 按钮 */
+  .btn{height:33px;padding:0 15px;border:1px solid var(--border);border-radius:var(--radius);
+       background:var(--surface);color:var(--text);font-size:13px;display:inline-flex;
+       align-items:center;gap:7px;font-family:var(--font);white-space:nowrap;}
+  .btn:hover{background:#f6f7f9;}
+  .btn .bi{font-size:14px;}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  .btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+  .btn.danger{color:var(--danger);border-color:#f0c8cc;}
+  .btn.danger:hover{background:#fef2f3;}
+  .btn.sm{height:28px;padding:0 11px;font-size:12px;}
+  .btn.ghost{border-color:transparent;background:transparent;}
+  .btn.ghost:hover{background:rgba(0,0,0,.05);}
+  .btn:disabled,.btn.dis{opacity:.5;}
+
+  /* SwitchButton（qfw，含中文开/关） */
+  .sw{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text);}
+  .sw .track{width:40px;height:20px;border-radius:999px;background:var(--accent);position:relative;
+        border:1px solid var(--accent-press);}
+  .sw .track::after{content:"";position:absolute;right:3px;top:2.5px;width:13px;height:13px;
+        border-radius:50%;background:#fff;}
+  .sw.off .track{background:#f0f1f3;border-color:#c9ced5;}
+  .sw.off .track::after{left:3px;right:auto;background:var(--neutral);}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;}
+  thead th{text-align:left;font-size:12px;color:var(--text2);font-weight:600;padding:9px 12px;
+        border-bottom:1px solid var(--border);white-space:nowrap;background:var(--surface);}
+  tbody td{padding:11px 12px;border-bottom:1px solid #f0f1f3;font-size:13px;color:var(--text);
+        vertical-align:middle;}
+  tbody tr:hover{background:#fafbfc;}
+  tbody tr:last-child td{border-bottom:none;}
+  td.mono,.mono{font-family:var(--mono);font-size:12.5px;}
+  .row-acts{display:flex;gap:6px;justify-content:flex-end;}
+
+  /* 语义标签 */
+  .tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 9px;
+       border-radius:999px;font-weight:600;}
+  .tag::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+  .tag.on{background:rgba(26,158,108,.12);color:var(--success);}
+  .tag.warn{background:rgba(201,138,45,.14);color:var(--warning);}
+  .tag.off{background:rgba(92,102,117,.12);color:var(--neutral);}
+  .tag.err{background:rgba(207,68,82,.12);color:var(--danger);}
+  .tag.info{background:rgba(0,120,212,.12);color:var(--info);}
+  .tag.acc{background:var(--accent-soft);color:var(--accent-press);}
+
+  /* 统计条 */
+  .stat-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;}
+  .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+        padding:14px 16px;}
+  .stat .num{font-size:24px;font-weight:700;line-height:1.1;}
+  .stat .num.g{color:var(--success);} .stat .num.a{color:var(--warning);}
+  .stat .num.d{color:var(--danger);} .stat .num.c{color:var(--accent-press);}
+  .stat .lbl{color:var(--text3);font-size:12px;margin-top:4px;}
+
+  /* 终端输出区 */
+  .term{background:var(--term-bg);border-radius:var(--radius);padding:12px 14px;
+        font-family:var(--mono);font-size:12.5px;color:var(--term-fg);line-height:1.7;
+        height:186px;overflow:auto;}
+  .term .ln{white-space:pre-wrap;}
+  .term .ok{color:#5fd08a;} .term .er{color:#ff7b72;} .term .wn{color:#e3b341;}
+  .term .dim{color:#7d8590;} .term .ac{color:#4dd0e1;}
+  .term-h{display:flex;align-items:center;gap:8px;background:#22262c;border-radius:var(--radius)
+        var(--radius) 0 0;padding:7px 12px;font-size:12px;color:#aeb6c2;font-family:var(--mono);}
+  .term-h .dots{display:flex;gap:5px;} .term-h .dots i{width:9px;height:9px;border-radius:50%;display:block;}
+  .term-wrap{border-radius:var(--radius);overflow:hidden;border:1px solid #000;}
+  .term-wrap .term{border-radius:0;height:170px;}
+
+  /* 进度条 */
+  .prog{height:6px;border-radius:999px;background:#e9ecef;overflow:hidden;}
+  .prog>span{display:block;height:100%;border-radius:999px;background:var(--accent);}
+  .prog.g>span{background:var(--success);} .prog.w>span{background:var(--warning);}
+
+  /* 提示条 InfoBar */
+  .infobar{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:var(--radius);
+        border:1px solid var(--border);background:var(--surface);margin-bottom:12px;font-size:13px;}
+  .infobar .ib-ico{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;
+        justify-content:center;color:#fff;font-size:12px;flex-shrink:0;margin-top:1px;}
+  .infobar.info{border-left:3px solid var(--info);} .infobar.info .ib-ico{background:var(--info);}
+  .infobar.warn{border-left:3px solid var(--warning);} .infobar.warn .ib-ico{background:var(--warning);}
+  .infobar.succ{border-left:3px solid var(--success);} .infobar.succ .ib-ico{background:var(--success);}
+  .infobar .ib-x{margin-left:auto;color:var(--text3);cursor:pointer;}
+
+  /* 空状态 */
+  .empty{text-align:center;padding:48px 20px;color:var(--text3);}
+  .empty .e-ico{width:56px;height:56px;border-radius:14px;background:var(--bg);border:1px solid var(--border);
+        display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 12px;color:#c2c8d0;}
+  .empty h4{font-size:14px;color:var(--text2);font-weight:600;margin-bottom:4px;}
+  .empty p{font-size:12.5px;margin-bottom:14px;}
+
+  /* 端口 chip 列表 */
+  .chips{display:flex;flex-wrap:wrap;gap:8px;}
+  .chip{display:inline-flex;align-items:center;gap:8px;padding:6px 8px 6px 12px;border-radius:999px;
+        border:1px solid var(--border);background:var(--surface);font-size:13px;font-family:var(--mono);}
+  .chip .cx{width:16px;height:16px;border-radius:50%;background:var(--bg);color:var(--text2);
+        display:flex;align-items:center;justify-content:center;font-size:11px;font-family:var(--font);}
+  .chip .cx:hover{background:var(--danger);color:#fff;}
+  .chip.free{border-style:dashed;color:var(--text3);}
+
+  .kbd{font-family:var(--mono);font-size:11px;background:var(--bg);border:1px solid var(--border);
+        border-bottom-width:2px;border-radius:4px;padding:1px 6px;color:var(--text2);}
+  .hint{font-size:12px;color:var(--text3);margin-top:2px;}
+  .flex{display:flex;align-items:center;gap:10px;} .wrap{flex-wrap:wrap;}
+  .between{justify-content:space-between;} .grow{flex:1;} .mt{margin-top:14px;} .mb{margin-bottom:14px;}
+  .divider{height:1px;background:var(--border);margin:14px 0;}
+  .seg{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:2px;}
+  .seg i{font-style:normal;padding:5px 14px;font-size:12.5px;border-radius:4px;color:var(--text2);}
+  .seg i.on{background:var(--surface);color:var(--text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06);}
+  .foot{max-width:1180px;margin:26px auto 40px;color:#6b7280;font-size:12.5px;line-height:1.8;
+        background:#fff;border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 20px;}
+  .foot h4{font-size:13px;color:var(--text);margin-bottom:6px;}
+  .foot ul{margin-left:18px;} .foot li{margin-bottom:3px;}
+</style>
+</head>
+<body data-page-node-id="TbYf4nnUFHTS0HoaDNmyZx">
+
+<div class="doc-header" data-page-node-id="6fRwGnE444foG1kqO3BXMu">
+  <h1 data-page-node-id="UW3oj0dnrjQrazYkzfJD6t">工具页 · 二期设计稿 <span style="font-weight:400;color:#8f959e;font-size:16px;" data-page-node-id="GR6jVngORGmUoFZlBCXJpP">ToolHub v2</span></h1>
+  <div class="meta" data-page-node-id="wLTRQVq8fpgggpIkU237Br">
+    <span class="badge" data-page-node-id="Lgx3kP5bnu8SJk1vtfetwR">qfw 控件还原</span>
+    <span class="badge g" data-page-node-id="XRmUYdvwxDsbt3vKUHGSt9">主色 #00BCD4</span>
+    <span class="badge" data-page-node-id="imAFrCJPsOnq4tZ42Ft1V4">圆角 6/8px</span>
+    <span class="badge w" data-page-node-id="W9e1zaF2ZtyXh26106nfeQ">从「设置-工具」升级为独立工作页</span>
+    <br data-page-node-id="hiFe2QUMR0wtJpVHHGT5xK">2026-09-07 · 挂载于主窗口左侧导航（运维/售后/跑视频之后）· 数据源：ui_mixin 四功能 + single_video_dialog/port_fake 真实字段
+  </div>
+</div>
+
+<div class="note" data-page-node-id="X6Vv3Zkxm0bkkBYRjNE7wF">
+  <b data-page-node-id="MEJbJlGheGDa0oISfjwjj2">设计目标：</b>把「设置 → 工具」里 4 条 <code data-page-node-id="qTobcpGdx1GHt2cOPX5NKG">SettingRow</code>（单杆视频 / 端口占用 / 上传清单 / 视频日志批量整理）
+  从「一行标题 + 一个按钮」升级为<b data-page-node-id="r0jSVRGEEaKnpBIoTCDcB9">带真实工作区的功能页</b>——左侧工具列表 + 右侧操作面板。
+  纯动作型入口（修改快捷键、连接诊断）仍保留在设置-工具；<b data-page-node-id="i0mmHWHtYLJ9xiccLUikcQ">需要配置项的</b>（如 videos_dir、上传凭据）继续留在设置里，工具页只放「执行 + 即时参数」。
+  所有控件严格复刻 qfluentwidgets 视觉（CardWidget / LineEdit / CompactSpinBox / ComboBox / PushButton / PrimaryButton / SwitchButton / TableWidget / TextEdit 终端 / InfoBar / ProgressBar）。
+</div>
+
+<!-- ============ 画布 1：单杆视频（默认选中，最复杂） ============ -->
+<div class="section-label" data-page-node-id="32U6sscfZwTOqXq7DiiI9t">画布 1 <span data-page-node-id="THDXq0lNiH0V5W763QTGRN">工具页 · 单杆视频工作区（默认落地页）</span></div>
+<div class="win" data-page-node-id="OH2UUFtnNCDcV510CU5o8I">
+  <div class="titlebar" data-page-node-id="nQzosuOV5aX8w31MZjNiTe">
+    <span class="app-ico" data-page-node-id="SCB4Q9n2huY3ARZaT8wjtg"></span><span class="app-name" data-page-node-id="GMpESXBEGvwU4zweDFe6bR">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="zETq8TxV7FiUjpU9qFLBO0"><i data-page-node-id="OekQFZWFcHUSQeHagFfFrV">&#9472;</i><i data-page-node-id="LoMIdkujEhtlokYuelyiud">&#9633;</i><i class="close" data-page-node-id="C1yALHC8deoR4huCgzmjPb">&#10005;</i></span>
+  </div>
+  <div class="app" data-page-node-id="y4QI8D6AVOb5sJ3iZtCGfi">
+    <div class="nav" data-page-node-id="nl6Oih5UEDpskU1ebpC3uA">
+      <div class="nav-item" data-page-node-id="ntZyjt2ZlfZF3fCoh41zI5"><span class="ni" data-page-node-id="erEnZAQwU3y6XQXGRVfZYX">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="fnetcYL0QtYl4pTIQVtP8a"><span class="ni" data-page-node-id="Xh1gWNc4NbfvMA1mGTT8AV">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="B8Oyk0e6J34uJdCiRnaaeU"><span class="ni" data-page-node-id="ZVHc3fBUSJBMbdoGnEi5Mx">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="8DDSoezjqf4DWr4KDOWlxL"><span class="ni" data-page-node-id="J8UmoKL0PNFPEFr9exYovl">&#9654;</span>跑视频</div>
+      <div class="nav-item new" data-page-node-id="zLd2pqA5zJL7GPMkNWdto1"><span class="ni" data-page-node-id="vOrPbcs3pvtYFDyijU0yJn">&#8644;</span>远程<span class="nav-tag" data-page-node-id="vOeeHNaCY227EiDAPGCZF2">二期</span></div>
+      <div class="nav-item active new" data-page-node-id="rkFABUhfnMT5IkxaRAOqPk"><span class="ni" data-page-node-id="DgKbWyaBOnJDgksIAInQOY">&#9881;</span>工具<span class="nav-tag" data-page-node-id="OE0MGsBxl9nO9SfbKy89ZJ">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="qrnoYLj3l005u1woDAEfUM">
+        <div class="nav-sep" data-page-node-id="k00ex195H5RYV4b2c3xCaY"></div>
+        <div class="nav-item" data-page-node-id="sVcwa6Q18aOfey0t51meJY"><span class="ni" data-page-node-id="Mq3m216WLGOBh2XaxXxCTM">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="wq9uRonClAsPptCB36ucfQ"><span class="ni" data-page-node-id="Sx78eWfRhx1bnOtAj5mF2g">&#9432;</span>关于</div>
+      </div>
+    </div>
+    <div class="content" data-page-node-id="wC6IAJlFF7B5pQDZl6Rlm9">
+      <div class="page-head" data-page-node-id="nl3ecOKjk51lTX9oJREvx4">
+        <div class="page-title" data-page-node-id="VUC1rVZ4vwqv3MpbIPrJmN">工具</div>
+        <div class="page-sub" data-page-node-id="2VTINNuZvmPHqDRhngVXJv">单杆视频、端口占用、上传清单与批量整理的工作台</div>
+      </div>
+      <div class="tool-body" data-page-node-id="LxylBCQS7GR3tqwqGDR5jY">
+        <!-- 左：工具列表 -->
+        <div class="tool-list" data-page-node-id="eG3XxSqxlDrFUx8SMELFCI">
+          <div class="tl-cap" data-page-node-id="C0PW6S7tGO0GT5ncDe9iVl">工具箱</div>
+          <div class="tl-item active" data-page-node-id="W5b08uMC4eOPgD7DI9Ljyl"><span class="ti" style="background:var(--accent)" data-page-node-id="zbJxLQsUQnF1VqXAJbXjc8">&#9654;</span><div data-page-node-id="FlN66GcqsCkmWqgaRyMvtR">单杆视频<small data-page-node-id="nMeh6g1i1RCiKhNYjNAXzy">解析得分生成水印</small></div></div>
+          <div class="tl-item" data-page-node-id="3dNYWsJg3QLOBlT8U1y5TS"><span class="ti" style="background:var(--info)" data-page-node-id="DC6jBuDJ2HKAnHxFPzvhZO">&#9096;</span><div data-page-node-id="AvDCgv6JqTYIFAfcJTbe5L">端口占用<small data-page-node-id="YqrWeWDOCw00VzCkHp3Of4">联调端口模拟</small></div></div>
+          <div class="tl-item" data-page-node-id="qwMDmD7oqTirfyiCXNP5Py"><span class="ti" style="background:var(--success)" data-page-node-id="guoK0cbqvGy81UYKZyShCk">&#8682;</span><div data-page-node-id="XeXx0hL1FJtsPHottNGTUi">上传清单<small data-page-node-id="P2StmXtkFfBSHwiMyWYrAY">待上传工作区</small></div></div>
+          <div class="tl-item" data-page-node-id="froLcNyyS9F0Idn53GbbuF"><span class="ti" style="background:var(--warning)" data-page-node-id="H9ye0Og8ZQWebMZzplcMgY">&#9776;</span><div data-page-node-id="r7KfqNAPukIeZANJ292cR3">批量整理<small data-page-node-id="QwmwVER3nuJ7GQUFq7Cvlx">视频/日志归类</small></div></div>
+        </div>
+        <!-- 右：单杆视频工作区 -->
+        <div class="tool-work" data-page-node-id="uuwAnrjGQ0ObdXNk9WtTdt">
+          <div class="card" data-page-node-id="Ewb9N3kfw0jDQkBHiB4D0M">
+            <div class="card-h" data-page-node-id="UO4MXI2xkFKevQExYxq1ud">
+              <span class="ch-ico" data-page-node-id="sRJpvRnXGIryB357N79Hu7">&#9654;</span>
+              <h3 data-page-node-id="4JV64HDBCb22smgAGcAqWT">单杆视频生成</h3><span class="ch-sub" data-page-node-id="YeWcyBxfTyZ3KUAUZVizIj">从日志解析单杆得分，逐帧渲染带计分水印的视频</span>
+              <div class="ch-right" data-page-node-id="AQtuOowvTPh5zdlK2vmiWa"><span class="tag info" data-page-node-id="DJeN6GnwFv15E4vVbJqVlB">CPU 密集 · 后台线程</span></div>
+            </div>
+            <div class="fld" data-page-node-id="0q4kllrTcklIIJ3VJbP8Tz">
+              <label data-page-node-id="woGDmd7T6lxvfMcwXxTMpe">日志文件</label>
+              <input class="inp mono" value="D:\AutoWork\videos\2026\09\06\table_3226-01.log" placeholder="选择 .log 日志文件" data-page-node-id="0qtlJRhdbAMsn8211VCmN9">
+              <button class="btn" data-page-node-id="adTcTWa7cZkB3nIptttevP"><span class="bi" data-page-node-id="ND9OHag8rbNzLSuz60Zojy">&#128193;</span>浏览</button>
+            </div>
+            <div class="hint" style="margin:-6px 0 12px 100px;" data-page-node-id="RC8NjZxackf9xBnSW6RHAx">解析结果将驱动水印；路径记忆上次配置作为默认值</div>
+            <div class="divider" data-page-node-id="HgtFzk5gDrAD1oVEwf8Vu4"></div>
+            <div class="mini-lbl" style="font-weight:600;color:var(--text);font-size:13px;margin-bottom:10px;" data-page-node-id="3tVXqK4MouaE29LEYg2UwC">JSON 字段（水印取值）</div>
+            <div class="grid3" data-page-node-id="4X5FUD574gzceGHA9eefDV">
+              <div data-page-node-id="azXDBHUcexwHF3ZHWZdknX"><div class="mini-lbl" data-page-node-id="4SnUE8vNdU7JfO9LCsbWZE">起始帧 start</div><div class="spin" data-page-node-id="EXZvEH0TYKoKJHrGOhXMcz"><span class="sv" data-page-node-id="gz3WSZUeEYCruFfYPnuqVq">120</span><span class="ss" data-page-node-id="a6PmuAj3nAeNUTXQ1ZBxnY"><b data-page-node-id="qRCd9l1N1XapKpSDsU7B42">&#9650;</b><b data-page-node-id="AKuD6pdwljXawjfBTLSjCD">&#9660;</b></span></div></div>
+              <div data-page-node-id="VQwufKl1dvHpSgiKDO5yA0"><div class="mini-lbl" data-page-node-id="bJAiFMoSk4D0Rap0joQQOd">结束帧 end</div><div class="spin" data-page-node-id="ZFXI0TTquzvLCq1BCN7LUp"><span class="sv" data-page-node-id="oq6AqiX3G0xnSsS2WBHk0o">480</span><span class="ss" data-page-node-id="qO21Tjo0htA3FJnwHAmb2z"><b data-page-node-id="FETJn8n1rp0ebGUVCyAPWC">&#9650;</b><b data-page-node-id="cUeCYooXXnz9pPm8lsl3vH">&#9660;</b></span></div></div>
+              <div data-page-node-id="yRsmgqYIjkVamPVJ1L4kmu"><div class="mini-lbl" data-page-node-id="QTiSxDn7AisGSiGAtU1jCI">球员 player</div><div class="spin" data-page-node-id="h5walgNEh6DBXRH6I2CEze"><span class="sv" data-page-node-id="jPyAgB333DTAqRwrgeItim">0</span><span class="ss" data-page-node-id="t8GzqVtajiZhoHyyqbswVM"><b data-page-node-id="gSyPxt9kynE60CfWZoOhkJ">&#9650;</b><b data-page-node-id="Yby765A1vwr9QJxBXcqxva">&#9660;</b></span></div></div>
+              <div data-page-node-id="ZMQiVHjRt86lJqBvOrL97R"><div class="mini-lbl" data-page-node-id="tLXH0T3rxAP0O1HYJLxKa3">回合 round</div><div class="spin" data-page-node-id="Vup8bQz4tGfNS5EYvb8hRy"><span class="sv" data-page-node-id="GCETAc8zf9GbQuaQ1GQ6tR">3</span><span class="ss" data-page-node-id="C6YQacQXtGLeCLmAGlH7DS"><b data-page-node-id="kSuZ7CAkvZXlwA2hQteQ8m">&#9650;</b><b data-page-node-id="xL8OglktUt0xJcQ5VLjHW7">&#9660;</b></span></div></div>
+              <div data-page-node-id="mwuNJJ8ilbZJp8EhlYLZOt"><div class="mini-lbl" data-page-node-id="YL6o1OprnPNwP7HBzciYLJ">赛制 format</div><input class="inp" value="中式八球" data-page-node-id="J9R9fMzoK8mYEWz504m8Nn"></div>
+              <div data-page-node-id="exunBFrl9ThwKEoR7Zymxf"><div class="mini-lbl" data-page-node-id="D10fM7JF5Ekz0hOCWjpSKD">日期 date</div><input class="inp" value="2026-09-06" data-page-node-id="KSId9vgSHEqxuWFt52K20C"></div>
+              <div data-page-node-id="41NZ8XPwy4hNxcYCxqMbgv"><div class="mini-lbl" data-page-node-id="Oycx17RUi7GqYxXLa1FANi">场次名 session</div><input class="inp" value="北辰中心1007" data-page-node-id="hwCqK7eEfZcgHoIAFcDmdB"></div>
+              <div data-page-node-id="OZuGqz1Gwb4GB9ji8uBOZ4"><div class="mini-lbl" data-page-node-id="JKHidkpRYZTC0FyZwEXbKO">场次码 code</div><input class="inp mono" value="474334530" data-page-node-id="3i43yp7lbkoPsPBqhNA5Ma"></div>
+              <div data-page-node-id="pzlEz6oqbj9vdUcdxwEZwa"><div class="mini-lbl" data-page-node-id="TKzwC2Y3Em2ynPjDn609qR">待清球 pending</div><input class="inp mono" value="2 3 5 6" data-page-node-id="FzwFxH1gektEhEXSYUTkqb"></div>
+            </div>
+            <div class="grid2 mt" data-page-node-id="fzVt2lS06jFoOPDb0RvZQB">
+              <div data-page-node-id="UnbsK8fHeDEToDna8HJyqW"><div class="mini-lbl" data-page-node-id="vJxHqBMAWY6elYsZZBV5jE">球员 A 头像/昵称 ava_0 · user_0</div><div class="flex" data-page-node-id="zpHKEyV9uaPkjjOptH0wEm"><input class="inp" value="A0" data-page-node-id="uNeesYvItCCR8M7F3yftZX"><input class="inp" value="张明" data-page-node-id="1MVhiZnTYBtBcyHd50Ugc6"></div></div>
+              <div data-page-node-id="vDz6jiccunmVcrmL76GDIo"><div class="mini-lbl" data-page-node-id="T8CT7p22nis5mrMrlQKvdN">球员 B 头像/昵称 ava_1 · user_1</div><div class="flex" data-page-node-id="HWJChNcEx60YqpiSeCQfIN"><input class="inp" value="B1" data-page-node-id="fjNrB1hnK3BOP9nmD4kGBZ"><input class="inp" value="李强" data-page-node-id="5FcCiR8jdnD2tEjkiDc61O"></div></div>
+            </div>
+            <div class="fld mt" style="margin-bottom:0;" data-page-node-id="hvLzfnIy1WLo73IrByycFG">
+              <label data-page-node-id="fmBUQHTnGSr0LfPywkgOn2">输出视频</label>
+              <input class="inp mono" value="D:\AutoWork\videos\single\3226-01_r3.mp4" placeholder="生成后保存路径" data-page-node-id="4JxOngzCcJZi55TTI27Ghc">
+              <button class="btn" data-page-node-id="FExxiZEFjfjzF81oip3lMP"><span class="bi" data-page-node-id="wMFR0cLINrGEZ6yHlfSk7G">&#128193;</span>另存</button>
+            </div>
+          </div>
+
+          <div class="card" data-page-node-id="aCTUm3Cx2ZBINJMvzOehFn">
+            <div class="card-h" style="margin-bottom:10px;" data-page-node-id="9tbfiTIyGFjTLBmFaMX6j9">
+              <span class="ch-ico" style="background:rgba(26,158,108,.12);color:var(--success);" data-page-node-id="PnU6tyeBAz9a2zLKt5EQYF">&#9679;</span>
+              <h3 data-page-node-id="VSm8iUoYrocy2Ft2f8xlTm">生成中</h3><span class="ch-sub" data-page-node-id="oicZ0sISxgNWpRnqHy5NbV">逐帧渲染 360 帧 · 已完成 68%</span>
+              <div class="ch-right" data-page-node-id="3KyVBVWa3EFIh3XmfeRjK0"><button class="btn danger sm" data-page-node-id="8qNN3h6rdKwPjrn15xjcEx"><span class="bi" data-page-node-id="fHaS0az0jeO4orCvFQrssH">&#10005;</span>取消</button></div>
+            </div>
+            <div class="prog mb" data-page-node-id="FzUveHonlf4KyoOzQkk1lV"><span style="width:68%" data-page-node-id="fQYsfTqPYv5pCyTALltF9z"></span></div>
+            <div class="term-wrap" data-page-node-id="o3zQQ9DVmfZP8Tl7LqX1z3">
+              <div class="term-h" data-page-node-id="fDsAFvOUl4uFsXpWR3ivUm"><span class="dots" data-page-node-id="cH6mcys4uVFF8PLwupjahF"><i style="background:#ff5f57" data-page-node-id="KF9xcphvNPiuH6Nm7mGc0M"></i><i style="background:#febc2e" data-page-node-id="KBgbjiobYuTSIymaPxEPFY"></i><i style="background:#28c840" data-page-node-id="FBbHm84gk4wtyBF1n8Fdyt"></i></span><span data-page-node-id="P9viHIgwjUB6HsZWsKzMgZ">运行输出 · single_video_worker</span></div>
+              <div class="term" data-page-node-id="zE8atF4t1j4YRBTi0YxQr8">
+<div class="ln dim" data-page-node-id="9Ps1JUFbIgsZuYRzbXypxP">$ 解析日志 table_3226-01.log ...</div>
+<div class="ln ok" data-page-node-id="F5iWE1ysqb5NgKylGSXItQ">✓ 命中单杆得分帧 start=120 end=480（360 帧）</div>
+<div class="ln ac" data-page-node-id="VAhoQfAS88Yy8mHsLSauZg">→ 加载水印字体 Microsoft YaHei / 计分面板 720p</div>
+<div class="ln" data-page-node-id="DA1l37GphQRszD9eYDEy76">渲染帧 245/360  <span class="dim" data-page-node-id="Cfz6hzC3xtOwcBPiUxjYYS">(cpu 87% · 预计剩余 12s)</span></div>
+<div class="ln wn" data-page-node-id="DfmeyW7dRdkn9IOl21j95R">! 帧 251 检测到球袋遮挡，已启用插值补帧</div>
+<div class="ln dim" data-page-node-id="KnHBsCRXthoiMijf5nNSUa">...</div>
+              </div>
+            </div>
+            <div class="flex between mt" data-page-node-id="MyZWAjkYDuJa3UwHWkxXJF">
+              <div class="sw" data-page-node-id="PE5ijB1Yi5to39NXiedRuj"><span class="track" data-page-node-id="hB7RPoR7WdBl9RP4kJ0Gic"></span>生成后自动打开所在目录</div>
+              <div class="flex" data-page-node-id="wLr0pQ7Dd8fpc7cvwHGr8R"><button class="btn" data-page-node-id="EquyxaACSk76zCWMaIke8O"><span class="bi" data-page-node-id="MECqOtp3oLgJnaVGEKPOj7">&#8635;</span>重置参数</button>
+                <button class="btn primary" data-page-node-id="EeeSgpalS1FAjpTvzD4ZuB"><span class="bi" data-page-node-id="zORAkm2fpF4oqZDGuaBJTu">&#9654;</span>开始生成</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 2：端口占用 ============ -->
+<div class="section-label" data-page-node-id="GEGxr15VRi1dbuXJQwb2OS">画布 2 <span data-page-node-id="mF4UcFRcGN6fzPSyeokxkM">工具页 · 端口占用工作区（切到第 2 项）</span></div>
+<div class="win" data-page-node-id="u7SIec9DBVlufVRW2LNBQd">
+  <div class="titlebar" data-page-node-id="wx65X1IGjbOq5aReiWQ361">
+    <span class="app-ico" data-page-node-id="WZG9eqFozRTVpMJDdTHLda"></span><span class="app-name" data-page-node-id="AECfjPPjjACl1YdexYQbNR">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="D44s9I7M3SxGHA5aqwmk7A"><i data-page-node-id="4xICusSTCm8a2ly87e9o3Y">&#9472;</i><i data-page-node-id="1ufXXA9CDgTGLu1ZAhJ6ik">&#9633;</i><i class="close" data-page-node-id="3SarLOgyPvfEm1gmRqreQA">&#10005;</i></span>
+  </div>
+  <div class="app" data-page-node-id="1ItBN7IAJAChXXycx4rlUn">
+    <div class="nav" data-page-node-id="moBEVlR8GB9BtloBY68SHI">
+      <div class="nav-item" data-page-node-id="Da9W1eGZSl7ceNizlcnBr2"><span class="ni" data-page-node-id="wc03zECq69oQ0T3vdmBKQs">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="n8UOBYb8mmh4g0trQmrCcK"><span class="ni" data-page-node-id="hWqV4qe6xHDfnh4U0wfpRf">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="hQOERIehCzH3eji0qcCP0J"><span class="ni" data-page-node-id="SpwMcgPDGfrfhaA3RsFH0v">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="b2xUaYIHTU0ZH8CPODdB6C"><span class="ni" data-page-node-id="6Yad98XUK6URfbJFF0z6H7">&#9654;</span>跑视频</div>
+      <div class="nav-item new" data-page-node-id="2ga4109ihOoiVDKYXiHtpY"><span class="ni" data-page-node-id="ShF1ROx4ZDFbEgh5oY6HBN">&#8644;</span>远程<span class="nav-tag" data-page-node-id="UKtQW0ODbpxNYNXZtHKkkd">二期</span></div>
+      <div class="nav-item active new" data-page-node-id="7xctNz4YTgZiBfFeqEdwCe"><span class="ni" data-page-node-id="Sk7aHPm7l3Sznopaz7RfzL">&#9881;</span>工具<span class="nav-tag" data-page-node-id="ydSpFlL2qcxjIVcjdtIOA1">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="DjLvxHYY2eKW8I2sjvINsQ"><div class="nav-sep" data-page-node-id="Y55WdYalN9Ht0nDEOYY3WC"></div>
+        <div class="nav-item" data-page-node-id="MG9QPGC0RGycPDfU1GGjmU"><span class="ni" data-page-node-id="jwckGeF6x5K42zYbNDPSdY">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="VBCpECN9C3sWU3GFyR5Lz4"><span class="ni" data-page-node-id="SVS321AnjuW1su2NRwExcm">&#9432;</span>关于</div></div>
+    </div>
+    <div class="content" data-page-node-id="S1AihZCTNYyuGvtQmC09dC">
+      <div class="page-head" data-page-node-id="aEViGuF7mAVrUOZ2c4N7qb"><div class="page-title" data-page-node-id="rulJkFkD87bzPNe3fys117">工具</div>
+        <div class="page-sub" data-page-node-id="GIZ0j2ljtBCqGcNlikVSHg">端口占用 · 真实监听指定端口模拟服务，用于联调与端口冲突测试</div></div>
+      <div class="tool-body" data-page-node-id="oPFNHYquFnDGm1p6RXEqGD">
+        <div class="tool-list" data-page-node-id="WmwPOcHUKU3FHIHBSpx35y">
+          <div class="tl-cap" data-page-node-id="5pFzDrcBejeSrY8W2xLPq4">工具箱</div>
+          <div class="tl-item" data-page-node-id="9WFEQdO7iowbv0MNN8cvgU"><span class="ti" style="background:var(--accent)" data-page-node-id="EGnGFFmf7qSMcQ6IwOsVuX">&#9654;</span><div data-page-node-id="hEmANnmq7Uvk0X80ZtC8FO">单杆视频<small data-page-node-id="hYvKNtFZyfs55ucVhhE9wj">解析得分生成水印</small></div></div>
+          <div class="tl-item active" data-page-node-id="Lz9dM7PlXdi7iW2p3sZqqx"><span class="ti" style="background:var(--info)" data-page-node-id="gfaPtB1JwqgPCyqwZYhKXj">&#9096;</span><div data-page-node-id="OWbpA29XlEaWsRJRSsoiqL">端口占用<small data-page-node-id="SBSuCofgOnay2ddrl44aum">联调端口模拟</small></div></div>
+          <div class="tl-item" data-page-node-id="I2DRKJAOBJI6JkqobwtGxm"><span class="ti" style="background:var(--success)" data-page-node-id="QXBkDrNHSYemjPYuFmQy9M">&#8682;</span><div data-page-node-id="tzAsuySi1xf3hdhtqDL1y4">上传清单<small data-page-node-id="A3ZONBtKOEb8k02ar4zqrX">待上传工作区</small></div></div>
+          <div class="tl-item" data-page-node-id="CGey6Xsy3rrbyBu2eBY6mi"><span class="ti" style="background:var(--warning)" data-page-node-id="IVFWSnSQ0gumFfwPUDgBJk">&#9776;</span><div data-page-node-id="a50Uap3qiKdo2HqHn5PBXT">批量整理<small data-page-node-id="ufe8whR7zunavLo4JFJJ25">视频/日志归类</small></div></div>
+        </div>
+        <div class="tool-work" data-page-node-id="EGRrYv8QVM7OBYlO3jkZmP">
+          <div class="card" data-page-node-id="5nR7muBjpemTWs08xI6RI5">
+            <div class="card-h" data-page-node-id="5uZLVSpD9rFNa0XOr5DSCp"><span class="ch-ico" style="background:rgba(0,120,212,.12);color:var(--info);" data-page-node-id="eJ1WDv8TWNzyKc1i5lc7SY">&#9096;</span>
+              <h3 data-page-node-id="rDhBYlpaEDN5to1z9xdi2s">占用端口</h3><span class="ch-sub" data-page-node-id="raTXI3dfP0JJIlk1n9A1jB">支持多端口同时占用，关闭页面自动全部释放</span></div>
+            <div class="flex wrap" data-page-node-id="1l95kvniBpS09OIwBWNQVk">
+              <div data-page-node-id="77TGPi86YE5LVUiAbIF7mM"><div class="mini-lbl" data-page-node-id="xCF2wX1fnGhI4kU1OUj9yF">端口号</div><div class="spin" data-page-node-id="JQ2azBVn2NHl9VdkvNxN2O"><span class="sv" data-page-node-id="vZ49j5jaMOMjVQ2MCyDfEB">7000</span><span class="ss" data-page-node-id="81JDb4RxyBlKCbdq4t2SAR"><b data-page-node-id="OAOOQ37Ng6F4fK7OJECoZZ">&#9650;</b><b data-page-node-id="XIjoVeOrHzF5yyys6ySnKK">&#9660;</b></span></div></div>
+              <div style="align-self:flex-end;" data-page-node-id="wkwH6UP5SwS4gWhaMqGUfy"><button class="btn" data-page-node-id="Eh6Hk62rJIbZetdCX6tF5q"><span class="bi" data-page-node-id="6aeSCtdFZaLmRGOOElJFEL">&#127922;</span>随机端口</button></div>
+              <div style="align-self:flex-end;" data-page-node-id="aJg9tgeNcQDCVmN1kJND46"><button class="btn primary" data-page-node-id="JaUISWv8KkISp08XTDixEH"><span class="bi" data-page-node-id="Dd9VRBcmm3fjTDWCPl75QF">&#128274;</span>占用</button></div>
+              <div style="align-self:flex-end;margin-left:auto;" data-page-node-id="VrCTTtZrgdBZLpq4Tscy3M"><button class="btn danger" data-page-node-id="GepIERrunSSLeTpldXqUI6"><span class="bi" data-page-node-id="bKnG7gGIMwDNS0OGhh5GBv">&#128465;</span>全部释放</button></div>
+            </div>
+            <div class="hint mt" data-page-node-id="WThgNaQIap2HiuUqyMLX9Z">绑定后 <code style="font-family:var(--mono)" data-page-node-id="kqHLxVEiEG6bdKP8j9oJST">netstat -ano</code> 可见 LISTENING；用于验证服务检测逻辑与端口冲突</div>
+          </div>
+
+          <div class="stat-strip" data-page-node-id="ABinBK48KG5ye7x55CGGlH">
+            <div class="stat" data-page-node-id="eV6rnPd4BhvfIOLUsHt4Dd"><div class="num c" data-page-node-id="DIJFrCfMmiTb8V32HNfEfN">3</div><div class="lbl" data-page-node-id="rAAaDXZAzXIEu3ttcynQs8">已占用端口</div></div>
+            <div class="stat" data-page-node-id="VJlg2PhN3l2HRw0HT377TO"><div class="num g" data-page-node-id="5GUn6nKocg3qatirww5n1e">3</div><div class="lbl" data-page-node-id="U7QlS5hEF6DcBzprlXL4ZQ">监听中 LISTENING</div></div>
+            <div class="stat" data-page-node-id="8dNH50KgdxrDYA4fhU9Clw"><div class="num" data-page-node-id="9Kc0lUuB4FA2WJ4FJFi91d">2</div><div class="lbl" data-page-node-id="golITIvGwXZ5TKi0e6NUtR">TCP · 1 UDP</div></div>
+            <div class="stat" data-page-node-id="mhN850NUSHxl2KpNaAfMkg"><div class="num" data-page-node-id="i7XqOPUAIJ9lFXKvj13GKo">18420</div><div class="lbl" data-page-node-id="FD00qg91FNsgvwD7qjHypZ">本进程 PID</div></div>
+          </div>
+
+          <div class="card" style="padding:0;overflow:hidden;" data-page-node-id="DLF5au3zzGQRusKFDwEimt">
+            <table data-page-node-id="bhpDr5vIBqCzUMSUBygdeN">
+              <thead data-page-node-id="w3ll6g9MKgzn8VrVDbPNhC"><tr data-page-node-id="WwMOC7mWjCohDhoZ3hc7mW"><th style="width:96px;" data-page-node-id="anchfbkrao0rLNRzpyEEIP">端口</th><th style="width:88px;" data-page-node-id="GMeWMM1SxKQC2bVbDdHHVn">协议</th><th data-page-node-id="mc7xetwc4UPLBrMyiFEmal">状态</th><th style="width:120px;" data-page-node-id="6ScHfThFdCxK3kYxnWn0fD">绑定地址</th><th style="width:150px;text-align:right;" data-page-node-id="Bw0yW84mRCrkFzqRx209ck">操作</th></tr></thead>
+              <tbody data-page-node-id="4uxBjk3ramHkeAhKbmzh3d">
+                <tr data-page-node-id="Yng3boPcJpGarJmlurKHSz"><td class="mono" data-page-node-id="OUSj9JW0EeZ72SD6tdOopd">7000</td><td data-page-node-id="4guULSUVWKY4L6izHYOcRo">TCP</td><td data-page-node-id="46uYBk8eajqeGh9U2F4wky"><span class="tag on" data-page-node-id="6ULaLakF9eDGD7qwO2Hfuu">LISTENING</span></td><td class="mono" data-page-node-id="XbBhU2QH566xeGIEdNsHXy">0.0.0.0</td>
+                  <td data-page-node-id="xFI1Wig7wV09CTP8pCqu0f"><div class="row-acts" data-page-node-id="3EH4hvkRKHOnKkys9FOGDj"><button class="btn sm ghost" data-page-node-id="pXXNjJ8OFQNpO8WOlHeACj">复制</button><button class="btn sm danger" data-page-node-id="NBgFBZ8RyTuEd6x3ZyJCrz">释放</button></div></td></tr>
+                <tr data-page-node-id="ZU2rfqbjQslZ5GFRX2zAuY"><td class="mono" data-page-node-id="y0lYHc952C0BxqJtHvFrE4">8080</td><td data-page-node-id="g0050FGDWyRUwp4AMYd6rb">TCP</td><td data-page-node-id="IUkobEDd7lU2hYbe3jUz7r"><span class="tag on" data-page-node-id="hc0T0l6Z3ax05mAMQayKEj">LISTENING</span></td><td class="mono" data-page-node-id="Xkd21S7EGRCJkCrsHYeupU">127.0.0.1</td>
+                  <td data-page-node-id="Wr4fMcFxERKjVf5CAfNdgK"><div class="row-acts" data-page-node-id="QsgjpjZiYZOlgTUF6yOOUV"><button class="btn sm ghost" data-page-node-id="S67LSUcjoTEtrY1ZDgfXo1">复制</button><button class="btn sm danger" data-page-node-id="jrrSuHhEiQOEta1TUQC2x5">释放</button></div></td></tr>
+                <tr data-page-node-id="7EifrDAM5CHRKAfbB82XDJ"><td class="mono" data-page-node-id="eSrO7wCgwVmckqj3LhWEZp">27017</td><td data-page-node-id="dF6AE2FEQvcMmavoxJLxnM">UDP</td><td data-page-node-id="Yb0c0S8ncHS54XZVWnOma9"><span class="tag on" data-page-node-id="mFLdUuFlmYC2CoSGbsbKHw">BOUND</span></td><td class="mono" data-page-node-id="caEXl2dn0PDQv484VKd96H">0.0.0.0</td>
+                  <td data-page-node-id="N2t8vZensIvgFo7e3U2RBJ"><div class="row-acts" data-page-node-id="Irb7EPmgLPJOM0j7bJmOtE"><button class="btn sm ghost" data-page-node-id="2O2SmKUF7WiGkgcEFyTV6O">复制</button><button class="btn sm danger" data-page-node-id="JYBDBkAk6IgvDyeCtql8CF">释放</button></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 3：上传清单 ============ -->
+<div class="section-label" data-page-node-id="2ay1PNLRhoAYpHu8v3iZrF">画布 3 <span data-page-node-id="ZpN4JkHdIDewSfKsewGWCV">工具页 · 上传清单工作区（切到第 3 项）</span></div>
+<div class="win" data-page-node-id="53nDYQNIAWrKQjs1ocnH9e">
+  <div class="titlebar" data-page-node-id="BjX1lhB1PSue0BFef4DotL">
+    <span class="app-ico" data-page-node-id="AQk6aNZ2m1HWSOqAEK4KrP"></span><span class="app-name" data-page-node-id="PTLL9ye67XXjzG725Un6BC">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="EhJlXcm7kQCQTQgBCsmIun"><i data-page-node-id="Jd3BzlG09RbihSbsh86sWp">&#9472;</i><i data-page-node-id="8pJL26d0xKHUEJaT4ikiJI">&#9633;</i><i class="close" data-page-node-id="jwrBq9FGs1Pa6xvmIztvbx">&#10005;</i></span>
+  </div>
+  <div class="app" data-page-node-id="qqG08ZbYtj4cxIQ7Sg6acy">
+    <div class="nav" data-page-node-id="PAQYgDSzifqVLeGmrjqdux">
+      <div class="nav-item" data-page-node-id="ieJJoQ7SYGbOZY6TFPtBGj"><span class="ni" data-page-node-id="cwv20ZeralycPrCwN0N08k">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="AQUhd7JX89EMtGEujT7bHK"><span class="ni" data-page-node-id="lKbniZbE7URKDvd6D6xATz">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="NQ0CWmlb4YsOkvxdtn760J"><span class="ni" data-page-node-id="c1YhnTPG8baHEimhEUBZp2">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="4dmEWo3UkzHDHuXncDxiPh"><span class="ni" data-page-node-id="CCo55VGdBM8hfYS4FcKD14">&#9654;</span>跑视频</div>
+      <div class="nav-item new" data-page-node-id="FkrxOL1y06zMIweKMKCCfw"><span class="ni" data-page-node-id="hJvXIOqHziPLYeMfFoDCCv">&#8644;</span>远程<span class="nav-tag" data-page-node-id="34sPTKtM6x5JVvlzKaD2WC">二期</span></div>
+      <div class="nav-item active new" data-page-node-id="ElNvUAjjdbWTPKJmFmZXTw"><span class="ni" data-page-node-id="1e5VBP0Iel5ndumkvy0DMQ">&#9881;</span>工具<span class="nav-tag" data-page-node-id="ipJJDkCDKmSH4Cs62yratc">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="2ntg5ljmGXp7a9ECVVA53j"><div class="nav-sep" data-page-node-id="1AtT4ejO02hl6Lt30RK92F"></div>
+        <div class="nav-item" data-page-node-id="7YKDJsyVU8Q1Q8B3vl69g5"><span class="ni" data-page-node-id="9o4KxGrXfHXSbooG9Y4xR1">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="5u5xcWFlzl7DMrw80bkg3i"><span class="ni" data-page-node-id="lDCv3YN4lQmwHyYhLYDjwz">&#9432;</span>关于</div></div>
+    </div>
+    <div class="content" data-page-node-id="m3wBlFOPmAxE51hTXJrZSZ">
+      <div class="page-head" data-page-node-id="lrSzOUohuRKxgIQ8Dv7ox6"><div class="page-title" data-page-node-id="56ffogxkVgtUhNYgyhltLy">工具</div>
+        <div class="page-sub" data-page-node-id="n3gsoupeaBerKhwmOB1A72">上传清单 · 查看已收集待上传的视频与日志，确认后打包上传</div></div>
+      <div class="tool-body" data-page-node-id="KfE70bYZCxEc1iM52xsB1g">
+        <div class="tool-list" data-page-node-id="vuBnZsv9vAuGCEd9ol4TX0">
+          <div class="tl-cap" data-page-node-id="hoU4rCT1GCkBKGuN1LejZo">工具箱</div>
+          <div class="tl-item" data-page-node-id="3OYjVrYwNukQXSs8kQVC3H"><span class="ti" style="background:var(--accent)" data-page-node-id="uQ3BLP9BObaDxpXzSPkRXj">&#9654;</span><div data-page-node-id="eLKBEetG8oFcGTP1Aia5wu">单杆视频<small data-page-node-id="xYmQogXkhCca6afZQSzbuE">解析得分生成水印</small></div></div>
+          <div class="tl-item" data-page-node-id="qdndDsXCMV26NtdbanRCSQ"><span class="ti" style="background:var(--info)" data-page-node-id="EQ9TIZ5IiQodqKVR1Ec35t">&#9096;</span><div data-page-node-id="orcZgoDyeiGoe119aQEeHx">端口占用<small data-page-node-id="7Ynuw8KusZFWDu5k4odZaD">联调端口模拟</small></div></div>
+          <div class="tl-item active" data-page-node-id="ZRVzsYUneuNSZ4xB4xkMrX"><span class="ti" style="background:var(--success)" data-page-node-id="RkH3cpT9G5OKYug973E5vF">&#8682;</span><div data-page-node-id="zbxFcoxgvwDi5YpuLeAtSG">上传清单<small data-page-node-id="I5wwpV7M2ifQOBSuLgkB7p">待上传工作区</small></div></div>
+          <div class="tl-item" data-page-node-id="fWIWshBhYKg9zzn6D2sA2p"><span class="ti" style="background:var(--warning)" data-page-node-id="4M9KvyO5Gzr3U3c98eMpe0">&#9776;</span><div data-page-node-id="RjuV82S8T0TkJFqdLVOajR">批量整理<small data-page-node-id="xBZDdDd6lTYj4Yx9gknjXB">视频/日志归类</small></div></div>
+        </div>
+        <div class="tool-work" data-page-node-id="wWikmDONd4lyKwymPx235s">
+          <div class="infobar info" data-page-node-id="J0yrwBzh6HKLKKQWoHD5tL"><span class="ib-ico" data-page-node-id="cgTjGdWrJ4vyN9Nl3ngj9m">&#8505;</span>
+            <div data-page-node-id="i8FnaVlgReH3dFpvllqh7c">工作区 <b class="mono" data-page-node-id="7BAvIkEduU1xL5mfBG0WTh">D:\AutoWork\videos\upload</b> · 共 4 个文件待上传，合计 1.24 GB</div>
+            <span class="ib-x" data-page-node-id="nRBLKCm8JQ6k4LIa1ecZcI">&#10005;</span></div>
+          <div class="card" data-page-node-id="xGydZcth3oNnBQOPYn3Om6">
+            <div class="card-h" data-page-node-id="QYyvwaF2SRftIscFXhCrWl"><span class="ch-ico" style="background:rgba(26,158,108,.12);color:var(--success);" data-page-node-id="aRO1b8oqeW8NvKUDz2G15q">&#8682;</span>
+              <h3 data-page-node-id="7Lg3X3BeifRvNIYvF6A1pm">待上传文件</h3>
+              <div class="ch-right" data-page-node-id="GKPNuBYMigNDETDFlKpWF9">
+                <div class="combo" style="width:120px;height:28px;font-size:12px;" data-page-node-id="4p9B4YngyGz4WVNGpVsxED">全部类型</div>
+                <input class="inp" style="width:180px;height:28px;font-size:12px;" placeholder="&#128269; 搜索文件名" data-page-node-id="Xk4To16u2uPXzmCXDs0v0p">
+                <button class="btn sm" data-page-node-id="EpAabNY3escbqMXPMQLQAW"><span class="bi" data-page-node-id="7MdGn5lBoBJxddi5E5tvec">&#8635;</span>刷新</button>
+              </div>
+            </div>
+            <div style="margin:0 -20px;border-top:1px solid var(--border);" data-page-node-id="z5vZCRBSCWYfRz21mPEdvE">
+            <table data-page-node-id="fCCOyETGTvEzsmwqNit9LB">
+              <thead data-page-node-id="xaf8X5tD54AHgtJCHDL7Ic"><tr data-page-node-id="MKpGeVehUnwsFYE0hosUUx"><th style="width:38px;" data-page-node-id="Wkye3neTsfRBBrJKOBJFDl"><span class="cb" data-page-node-id="qeIxcoVCiEd0R6wquLFnF4"></span></th><th data-page-node-id="yxWdmoGa5N2oDG5dFsLBlZ">文件名</th><th style="width:78px;" data-page-node-id="WG8C8Wl1FI0YVM3CYWEkJC">类型</th>
+                <th style="width:88px;" data-page-node-id="PweIDwsHzVOGmdlOjIUzqP">大小</th><th style="width:150px;" data-page-node-id="erQP7PGoECoP5Q6be5w3b2">修改时间</th><th style="width:90px;" data-page-node-id="PuDJwy07CfoMFC8RAhv2mk">状态</th></tr></thead>
+              <tbody data-page-node-id="NtcUxl6wAne8JoHtbwVHo7">
+                <tr data-page-node-id="SWzWfvAA4uRzWh2fKf8XyF"><td data-page-node-id="MxwS0ufEpOFuUsElgiUHDK">&#9745;</td><td class="mono" data-page-node-id="71h68mRz9ogOP43mkPhZ7T">table_3226-01_20260906.mp4</td><td data-page-node-id="lBw95GhII698iy3Ep4L4e7"><span class="tag acc" data-page-node-id="jda6bWA5mhafFmaLmdZsa1">视频</span></td><td class="mono" data-page-node-id="Syo6GQLFjnalBIaLocJjYL">812 MB</td><td class="mono" data-page-node-id="oQ9JKMOZFhMoMoqYPVBl3B">09-06 23:57</td><td data-page-node-id="eOyolTC7VmzpoDng20zG2L"><span class="tag on" data-page-node-id="BgACm8ECNp2RhCyHIAWobK">待上传</span></td></tr>
+                <tr data-page-node-id="msnDlw0wLCfuCQmbH2Fwxa"><td data-page-node-id="pnIYC1IlbQsvHsHHajJ80x">&#9745;</td><td class="mono" data-page-node-id="3lwW7kXSykZGTJzJ4NMjay">table_3226-01_20260906.log</td><td data-page-node-id="OLdP8FryHBCliEqFG0PirL"><span class="tag off" data-page-node-id="CIXFJbdoG3o0LWtOpkQ9ld">日志</span></td><td class="mono" data-page-node-id="553Hjy8b4PeRrkfMv65P95">4.2 MB</td><td class="mono" data-page-node-id="A1IuI013njZSClW0IHVO1a">09-06 23:57</td><td data-page-node-id="pa2OrwGVeEWKSGP07CR5fk"><span class="tag on" data-page-node-id="XCokgjdAI8BrNfSw4dIekq">待上传</span></td></tr>
+                <tr data-page-node-id="dp0ei1UMFnAS5XXLwOUOcG"><td data-page-node-id="HZP801Ccep0wGwGADRTGOq">&#9744;</td><td class="mono" data-page-node-id="qH8XEIv7FzfDUnWAOpgjTw">table_3217-02_20260906.mp4</td><td data-page-node-id="GaCEGfslw0Wb3tuT1w6k5q"><span class="tag acc" data-page-node-id="nefrZFrkeN8OCr7HlNvh8k">视频</span></td><td class="mono" data-page-node-id="Qto2CmPAAswgLEgzJnNBKk">438 MB</td><td class="mono" data-page-node-id="zWjXIVEMnshycy7akBZe4F">09-06 21:12</td><td data-page-node-id="DlfPBmwcAuaumtZw3ExQBI"><span class="tag on" data-page-node-id="73BwDh6KFAHGnC7UIyjOmV">待上传</span></td></tr>
+                <tr data-page-node-id="LsPLDFVscAGRxSNXlWhg7o"><td data-page-node-id="CvMFHEN6dmGQH64uH7kLQk">&#9744;</td><td class="mono" data-page-node-id="XAE7FS9k00DI4gT3OxiiYf">submission_20260906.json</td><td data-page-node-id="XNlxuSPeCLSsvOwx5EhLWS"><span class="tag off" data-page-node-id="O9MAmUUwUJzOFzQnnxJ1hH">清单</span></td><td class="mono" data-page-node-id="HIQfv8d2PRsmgOGJt1XCfF">18 KB</td><td class="mono" data-page-node-id="6kUeEmuCh5AMFfmwx3O096">09-06 20:03</td><td data-page-node-id="543x9gHuJTKbWC72ygF7q2"><span class="tag warn" data-page-node-id="D9V2siwzYRLFI4CO0XIUou">已选</span></td></tr>
+              </tbody>
+            </table></div>
+            <div class="flex between mt" data-page-node-id="dJewIvU1KweRJm0jj2H182">
+              <div class="hint" data-page-node-id="PJsBryPyBMDEBgN019KXRP">已选 <b style="color:var(--text)" data-page-node-id="isFq2aUAS8OJLFnc5HAmNc">2 / 4</b> · 合计 816.2 MB　<span class="hint" data-page-node-id="hv0X0IvwjAPCfyctSNX9HR">上传凭据在「设置 → 应用配置 → 收集与上传」</span></div>
+              <div class="flex" data-page-node-id="NuciK7eDbPiskNF04UPsI8"><button class="btn sm" data-page-node-id="ntX0uzVX8ev413Lh0ukN9S">全选</button>
+                <button class="btn primary" data-page-node-id="3gYzUUj0EK5DQ3ZL1ph8N5"><span class="bi" data-page-node-id="8qqMjJsfG6Ge5CjcABXtOa">&#8679;</span>打包上传（2）</button></div>
+            </div>
+          </div>
+
+          <div class="card" data-page-node-id="YsbiIFAudeYPqMejaAdnhu">
+            <div class="card-h" style="margin-bottom:10px;" data-page-node-id="phkyGB4L1DBPE2496uU5H0"><span class="ch-ico" style="background:rgba(0,188,212,.12);color:var(--accent-press);" data-page-node-id="iVIUscFAhYdDT7jeiHaHj7">&#8679;</span>
+              <h3 data-page-node-id="UdrLFqyp3oafr8yeZDDnkj">上传进度</h3><span class="ch-sub" data-page-node-id="DsUJd2EVFSOwUznruEcNmp">打包中 → 上传 zip 至 SFTP</span>
+              <div class="ch-right" data-page-node-id="xRLSxyn6QafGat6hSeOTeB"><button class="btn sm" data-page-node-id="JZOnAPKkCAvXqgEexByP60">最小化</button><button class="btn sm danger" data-page-node-id="wXrXyXQs0xj4DSDKR4v4Y9">取消</button></div></div>
+            <div class="prog" data-page-node-id="SIQcA9CPDIc3r3IVnVlVqW"><span style="width:41%" data-page-node-id="oe5rkLqlFBrhvfv4d3ME0e"></span></div>
+            <div class="flex between mt" data-page-node-id="wIig25EBAiTAfdAswMHtNC"><span class="hint mono" data-page-node-id="x8mAYiFt1JtdvYImpgmQbO">upload_20260906.zip · 335 MB / 816 MB · 6.2 MB/s</span><span class="hint" data-page-node-id="KRWgqux7kqKkL3TVdB7dFo">剩余约 78s</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 4：批量整理 ============ -->
+<div class="section-label" data-page-node-id="UF29ASRFKTXQpAjdMHm1Vp">画布 4 <span data-page-node-id="DK6fIAw7UztjslnP08IjKB">工具页 · 视频与日志批量整理工作区（切到第 4 项）</span></div>
+<div class="win" data-page-node-id="egEB5MUQ0rmZFgnvXLHre1">
+  <div class="titlebar" data-page-node-id="GyFw9Y09YZW4Q5kbHohUxb">
+    <span class="app-ico" data-page-node-id="IIlMlRNWJ0xsDpmKKlJOPo"></span><span class="app-name" data-page-node-id="hdCY1ekyAX6cC7KYcRA1zu">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns" data-page-node-id="mlCFMeK0WVjKUqxElcFWRs"><i data-page-node-id="JCkg6nuN2zl2FssaYZ45UO">&#9472;</i><i data-page-node-id="golYpxA8qAA9isaVsNcfB6">&#9633;</i><i class="close" data-page-node-id="gQwJa5OBsIx8NwnJBdmf5u">&#10005;</i></span>
+  </div>
+  <div class="app" data-page-node-id="0KBIJzOcqrYDrQcxSf0QwD">
+    <div class="nav" data-page-node-id="mf9jnA02qA8083Fdenm72q">
+      <div class="nav-item" data-page-node-id="B5MLYmlXmUWl0MlAtXfFPE"><span class="ni" data-page-node-id="cI6X5itfe6PAwiXNjzNGRE">&#8962;</span>工作台</div>
+      <div class="nav-item" data-page-node-id="WmhejRRfnF9mZQt98Bn6vb"><span class="ni" data-page-node-id="5WebpZAGoUtNHCKLoWGHDQ">&#9776;</span>运维管理</div>
+      <div class="nav-item" data-page-node-id="4D4Vw10DEf20DnALCVLM1D"><span class="ni" data-page-node-id="we4USpmGCfZmnisLVWSyAh">&#973;</span>售后</div>
+      <div class="nav-item" data-page-node-id="JDWrxfNqs3E8d4HB8GfhMb"><span class="ni" data-page-node-id="1f36Gn36L13zKG1dhmSXOQ">&#9654;</span>跑视频</div>
+      <div class="nav-item new" data-page-node-id="Dhpx3QNvqjEG1w16RlwB75"><span class="ni" data-page-node-id="GsyYs6VgyRVRJ7QMKNDMOE">&#8644;</span>远程<span class="nav-tag" data-page-node-id="oYs9DM1ctwIEidRyaoG8W6">二期</span></div>
+      <div class="nav-item active new" data-page-node-id="w9vIWuqj08txKyaH2QReNc"><span class="ni" data-page-node-id="YQmvYXeObNAgF7rQRyDjm4">&#9881;</span>工具<span class="nav-tag" data-page-node-id="eITLrkFHtGXzchKnoecZOn">二期</span></div>
+      <div class="nav-bottom" data-page-node-id="IcuIMxRQ16hqPQmn0GJPRN"><div class="nav-sep" data-page-node-id="2DFyMA87kxd6q4xXi67hRS"></div>
+        <div class="nav-item" data-page-node-id="qsKg9MS14Vl2U1HJn7Gqau"><span class="ni" data-page-node-id="9LGHHlUZiLtU0a7Mof0aUX">&#9881;</span>设置</div>
+        <div class="nav-item" data-page-node-id="Pvn9s2ZnWvolCH7VUpLCpo"><span class="ni" data-page-node-id="xJTR61VFizPCRyaH5VjVyD">&#9432;</span>关于</div></div>
+    </div>
+    <div class="content" data-page-node-id="I4cxAKrb7ii5XaQ8eT1Kx4">
+      <div class="page-head" data-page-node-id="EOi9DDkJA96xQOw0hPRwAf"><div class="page-title" data-page-node-id="eUdonKRLbFMJHCbmZ7M0kT">工具</div>
+        <div class="page-sub" data-page-node-id="9TmwFjPavJN5AGEHG87fFN">视频与日志批量整理 · 按署名批量归类视频和日志，完成后可直接打包上传</div></div>
+      <div class="tool-body" data-page-node-id="i7qZhAp51oWl9842mnOYct">
+        <div class="tool-list" data-page-node-id="g9mUIyzGxIupgDHJhwleYa">
+          <div class="tl-cap" data-page-node-id="shpeNxjBXgqa8jzoCvawTi">工具箱</div>
+          <div class="tl-item" data-page-node-id="WYtIdHWT4oDwNKC1ZH7MEs"><span class="ti" style="background:var(--accent)" data-page-node-id="Axoo27w1OpEGMXMHbI7xya">&#9654;</span><div data-page-node-id="Gnd0iiPeqEZADEvsJCl5vk">单杆视频<small data-page-node-id="DBAxhDJHKi586IMYUtf6Qn">解析得分生成水印</small></div></div>
+          <div class="tl-item" data-page-node-id="OCkn7FfTwKLNmYqB3FFHVW"><span class="ti" style="background:var(--info)" data-page-node-id="c9OZTnCuWkdsR9l0CyqjOD">&#9096;</span><div data-page-node-id="2JDXqZ830ivQfKVbOa3AsP">端口占用<small data-page-node-id="h4qxn3A4OsYN0beW7NybIs">联调端口模拟</small></div></div>
+          <div class="tl-item" data-page-node-id="u001HgVNf34SBhUv5x0XNI"><span class="ti" style="background:var(--success)" data-page-node-id="VfEHs6kdWKBZrczAxycjO0">&#8682;</span><div data-page-node-id="SrEAEpPHvAldNpRXPwEMb3">上传清单<small data-page-node-id="y0363fH1gszUqEL6FtoW9k">待上传工作区</small></div></div>
+          <div class="tl-item active" data-page-node-id="xXsuoXAbRm7goyrhcU8oxH"><span class="ti" style="background:var(--warning)" data-page-node-id="Sb7ctlS1dOA2wPtkttVnTE">&#9776;</span><div data-page-node-id="kmXLMVLz2I66mB1lGfyX78">批量整理<small data-page-node-id="SSTEz8uOWq1lxBxCmwJPIF">视频/日志归类</small></div></div>
+        </div>
+        <div class="tool-work" data-page-node-id="nkW2ibJnh59P1MYEe3MZLf">
+          <div class="card" data-page-node-id="26QcYFQjOp425vPtZCkoiP">
+            <div class="card-h" data-page-node-id="KR6b1ncDai1Yf1xAETXxqH"><span class="ch-ico" style="background:rgba(201,138,45,.14);color:var(--warning);" data-page-node-id="ruFjuxGWeJ2uRfPeUiE2uk">&#9776;</span>
+              <h3 data-page-node-id="TP3i8XErwHDmFXhxIh5GI1">整理参数</h3><span class="ch-sub" data-page-node-id="aiA95KuNupZ2YgOJfuw6QB">NewLogWorker 后台执行，完成后进入打包上传阶段</span></div>
+            <div class="fld" data-page-node-id="NWB0HYHoqGbJoB0QSRwYDI"><label data-page-node-id="GNRBj7FRSuQEdAFaGLOY6N">筛选署名</label>
+              <div class="combo" style="max-width:280px;" data-page-node-id="gCXH640JPpZQYhcmA2XGfL">北辰中心1007 ▾　<span style="color:var(--text3);font-size:12px;" data-page-node-id="tGhtUHoA64FnFLUb1IC5eF">（上次整理记忆）</span></div></div>
+            <div class="grid2" data-page-node-id="8xrJWVzG5vNn9nvb2wYMXc">
+              <div data-page-node-id="479n7msd9KkMo8CU0hc6mV"><div class="mini-lbl" data-page-node-id="0GtmPcGWZwzeIulAhX6FWY">Excel 源目录 excel_dir</div><div class="flex" data-page-node-id="NljT0K9gXVHJhxHdtm6O2i"><input class="inp mono" value="~\Desktop\excel" data-page-node-id="HvMCYQ26CHLAslORKDwSW0"><button class="btn" data-page-node-id="2Ps4oXzm1TVUAlEfzMEm2Y"><span class="bi" data-page-node-id="EJGLqXXQqJHcHUtkDOzud9">&#128193;</span></button></div></div>
+              <div data-page-node-id="zce0STQcmNtjBTbrFH6U5l"><div class="mini-lbl" data-page-node-id="5FlAkJ0QGFsFHMBez5LpZf">输出目录 out_dir</div><div class="flex" data-page-node-id="VE9otApyDbVKNEpYmS3cq7"><input class="inp mono" value="~\Desktop" data-page-node-id="SCDEZDtVD8MAxtpaDzTgII"><button class="btn" data-page-node-id="tpcSXkpAWlG40GlEcIpM17"><span class="bi" data-page-node-id="so5n95yjZZ3KW20Jxnn2LD">&#128193;</span></button></div></div>
+            </div>
+            <div class="flex between mt" style="margin-bottom:0;" data-page-node-id="As6XdSon2pHzx2hf1HY0Ci">
+              <div class="flex wrap" style="gap:16px;" data-page-node-id="VwE3sYWzGaB2JRnuvC31ZV">
+                <span class="sw" data-page-node-id="NEKW0sli0gXJfvPDRd2FFR"><span class="track" data-page-node-id="a9ZWR0S4ArcC6cXt2tyE7I"></span>整理后自动打包</span>
+                <span class="sw off" data-page-node-id="AUvK7DgS2TZEssHf96tdub"><span class="track" data-page-node-id="xjiMMxvTE1RsK4WuVOEFSd"></span>覆盖同名文件</span>
+              </div>
+              <button class="btn primary" data-page-node-id="eCWFHvBWOyjYicWQMHwOBC"><span class="bi" data-page-node-id="rjZDQALDmAFMc2mAzaXykL">&#9881;</span>开始整理</button>
+            </div>
+          </div>
+
+          <div class="stat-strip" data-page-node-id="rmLJG5rpYfX8f0O6zywfAM">
+            <div class="stat" data-page-node-id="fskZonO3wKc0dKFhLH3rNe"><div class="num" data-page-node-id="l1YTHguP4vwc6MyBa07S94">128</div><div class="lbl" data-page-node-id="qhA4FFSbebJ3mFj6Iwm0iT">扫描文件</div></div>
+            <div class="stat" data-page-node-id="0S5sh47MBDvm102u5hDX9v"><div class="num g" data-page-node-id="2pkAbKjRxEikNwRrm7G7IH">96</div><div class="lbl" data-page-node-id="Cpac4VL1ULKkvJZgaxOjhe">已归类</div></div>
+            <div class="stat" data-page-node-id="8moN8EZYTmSCoqJ0Azjnjf"><div class="num a" data-page-node-id="fM5QrHMuDAmw92ypIXjQvD">7</div><div class="lbl" data-page-node-id="aH29FWZcS1RcW1W7E5AsCY">署名不匹配跳过</div></div>
+            <div class="stat" data-page-node-id="Qg0ktwwKjojqEw3ktgDBmL"><div class="num d" data-page-node-id="htG3htHrefOY6XgLhZc95y">2</div><div class="lbl" data-page-node-id="q0poB6LqjYD5OxPCTjkw3X">异常</div></div>
+          </div>
+
+          <div class="card" data-page-node-id="69fVPwN5TiqnsmB7pEH6TH">
+            <div class="card-h" style="margin-bottom:10px;" data-page-node-id="cT46FD8MIhvkoCAHoCdIG1">
+              <span class="ch-ico" style="background:rgba(26,158,108,.12);color:var(--success);" data-page-node-id="i4HOoMZmKoTKVlLcDl6QFm">&#10003;</span>
+              <h3 data-page-node-id="VRGT4aMi52gBRmcxvM151J">整理完成</h3><span class="ch-sub" data-page-node-id="hQw91SXHGmcXiEH9T5ech6">96 个文件已按署名归类 · 进入打包上传阶段</span>
+              <div class="ch-right" data-page-node-id="D4DDs8fCGmIOw4XnWatBtM"><button class="btn sm" data-page-node-id="2C6jAHTTst7OnKOoi5bOsZ">最小化</button><button class="btn sm" data-page-node-id="TDqIqY2TgbV0N4a34o2yTj">打开输出目录</button><button class="btn primary sm" data-page-node-id="7RaITk4901y86UJw8awY6P"><span class="bi" data-page-node-id="IWGpGUcP5zTsrCHjVilIAF">&#8679;</span>打包上传</button></div>
+            </div>
+            <div class="term-wrap" data-page-node-id="h7Pyo11PSYRKDghXbAdJsi">
+              <div class="term-h" data-page-node-id="rR1OcQpZwCuGtD7du2X1j6"><span class="dots" data-page-node-id="ivlWlpk3aSFV1dQ6QZjuE6"><i style="background:#ff5f57" data-page-node-id="d5QzUicjG9pdQXRfhWMexr"></i><i style="background:#febc2e" data-page-node-id="DmSdqAlCbolFoGfnsOHVFY"></i><i style="background:#28c840" data-page-node-id="XIbZ76Cl5WTNXqrKkI0g5R"></i></span><span data-page-node-id="uUehXtMrC5QA4jSsO7noMd">运行输出 · newlog_worker</span></div>
+              <div class="term" data-page-node-id="PDPgGLv6wnO4rQDuiHjUwC">
+<div class="ln dim" data-page-node-id="DvUJ5DnoCzIlD6QMDDrEeQ">$ 扫描 ~\Desktop\excel · 128 个文件</div>
+<div class="ln ok" data-page-node-id="GjAgG9twrXqlHL4fyvAjwD">✓ 北辰中心1007 → 归档 42 视频 / 54 日志</div>
+<div class="ln ok" data-page-node-id="ZjynzjTrcaonZSuuiHS8Ua">✓ 汉台名府 → 归档 0 视频 / 9 日志</div>
+<div class="ln wn" data-page-node-id="aujiZaOjZwyOTTu1OFIXot">! 7 个文件署名不在筛选列表，已跳过</div>
+<div class="ln er" data-page-node-id="LY9jxdXsKOcBKRMFBFfemt">✕ table_43-16.mp4 元数据缺失，归类失败</div>
+<div class="ln dim" data-page-node-id="hYlg41w8mfl9XveirwRr6T">→ 等待打包上传指令 ...</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="foot" data-page-node-id="cOhsGo8gB9jZAgrMHdTu1y">
+  <h4 data-page-node-id="KRauZt3U30kp92cBKQW2Tg">实现落点建议（供二期开发参考，非设计约束）</h4>
+  <ul data-page-node-id="edNCevxumVmQj8MZH50IlK">
+    <li data-page-node-id="LnkSjjjo1AemvFLP6Tkrva"><b data-page-node-id="kde44deapnTf1FQE8lnL4I">页面骨架：</b>新建 <code data-page-node-id="qlDt4ucEMj3yQERwyqKY0X">main_window/tool_hub.py</code> 内 <code data-page-node-id="C2CWvUamvskKhp6WCexZEl">ToolHub(QWidget)</code>，仿 <code data-page-node-id="Qg9VnZ8aTIRtmrbtifX2LB">ManagementHub</code> 用 qfw <code data-page-node-id="U1fXNn9E9HbqN4lgtNN7d6">ListWidget</code>/自绘 tl-item 作左导航 + <code data-page-node-id="p6LfqIwwYR9ApWaimFvSay">QStackedWidget</code> 切 4 个工作区；主窗口 <code data-page-node-id="ADrGzpXNPi5fWKFpyzPfZq">addSubInterface(tool_hub, FluentIcon.DEVELOPER_TOOLS, "工具")</code> 插在跑视频之后。</li>
+    <li data-page-node-id="mo0lSNuZGHCqtx7NVkiD6K"><b data-page-node-id="qyyAGfvWPC9I0wnxLhCXWI">控件映射：</b>卡片=<code data-page-node-id="13uvb1uAkAFOdx1rXabOFw">CardWidget</code>；输入=<code data-page-node-id="4ikYPYXMs22rBdQ3Jw7rIn">LineEdit</code>；端口/帧号=<code data-page-node-id="lJn2xhBYqsr99Cqpl6uoCB">CompactSpinBox</code>；下拉=<code data-page-node-id="lqd77uiawKqAUuEmdyNcmp">ComboBox</code>；开关=<code data-page-node-id="DTsUBx10QEGmhYehoFGsyD">SwitchButton</code>（已全局中文化「开/关」）；表格=<code data-page-node-id="vfQrjACx44aGKJNJKqUFEQ">TableWidget</code>；终端=<code data-page-node-id="OQX11AnnmFHDC7dIBYnEs4">TextEdit</code> 黑底；提示=<code data-page-node-id="mKWAKx4zylM2gac0EwXI4c">InfoBar</code>；进度=<code data-page-node-id="v6WZWc4W3GE0Po8qDCpPhG">ProgressBar</code>；按钮=<code data-page-node-id="UwQFOhbPngqa4QQPhUhKLJ">PushButton</code>/<code data-page-node-id="PaOcCAaKWkP0z5wJJWtOB4">PrimaryPushButton</code>/<code data-page-node-id="FE42PhJ37yRTEHMbkEemZR">PushButton(FluentIcon.DELETE,"全部释放")</code>。</li>
+    <li data-page-node-id="Ai5sxKxgVAUZCrqq81rVPK"><b data-page-node-id="QNqA7ZMUzb3AkIo9Fs3mWy">逻辑复用：</b>四功能后端不变——直接复用 <code data-page-node-id="dBGXvRYYCPO3jVl90y0mDR">_on_open_single_video</code>/<code data-page-node-id="yLfuQ7q29EnXREk6SwZCiK">SingleVideoWorker</code>、<code data-page-node-id="AeNypNfM3sN2DiBMBSmaE9">PortFakeWidget</code>（内嵌而非弹窗）、<code data-page-node-id="Zy24NRESjlfGmooKrf8Cr8">UploadListDialog</code> 的 <code data-page-node-id="FlhnIyJRDgJmC8slJxaXpR">ZipUploadWorker</code>、<code data-page-node-id="6CjAMf4BY0SBGwfpEqro1N">_on_newlog_organize</code> 的 <code data-page-node-id="mX1V8vTqmWXPvFEIWmnn4f">NewLogWorker</code>。把「弹窗」改为「页面内嵌工作区」即可。</li>
+    <li data-page-node-id="xEEI37OtJOSM1BvwOUtCok"><b data-page-node-id="jkKdzQTTdFEzdsZSgfAKwT">设置-工具瘦身：</b>移除 4 条已迁功能行，仅保留「修改快捷键」「连接诊断」两个纯动作入口 + 工具相关配置（excel_dir/out_dir/上传凭据入口跳转），符合用户「需要配置再放回设置-工具」的要求。</li>
+    <li data-page-node-id="vsTZN9HSF8KeCwr2YglI7x"><b data-page-node-id="GIXea9NBiSHJFEE7coGXSQ">依赖守卫：</b>单杆视频(cv2/numpy)、批量整理(openpyxl) 缺依赖时，工作区顶部显示 <code data-page-node-id="zYzeS698Rha4EAnbeplTQf">InfoBar</code> warning 引导安装，与现有 <code data-page-node-id="6NvxkZwtQMYjzUfHLzcpkp">_show_info_bar</code> 行为一致。</li>
+  </ul>
+</div>
+
+</body>
+</html>

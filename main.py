@@ -52,7 +52,8 @@ from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 # 中央拦截菜单弹出动画：按「面板覆盖→全局」生效值降级（含库内硬编码的
 # ComboBox 下拉），开关切换后下一次弹出即生效（幂等，重复调用无害）
 from core.perf import (patch_menu_animation, patch_dialog_animation,
-                       patch_table_hover_repaint)
+                       patch_table_hover_repaint,
+                       patch_lean_table_delegate)
 patch_menu_animation()
 # 中央拦截 MessageBoxBase 弹窗淡入/淡出（QGraphicsOpacityEffect 整窗离屏
 # 渲染是「双击打开面板」低帧/卡顿主因）：动画关闭时直接显示，秒开无渐变
@@ -60,6 +61,10 @@ patch_dialog_animation()
 # 中央拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代
 # 库默认整视口重绘），滚轮滚动 + 鼠标移动叠加场景掉帧显著减少（幂等）
 patch_table_hover_repaint()
+# 表格委托换轻量实现（P0-1）：保留库的 hover/圆角/自绘勾选框等全部视觉，
+# 只把每格文本绘制从 QTextLayout 排版换成 drawText + 省略号缓存。实测滚动
+# 耗时 -49.4%（售后 60 行 × 13 列：11.9 → 6.0 ms/帧），全局表格自动生效（幂等）
+patch_lean_table_delegate()
 # SwitchButton 状态文本统一中文「开/关」（库默认 "On"/"Off"，patch
 # __init__ 对全项目所有直接实例化处一次生效，幂等）
 from core.switch_cn_patch import patch_switch_cn_text

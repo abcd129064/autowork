@@ -222,6 +222,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         from qfluentwidgets import NavigationItemPosition
         from main_window.hub_pages import (ManagementHub, AftersaleHub,
                                            LedgerHub, SettingsHubPage, AboutPage)
+        from main_window.tool_hub import ToolHub
+        from main_window.remote_hub import RemoteHub
 
         # 页面通过 getattr(self.window(), "_remote_bridge", None) 取远程会话中心
         # （全局单例，与球桌面板/主窗口远程面板共享同一 frpc 进程）
@@ -230,19 +232,29 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.management_hub = ManagementHub(self)
         self.aftersale_hub = AftersaleHub(self)
         self.ledger_hub = LedgerHub(self)
+        self.remote_hub = RemoteHub(self)
+        self.tool_hub = ToolHub(self)
         self.settings_hub = SettingsHubPage(self)
         self.about_page = AboutPage(self)
 
         # 统一设置页 → 各 Hub 刷新（替代原面板内部信号连线）
         self.settings_hub.aftersale_cycle_saved.connect(
             self.aftersale_hub.reload_cycles)
+        # 自动刷新开关/间隔变更 → 售后记录页即时启停定时器（2026-09-16）
+        self.settings_hub.aftersale_auto_refresh_changed.connect(
+            self.aftersale_hub.apply_auto_refresh)
         self.settings_hub.table_smooth_changed.connect(
             self._apply_all_table_smooth)
 
         for hub, icon, text in (
                 (self.management_hub, FluentIcon.LIBRARY, "运维管理"),
                 (self.aftersale_hub, FluentIcon.PEOPLE, "售后"),
-                (self.ledger_hub, FluentIcon.VIDEO, "跑视频")):
+                (self.ledger_hub, FluentIcon.VIDEO, "跑视频"),
+                # 二期（2026-09-07）：远程会话中心（design/remote_page_v2.html），
+                # qfw 1.11.x 无 FluentIcon.REMOTE，用 LINK 代替
+                (self.remote_hub, FluentIcon.LINK, "远程"),
+                # 二期（2026-09-07）：工具独立工作页（design/tools_page_v2.html）
+                (self.tool_hub, FluentIcon.DEVELOPER_TOOLS, "工具")):
             self.addSubInterface(hub, icon, text)
 
         self.navigationInterface.addSeparator()
@@ -255,6 +267,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """统一设置页任意表格平滑开关变更 → 刷新三个 Hub + 已打开远程窗口"""
         self.management_hub._apply_table_smooth_all()
         self.ledger_hub._apply_table_smooth_all()
+        self.remote_hub._apply_table_smooth_all()
         self.aftersale_hub.refresh_smooth()
         self.management_hub._apply_remote_table_smooth()
 
@@ -279,6 +292,61 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         """球桌右键「查看售后记录」→ 售后 Hub 记录页按桌号预筛选"""
         self.switchTo(self.aftersale_hub)
         self.aftersale_hub.open_records_for_table(table_no)
+
+    # ---------- 弹出面板（2026-09-07 需求） ----------
+
+    # 有旧版独立窗口对应的 Hub → 直接开旧面板（重构前形态原样复活）；
+    # 无旧版对应的（工具/远程，二期新页面）→ 通用 HubPopoutWindow 嵌入
+    _POPOUT_LEGACY = {
+        "managementHub": ("windows.management.window",
+                          "ManagementPanelWindow", "运维管理面板"),
+        "aftersaleHub": ("windows.aftersale.window",
+                         "AftersalePanelWindow", "售后面板"),
+        "ledgerHub": ("windows.run_video.window",
+                      "LedgerPanelWindow", "跑视频面板"),
+    }
+
+    def open_hub_popout(self, hub):
+        """Hub 右上「弹出面板」入口：把该面板复刻为独立窗口打开。
+
+        效果 = FluentWindow 单窗口重构前，主界面点导航弹出的子面板：
+        旧运维/售后/跑视频开原 FluentWindow 面板类；工具/远程用通用
+        HubPopoutWindow（新建 Hub 实例嵌入，busy 守卫/日志/设置全部经
+        代理与内嵌视图共享主窗口）。同面板已弹出则置顶复用。
+        """
+        import importlib
+        key = hub.objectName()
+        existing = getattr(self, "_hub_popouts", None)
+        if existing is None:
+            existing = self._hub_popouts = {}
+        win = existing.get(key)
+        if win is not None:
+            try:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+                return win
+            except RuntimeError:
+                existing.pop(key, None)  # C++ 已销毁，重建
+        spec = self._POPOUT_LEGACY.get(key)
+        try:
+            if spec is not None:
+                mod_name, cls_name, title = spec
+                cls = getattr(importlib.import_module(mod_name), cls_name)
+                win = cls()
+            else:
+                from main_window.hub_popout import HubPopoutWindow
+                title = {"toolHub": "工具面板",
+                         "remoteHub": "远程面板"}.get(key, "面板")
+                win = HubPopoutWindow(type(hub), self, title)
+        except Exception as e:
+            self._show_info_bar(f"面板弹出失败：{e}", "error", duration=5000)
+            return None
+        existing[key] = win
+        win.destroyed.connect(lambda _o=None, k=key: existing.pop(k, None))
+        win.show()
+        self._append_log(f"[面板] 「{win.windowTitle()}」已弹出为独立窗口")
+        return win
 
     # 统计图表不单独建页（2026-09-06）：售后/跑视频记录页工具栏按钮
     # 直开图表窗口（_on_open_stats_chart），与重构前呈现一致。
@@ -1785,6 +1853,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
                     hub.detach_workers()
                 except Exception:
                     pass
+        # 弹出面板窗口一并关闭（先于 worker 等待，closeEvent 会各自 detach）
+        for win in list(getattr(self, "_hub_popouts", {}).values()):
+            try:
+                win.close()
+            except (RuntimeError, OSError):
+                pass
         # 一次性短等待：给所有 worker 200ms 自行收尾。绝不在关闭路径上串行
         # wait（旧实现对每个运行中 worker 各 wait(2000)，是无事件循环线程的
         # 干等，累积出 ~2s 关闭卡顿的根因）

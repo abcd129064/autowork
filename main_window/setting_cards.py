@@ -196,7 +196,7 @@ class SettingGroup(QWidget):
         self.setObjectName("settingGroup")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(2, 0, 0, 0)
         outer.setSpacing(10)
         if title:
             t = CaptionLabel(title, self)

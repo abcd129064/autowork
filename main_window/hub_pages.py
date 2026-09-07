@@ -117,6 +117,13 @@ class AftersaleHub(PivotPage):
         self.records_page._cycles_loaded = False
         self.records_page._load_cycles_then_data()
 
+    def apply_auto_refresh(self):
+        """自动刷新开关/间隔变更：记录页即时启停定时器（2026-09-16）"""
+        try:
+            self.records_page._sync_auto_timer()
+        except Exception:
+            pass
+
     def refresh_smooth(self):
         """表格平滑滚动开关变更后刷新记录页表格"""
         try:
@@ -197,10 +204,13 @@ class SettingsHubPage(QWidget):
 
     信号：
         aftersale_cycle_saved —— 周期设置保存成功（主窗口转发售后记录页刷新）
+        aftersale_auto_refresh_changed —— 自动刷新开关/间隔变更（主窗口
+            转发售后记录页即时启停定时器，2026-09-16）
         table_smooth_changed —— 任意表格平滑开关变更（主窗口转发各 Hub 刷新）
     """
 
     aftersale_cycle_saved = Signal()
+    aftersale_auto_refresh_changed = Signal()
     table_smooth_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -232,15 +242,15 @@ class SettingsHubPage(QWidget):
         self._stack = QStackedWidget(self)
         pages = (
             # 2026-09-07 二期反馈：顺序 应用配置→工具→性能→数据库→面板设置→外观；
-            # 收集与上传自数据库页迁入、配置文件自工具页迁入应用配置，
-            # 手动添加球桌记录自数据库页迁入面板设置（运维）
+            # 配置文件自工具页迁入应用配置；手动添加球桌记录自数据库页迁入面板设置；
+            # 2026-09-07：收集与上传自应用配置迁入面板设置「运维」组内
             ("config", "应用配置", (self._group_paths,
-                                    self._group_ai, self._group_upload,
                                     self._group_log_rules, self._group_files)),
             # 2026-09-07 三期衔接：远程连接独立分页（SSH/SFTP/FRP），
             # 为二期远程会话页（design/remote_session_v2.html）预留落点
             ("remote", "远程连接", (self._group_remote,)),
-            ("tools", "工具", (self._group_tools,)),
+            # 2026-09-07：AI 分析自应用配置迁入工具页
+            ("tools", "工具", (self._group_tools, self._group_ai)),
             ("perf", "性能", (self._group_perf,)),
             ("database", "数据库", (self._group_database,)),
             ("panels", "面板设置", (self._group_aftersale, self._group_ledger,
@@ -484,26 +494,39 @@ class SettingsHubPage(QWidget):
             return g.addRow(SettingRow(
                 icon, title, desc, make_button(btn_text, cb, width=76)))
 
+        # 2026-09-07 二期：单杆视频/端口占用/上传清单/批量整理已迁独立
+        # 「工具」页（main_window.tool_hub），此处仅保留纯动作入口
         row(FluentIcon.EDIT, "修改快捷键", "自定义全局快捷键",
             "修改…", win._on_modify_shortcuts)
-        row(FluentIcon.LIBRARY, "上传清单", "查看已收集待上传的视频和日志",
-            "查看", win._on_show_upload_list)
         row(FluentIcon.DEVELOPER_TOOLS, "连接诊断", "查看连接日志与失败记录",
             "打开", win._on_open_conn_diag)
-        row(FluentIcon.VIDEO, "单杆视频",
-            "从日志解析单杆得分，生成带计分水印的单杆视频",
-            "打开", win._on_open_single_video)
-        row(FluentIcon.CONNECT, "端口占用", "占用指定端口模拟服务，用于联调测试",
-            "打开", win._on_open_port_fake)
-        row(FluentIcon.LIBRARY, "视频与日志批量整理", "按署名批量归类视频和日志",
-            "打开", win._on_newlog_organize)
+        row(FluentIcon.CODE, "打开工具页",
+            "单杆视频 / 端口占用 / 上传清单 / 批量整理",
+            "前往", win._on_open_tool_hub)
+
+        # 工具页行为开关（单杆视频工作区读取，2026-09-07 二期需求）
+        settings = win._load_settings()
+
+        def _persist(key, value):
+            win._save_settings({key: bool(value)})
+
+        g.addRow(SettingRow(
+            FluentIcon.SYNC, "随机生成 session_code",
+            "选择日志文件后自动随机生成 session_code（关闭则保留当前值）",
+            make_switch(bool(settings.get("single_random_session_code", True)),
+                        lambda on: _persist("single_random_session_code", on))))
+        g.addRow(SettingRow(
+            FluentIcon.FOLDER, "生成后自动打开所在目录",
+            "单杆视频生成完成后自动用资源管理器打开输出目录",
+            make_switch(bool(settings.get("single_auto_open_dir", False)),
+                        lambda on: _persist("single_auto_open_dir", on))))
         return g
 
     def _group_database(self, parent):
         g = SettingGroup("数据库与接口", parent)
         # 原管理设置页迁入（数据源/接口1·2 账号/MySQL 配置）；2026-09-07
-        # 收集上传迁「应用配置」、手动添加球桌迁「面板设置→运维」，embedded
-        # 模式不再构建这三张卡
+        # 收集上传先迁「应用配置」再并入「面板设置→运维」组、手动添加球桌迁
+        # 「面板设置→运维」，embedded 模式不再构建这三张卡
         from windows.management.settings_page import AdminSettingsPage
         self.admin_settings = AdminSettingsPage(parent, embedded=True)
         self.admin_settings.table_smooth_changed.connect(
@@ -515,10 +538,40 @@ class SettingsHubPage(QWidget):
 
     def _group_aftersale(self, parent):
         g = SettingGroup("售后", parent)
+        from database import aftersale_db
         from windows.aftersale.settings import CycleSettingsPage
         self.cycle_page = CycleSettingsPage(parent)
         self.cycle_page.saved.connect(self.aftersale_cycle_saved.emit)
         g.addWidget(self.cycle_page)
+        # 记住上次发生日期（2026-09-16）：上一条填 9/14，下一条新增默认仍 9/14
+        g.addRow(SettingRow(
+            FluentIcon.CALENDAR, "记住上次发生日期",
+            "新增售后记录时，「发生时间」默认沿用上一条填写的日期，"
+            "而不是回到当天（关闭后恢复默认当日）",
+            make_switch(aftersale_db.remember_occurred_enabled(),
+                        aftersale_db.set_remember_occurred)))
+        # 自动刷新（2026-09-16）：定时比对全表指纹，有变化即静默重查，
+        # 免手动点同步即可看到他人新填记录；开关/间隔变更即时转发记录页生效
+        def _apply():
+            self.aftersale_auto_refresh_changed.emit()
+        g.addRow(SettingRow(
+            FluentIcon.SYNC, "自动刷新记录",
+            "定时检查数据库变化（他人填写的记录自动出现，无需手动同步）；"
+            "仅在数据真正变化时刷新，不打扰当前浏览",
+            make_switch(aftersale_db.auto_refresh_enabled(),
+                        lambda on: (aftersale_db.set_auto_refresh(on),
+                                    _apply()))))
+        _interval_items = [("15 秒", 15), ("30 秒", 30),
+                           ("1 分钟", 60), ("5 分钟", 300)]
+        _cur_iv = aftersale_db.auto_refresh_interval()
+        _iv_idx = next((i for i, (_l, v) in enumerate(_interval_items)
+                        if v == _cur_iv), 1)
+        g.addRow(SettingRow(
+            FluentIcon.DATE_TIME, "自动刷新间隔",
+            "两次数据库检查之间的时间",
+            make_combo(_interval_items, _iv_idx,
+                       lambda v: (aftersale_db.set_auto_refresh_interval(v),
+                                  _apply()))))
         return g
 
     def _group_ledger(self, parent):
@@ -529,11 +582,12 @@ class SettingsHubPage(QWidget):
         return g
 
     def _group_management(self, parent):
-        """运维（2026-09-07 手动添加球桌记录自数据库页迁入，作运维面板设置）"""
+        """运维（手动添加球桌记录 + 收集与上传，2026-09-07 上传自应用配置并入）"""
         from windows.management.settings_page import AddTableRecordCard
         g = SettingGroup("运维", parent)
         self.add_record_card = AddTableRecordCard(parent)
         g.addWidget(self.add_record_card)
+        self._add_upload_rows(g)
         return g
 
     def _group_files(self, parent):
@@ -742,17 +796,16 @@ class SettingsHubPage(QWidget):
         g.addRow(url_row)
         return g
 
-    def _group_upload(self, parent):
-        """收集与上传（2026-09-07 自数据库页 AdminSettingsPage 迁入）
+    def _add_upload_rows(self, g):
+        """收集与上传行（2026-09-07 自应用配置并入「运维」组）
 
         精度/问题文件收集打包上传的 SFTP 目标；键与旧卡同（upload_*，
-        credentials 域落盘自动 DPAPI），        独立窗口模式的管理设置页仍保留
+        credentials 域落盘自动 DPAPI），独立窗口模式的管理设置页仍保留
         原集中保存卡，两处写同一批配置键。
         """
         from main_window.setting_cards import make_line_edit
         win = self._win
         settings = win._load_settings()
-        g = SettingGroup("收集与上传", parent)
 
         def _int_or(text, default):
             try:
@@ -792,7 +845,6 @@ class SettingsHubPage(QWidget):
             make_line_edit(str(settings.get("upload_pass", "") or ""),
                            lambda t: win._save_settings({"upload_pass": t}),
                            "上传密码", password=True)))
-        return g
 
     def _group_log_rules(self, parent):
         """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效"""

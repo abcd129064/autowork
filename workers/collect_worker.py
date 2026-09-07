@@ -266,7 +266,10 @@ class ZipUploadWorker(QThread):
         zip_prefix:   zip 文件名前缀，默认 'upload'；
         zip_dir:      zip 落地目录，默认 upload_root 的上级目录；
         cleanup_after_done: 上传成功后是否清空 upload_root，默认 True；
-        remove_zip_after_done: 上传成功后是否删除本地 zip，默认 False。
+        remove_zip_after_done: 上传成功后是否删除本地 zip，默认 False；
+        files: 勾选上传白名单（绝对路径列表）。非 None 时只打包这些文件
+            （arcname 相对 content_root），cleanup_after_done 也只删除这些
+            文件而非整个 upload_root（工具页上传清单勾选模式，2026-09-07）。
 
     Signals:
         progress(str): 阶段提示（打包中/连接中/上传中）
@@ -284,7 +287,8 @@ class ZipUploadWorker(QThread):
     def __init__(self, upload_root, host, port, username, password,
                  remote_dir, parent=None, content_root=None,
                  zip_prefix="upload", zip_dir=None,
-                 cleanup_after_done=True, remove_zip_after_done=False):
+                 cleanup_after_done=True, remove_zip_after_done=False,
+                 files=None):
         super().__init__(parent)
         self.upload_root = upload_root
         self.host = host
@@ -297,6 +301,7 @@ class ZipUploadWorker(QThread):
         self.zip_dir = zip_dir  # zip 落地目录；None 时取 upload_root 上级目录
         self.cleanup_after_done = cleanup_after_done
         self.remove_zip_after_done = remove_zip_after_done
+        self.files = list(files) if files else None  # 勾选白名单（None=整目录）
         self._last_percent = -1
         self._zip_path = ""
 
@@ -339,15 +344,26 @@ class ZipUploadWorker(QThread):
         count = 0
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, _dirs, files in os.walk(content_root):
-                    for name in files:
+                if self.files is not None:
+                    # 勾选白名单模式：只打包选中的文件（arcname 相对源目录）
+                    for full in self.files:
                         count += 1
-                        # 每 8 个文件检查一次取消请求，大文件包也能及时响应
                         if count % 8 == 0 and self.isInterruptionRequested():
                             raise _UploadCancelled()
-                        full = os.path.join(root, name)
+                        if not os.path.isfile(full):
+                            continue
                         arc = os.path.relpath(full, content_root)
                         zf.write(full, arc)
+                else:
+                    for root, _dirs, files in os.walk(content_root):
+                        for name in files:
+                            count += 1
+                            # 每 8 个文件检查一次取消请求，大文件包也能及时响应
+                            if count % 8 == 0 and self.isInterruptionRequested():
+                                raise _UploadCancelled()
+                            full = os.path.join(root, name)
+                            arc = os.path.relpath(full, content_root)
+                            zf.write(full, arc)
         except _UploadCancelled:
             self._remove_temp_zip()
             raise
@@ -414,7 +430,16 @@ class ZipUploadWorker(QThread):
 
             # 上传成功后按需清空本地收集目录（批量整理模式保留共享 upload 目录）
             if self.cleanup_after_done:
-                shutil.rmtree(self.upload_root, ignore_errors=True)
+                if self.files is not None:
+                    # 勾选模式：只删除已上传的选中文件，保留未勾选内容
+                    for full in self.files:
+                        try:
+                            if os.path.isfile(full):
+                                os.remove(full)
+                        except OSError:
+                            pass
+                else:
+                    shutil.rmtree(self.upload_root, ignore_errors=True)
             if self.remove_zip_after_done:
                 self._remove_temp_zip()
             self.done.emit(f"{zip_name} → {self.host}:{remote_path}")

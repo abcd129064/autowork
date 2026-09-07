@@ -124,6 +124,9 @@ class RecordsPage(QWidget):
         self._total = 0
         self._rows = []
         self._worker = None
+        # 写操作（新增/复制/更新/删除）独立槽，不与查询 worker 抢 _worker：
+        # 2026-09-08 修复）。属性以 _worker 结尾，detach_workers 扫描自动覆盖。
+        self._mutate_worker = None
         self._export_worker = None
         self._import_worker = None
         self._cycles_loaded = False
@@ -135,7 +138,17 @@ class RecordsPage(QWidget):
         self._recalc_worker = None
         # 周期选项拉取 worker（独立于数据 worker，供加载链重入保护判定）
         self._cycles_worker = None
+        # 自动刷新（2026-09-16 需求：他人填写免手动同步）：轮询轻量指纹，
+        # 仅在数据真的变化时静默重查，并保持阅读位置。独立查询槽
+        # _auto_worker（以 _worker 结尾，detach_workers 自动覆盖）。
+        self._auto_worker = None
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setTimerType(Qt.TimerType.CoarseTimer)
+        self._auto_timer.timeout.connect(self._auto_refresh_tick)
+        self._last_fingerprint = None   # 上次全表指纹快照（None=需重建基线）
+        self._preserve_view = None      # 静默重查待恢复的 (滚动偏移, 勾选id集)
         self._init_ui()
+        self._sync_auto_timer()
         # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
         self._stats_opener = StatsOpener(_aftersale_options, "aftersale", self)
         self._stats_opener.finished.connect(self._on_stats_finished)
@@ -551,6 +564,101 @@ class RecordsPage(QWidget):
         """其他页面提交后静默刷新（不重置周期选择）"""
         self._load()
 
+    # ---------- 自动刷新（2026-09-16：他人填写免手动同步） ----------
+
+    def _sync_auto_timer(self):
+        """按当前配置启停轮询定时器（开关/间隔变更后调用，也用于构造时初始化）"""
+        try:
+            enabled = aftersale_db.auto_refresh_enabled()
+            interval = aftersale_db.auto_refresh_interval()
+        except Exception:
+            enabled, interval = False, 30
+        self._auto_timer.setInterval(interval * 1000)
+        # 启停同时受页面可见性约束（show/hideEvent 联动）：隐藏的页面
+        # （弹窗口关闭仅隐藏/切走的其他 Pivot 页）不轮询，省无谓查询
+        should_run = enabled and self.isVisible()
+        if should_run:
+            if not self._auto_timer.isActive():
+                self._auto_timer.start()
+        elif self._auto_timer.isActive():
+            self._auto_timer.stop()
+
+    def _auto_refresh_tick(self):
+        """定时器回调：前置守卫后起一条轻量指纹查询。
+
+        定时器仅在「开关开 + 页面可见」时运行（_sync_auto_timer 与
+        show/hideEvent 联动）。跳过条件：有模态弹窗在前台（编辑/确认/
+        设置）、或本表正在查询/写库——不打扰用户操作，等下个周期。
+        """
+        from PySide6.QtWidgets import QApplication
+        if QApplication.activeModalWidget() is not None:
+            return
+        for w in (self._auto_worker, self._worker, self._mutate_worker):
+            if w is not None and w.isRunning():
+                return
+        self._auto_worker = AftersaleDBWorker(aftersale_db.change_fingerprint)
+        self._auto_worker.result_ready.connect(self._on_fingerprint)
+        self._auto_worker.error.connect(lambda _m: None)
+        self._auto_worker.start()
+
+    def _on_fingerprint(self, fp):
+        """指纹回来：与上次快照比对，一致则完全不动表格，变化才静默重查。"""
+        if fp is None:
+            return
+        fp = tuple(fp)
+        if self._last_fingerprint is None:
+            self._last_fingerprint = fp  # 建立基线（首帧/重开后）不刷新
+            return
+        if fp == self._last_fingerprint:
+            return  # 无远端变化：保留滚动/勾选/展开，零重绘
+        self._last_fingerprint = fp
+        # 先捕获阅读位置再重查；_load 自增 seq 后记录本轮期望值，
+        # _on_loaded 只有拿到本次结果（seq 匹配）才还原，避免误消费
+        cap = self._capture_view()
+        self._load()
+        self._preserve_view = cap + (self._query_seq,)
+
+    def _capture_view(self):
+        """捕获当前阅读位置：垂直滚动偏移 + 已勾选记录 id 集合"""
+        sb = self._table.verticalScrollBar()
+        offset = sb.value() if sb is not None else 0
+        return (offset, set(self._checked_ids()))
+
+    def _restore_view(self, captured):
+        """静默重查后还原滚动位置与勾选（数据变了也尽量让用户停在原地）
+
+        captured = (滚动偏移, 勾选id集, 期望seq)——仅当本轮结果 seq 匹配
+        （即这是触发还原的那次查询的返回值）时才由 _on_loaded 调用。
+        """
+        offset, checked = captured[0], captured[1]
+        try:
+            if checked:
+                self._table.blockSignals(True)
+                try:
+                    for r in range(self._table.rowCount()):
+                        it = self._table.item(r, _COL_CHECK)
+                        if it is None:
+                            continue
+                        rid = it.data(Qt.ItemDataRole.UserRole)
+                        it.setCheckState(
+                            Qt.CheckState.Checked if rid in checked
+                            else Qt.CheckState.Unchecked)
+                finally:
+                    self._table.blockSignals(False)
+                self._sync_batch_bar()
+        except Exception:
+            pass
+        # 滚动还原延后一个事件循环：setRowCount 后 Qt 尚未重算 scrollbar
+        # maximum，同步 setValue 会被陈旧上限夹小（实测停在 0 附近）
+        def _apply_scroll():
+            try:
+                sb = self._table.verticalScrollBar()
+                if sb is not None:
+                    sb.setValue(min(offset, sb.maximum()))
+            except Exception:
+                pass
+        QTimer.singleShot(0, _apply_scroll)
+
     def set_keyword(self, kw: str):
         """外部入口：按桌号预筛选（球桌管理右键跳转）"""
         self._search_edit.setText(str(kw or ""))
@@ -565,6 +673,17 @@ class RecordsPage(QWidget):
         super().showEvent(event)
         if not self._cycles_loaded:
             self._load_cycles_then_data()
+        # 切回本页：若开了自动刷新，重启定时器并立刻补一次比对——
+        # 隐藏期间（在填写页/其他面板）他人的新记录即刻呈现
+        if aftersale_db.auto_refresh_enabled():
+            self._sync_auto_timer()
+            self._auto_refresh_tick()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # 页面隐藏（切页/弹窗口关闭）：停轮询省查询；开关与基线保留，
+        # 下次 showEvent 恢复
+        self._auto_timer.stop()
 
     def _load_cycles_then_data(self):
         """先异步拉周期选项填充下拉，再加载数据
@@ -644,8 +763,14 @@ class RecordsPage(QWidget):
     def _load(self):
         """按当前筛选异步查询（分页数据 + 统计一次返回）"""
         if self._worker and self._worker.isRunning():
+            # 只 interrupt 不 disconnect：worker.run() 检测到中断会静默返回
+            # 不发 result_ready；且 disconnect() 会连内部 finished→_release
+            # 一起断掉，导致保活集合泄漏。双保险：_query_seq 过期守卫。
             self._worker.requestInterruption()
-            self._worker.disconnect(self)
+        # 查询代数守卫：即便旧查询信号已入队（disconnect 拦不住 queued 调用），
+        # 回调时按 seq 丢弃过期结果（2026-09-08 搜索中新增竞态修复）
+        self._query_seq = getattr(self, "_query_seq", 0) + 1
+        seq = self._query_seq
         f = self._current_filters()
         self._worker = AftersaleDBWorker(
             aftersale_db.query_with_stats,
@@ -654,11 +779,15 @@ class RecordsPage(QWidget):
             issue_type=f["issue_type"], resolved=f["resolved"],
             is_initiative=f["is_initiative"],
             is_our_problem=f["is_our_problem"])
-        self._worker.result_ready.connect(self._on_loaded)
-        self._worker.error.connect(self._on_load_error)
+        self._worker.result_ready.connect(
+            lambda result, _s=seq: self._on_loaded(result, _s))
+        self._worker.error.connect(
+            lambda msg, _s=seq: self._on_load_error(msg, _s))
         self._worker.start()
 
-    def _on_loaded(self, result):
+    def _on_loaded(self, result, seq=None):
+        if seq is not None and seq != getattr(self, "_query_seq", None):
+            return  # 过期查询结果（已被更新的筛选/翻页取代），丢弃
         total, rows, stats = result
         self._total = total
         self._rows = rows
@@ -683,8 +812,16 @@ class RecordsPage(QWidget):
             self._manual_refresh = False
             show_info_bar(f"已刷新 · 共 {total} 条记录", "success",
                           title="刷新", parent=self, duration=2500)
+        # 自动刷新的静默重查：还原触发前的滚动位置与勾选（用户无感）
+        pv = self._preserve_view
+        if pv is not None:
+            self._preserve_view = None
+            if seq is None or seq == pv[2]:
+                self._restore_view(pv)
 
-    def _on_load_error(self, msg):
+    def _on_load_error(self, msg, seq=None):
+        if seq is not None and seq != getattr(self, "_query_seq", None):
+            return  # 过期查询的错误，丢弃
         self._lbl_stats.setText(f"查询失败: {msg}")
         self._update_source_label()
         if self._manual_refresh:
@@ -1163,16 +1300,20 @@ class RecordsPage(QWidget):
         self._edit_cand_worker = cand_worker  # 保活引用
         if dlg.exec() and getattr(dlg, "collected", None):
             collected = dlg.collected
-            self._worker = AftersaleDBWorker(
+            self._mutate_worker = AftersaleDBWorker(
                 aftersale_db.insert_record, collected)
-            self._worker.result_ready.connect(
-                lambda _rid: (show_info_bar("记录已新增", "success",
+            # 新增成功 → 记住本次发生日期（「记住上次发生日期」开关控制，
+            # 下一条新增默认沿用而非回到当日，2026-09-16）
+            _occ = str(collected.get("occurred_at") or "")
+            self._mutate_worker.result_ready.connect(
+                lambda _rid: (aftersale_db.save_last_occurred(_occ),
+                              show_info_bar("记录已新增", "success",
                                             title="新增成功", parent=self,
                                             duration=2000), self._load()))
-            self._worker.error.connect(
+            self._mutate_worker.error.connect(
                 lambda m: show_info_bar(m, "error", title="新增失败",
                                         parent=self, duration=4000))
-            self._worker.start()
+            self._mutate_worker.start()
 
     def _on_duplicate(self, row: int = -1):
         """复制当前行：按原记录内容新增一条相同记录（填写时间/周期重算）"""
@@ -1184,16 +1325,19 @@ class RecordsPage(QWidget):
         rec.pop("id", None)
         rec.pop("created_at", None)    # insert_record 自动取当前填写时间
         rec.pop("cycle_start", None)   # 周期按发生时间重新归属
-        self._worker = AftersaleDBWorker(aftersale_db.insert_record, rec)
-        self._worker.result_ready.connect(
-            lambda _rid: (show_info_bar("记录已复制并新增", "success",
+        self._mutate_worker = AftersaleDBWorker(aftersale_db.insert_record, rec)
+        # 复制新增成功 → 同样记住该发生日期（保持「下一条=这条的日期」语义一致）
+        _occ = str(rec.get("occurred_at") or "")
+        self._mutate_worker.result_ready.connect(
+            lambda _rid: (aftersale_db.save_last_occurred(_occ),
+                          show_info_bar("记录已复制并新增", "success",
                                         title="复制成功", parent=self,
                                         duration=2000),
                           self._load()))
-        self._worker.error.connect(
+        self._mutate_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="复制失败",
                                     parent=self, duration=4000))
-        self._worker.start()
+        self._mutate_worker.start()
 
     def _on_edit(self, row: int = -1):
         """编辑（按行号入口：双击/右键菜单/选中行）"""
@@ -1221,15 +1365,15 @@ class RecordsPage(QWidget):
             self._run_update(collected)
 
     def _run_update(self, record):
-        self._worker = AftersaleDBWorker(aftersale_db.update_record, record)
-        self._worker.result_ready.connect(
+        self._mutate_worker = AftersaleDBWorker(aftersale_db.update_record, record)
+        self._mutate_worker.result_ready.connect(
             lambda _n: (show_info_bar("记录已更新", "success",
                                       title="保存成功", parent=self, duration=2000),
                         self._load()))
-        self._worker.error.connect(
+        self._mutate_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="保存失败",
                                     parent=self, duration=4000))
-        self._worker.start()
+        self._mutate_worker.start()
 
     def _on_delete(self, row: int = -1):
         """删除（按行号入口：右键菜单/选中行）"""
@@ -1253,15 +1397,16 @@ class RecordsPage(QWidget):
         dlg.cancelButton.setText("取消")
         if not dlg.exec():
             return
-        self._worker = AftersaleDBWorker(aftersale_db.delete_record, rec.get("id"))
-        self._worker.result_ready.connect(
+        self._mutate_worker = AftersaleDBWorker(aftersale_db.delete_record,
+                                                rec.get("id"))
+        self._mutate_worker.result_ready.connect(
             lambda _n: (show_info_bar("记录已删除", "success",
                                       title="删除成功", parent=self, duration=2000),
                         self._load()))
-        self._worker.error.connect(
+        self._mutate_worker.error.connect(
             lambda m: show_info_bar(m, "error", title="删除失败",
                                     parent=self, duration=4000))
-        self._worker.start()
+        self._mutate_worker.start()
 
     # ---------- 导出 / 导入 ----------
 
