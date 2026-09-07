@@ -132,15 +132,14 @@ class SettingRow(CardWidget):
 
 
 def make_switch(checked, on_change, text=True):
-    """Watt 式开关：左侧带「开/关」文字的 SwitchButton"""
-    sw = SwitchButton("开" if checked else "关")
+    """Watt 式开关：左侧带「开/关」文字的 SwitchButton。
+
+    中文状态文本由 core/switch_cn_patch 全局 patch 维护（checked 翻转
+    时 qfw _updateText 自动刷新），此处不再手动 setText 同步。
+    """
+    sw = SwitchButton()
     sw.setChecked(checked)
-
-    def _on(checked_):
-        sw.setText("开" if checked_ else "关")
-        on_change(checked_)
-
-    sw.checkedChanged.connect(_on)
+    sw.checkedChanged.connect(on_change)
     return sw
 
 

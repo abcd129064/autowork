@@ -106,7 +106,6 @@ autowork/
 ├── requirements.txt           # Python 依赖
 ├── AutoWork.spec              # PyInstaller 打包配置（完整版 onedir）
 ├── AfterSale.spec             # PyInstaller 打包配置（售后面板单文件 onefile）
-├── Management.spec            # （历史遗留）运维面板独立打包 spec，已不再构建
 ├── build_exe.py               # 打包构建脚本（完整版 + 单文件售后面板）
 │
 ├── core/                      # 基础层（路径、日志、工具函数）
@@ -169,14 +168,9 @@ autowork/
 ├── main_window/               # 主窗口层（Mixin 拆分）
 │   ├── main_window.py         #   MainWindow 主类（组合所有 Mixin）
 │   ├── settings_mixin.py      #   配置读写、快捷键
-│   ├── settings_dialog.py     #   设置对话框（七分区，数据驱动 collect 机制）
 │   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
 │   ├── remote_mixin.py        #   远程连接（frpc/SSH/SFTP/RDP）
 │   └── ui_mixin.py            #   状态栏/菜单栏（含工具菜单）/右键菜单/主题
-│
-├── tools/                     # 独立工具模块（从 single_json 项目收编）
-│   ├── single_shot_video.py   #   单杆视频渲染服务（计分水印）
-│   └── single_video_tool.py   #   单杆 json 生成（generate_json/extract_break）
 │
 ├── styles/                    # QSS 主题样式
 │   ├── dark.qss               #   深色主题

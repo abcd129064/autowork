@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame,
                                QScrollArea, QSizePolicy,
                                QStackedWidget)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, CardWidget,
-                            FluentIcon, SegmentedWidget,
+                            FluentIcon, SegmentedWidget, CheckableMenu,
                             ComboBox, LineEdit, SwitchButton, PushButton)
 
 from main_window.pivot_page import PivotPage
@@ -166,13 +166,30 @@ class LedgerHub(PivotPage):
 
 # ==================== 设置（底部，Watt Toolkit 式分组卡片） ====================
 
+class _PersistentCheckableMenu(CheckableMenu):
+    """点击勾选项后不关闭菜单的多选菜单
+
+    qfw RoundMenu._onItemClicked 无差别先 _hideMenu(False) 再触发
+    action（原版点一下就关，无法连续勾选）；checkable 场景重写为只
+    trigger（QAction 自动翻转 checked 并发 toggled），菜单维持打开。
+    """
+
+    def _onItemClicked(self, item):
+        from PySide6.QtCore import Qt as _Qt
+        action = item.data(_Qt.UserRole)
+        if action not in self._actions or not action.isEnabled():
+            return
+        action.trigger()  # 翻转勾选 + 发 toggled；不隐藏菜单
+
+
 class SettingsHubPage(QWidget):
     """统一设置页：左标题 + 右 SegmentedWidget 分页切换（Watt Toolkit 式）
 
-    页签（2026-09-07 二期反馈：按使用频率重排 + 配置域归位）：
-        应用配置 │ 工具 │ 性能 │ 数据库 │ 面板设置 │ 外观
-        - 应用配置 = 路径 / 远程含FRP / AI 分析 / 收集与上传（自数据库页
-          迁入）/ 日志高亮 / 配置文件（自工具页迁入）
+    页签（2026-09-07 三期衔接：远程连接 独立分页）：
+        应用配置 │ 远程连接 │ 工具 │ 性能 │ 数据库 │ 面板设置 │ 外观
+        - 应用配置 = 路径 / AI 分析 / 收集与上传（自数据库页迁入）/
+          日志高亮 / 配置文件（自工具页迁入）
+        - 远程连接 = SSH/SFTP/FRP（为二期远程会话页预留落点）
         - 工具 = 快捷键与工具
         - 性能 = 亚克力 / 动画 / 表格平滑滚动（范围下拉 + 开关）
         - 数据库 = 数据源/双接口/MySQL（收集上传与手动添加已迁出）
@@ -217,9 +234,12 @@ class SettingsHubPage(QWidget):
             # 2026-09-07 二期反馈：顺序 应用配置→工具→性能→数据库→面板设置→外观；
             # 收集与上传自数据库页迁入、配置文件自工具页迁入应用配置，
             # 手动添加球桌记录自数据库页迁入面板设置（运维）
-            ("config", "应用配置", (self._group_paths, self._group_remote,
+            ("config", "应用配置", (self._group_paths,
                                     self._group_ai, self._group_upload,
                                     self._group_log_rules, self._group_files)),
+            # 2026-09-07 三期衔接：远程连接独立分页（SSH/SFTP/FRP），
+            # 为二期远程会话页（design/remote_session_v2.html）预留落点
+            ("remote", "远程连接", (self._group_remote,)),
             ("tools", "工具", (self._group_tools,)),
             ("perf", "性能", (self._group_perf,)),
             ("database", "数据库", (self._group_database,)),
@@ -342,14 +362,16 @@ class SettingsHubPage(QWidget):
         return g
 
     def _group_perf(self, parent):
+        from qfluentwidgets import (Action,
+                                    TransparentDropDownPushButton)
         from core.perf import (is_acrylic_enabled, is_animation_enabled,
-                               is_table_smooth_scroll_enabled,
                                get_table_smooth, set_acrylic_enabled,
                                set_animation_enabled, set_table_smooth)
-        # 2026-09-07 用户反馈重排为三项：亚克力 / 动画 / 表格平滑滚动；
-        # 原面板级覆盖 ExpandSettingCard 在卡内渲染挤压错乱（真机截图），
-        # 改为 Win11 设置式「作用范围下拉框 + 开关」：下拉选范围，开关
-        # 作用于所选范围（全部面板=全局，具体面板=单独覆盖）
+        # 2026-09-07 用户反馈定稿：三项 亚克力 / 动画 / 表格平滑滚动。
+        # 平滑滚动方案演进：ExpandSettingCard 折叠卡（渲染挤压错乱）→
+        # 范围下拉+开关（两段式操作割裂）→ 本版单一下拉控件：点开
+        # CheckableMenu 列出各面板勾选子项，勾选即写所选范围（全部面板=
+        # 全局，具体面板=单独覆盖），按钮文本为状态摘要
         g = SettingGroup("性能", parent)
 
         g.addRow(SettingRow(
@@ -361,41 +383,97 @@ class SettingsHubPage(QWidget):
             "菜单和弹窗的过渡动画，关闭后立即显示",
             make_switch(is_animation_enabled(), set_animation_enabled)))
 
-        # 表格平滑滚动：范围下拉（全部/售后/跑视频/运维/远程）+ 开关
-        scope_combo = ComboBox()
-        for label, panel in (("全部面板", None), ("售后面板", "aftersale"),
-                             ("跑视频面板", "video"), ("运维管理", "management"),
-                             ("远程会话", "remote")):
-            scope_combo.addItem(label, userData=panel)
-        scope_combo.setCurrentIndex(0)  # 先回显再连接，初始化不误触发
-        scope_combo.setFixedWidth(120)
+        # 表格平滑滚动：下拉勾选各面板子选项，点击后菜单维持可连续勾选
+        # （2026-09-07 用户反馈定稿）：「全部面板」为主控——勾选=全部开启
+        # 并清空面板覆盖，取消=全部取消并清空覆盖（消除主控关而子项开的
+        # 无意义组合）；后续可单独勾选某面板开启（写面板覆盖）
+        scopes = (("全部面板", None), ("售后面板", "aftersale"),
+                  ("跑视频面板", "video"), ("运维管理", "management"),
+                  ("远程会话", "remote"))
 
-        state = {"syncing": False}
+        def _summary_text():
+            n = sum(get_table_smooth(p) for _l, p in scopes[1:])
+            if n == 0:
+                return "全部关闭"
+            if n == len(scopes) - 1:
+                return "全部开启"
+            return f"自定义 · {n} 项开启"
 
-        def _sync_switch():
-            """切范围时回显该范围当前生效值（覆盖→全局；panel=None 即全局）"""
-            state["syncing"] = True
-            v = get_table_smooth(scope_combo.currentData())
-            smooth_switch.setChecked(v)
-            smooth_switch.setText("开" if v else "关")
-            state["syncing"] = False
-
-        def _on_smooth(checked):
-            if state["syncing"]:
-                return
-            # 开关作用于所选范围；qfw setChecked 亦会发 checkedChanged，
-            # syncing 守卫挡掉回显引发的重复写盘
-            set_table_smooth(scope_combo.currentData(), checked)
+        def _apply(panel, on):
+            if panel is None:
+                # 主控联动：全局开/关 + 清空全部面板覆盖（回到纯全局态）
+                set_table_smooth(None, on)
+                for _label, p in scopes[1:]:
+                    set_table_smooth(p, None)
+            else:
+                set_table_smooth(panel, on)
+            # 单独勾选面板后同样刷新：主控按 all(全局+各面板生效值) 判定
+            # 自动翻转（全开→回勾，任一关→取消），消除主控与子项状态脱节
+            _refresh_checked()
             self.table_smooth_changed.emit("all")
+            smooth_btn.setText(_summary_text())
 
-        smooth_switch = make_switch(is_table_smooth_scroll_enabled(),
-                                    _on_smooth)
-        scope_combo.currentIndexChanged.connect(lambda _i: _sync_switch())
+        def _refresh_checked():
+            """按当前配置回显：主控=全局开且全部面板生效开；blockSignals
+            防程序性 setChecked 触发 toggled 造成递归写盘"""
+            master = (get_table_smooth(None) and all(
+                get_table_smooth(p) for _l, p in scopes[1:]))
+            for a, (_label, panel) in zip(smooth_menu.actions(), scopes):
+                v = master if panel is None else get_table_smooth(panel)
+                if a.isChecked() != v:
+                    a.blockSignals(True)
+                    a.setChecked(v)
+                    a.blockSignals(False)
+
+        smooth_btn = TransparentDropDownPushButton(_summary_text())
+        smooth_btn.setFixedWidth(170)
+
+        smooth_menu = _PersistentCheckableMenu(parent=smooth_btn)
+        smooth_menu.setItemHeight(33)
+        for label, panel in scopes:
+            act = Action(label, smooth_menu)
+            act.setCheckable(True)
+            act.setChecked(get_table_smooth(panel))  # 初值近似，弹出前必刷
+            act.toggled.connect(lambda on, p=panel: _apply(p, on))
+            smooth_menu.addAction(act)
+
+        # PySide6/Shiboken 劫持：实例级 menu.exec 会解析到 C++ QMenu.exec()，
+        # 子类 Python exec（CheckableMenu→RoundMenu.exec）永不执行——
+        # _showMenu 内 menu.exec(pd, aniType=...) 直接报
+        # "unsupported keyword 'aniType'"，菜单弹不出。同
+        # ui_mixin._patch_acrylic_exec 结论：实例绑定 Python 级 exec
+        # 属性即可绕过劫持（Python 属性优先于 C++ 方法解析）
+        from qfluentwidgets import MenuAnimationType, RoundMenu
+
+        def _menu_exec(pos, ani=True, aniType=None):
+            RoundMenu.exec(smooth_menu, pos, ani=ani,
+                           aniType=aniType or MenuAnimationType.DROP_DOWN)
+
+        smooth_menu.exec = _menu_exec
+
+        # 刷新挂菜单 Show 事件（QMenu.aboutToShow 只在 popup() 路径发射，
+        # qfw RoundMenu.exec 走 show() 不触发——eventFilter 必然命中）。
+        # PySide6 installEventFilter 只收 QObject，函数式过滤器不可用
+        from PySide6.QtCore import QObject, QEvent
+
+        class _MenuShowFilter(QObject):
+            def __init__(self, target_menu, refresh, parent):
+                super().__init__(parent)
+                self._m, self._refresh = target_menu, refresh
+
+            def eventFilter(self, obj, ev):
+                if obj is self._m and ev.type() == QEvent.Show:
+                    self._refresh()
+                return False
+
+        smooth_menu.installEventFilter(
+            _MenuShowFilter(smooth_menu, _refresh_checked, smooth_menu))
+        smooth_btn.setMenu(smooth_menu)  # mouseReleaseEvent 自动弹出
 
         g.addRow(SettingRow(
             FluentIcon.SPEED_HIGH, "表格平滑滚动",
-            "开关作用于所选范围，选择具体面板时单独覆盖全局设置",
-            [scope_combo, smooth_switch]))
+            "下拉勾选各面板的平滑滚动，可多选；全部面板为总控",
+            smooth_btn))
         return g
 
     def _group_tools(self, parent):
@@ -720,8 +798,7 @@ class SettingsHubPage(QWidget):
         """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效"""
         from PySide6.QtWidgets import QListWidget, QListWidgetItem, QDialog
         from PySide6.QtWidgets import QFormLayout as _QForm
-        from main_window.settings_dialog import (_DEFAULT_LOG_RULES,
-                                                 _compile_log_rules)
+        from core.log_rules import DEFAULT_LOG_RULES, compile_log_rules
         win = self._win
         settings = win._load_settings()
         g = SettingGroup("日志高亮", parent)
@@ -735,7 +812,7 @@ class SettingsHubPage(QWidget):
         g.addWidget(tip)
 
         self._log_rules_state = list(
-            settings.get("log_highlight_rules") or _DEFAULT_LOG_RULES)
+            settings.get("log_highlight_rules") or DEFAULT_LOG_RULES)
         rules_list = QListWidget(parent)
         rules_list.setFixedHeight(150)
         g.addWidget(rules_list)
@@ -754,8 +831,8 @@ class SettingsHubPage(QWidget):
             """规则变更落盘 + 重编译（渲染与通知共用，不刷新则旧规则仍生效）"""
             win._save_settings(
                 {"log_highlight_rules": list(self._log_rules_state)})
-            win._log_rules = _compile_log_rules(
-                self._log_rules_state or _DEFAULT_LOG_RULES)
+            win._log_rules = compile_log_rules(
+                self._log_rules_state or DEFAULT_LOG_RULES)
 
         def _refresh():
             rules_list.clear()
@@ -844,7 +921,10 @@ class SettingsHubPage(QWidget):
             h.addStretch(1)
             form.addRow("颜色:", h)
 
-            notify_sw = SwitchButton("命中时弹通知", dlg)
+            # 语义由 form 行标签「命中通知:」承载；SwitchButton 自身
+            # 只作状态指示（patch 后构造会覆盖初始 text 为中文开/关，
+            # 语义文本放这里会在首次翻转时丢失）
+            notify_sw = SwitchButton(dlg)
             notify_sw.setChecked(bool(rule.get("notify")))
             form.addRow("命中通知:", notify_sw)
             v.addLayout(form)

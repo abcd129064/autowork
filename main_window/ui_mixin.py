@@ -33,8 +33,7 @@ from workers.collect_worker import (CollectFilesWorker, FileCopyWorker,
     ZipUploadWorker)
 from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
-from main_window.settings_dialog import (_DEFAULT_LOG_RULES,
-    _compile_log_rules)  # 弹窗已废止（2026-09-07），仅保留规则常量与编译函数
+from core.log_rules import DEFAULT_LOG_RULES, compile_log_rules
 
 # ==================== 版本信息（帮助→关于） ====================
 # 版本号由 core/version.py 根据 git 分支与提交次数自动计算：

@@ -60,6 +60,10 @@ patch_dialog_animation()
 # 中央拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代
 # 库默认整视口重绘），滚轮滚动 + 鼠标移动叠加场景掉帧显著减少（幂等）
 patch_table_hover_repaint()
+# SwitchButton 状态文本统一中文「开/关」（库默认 "On"/"Off"，patch
+# __init__ 对全项目所有直接实例化处一次生效，幂等）
+from core.switch_cn_patch import patch_switch_cn_text
+patch_switch_cn_text()
 
 from core.app_paths import get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler

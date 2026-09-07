@@ -21,7 +21,7 @@ from autowork_with_table import Ui_MainWindow
 from core.utils import natural_sort_key, show_info_bar
 from core.design_tokens import SEMANTIC
 from core.perf import is_acrylic_enabled
-from main_window.settings_dialog import _DEFAULT_LOG_RULES, _compile_log_rules
+from core.log_rules import DEFAULT_LOG_RULES, compile_log_rules
 
 from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
@@ -380,7 +380,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self._apply_theme_color()
         # 日志高亮规则（设置对话框「日志高亮」分区维护，存 settings.json）
         cfg_rules = self._load_settings().get("log_highlight_rules")
-        self._log_rules = _compile_log_rules(cfg_rules or _DEFAULT_LOG_RULES)
+        self._log_rules = compile_log_rules(cfg_rules or DEFAULT_LOG_RULES)
         self._rule_last_notify = {}  # 规则名 -> 上次通知时间（防抖）
         self._apply_font_size()
         self._apply_font_family()

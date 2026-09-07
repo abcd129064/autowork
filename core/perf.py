@@ -128,19 +128,33 @@ def get_table_smooth(panel: str | None = None) -> bool:
     return _table_smooth_enabled
 
 
-def set_table_smooth(panel: str | None, enabled: bool):
-    """设置面板级（panel 非空）或全局（panel=None）平滑滚动开关并持久化"""
+def set_table_smooth(panel: str | None, enabled: bool | None):
+    """设置面板级（panel 非空）或全局（panel=None）平滑滚动开关并持久化
+
+    2026-09-07 语义扩展：panel 非空且 enabled=None → 清除该面板覆盖
+    （运行时缓存与落盘键一并移除，回到跟随全局），供设置页「全部面板」
+    主控联动使用（勾选/取消主控时清空覆盖，消除主控关而子项开的无意义组合）
+    """
     global _panel_table_overrides
-    enabled = bool(enabled)
     if panel:
         if _panel_table_overrides is None:
             _load_panel_table_overrides()
+        if enabled is None:
+            _panel_table_overrides.pop(panel, None)
+            key = _PANEL_TABLE_KEYS.get(panel)
+            if key:
+                try:
+                    app_settings.remove(key)
+                except Exception:
+                    pass
+            return
+        enabled = bool(enabled)
         _panel_table_overrides[panel] = enabled
         key = _PANEL_TABLE_KEYS.get(panel)
         if key:
             _persist(key, enabled)
     else:
-        set_table_smooth_scroll_enabled(enabled)
+        set_table_smooth_scroll_enabled(bool(enabled))
 
 
 def apply_table_smooth_mode(table, panel: str | None = None):
