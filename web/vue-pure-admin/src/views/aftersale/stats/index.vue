@@ -1,0 +1,578 @@
+<script setup lang="ts">
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { useDark, useECharts } from "@pureadmin/utils";
+import { useAftersaleCharts, PALETTE, DIM_OPTIONS, MEASURE_OPTIONS, CHART_TYPE_OPTIONS } from "./utils/hook";
+import { useRenderIcon } from "@/components/ReIcon/src/hooks";
+
+import Refresh from "~icons/ep/refresh";
+import TrendCharts from "~icons/ep/trend-charts";
+
+defineOptions({
+  name: "AftersaleStats"
+});
+
+const {
+  loading,
+  charts,
+  filter,
+  cycleOptions,
+  custom,
+  loadCharts,
+  loadCustom,
+  onSearch,
+  resetFilter
+} = useAftersaleCharts();
+
+const formRef = ref();
+const { isDark } = useDark();
+const theme = computed(() => (isDark.value ? "dark" : "light"));
+
+/** 统一的空态提示配置 */
+const emptyOption = {
+  title: {
+    text: "暂无数据",
+    left: "center",
+    top: "center",
+    textStyle: { color: "#909399", fontSize: 14, fontWeight: 400 }
+  }
+};
+
+/* ---------------- 1. 地区分布（环形图） ---------------- */
+const regionRef = ref();
+const { setOptions: setRegion } = useECharts(regionRef, {
+  theme,
+  renderer: "svg"
+});
+
+function renderRegion() {
+  const data = charts.value.region_dist ?? [];
+  if (!data.length) return setRegion(emptyOption);
+  setRegion({
+    color: PALETTE,
+    tooltip: { trigger: "item", formatter: "{b}<br/>{c} 条 ({d}%)" },
+    legend: {
+      type: "scroll",
+      bottom: 0,
+      icon: "circle",
+      itemWidth: 8,
+      itemHeight: 8,
+      textStyle: { fontSize: 12 }
+    },
+    series: [
+      {
+        type: "pie",
+        radius: ["42%", "68%"],
+        center: ["50%", "44%"],
+        avoidLabelOverlap: true,
+        itemStyle: { borderColor: "transparent", borderWidth: 2 },
+        label: { show: false },
+        emphasis: {
+          label: { show: true, fontSize: 16, fontWeight: "bold" }
+        },
+        data
+      }
+    ]
+  });
+}
+
+/* ---------------- 2. 每日售后量（柱状图） ---------------- */
+const dailyRef = ref();
+const { setOptions: setDaily } = useECharts(dailyRef, {
+  theme,
+  renderer: "svg"
+});
+
+function renderDaily() {
+  const raw = charts.value.daily ?? [];
+  if (!raw.length) return setDaily(emptyOption);
+  // 日期点较多时抽样显示 x 轴标签，避免挤成一团（保留首尾）
+  const step = Math.max(1, Math.ceil(raw.length / 12));
+  setDaily({
+    color: [PALETTE[0]],
+    grid: { left: 8, right: 16, top: 24, bottom: 8, containLabel: true },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: {
+      type: "category",
+      data: raw.map(r => r.date),
+      axisLabel: {
+        fontSize: 11,
+        // 超过 12 条才抽样；否则全显示
+        interval: raw.length > 12 ? step - 1 : 0
+      },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: "value",
+      splitLine: { lineStyle: { type: "dashed" } },
+      axisLabel: { fontSize: 11 }
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 18,
+        itemStyle: { borderRadius: [3, 3, 0, 0] },
+        data: raw.map(r => r.count)
+      }
+    ]
+  });
+}
+
+/* ---------------- 3. 我方问题占比（环形图） ---------------- */
+const ourRef = ref();
+const { setOptions: setOur } = useECharts(ourRef, {
+  theme,
+  renderer: "svg"
+});
+
+function renderOur() {
+  const { yes = 0, no = 0 } = charts.value.our_problem ?? {};
+  const total = yes + no;
+  if (!total) return setOur(emptyOption);
+  const pct = ((yes / total) * 100).toFixed(1);
+  setOur({
+    color: ["#e6a23c", "#dcdfe6"],
+    tooltip: { trigger: "item", formatter: "{b}<br/>{c} 条 ({d}%)" },
+    legend: {
+      bottom: 0,
+      icon: "circle",
+      itemWidth: 8,
+      itemHeight: 8,
+      textStyle: { fontSize: 12 }
+    },
+    title: {
+      text: `${pct}%`,
+      subtext: "我方问题占比",
+      left: "50%",
+      top: "36%",
+      textAlign: "center",
+      textStyle: { fontSize: 26, fontWeight: 600 },
+      subtextStyle: { fontSize: 12 }
+    },
+    series: [
+      {
+        type: "pie",
+        radius: ["55%", "72%"],
+        center: ["50%", "46%"],
+        itemStyle: { borderColor: "transparent", borderWidth: 2 },
+        label: { show: false },
+        emphasis: { label: { show: false } },
+        data: [
+          { name: "我方问题", value: yes },
+          { name: "非我方问题", value: no }
+        ]
+      }
+    ]
+  });
+}
+
+/* ---------------- 4. 问题类型分布（横向条形图） ---------------- */
+const issueRef = ref();
+const { setOptions: setIssue } = useECharts(issueRef, {
+  theme,
+  renderer: "svg"
+});
+
+function renderIssue() {
+  // 横向条形图从下往上画，倒序让最大值在顶部
+  const data = [...(charts.value.issue_type_dist ?? [])].reverse();
+  if (!data.length) return setIssue(emptyOption);
+  setIssue({
+    color: [PALETTE[2]],
+    grid: { left: 8, right: 30, top: 12, bottom: 8, containLabel: true },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: {
+      type: "value",
+      splitLine: { lineStyle: { type: "dashed" } },
+      axisLabel: { fontSize: 11 }
+    },
+    yAxis: {
+      type: "category",
+      data: data.map(d => d.name),
+      axisLabel: { fontSize: 11 },
+      axisTick: { show: false }
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 14,
+        itemStyle: { borderRadius: [0, 3, 3, 0] },
+        label: {
+          show: true,
+          position: "right",
+          fontSize: 11,
+          color: "#909399"
+        },
+        data: data.map(d => d.value)
+      }
+    ]
+  });
+}
+
+/* ---------------- 5. 自定义图表 ---------------- */
+const customRef = ref();
+const { setOptions: setCustom } = useECharts(customRef, {
+  theme,
+  renderer: "svg"
+});
+
+function renderCustom() {
+  const data = custom.data ?? [];
+  if (!data.length) return setCustom(emptyOption);
+
+  const names = data.map(d => d.name);
+  const values = data.map(d => d.value);
+  const isPercent = custom.measure === "percent";
+  const suffix = isPercent ? "%" : " 条";
+
+  // 饼 / 环
+  if (custom.chart === "pie" || custom.chart === "ring") {
+    return setCustom({
+      color: PALETTE,
+      tooltip: { trigger: "item", formatter: `{b}<br/>{c}${suffix} ({d}%)` },
+      legend: {
+        type: "scroll",
+        bottom: 0,
+        icon: "circle",
+        itemWidth: 8,
+        itemHeight: 8,
+        textStyle: { fontSize: 12 }
+      },
+      series: [
+        {
+          type: "pie",
+          radius: custom.chart === "ring" ? ["42%", "68%"] : "62%",
+          center: ["50%", "46%"],
+          itemStyle: { borderColor: "transparent", borderWidth: 2 },
+          label: { show: false },
+          emphasis: { label: { show: true, fontSize: 15, fontWeight: "bold" } },
+          data: data.map(d => ({ name: d.name, value: d.value }))
+        }
+      ]
+    });
+  }
+
+  // 条形（横向）
+  if (custom.chart === "hbar") {
+    return setCustom({
+      color: [PALETTE[2]],
+      grid: { left: 8, right: 40, top: 12, bottom: 8, containLabel: true },
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+      xAxis: {
+        type: "value",
+        splitLine: { lineStyle: { type: "dashed" } },
+        axisLabel: { fontSize: 11, formatter: `{value}${suffix}` }
+      },
+      yAxis: {
+        type: "category",
+        data: [...names].reverse(),
+        axisLabel: { fontSize: 11 },
+        axisTick: { show: false }
+      },
+      series: [
+        {
+          type: "bar",
+          barMaxWidth: 14,
+          itemStyle: { borderRadius: [0, 3, 3, 0] },
+          label: {
+            show: true,
+            position: "right",
+            fontSize: 11,
+            color: "#909399",
+            formatter: `{c}${suffix}`
+          },
+          data: [...values].reverse()
+        }
+      ]
+    });
+  }
+
+  // 折线 / 柱状
+  setCustom({
+    color: [PALETTE[0]],
+    grid: { left: 8, right: 20, top: 24, bottom: 8, containLabel: true },
+    tooltip: { trigger: "axis" },
+    xAxis: {
+      type: "category",
+      data: names,
+      axisLabel: { fontSize: 11, rotate: names.length > 10 ? 40 : 0 },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: "value",
+      splitLine: { lineStyle: { type: "dashed" } },
+      axisLabel: { fontSize: 11, formatter: `{value}${suffix}` }
+    },
+    series: [
+      custom.chart === "line"
+        ? {
+            type: "line",
+            smooth: true,
+            symbolSize: 6,
+            areaStyle: { opacity: 0.12 },
+            data: values
+          }
+        : {
+            type: "bar",
+            barMaxWidth: 24,
+            itemStyle: { borderRadius: [3, 3, 0, 0] },
+            data: values
+          }
+    ]
+  });
+}
+
+/** 数据变化后统一重绘（nextTick 等 DOM 尺寸就绪） */
+async function renderAll() {
+  await nextTick();
+  renderRegion();
+  renderDaily();
+  renderOur();
+  renderIssue();
+}
+
+watch(charts, renderAll, { deep: true });
+watch(
+  () => [custom.data, custom.chart, custom.measure],
+  () => nextTick(renderCustom),
+  { deep: true }
+);
+
+// 主题切换 / 窗口缩放时重绘，避免 SVG 尺寸僵在旧值
+watch(theme, () => nextTick(renderAll));
+let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+function onResize() {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    renderAll();
+    nextTick(renderCustom);
+  }, 200);
+}
+
+onMounted(async () => {
+  // 等父级 el-col 布局稳定后再首绘
+  await nextTick();
+  renderAll();
+  nextTick(renderCustom);
+  window.addEventListener("resize", onResize);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", onResize);
+  if (resizeTimer) clearTimeout(resizeTimer);
+});
+</script>
+
+<template>
+  <div class="main-content">
+    <!-- 筛选栏：与列表页同口径，四图联动 -->
+    <el-form
+      ref="formRef"
+      :inline="true"
+      :model="filter"
+      class="search-form bg-bg_color w-full pl-8 pt-3 overflow-auto"
+    >
+      <el-form-item label="账期：" prop="cycle_start">
+        <el-select
+          v-model="filter.cycle_start"
+          placeholder="全部周期"
+          clearable
+          filterable
+          class="w-40!"
+        >
+          <el-option
+            v-for="item in cycleOptions"
+            :key="item"
+            :label="item"
+            :value="item"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="是否解决：" prop="resolved">
+        <el-select
+          v-model="filter.resolved"
+          placeholder="全部"
+          clearable
+          class="w-28!"
+        >
+          <el-option label="是" value="是" />
+          <el-option label="否" value="否" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="主动发起：" prop="is_initiative">
+        <el-select
+          v-model="filter.is_initiative"
+          placeholder="全部"
+          clearable
+          class="w-28!"
+        >
+          <el-option label="是" value="是" />
+          <el-option label="否" value="否" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="我方问题：" prop="is_our_problem">
+        <el-select
+          v-model="filter.is_our_problem"
+          placeholder="全部"
+          clearable
+          class="w-28!"
+        >
+          <el-option label="是" value="是" />
+          <el-option label="否" value="否" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <el-button
+          type="primary"
+          :icon="useRenderIcon('ri/search-line')"
+          :loading="loading"
+          @click="onSearch"
+        >
+          搜索
+        </el-button>
+        <el-button :icon="useRenderIcon(Refresh)" @click="resetFilter(formRef)">
+          重置
+        </el-button>
+      </el-form-item>
+    </el-form>
+
+    <!-- 图表统计（四件套） -->
+    <el-card shadow="never" class="chart-card">
+      <template #header>
+        <div class="card-header">
+          <span class="font-medium">图表统计</span>
+          <span class="text-text_color_regular text-sm">
+            共 {{ charts.total }} 条 · 跟随上方筛选条件
+          </span>
+        </div>
+      </template>
+
+      <el-row :gutter="16" v-loading="loading">
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">地区分布</div>
+          <div ref="regionRef" class="chart-box" />
+        </el-col>
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">每日售后量</div>
+          <div ref="dailyRef" class="chart-box" />
+        </el-col>
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">我方问题占比</div>
+          <div ref="ourRef" class="chart-box" />
+        </el-col>
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">问题类型分布</div>
+          <div ref="issueRef" class="chart-box" />
+        </el-col>
+      </el-row>
+    </el-card>
+
+    <!-- 自定义图表 -->
+    <el-card shadow="never" class="chart-card">
+      <template #header>
+        <div class="card-header">
+          <span class="font-medium">自定义图表</span>
+          <span class="text-text_color_regular text-sm">
+            自由组合维度与度量
+          </span>
+        </div>
+      </template>
+
+      <el-form :inline="true" :model="custom" class="mb-2">
+        <el-form-item label="维度：">
+          <el-select v-model="custom.dim" class="w-36!" @change="loadCustom">
+            <el-option
+              v-for="item in DIM_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="度量：">
+          <el-select
+            v-model="custom.measure"
+            class="w-28!"
+            @change="loadCustom"
+          >
+            <el-option
+              v-for="item in MEASURE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="图表：">
+          <el-select v-model="custom.chart" class="w-28!" @change="loadCustom">
+            <el-option
+              v-for="item in CHART_TYPE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            type="primary"
+            :icon="useRenderIcon(TrendCharts)"
+            :loading="custom.loading"
+            @click="loadCustom"
+          >
+            查询
+          </el-button>
+        </el-form-item>
+      </el-form>
+
+      <div ref="customRef" class="chart-box chart-box--custom" />
+    </el-card>
+  </div>
+</template>
+
+<style lang="scss" scoped>
+.main-content {
+  margin: 24px 24px 0 !important;
+}
+
+.search-form {
+  :deep(.el-form-item) {
+    margin-bottom: 12px;
+  }
+}
+
+.chart-card {
+  margin-bottom: 12px;
+}
+
+.card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.chart-title {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 4px;
+  padding-left: 2px;
+}
+
+.chart-box {
+  width: 100%;
+  height: 280px;
+}
+
+.chart-box--custom {
+  height: 360px;
+}
+
+@media (max-width: 768px) {
+  .chart-box {
+    height: 240px;
+  }
+
+  .chart-box--custom {
+    height: 300px;
+  }
+}
+</style>
