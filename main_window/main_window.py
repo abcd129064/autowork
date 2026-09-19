@@ -263,6 +263,29 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.addSubInterface(self.about_page, FluentIcon.INFO, "关于",
                              NavigationItemPosition.BOTTOM)
 
+        # 启动默认页面（设置 → 应用配置 → 启动，2026-09-19）：
+        # singleShot(0) 等事件循环起来再切，避开构造期副作用
+        QTimer.singleShot(0, self._apply_startup_default_page)
+
+    def _apply_startup_default_page(self):
+        """按配置 startup_default_page 切换启动展示的界面（非法值回退工作台）"""
+        try:
+            key = str(self._load_settings().get(
+                "startup_default_page", "homeInterface") or "homeInterface")
+            pages = {
+                "homeInterface": self.homeInterface,
+                "managementHub": self.management_hub,
+                "aftersaleHub": self.aftersale_hub,
+                "ledgerHub": self.ledger_hub,
+                "remoteHub": self.remote_hub,
+                "toolHub": self.tool_hub,
+            }
+            target = pages.get(key)
+            if target is not None and self.stackedWidget.currentWidget() is not target:
+                self.switchTo(target)
+        except Exception:
+            pass
+
     def _apply_all_table_smooth(self, scope: str = "all"):
         """统一设置页任意表格平滑开关变更 → 刷新三个 Hub + 已打开远程窗口"""
         self.management_hub._apply_table_smooth_all()

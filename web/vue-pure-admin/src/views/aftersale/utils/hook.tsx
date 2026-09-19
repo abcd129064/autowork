@@ -19,6 +19,7 @@ import {
 } from "@/api/aftersale";
 import type { AftersaleRecord, AftersaleStats } from "@/api/aftersale";
 import type { AftersaleFormItem } from "./types";
+import { loadLastUsed, saveLastUsed } from "./lastUsed";
 import { type Ref, h, ref, reactive, computed, onMounted } from "vue";
 
 import FileListIcon from "~icons/ri/file-list-3-line";
@@ -461,10 +462,13 @@ export function useAftersale(tableRef: Ref) {
   /**
    * 新增 / 编辑 弹窗
    *
-   * 新增：把 `NEW_RECORD_TEMPLATE` 铺开成表单初始值，`creator` 留空交给后端写登录用户
+   * 新增：把 `NEW_RECORD_TEMPLATE` 铺开成表单初始值，并应用「记住上次填写」
+   * （填写人/解决人/发生日期，localStorage —— 对齐桌面端记忆体验）；
+   * `creator` 留空时由后端写登录用户
    * 编辑：行数据整体回填，并把 `updated_at` 一起带上做乐观锁
    */
   function openDialog(title: "新增" | "编辑", row?: AftersaleRecord) {
+    const last = title === "新增" && !row ? loadLastUsed() : {};
     const initForm: AftersaleFormItem = {
       title,
       // 新增时用模板，编辑时用行数据覆盖
@@ -500,11 +504,17 @@ export function useAftersale(tableRef: Ref) {
       issueTypes: issueTypes.value,
       regions: regions.value
     };
+    // 「记住上次填写」：creator/resolver/occurred_at（编辑回填不受影响）
+    if (last.creator && !initForm.creator) initForm.creator = last.creator;
+    if (last.resolver && !initForm.resolver) initForm.resolver = last.resolver;
+    if (last.occurred_at && !initForm.occurred_at)
+      initForm.occurred_at = last.occurred_at;
 
     addDialog({
       title: `${title}售后记录`,
       props: { formInline: initForm },
-      width: "62%",
+      // 720px 定宽：字段两列排布足够，不再用 62% 宽屏拉满
+      width: "720px",
       draggable: true,
       fullscreenIcon: true,
       closeOnClickModal: false,
@@ -518,6 +528,12 @@ export function useAftersale(tableRef: Ref) {
           try {
             if (title === "新增") {
               const res = await addRecord(payload);
+              // 记住本次填写，供下次新增默认（对齐桌面端 save_last_people）
+              saveLastUsed({
+                creator: curData.creator || undefined,
+                resolver: curData.resolver || undefined,
+                occurred_at: curData.occurred_at || undefined
+              });
               message(`已新增售后记录（编号 ${res?.id ?? "-"}）`, {
                 type: "success"
               });

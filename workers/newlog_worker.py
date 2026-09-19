@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """NewLog 批量整理 Worker（Task #40 / C8）
 
-将根目录 CLI 脚本 newlog.py 收编进 GUI：后台线程运行 newlog.main，
+将 windows/tools/newlog.py 收编进 GUI：后台线程运行 newlog.main，
 通过自定义 logging.Handler 捕获 newlog 模块日志，逐行转发到 GUI。
 
 注意：newlog 依赖 openpyxl，import 延迟到 run() 内执行并带
@@ -56,7 +56,7 @@ class NewLogWorker(QThread):
         newlog_logger.setLevel(logging.INFO)
         try:
             try:
-                import newlog
+                from windows.tools import newlog
             except ImportError as e:
                 self.error.emit(f"无法加载 newlog 模块（请确认已安装 openpyxl）: {e}")
                 return

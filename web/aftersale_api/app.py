@@ -25,6 +25,9 @@ DB = dict(
     password=os.getenv("MYSQL_PASS", ""),
     database=os.getenv("MYSQL_DB", "autowork"),
     charset="utf8mb4", cursorclass=pymysql.cursors.DictCursor,
+    # pymysql 默认 autocommit=False 且 with 连接退出不 commit，
+    # 写路径会整事务回滚（INSERT 返回 id 但行丢失）→ 必须开启
+    autocommit=True,
 )
 
 # 记录日期表达式（与桌面端 _RECORD_DATE_EXPR 一致，两方言通用）
@@ -226,6 +229,51 @@ def require_auth(authorization: str = Header(default="")):
 def auth_me(user = Depends(require_auth)):
     return {"user": user}
 
+@app.get("/api/tables/search")
+def tables_search(room: str = "", limit: int = 30, user=Depends(require_auth)):
+    """按球房名模糊搜索球桌（与桌面端 table_db.query_tables_by_room 同源同过滤）。
+
+    过滤：排除「公司测试」与手动设备（@s）；返回 name/roomName/snk_code/city。
+    需要 aftersale_ro 对 autowork.billiard_tables 的 SELECT 权限。
+    """
+    kw = str(room or "").strip()
+    if not kw:
+        return {"rows": []}
+    try:
+        limit = max(1, min(int(limit or 30), 50))
+    except (TypeError, ValueError):
+        limit = 30
+    like = f"%{kw}%"
+    sql = ("SELECT name, roomName, snk_code, city FROM billiard_tables "
+           "WHERE TRIM(roomName) != %s "
+           "AND name NOT LIKE %s AND roomName NOT LIKE %s "
+           "AND roomName LIKE %s ORDER BY name LIMIT %s")
+    with _db() as c, c.cursor() as cur:
+        cur.execute(sql, ["公司测试", "%@s%", "%@s%", like, limit])
+        rows = cur.fetchall()
+    return {"rows": rows}
+
+
+def _cycle_start_of(date_str: str) -> str:
+    """记录归属周期起点 yyyy/MM/dd（与桌面端 cycle_start_of 对齐）
+
+    支持 tue（默认，周二起点）/mon（自然周）/month（自然月）；custom 模式
+    依赖桌面端配置，Web 端回退 tue 口径。
+    """
+    try:
+        d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        d = datetime.now().date()
+    mode = os.getenv("CYCLE_TYPE", "tue")
+    if mode == "month":
+        return d.replace(day=1).strftime("%Y/%m/%d")
+    if mode == "mon":
+        start = d - timedelta(days=d.weekday())
+    else:  # tue 默认：周二开始周一结束
+        start = d - timedelta(days=(d.weekday() - 1) % 7)
+    return start.strftime("%Y/%m/%d")
+
+
 @app.post("/api/records")
 def create_record(rec: dict = Body(...), user = Depends(require_auth)):
     if not _write_enabled(): raise HTTPException(503, "write not enabled")
@@ -234,6 +282,32 @@ def create_record(rec: dict = Body(...), user = Depends(require_auth)):
         if k in rec and rec[k] is not None:
             fields.append(k); values.append(rec[k])
     if not fields: raise HTTPException(400, "no writable fields")
+    # ---- 系统字段（对齐桌面端 insert_record）----
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # created_at=填写时刻：NULL 会导致「填写时间」显示 "-" 且 ORDER BY
+    # created_at DESC 时记录沉底（用户报障：新记录排在所有记录最后）
+    fields += ["created_at", "updated_at"]; values += [now_str, now_str]
+    # occurred_at 缺省当日；cycle_start（账期）按发生时间归属周期
+    if "occurred_at" not in fields:
+        fields.append("occurred_at"); values.append(now_str[:10])
+    occ = str(values[fields.index("occurred_at")])[:10]
+    if "cycle_start" not in fields:
+        fields.append("cycle_start"); values.append(_cycle_start_of(occ))
+    # snk_code/device_code 未提供时按桌号精确匹配球桌管理库带出
+    def _val(k):
+        return str(values[fields.index(k)] or "").strip() if k in fields else ""
+    if not _val("snk_code") and _val("table_no"):
+        with _db() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT snk_code, code FROM billiard_tables "
+                "WHERE TRIM(name)=%s LIMIT 1", [_val("table_no")])
+            row = cur.fetchone() or {}
+        snk = str(row.get("snk_code") or "")
+        if snk:
+            fields.append("snk_code"); values.append(snk)
+            dev = str(row.get("code") or "")
+            if dev and "device_code" not in fields:
+                fields.append("device_code"); values.append(dev)
     if "creator" not in fields:  # 强制记录创建人
         fields.append("creator"); values.append(user)
     placeholders = ",".join(["%s"]*len(fields))

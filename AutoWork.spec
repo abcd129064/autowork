@@ -195,7 +195,7 @@ a = Analysis(
         'PIL.ImageQt',
         'PIL.ImageFilter',
         'PIL.ImageEnhance',
-        # 单杆视频（tools/single_shot_video.py 延迟导入，显式声明保险）
+        # 单杆视频（windows/tools/single_shot_video.py 延迟导入，显式声明保险）
         'cv2',
         'numpy',
     ] + pygwalker_hiddenimports + qfw_hiddenimports,

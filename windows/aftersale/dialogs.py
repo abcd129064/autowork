@@ -52,20 +52,32 @@ class EditRecordDialog(MessageBoxBase):
         self.widget.setMinimumWidth(560)
 
     def _on_yes(self):
-        """保存前校验必填；不通过则阻止关闭"""
+        """收集表单值。
+
+        必填拦截在 validate()（qfw 基类 accept 前调用）：
+        基类槽序为先跑 validate() → 通过才 accept → 再轮到本槽收集，
+        因此走到这里时必填一定已填齐；未通过时弹窗保持打开、不丢输入。
+        """
+        self.collected = self.form.collect()
+
+    def validate(self) -> bool:
+        """必填校验：不通过返回 False → qfw 基类不 accept、弹窗不关闭
+
+        （此前校验写在 _on_yes 里，但基类默认 validate() 恒 True、先 accept
+        关窗才轮到 _on_yes，导致必填控制形同虚设、用户输入随弹窗关闭丢失。）
+        """
         missing = self.form.validate()
         if missing:
             show_info_bar(f"请先填写必填项: {'、'.join(missing)}", "warning",
                           title="无法保存", parent=self, duration=3000)
-            # MessageBoxBase 的 yesButton 默认触发 accept，这里用重新校验拦截：
-            # 校验失败时把结果标记到属性上，由 exec 返回值区分
-            self._validation_ok = False
-            return
-        self._validation_ok = True
-        self.collected = self.form.collect()
+            # 聚焦首个缺失字段，与录入页「滚动聚焦」体验一致
+            first_error = getattr(self.form, "first_error", None)
+            if first_error is not None:
+                first_error.setFocus()
+            return False
+        return True
 
     def exec(self):
-        self._validation_ok = True
         self.collected = None
         return super().exec()
 

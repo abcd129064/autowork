@@ -27,7 +27,8 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QFrame, QScrollArea, QFileDialog, QHeaderView,
-                               QTableWidgetItem, QAbstractItemView, QSizePolicy)
+                               QTableWidgetItem, QAbstractItemView, QSizePolicy,
+                               QSplitter)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, CardWidget,
                             LineEdit, PushButton, PrimaryPushButton, ComboBox,
                             CompactSpinBox, SpinBox, TextEdit, TableWidget,
@@ -74,6 +75,25 @@ def _make_terminal(parent, height=200):
         "TextEdit{background:#1b1e23;color:#d4d8de;border:1px solid #2b2f36;"
         "border-radius:6px;padding:6px 8px;}")
     return tv
+
+
+def _make_vsplitter(parent, top_widget, bottom_widget):
+    """上下两块之间插入可拖动分隔条（2026-09-19 反馈：拖动改高度）
+
+    外观**对齐主界面列表之间的间隔**：工作台 4 列的 splitter 就是默认 QSplitter
+    + handleWidth=2（渲染出来约 4px 的细缝，不做任何配色），这里照抄同一套，
+    不再自造粗色条；鼠标移到缝上会变成上下调整光标。
+    - 上块保持自身高度，下块（输出区）吃掉窗口多余高度，不改原有比例；
+    - childrenCollapsible=False：两块都不会被拖没，最短高度各自的最小尺寸兜底。
+    """
+    sp = QSplitter(Qt.Orientation.Vertical, parent)
+    sp.setChildrenCollapsible(False)
+    sp.setHandleWidth(2)
+    sp.addWidget(top_widget)
+    sp.addWidget(bottom_widget)
+    sp.setStretchFactor(0, 0)
+    sp.setStretchFactor(1, 1)
+    return sp
 
 
 def _fmt_size(n: float) -> str:
@@ -161,7 +181,17 @@ class SingleVideoWork(QWidget):
             "从 .log 日志解析单杆得分，生成带计分水印的单杆视频（逐帧渲染，CPU 密集）。",
             card))
 
-        # ---------- 日志文件选择（卡铺满，控件定宽，参考跑视频录入表单） ----------
+        # ---------- 表单区：左列参数 + 右列日志预览（2026-09-19 反馈） ----------
+        # 左列沿用「控件定宽、尾部空列吃剩余」的既定规范；右侧预览面板吃掉剩下的
+        # 宽度、与左列表单等高等宽，用来在生成前核对日志内容（帧区间/进球记录）。
+        form_row = QHBoxLayout()
+        form_row.setSpacing(16)
+        left_col = QVBoxLayout()
+        left_col.setSpacing(10)
+        form_row.addLayout(left_col, 0)
+        form_row.addWidget(self._build_log_preview(card), 1)
+
+        # ---------- 日志文件选择（控件定宽，参考跑视频录入表单） ----------
         row = QHBoxLayout()
         row.addWidget(BodyLabel("日志文件:", card))
         self.log_path_edit = LineEdit(card)
@@ -173,10 +203,10 @@ class SingleVideoWork(QWidget):
         self.btn_browse.clicked.connect(self._on_browse)
         row.addWidget(self.btn_browse)
         row.addStretch(1)
-        cl.addLayout(row)
+        left_col.addLayout(row)
 
         # ---------- 参数表单 ----------
-        cl.addWidget(CaptionLabel("JSON 字段:", card))
+        left_col.addWidget(CaptionLabel("JSON 字段:", card))
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
@@ -260,9 +290,9 @@ class SingleVideoWork(QWidget):
             lambda: _pick_dir(self._win, self.edit_videos))
         _pair(grid, 6, "待处理目录:", self._dir_cell(self.edit_pending, self.btn_pending, card),
               "视频输出目录:", self._dir_cell(self.edit_videos, self.btn_videos, card), card)
-        # 卡铺满、控件定宽：网格整体靠左，尾部空列吃掉剩余宽度
+        # 控件定宽：网格整体靠左，尾部空列吃掉左列剩余宽度
         grid.setColumnStretch(4, 1)
-        cl.addLayout(grid)
+        left_col.addLayout(grid)
 
         # ---------- 操作行 ----------
         btns = QHBoxLayout()
@@ -274,10 +304,14 @@ class SingleVideoWork(QWidget):
         self.btn_open_out.hide()
         btns.addWidget(self.btn_open_out)
         btns.addStretch(1)
-        cl.addLayout(btns)
+        left_col.addLayout(btns)
+
+        # 左列表单 + 右列日志预览合成一行
+        cl.addLayout(form_row)
 
         # ---------- 布局（2026-09-07 反馈）：卡铺满整行、卡内控件定宽，
-        # 运行输出独立整宽卡片占满剩余空间（不套滚动） ----------
+        # 运行输出独立整宽卡片占满剩余空间（不套滚动）；
+        # 2026-09-19：参数区与运行输出之间改由 QSplitter 分隔，可上下拖动改高度 ----------
         out_card = CardWidget(self)
         ol = QVBoxLayout(out_card)
         ol.setContentsMargins(16, 14, 16, 14)
@@ -286,11 +320,72 @@ class SingleVideoWork(QWidget):
         self.log_view = _make_terminal(out_card, None)
         ol.addWidget(self.log_view, 1)
 
-        lay.addWidget(card)
-        lay.addWidget(out_card, 1)
+        self.splitter = _make_vsplitter(body, card, out_card)
+        lay.addWidget(self.splitter, 1)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(body)
+
+        self._refresh_log_preview()      # 初始为「未选择日志」提示态
+
+    # ---------- 右侧日志预览（2026-09-19 反馈：卡右侧空白区） ----------
+
+    _LOG_PREVIEW_MAX_BYTES = 256 * 1024   # 读取上限，防超大日志把界面卡住
+
+    def _build_log_preview(self, parent):
+        """右列「日志预览」：与左列表单等高的只读日志视图（样式同运行输出）"""
+        box = QWidget(parent)
+        box.setMinimumWidth(300)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(CaptionLabel("日志预览:", box))
+        self.log_preview_meta = CaptionLabel("未选择日志文件", box)
+        self.log_preview_meta.setMaximumWidth(420)   # 超长文件名不撑破面板
+        head.addWidget(self.log_preview_meta)
+        head.addStretch(1)
+        self.btn_log_refresh = ToolButton(FluentIcon.SYNC, box)
+        self.btn_log_refresh.setToolTip("重新读取日志文件")
+        self.btn_log_refresh.clicked.connect(self._refresh_log_preview)
+        head.addWidget(self.btn_log_refresh)
+        v.addLayout(head)
+
+        self.log_preview = _make_terminal(box, None)
+        self.log_preview.setPlaceholderText("选择 .log 日志文件后，在此预览内容")
+        v.addWidget(self.log_preview, 1)
+        return box
+
+    def _refresh_log_preview(self):
+        """把所选日志读进预览区（限 _LOG_PREVIEW_MAX_BYTES 字节，超出加截断提示）"""
+        path = self.log_path_edit.text().strip()
+        if not path or not os.path.isfile(path):
+            self.log_preview_meta.setText("未选择日志文件")
+            self.log_preview_meta.setToolTip("")
+            self.log_preview.clear()
+            self.btn_log_refresh.setEnabled(False)
+            return
+        self.btn_log_refresh.setEnabled(True)
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                raw = f.read(self._LOG_PREVIEW_MAX_BYTES)
+        except OSError as e:
+            self.log_preview_meta.setText(f"读取失败: {e}")
+            self.log_preview.clear()
+            return
+        text = raw.decode("utf-8", errors="replace")
+        if len(raw) < size:
+            text += (f"\n\n… 日志较大（{_fmt_size(size)}），"
+                     f"仅预览前 {_fmt_size(self._LOG_PREVIEW_MAX_BYTES)}")
+        # 面板本身较窄，头部只放「大小 · 行数」，文件名挂悬停提示（左侧字段已显示路径）
+        info = f"{_fmt_size(size)} · {text.count(chr(10)) + 1} 行"
+        self.log_preview_meta.setText(info)
+        self.log_preview_meta.setToolTip(f"{path}\n{info}")
+        self.log_preview.setPlainText(text)
+        self.log_preview.verticalScrollBar().setValue(0)   # 预览回到日志开头
 
     @staticmethod
     def _dir_cell(edit, btn, parent):
@@ -337,6 +432,7 @@ class SingleVideoWork(QWidget):
         if not path:
             return
         self.log_path_edit.setText(path)
+        self._refresh_log_preview()      # 右列日志预览随选择联动
         video_name = os.path.basename(path).replace('.log', '.mp4')
         self.append_line(f"[选择] 日志: {path}")
         self.append_line(f"[选择] 自动推断视频: "
@@ -1203,8 +1299,9 @@ class NewLogWork(QWidget):
         self.progress_bar.hide()
         ol.addWidget(self.progress_bar)
 
-        lay.addWidget(card)
-        lay.addWidget(out_card, 1)
+        # 与单杆视频页同构：参数区 / 运行输出之间可上下拖动改高度
+        self.splitter = _make_vsplitter(body, card, out_card)
+        lay.addWidget(self.splitter, 1)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1231,7 +1328,7 @@ class NewLogWork(QWidget):
             win._show_info_bar("打包上传进行中，请等待完成或先取消", "warning")
             return
         try:
-            import newlog  # noqa: F401  依赖守卫（newlog 顶层 import openpyxl）
+            from windows.tools import newlog  # noqa: F401  依赖守卫（newlog 顶层 import openpyxl）
         except ImportError as e:
             win._show_info_bar(f"无法加载 newlog 模块（请确认已安装 openpyxl）: {e}",
                                "error", duration=5000)

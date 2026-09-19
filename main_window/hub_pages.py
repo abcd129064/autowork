@@ -194,8 +194,8 @@ class SettingsHubPage(QWidget):
 
     页签（2026-09-07 三期衔接：远程连接 独立分页）：
         应用配置 │ 远程连接 │ 工具 │ 性能 │ 数据库 │ 面板设置 │ 外观
-        - 应用配置 = 路径 / AI 分析 / 收集与上传（自数据库页迁入）/
-          日志高亮 / 配置文件（自工具页迁入）
+        - 应用配置 = 路径 / 启动（默认启动页面，2026-09-19）/ 日志高亮 /
+          配置文件（自工具页迁入）
         - 远程连接 = SSH/SFTP/FRP（为二期远程会话页预留落点）
         - 工具 = 快捷键与工具
         - 性能 = 亚克力 / 动画 / 表格平滑滚动（范围下拉 + 开关）
@@ -244,7 +244,7 @@ class SettingsHubPage(QWidget):
             # 2026-09-07 二期反馈：顺序 应用配置→工具→性能→数据库→面板设置→外观；
             # 配置文件自工具页迁入应用配置；手动添加球桌记录自数据库页迁入面板设置；
             # 2026-09-07：收集与上传自应用配置迁入面板设置「运维」组内
-            ("config", "应用配置", (self._group_paths,
+            ("config", "应用配置", (self._group_paths, self._group_startup,
                                     self._group_log_rules, self._group_files)),
             # 2026-09-07 三期衔接：远程连接独立分页（SSH/SFTP/FRP），
             # 为二期远程会话页（design/remote_session_v2.html）预留落点
@@ -845,6 +845,38 @@ class SettingsHubPage(QWidget):
             make_line_edit(str(settings.get("upload_pass", "") or ""),
                            lambda t: win._save_settings({"upload_pass": t}),
                            "上传密码", password=True)))
+
+    def _group_startup(self, parent):
+        """启动：设定打开程序时默认展示的界面（2026-09-19 需求）
+
+        下拉选项 = 六个一级导航页；存 objectName（与主窗口导航路由解耦，
+        改名/换序不影响持久值）。非法/缺失值回退「工作台」。
+        """
+        win = self._win
+        settings = win._load_settings()
+        g = SettingGroup("启动", parent)
+        items = [
+            ("工作台", "homeInterface"),
+            ("运维管理", "managementHub"),
+            ("售后", "aftersaleHub"),
+            ("跑视频", "ledgerHub"),
+            ("远程", "remoteHub"),
+            ("工具", "toolHub"),
+        ]
+        valid = {obj for _label, obj in items}
+        cur = str(settings.get("startup_default_page", "homeInterface")
+                  or "homeInterface")
+        if cur not in valid:
+            cur = "homeInterface"
+        idx = [obj for _label, obj in items].index(cur)
+        g.addRow(SettingRow(
+            FluentIcon.HOME, "默认启动页面",
+            "打开程序时自动切换到该界面（下次启动生效）",
+            make_combo(items, idx,
+                       lambda v: win._save_settings(
+                           {"startup_default_page": v}),
+                       width=180)))
+        return g
 
     def _group_log_rules(self, parent):
         """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效"""

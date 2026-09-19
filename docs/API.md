@@ -11,9 +11,11 @@
 - [database/ 数据层](#database-数据层)
 - [windows/ 独立窗口层](#windows-独立窗口层)
 - [main_window/ 主窗口层](#main_window-主窗口层)
+- [main_window/ Hub 页面（二级界面）](#main_window-hub-页面二级界面2026-09)
 - [win_api/ Windows API 层](#win_api-windows-api-层)
 - [tools/ 独立工具模块](#tools-独立工具模块)
 - [p2p.py P2P 工具模块](#p2ppy-p2p-工具模块)
+- [Web 端接口（售后面板 Web）](#web-端接口售后面板-web)
 - [配置门面 config/（原 settings.json）](#配置门面-config原-settingsjson2026-09-06-拆分)
 
 ---
@@ -231,7 +233,7 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 
 | 常量/函数 | 签名 | 说明 |
 |-----------|------|------|
-| `BASE_VERSION` | `str = "2.8"` | 主.次版本（手工维护，新增功能集 → 次版本 +1） |
+| `BASE_VERSION` | `str = "3.11"` | 主.次版本（手工维护，新增功能集 → 次版本 +1） |
 | `APP_VERSION` | `str` | 模块级缓存完整版本号（导入时计算一次） |
 | `get_branch_name()` | `() -> str` | 当前分支名；detached HEAD / 非 git 环境返回空串 |
 | `get_commit_count()` | `() -> int` | 当前分支累计提交次数；失败返回 0 |
@@ -1133,7 +1135,7 @@ RDPWindow(host, port, username, password,
 
 ### SingleVideoDialog
 
-单杆视频参数对话框（工具菜单「单杆视频」，`windows/single_video_dialog.py`）。继承 `MessageBoxBase`（透明模态窗口），由主窗口 `UiMixin._on_open_single_video` 注入 `_start` 回调后 `exec()` 打开。
+单杆视频参数对话框（`windows/single_video_dialog.py`）。继承 `MessageBoxBase`（透明模态窗口）。工具页 `SingleVideoWork` 直接从本模块导入默认值常量（`_DEFAULT_SESSION_CODE/_DEFAULT_FORMAT/_DEFAULT_USER_x/_DEFAULT_AVATAR_x` 等）内嵌表单；独立对话框形态保留为回退兜底（`UiMixin._on_open_single_video` 旧入口）。
 
 ```python
 SingleVideoDialog(parent, settings=None)
@@ -1349,7 +1351,7 @@ ImageViewerDialog(entries, index, file_path, device_code, device_page,
 
 ### PortFakeWidget
 
-`windows/port_fake.py`：虚假端口占用工具（工具菜单「端口占用」）——真实 `bind + listen` 模拟服务占用，`netstat -ano` 可见 `LISTENING`。
+`windows/tools/port_fake.py`：虚假端口占用工具（工具菜单「端口占用」）——真实 `bind + listen` 模拟服务占用，`netstat -ano` 可见 `LISTENING`。
 
 ```python
 PortFakeWidget(parent=None)
@@ -1402,6 +1404,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 | `on_open_dir_clicked()` | 打开当前设备目录 |
 | `on_open_config_clicked()` | 打开配置文件对话框 |
 | `apply_dpi_scale(settings_path)` | [静态] 应用 DPI 缩放 |
+| `_apply_startup_default_page()` | 启动时按配置 `startup_default_page` 切换默认展示界面（`_build_hub_pages` 末尾 singleShot(0) 调用；非法值回退工作台，2026-09-19） |
 | `_effective_is_dark(settings)` | [静态] 判断是否深色主题 |
 | `_show_info_bar(message, message_type="info", title=None, duration=2500)` | 统一 InfoBar 提示（兼容入口，内部转调 `core.utils.show_info_bar`，位置 BOTTOM_RIGHT、标题自动映射） |
 
@@ -1434,9 +1437,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 | 查看CPP日志 | Ctrl+L | `shortcut_open_daily` |
 | 打开配置 | Ctrl+, | `shortcut_open_config` |
 | P2P面板 | F9 | `shortcut_p2p_panel` |
-| 跑视频面板 | Ctrl+1 | `shortcut_ledger_panel` |
-| 售后面板 | Ctrl+2 | `shortcut_aftersale_panel` |
-| 运维管理面板 | Ctrl+3 | `shortcut_table_panel` |
+| 跑视频页 | Ctrl+1 | `shortcut_ledger_panel` | 跳转「跑视频」页并预填当前球桌会话 |
+| 售后页 | Ctrl+2 | `shortcut_aftersale_panel` | 跳转「售后」页 |
+| 运维管理页 | Ctrl+3 | `shortcut_table_panel` | 跳转「运维管理」页 |
 
 ---
 
@@ -1483,7 +1486,7 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 |------|------|
 | `_init_statusbar()` | 初始化底部状态栏 |
 | `_init_context_menus()` | 初始化右键菜单 |
-| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 + 端口占用 + 视频/日志批量整理） |
+| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 / 端口占用 / 视频/日志批量整理 / 上传清单——各入口统一经 `_on_open_tool_hub(work)` 跳转工具页对应工作区） |
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_parse_theme_color(settings)` | [静态] 解析主题强调色：优先 `theme_color`（HEX），兼容旧 `highlight_color`（RGB 列表） |
 | `_apply_theme_color()` | 从 settings.json 加载主题强调色到内存（`_apply_theme` 时应用） |
@@ -1493,23 +1496,76 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 | `_apply_font_size()` | 应用字号设置 |
 | `_apply_font_family()` | 应用字体设置 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
-| `_on_open_single_video()` | 工具菜单「单杆视频」：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调（参数校验 → 保存 settings → 创建 `SingleVideoWorker` 连信号 → `exec()`） |
+| `_on_open_single_video()` | 工具菜单「单杆视频」回退兜底（正常路径为 `_on_open_tool_hub("single_video_work")` 跳工具页）：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调 |
+| `_on_open_tool_hub(work=None)` | 工具类入口统一跳转二期独立工具页（`main_window.tool_hub`）；`work` 为工作区 objectName（single_video_work / port_fake_work / upload_list_work / newlog_work） |
 | `_on_open_port_fake()` | 工具菜单「端口占用」：弹窗真实监听指定端口模拟服务占用（`PortFakeWidget`） |
 | `_on_newlog_organize()` | 工具菜单「视频/日志批量整理」：按 Excel 署名筛选批量归类（`NewLogDialog` + `NewLogWorker`），支持一键打包上传 |
 
 ---
 
-### SettingsDialog
+### SettingsHubPage（统一设置页，原 SettingsDialog 已下线）
 
-设置对话框（`main_window/settings_dialog.py`），继承 `MessageBoxBase`，Pivot 导航 + 分区懒加载（首次切入才构建控件）。
+`main_window/hub_pages.py`：Watt Toolkit 式统一设置页（左标题 + 右 SegmentedWidget 分页），收编原菜单栏全部设置 Action 与三个面板的设置项。**原 `main_window/settings_dialog.py` 已删除**（2026-09-06），日志规则迁 `core/log_rules.py`，控件组件在 `main_window/setting_cards.py`（SettingGroup 组标题 + SettingRow 逐项独立圆角卡片：图标+标题+副标题 | 右侧操作控件）。
 
-**分区**：路径配置 / 远程连接 / 收集与上传 / FRPC 服务器 / API Key / 日志高亮 / 外观。
+**七个分段**（键归属）：
 
-**数据驱动 collect 机制**：`_CONFIG_ITEMS` 配置表描述每项 `(配置key, 所属分区, 控件获取lambda, 读取函数, 回退函数)`，`collect()` 循环统一收集——未构建分区的项用回退函数从原始配置取值，已构建的从控件读值。
+| 分段 | 内容 |
+|------|------|
+| 应用配置 | 路径 / 启动（默认启动页面 `startup_default_page`，2026-09-19）/ 日志高亮 / 配置文件（自工具页迁入） |
+| 远程连接 | SSH/SFTP/FRP（为远程页预留落点） |
+| 工具 | 快捷键与工具（连接诊断入口、前往工具页）+ AI 分析组（2026-09-07 自应用配置迁入） |
+| 性能 | 亚克力 / 动画 / 表格平滑滚动（范围下拉 + 开关） |
+| 数据库 | 数据源/双接口账号/MySQL（收集上传与手动添加已迁出） |
+| 面板设置 | 售后（周期/自动刷新）+ 跑视频（署名）+ 运维（手动添加球桌记录 + 收集与上传组） |
+| 外观 | 主题/字体/DPI/强调色 |
 
-**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`，默认规则「错误」（红，通知）/「警告」（橙，静默）/「返回」「加分」「add」（旧版硬编码关键词迁移，橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
+**信号**：`aftersale_cycle_saved`（周期保存 → 主窗口转发售后记录页刷新）、`aftersale_auto_refresh_changed`（自动刷新开关/间隔 → 即时启停定时器，2026-09-16）、`table_smooth_changed`（平滑开关 → 各 Hub 刷新）。
+
+**日志高亮规则**：`log_highlight_rules` 列表 `[{name, pattern, color, notify}]`（引擎 `core/log_rules.py`），默认规则「错误」（红，通知）/「警告」（橙，静默）/「返回」「加分」「add」（旧版硬编码关键词迁移，橙，静默）；主窗口日志区实时匹配着色，`notify=True` 命中弹 InfoBar（每规则 10s 静默期）。
 
 **NewLog 路径默认值**：`newlog_excel_dir` 默认 `~/Desktop/excel`、`newlog_out_dir` 默认 `~/Desktop`。
+
+---
+
+## main_window/ Hub 页面（二级界面，2026-09）
+
+FluentWindow 单窗口重构后，原独立面板降层为「Pivot 二级导航 + 工作区」容器页。主窗口导航顺序：**工作台 / 运维管理 / 售后 / 跑视频 / 远程 / 工具**，底部 **设置 / 关于**。
+
+### 基建
+
+| 类 | 模块 | 说明 |
+|------|------|------|
+| `PivotPage` | `main_window/pivot_page.py` | Pivot 二级导航容器页基类（顶部横排 SegmentedWidget + 下方 QStackedWidget 工作区切换；实测嵌套 FluentWindow 会渲染异常，故用 Pivot 容器） |
+| `CardPage` | `main_window/pivot_page.py` | 卡片页辅助容器 |
+| `HubPopoutWindow(FluentWindow)` | `main_window/hub_popout.py` | 通用「弹出面板」独立窗口：把无旧版独立窗口对应的 Hub（工具/远程）重新以独立 FluentWindow 打开，Hub 内 `self._win` 指向本窗口，故须代理宿主接口（`_show_info_bar` 等） |
+| `SettingGroup` / `SettingRow` | `main_window/setting_cards.py` | 统一设置页卡片组件：组标题 + 逐项独立圆角卡片（左图标+标题+副标题，右操作控件） |
+
+### 业务 Hub（`main_window/hub_pages.py`）
+
+| 类 | 导航 | 说明 |
+|------|------|------|
+| `ManagementHub(PivotPage)` | 「运维管理」 | 原运维面板六页面降层（球桌/设备状态/健康度/管理设置/控件测试/小游戏）；embedded 模式下 AdminSettingsPage 不建上传/添加/性能卡（getattr 守卫） |
+| `AftersaleHub(PivotPage)` | 「售后」 | 售后面板降层（填写录入/记录与统计）；设置统一迁底部设置页；支持自动刷新（2026-09-16） |
+| `LedgerHub(PivotPage)` | 「跑视频」 | 跑视频面板降层（填写录入/记录与统计） |
+| `SettingsHubPage(QWidget)` | 底部「设置」 | 七分段统一设置页（见上文 SettingsHubPage 节） |
+| `AboutPage(QWidget)` | 底部「关于」 | 版本信息与说明 |
+
+### ToolHub 工具页（`main_window/tool_hub.py`）
+
+`ToolHub(PivotPage)`：横排 Pivot 四项无图标（与运维/售后/跑视频同风格），四个工作区类：
+
+| 工作区 | 类 | 说明 |
+|------|------|------|
+| 单杆视频 | `SingleVideoWork` | 参数卡（整行铺满，定宽下沉到控件）+ 右侧**日志预览面板**（只读终端、大小·行数、悬停完整路径、刷新按钮、256KB 截断、随选择联动）；参数区与「运行输出」终端间竖直 `QSplitter`（`_make_vsplitter`：handleWidth=2、无自定义 qss，外观对齐主界面工作台列间隔）；生成走 `workers/single_video_worker.SingleVideoWorker` |
+| 端口占用 | `PortFakeWork` | 自写表格：TCP listen→LISTENING、UDP bind→BOUND；绑定地址用 `EditableComboBox` |
+| 上传清单 | `UploadListWork` | 复选框文件表（表头浮 CheckBox 全选，`clicked` 接管三态；「删除所选」二次确认 + `_safe_upload_path` 越界拒绝）；勾选上传走 `ZipUploadWorker(files=白名单)` |
+| 批量整理 | `NewLogWork` | NewLog 整理 + 打包上传，与 SingleVideoWork 同构（splitter/终端） |
+
+busy 守卫共享 `_single_video_worker/_newlog_worker/_newlog_upload_worker`（任一在跑拒绝再启动）。配置键 `single_random_session_code`（默 True）/ `single_auto_open_dir`（默 False）位于 misc 域。辅助工厂 `_transparent()`（消工作区直角底色块）、`_make_terminal(parent, None)`（Expanding 终端，不设固定高）。
+
+### RemoteHub 远程页（`main_window/remote_hub.py`）
+
+`RemoteHub(PivotPage)`：三视图——`SessionWork`（会话总览：统计卡 + 7 列隧道表，行内 SSH/SFTP/RDP/断开/删除，SFTP 传输中二次确认）、`VisitorWork`（P2P 访客：注册只 persist 不拉 frpc）、`TunnelConfWork`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
 
 ---
 
@@ -1550,20 +1606,26 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 
 ---
 
-## tools/ 独立工具模块
+## windows/tools/ 工具页功能后端
 
-从 single_json 项目收编的独立工具，由 `SingleVideoWorker` / `SingleVideoDialog` 调用。
+工具页（`main_window.tool_hub`）四工作区的运行时业务逻辑，由 `SingleVideoWorker` / `NewLogWorker` / `PortFakeWidget` 调用；
+单杆渲染相关部分从 single_json 项目收编。包内另有 `newlog.py`（批量整理，见上 Workers 节）
+与 `smoke_fluent_mainwindow.py`（GUI 冒烟脚本）。
 
-### tools.single_shot_video
+### windows.tools.single_shot_video
 
 单杆视频渲染服务（计分水印合成）。
 
 | 符号 | 说明 |
 |------|------|
 | `SingleShotVideoServer` | 渲染服务封装：接收场次参数（日志路径/帧范围/输出目录）执行帧级计分提取与水印视频合成 |
+| `build_bar_image(player)` | 比分条底图构建：选手0=模板原样；选手1=模板**整体镜像** + 品牌图形按 `BAR_BRAND_BOXES` 贴回未镜像像素（防 logo 翻反/箭头错位；`image_1.png` 已弃用） |
+| `BAR_TEMPLATE_NAME` / `BAR_BRAND_BOXES` | 模板文件名（image_0.png）/ 品牌图形镜像还原框坐标 |
 | `resource_path(rel)` | 打包/开发环境自适应资源路径（字体/模板等随包资源） |
 
-### tools.single_video_tool
+> ⚠️ **禁止 cv2 HighGUI 调用**（`destroyAllWindows`/`imshow` 等）：运行环境 opencv 无 GUI 后端，调用抛异常导致「视频已写盘却报失败」。`tests/test_single_shot_bar.py` 用 AST 断言兜底。
+
+### windows.tools.single_video_tool
 
 单杆 json 生成工具。
 
@@ -1581,6 +1643,59 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `generate_random_port(exclude_ports=None)` | `(set?) -> int` | 生成随机端口（排除常用+已用端口） |
 | `is_port_in_use(port, host='127.0.0.1')` | `(int, str) -> bool` | 检测端口是否被占用 |
 | `open_xshell_and_xftp(host, port, ...)` | 使用 Xshell/Xftp 双开连接 | 外部工具调用 |
+
+---
+
+## Web 端接口（售后面板 Web）
+
+售后面板 Web 端与桌面端售后页**同库同口径**（MySQL `autowork.aftersale_records`）。三套组成：后端 `web/aftersale_api/app.py`（FastAPI）、v1 前端 `web/aftersale_front`（Vue3+Vite）、v2 前端 `web/vue-pure-admin`（vue-pure-admin 7.0，售后页在 `src/views/aftersale/`，接口封装 `src/api/aftersale.ts`）。入口选择页 `web/aftersale_chooser/index.html`。
+
+### 后端部署与开关（生产机 49.235.34.253）
+
+| 项 | 值/说明 |
+|------|------|
+| 服务 | systemd `aftersale-web.service`（uvicorn 单 worker），凭据 `/opt/aftersale-web/.env`（chmod 600） |
+| 环境变量 | `MYSQL_HOST/PORT/USER/PASS/DB`；`CYCLE_TYPE`（tue/mon/custom/month，默认 tue）+ `CYCLE_SPAN`；`WRITE_ENABLED`（默认 false）、`AUTH_ENABLED`（默认 false）、`AUTH_SECRET`（JWT 签名密钥） |
+| 静态站根 | `/opt/aftersale-web/dist`：`index.html` 入口页｜`v1/index.html` 老系统（v1 资产留根 `assets/`）｜`v2/**` 新系统（base=`/v2/`） |
+| 访问入口 | `http://49.235.34.253/`、`/v1/`、`/v2/`（80 端口与 newball.cloud 共端口 default_server 分流；8080 外部不可达）。**零 nginx 改动**：既有 `location / { try_files $uri $uri/ /index.html; }` 直接服务子目录 SPA |
+| 认证前提 | `users.json`（bcrypt `pw_hash`）目前不存在——开 `AUTH_ENABLED` 前必须先补用户文件 |
+| 部署脚本 | `tools/deploy_parallel_v1v2.py`（v1/v2 并行整包，幂等防覆盖 v1）、`tools/upload_aftersale_dist.py`（v1 产物）、`tools/deploy_aftersale_api.py`（后端+重启）；SSH 统一走 `tools/prod_ssh.py`，密码只从环境变量 `AFT_SSH_PASS` 读取 |
+| v2 子路径三件套 | `VITE_PUBLIC_PATH=/v2/`、`useNav.getLogo()` 用 `import.meta.env.BASE_URL`、`public/platform-config.json` 的 Title |
+| 验证脚本 | `web/aftersale_front/tools/verify_prod_layout.mjs`（产物预检）、`serve_dist_v2.mjs`（本地仿真）、`verify_prod_deployed.mjs` / `verify_prod_write.mjs`（线上巡检） |
+
+> ⚠️ v2 的 `vite-plugin-fake-server` 生产 mock 走 xhook 注入，静态分析看不出、必须实测（正常产物应无 Service Worker、index.html 无额外 script 注入）。
+
+### REST API（`web/aftersale_api/app.py`）
+
+所有查询接口与桌面端 `database/aftersale_db` 口径一致：记录归属日期 = `substr(COALESCE(NULLIF(occurred_at,''),created_at),1,10)`；`resolved`/`is_initiative`/`is_our_problem` 为**中文字符串** `"是"`/`"否"`（非 0/1）；周期起点格式 `yyyy/MM/dd`，非当前模式合法起点 → 该筛选命中 0 条。
+
+**只读接口（默认开放）**：
+
+| 方法 路径 | 参数 | 说明 |
+|------|------|------|
+| `GET /api/health` | — | 健康检查，返回 `{ok, db}` |
+| `GET /api/cycle-options` | — | 最近 12 个周期起点下拉（含 `current`），仅当前模式合法起点 |
+| `GET /api/records` | `page, page_size(≤200), keyword, cycle_start, issue_type, resolved, is_initiative, is_our_problem` | 分页列表 + 同口径统计一次返回 `{total, rows, stats:{total,unresolved,initiative,our_problem}, page, page_size}` |
+| `GET /api/table-columns` | — | 表格列定义（与桌面端 TABLE_COLUMNS 同构，前端据此渲染） |
+| `GET /api/stats/charts` | 同 records 筛选（无 keyword） | 默认图表四件套：`region_dist`/`daily`（键名 `count`）/`our_problem`/`issue_type_dist`/`total`；无周期时取最近 90 天 |
+
+**写入与高级接口（受开关控制，`WRITE_ENABLED=false` 一律 503）**：
+
+| 方法 路径 | 说明 |
+|------|------|
+| `POST /api/auth/login` | 登录（需 `AUTH_ENABLED`）：bcrypt 校验 → 返回 12h JWT `{token, user}` |
+| `GET /api/auth/me` | 校验 token（`AUTH_ENABLED` 关闭时直接放行） |
+| `POST /api/records` | 新增（`_WRITABLE` 字段白名单；creator 缺省强制记为登录用户）→ `{id}` |
+| `PUT /api/records/{id}` | 更新（可选乐观锁：带 `updated_at` 时条件更新，0 行 → 409 conflict） |
+| `DELETE /api/records/{id}` | 删除 |
+| `POST /api/records/batch-resolve` / `batch-delete` | 批量 `{ids:[...]}` → `{updated/deleted: n}` |
+| `POST /api/stats/query` | 通用聚合（自定义图表）：`{dimension, measure(count/percent), chart(bar/line/pie/ring/hbar), sort, limit≤50, filter}`；维度白名单 `_DIM`（region/issue_type/resolved/is_initiative/is_our_problem/table_no/creator/resolver/day/week）防注入 |
+
+认证接线：写接口经 `Depends(require_auth)`——`AUTH_ENABLED=false` 时不校验（桌面/内部场景放行），`true` 时要求 `Authorization: Bearer <token>`。
+
+### 本地反代（`core.local_web_server`）
+
+桌面程序启动时可选拉起本地 Web（默认 `http://localhost:8787`）：托管 v1 构建产物 + `/api/*` 反代云端 `http://49.235.34.253`（同一数据源）。配置键 `local_web = {enabled, port, api_base}`（misc 域）。纯标准库实现、daemon 线程、防路径穿越；独立测试 `python -m core.local_web_server --port 8787`。
 
 ---
 
@@ -1605,6 +1720,7 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | ui.json | `theme_mode` | str = "auto" | 主题模式 auto/light/dark |
 | ui.json | `dark_theme` | bool = false | 深色主题开关（旧字段，theme_mode 兼容回退） |
 | ui.json | `classic_layout` | bool = false | 经典布局模式 |
+| ui.json | `startup_default_page` | str = "homeInterface" | 启动默认展示页面（homeInterface / managementHub / aftersaleHub / ledgerHub / remoteHub / toolHub，非法值回退工作台；设置 → 应用配置 → 启动） |
 | ui.json | `theme_color` | str = "#00BCD4" | 主题强调色（即时生效） |
 | ui.json | `highlight_color` | [r,g,b] | 日志高亮颜色（旧字段，仅作 theme_color 兼容回退） |
 | ui.json | `log_highlight_rules` | [object] | 日志高亮规则 `[{name, pattern, color, notify}]` |

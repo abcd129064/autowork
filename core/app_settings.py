@@ -110,6 +110,7 @@ KEY_DOMAIN = {
     "deepseek_api_key": "credentials",
     "xtcp_secret_key": "credentials",
     # ---- ui ----
+    "startup_default_page": "ui",
     "dark_theme": "ui",
     "classic_layout": "ui",
     "theme_mode": "ui",

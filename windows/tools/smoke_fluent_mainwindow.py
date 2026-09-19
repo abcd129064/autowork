@@ -10,7 +10,7 @@
   6. 切页 API switchTo 可用
 
 用法：
-  QT_QPA_PLATFORM=offscreen <venv>/python.exe tools/smoke_fluent_mainwindow.py
+  QT_QPA_PLATFORM=offscreen <venv>/python.exe windows/tools/smoke_fluent_mainwindow.py
 注意：退出码 139 是 offscreen 下 Qt 清理的已知段错误，断言结果看 stdout。
 """
 import os
@@ -22,7 +22,7 @@ _parts = [p for p in os.environ.get("PATH", "").split(os.pathsep)
 os.environ["PATH"] = os.pathsep.join(_parts)
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
@@ -140,6 +140,66 @@ if th is not None:
     check("8b.7 上传清单四列表格+全选框",
           th.upload_list_work.table.columnCount() == 4
           and th.upload_list_work.chk_all is not None)
+    # 日志预览面板（2026-09-19 反馈：参数卡右侧空白区 → 日志预览）
+    sv = th.single_video_work
+    check("8b.8 日志预览面板存在（只读）",
+          hasattr(sv, "log_preview") and sv.log_preview.isReadOnly()
+          and hasattr(sv, "log_preview_meta"))
+    sv.log_path_edit.setText("")
+    sv._refresh_log_preview()
+    check("8b.9 未选日志→提示态、刷新禁用",
+          "未选择" in sv.log_preview_meta.text()
+          and not sv.btn_log_refresh.isEnabled()
+          and not sv.log_preview.toPlainText())
+    import tempfile as _tempfile
+    _fd, _log = _tempfile.mkstemp(suffix=".log")
+    try:
+        with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+            _f.write("frame_id:5173 选手1 进1球，目标球-1，红球14\n")
+        sv.log_path_edit.setText(_log)
+        sv._refresh_log_preview()
+        check("8b.10 选日志→预览联动（内容/大小行数）",
+              "选手1 进1球" in sv.log_preview.toPlainText()
+              and "行" in sv.log_preview_meta.text()
+              and os.path.basename(_log) in sv.log_preview_meta.toolTip()
+              and sv.btn_log_refresh.isEnabled())
+        # 超上限截断保护（避免大日志把界面卡住）
+        with open(_log, "w", encoding="utf-8") as _f:
+            _f.write("x" * (type(sv)._LOG_PREVIEW_MAX_BYTES + 64))
+        sv._refresh_log_preview()
+        check("8b.11 超大日志截断提示",
+              "仅预览前" in sv.log_preview.toPlainText())
+    finally:
+        try:
+            os.remove(_log)
+        except OSError:
+            pass
+    sv.log_path_edit.setText("")
+    sv._refresh_log_preview()
+    # 参数区 / 运行输出 可拖动分隔（2026-09-19 反馈）
+    from PySide6.QtCore import Qt as _Qt
+    check("8b.12 参数区与运行输出之间为可拖动分隔条（细间隔，同主界面）",
+          hasattr(sv, "splitter")
+          and sv.splitter.orientation() == _Qt.Orientation.Vertical
+          and sv.splitter.count() == 2
+          and not sv.splitter.childrenCollapsible()
+          and sv.splitter.handleWidth() == 2)
+    sv.splitter.setSizes([1000, 100])
+    for _ in range(3):
+        app.processEvents()
+    _short = sv.splitter.sizes()[1]
+    w.switchTo(w.tool_hub)      # 确保工具页已完成布局，否则几何断言恒为 0
+    for _ in range(4):
+        app.processEvents()
+    sv.splitter.setSizes([100, 1000])
+    for _ in range(3):
+        app.processEvents()
+    _tall = sv.splitter.sizes()[1]
+    check("8b.13 拖动后输出区高度随 sizes 变化", _tall > _short,
+          f"{_short} -> {_tall}")
+    check("8b.14 批量整理页同构分隔条",
+          th.newlog_work.splitter.count() == 2
+          and not th.newlog_work.splitter.childrenCollapsible())
 # 设置-工具瘦身：4 条已迁功能行不再出现在 _group_tools 源码里
 import inspect as _inspect
 from main_window.hub_pages import SettingsHubPage as _SHP
@@ -318,12 +378,12 @@ print("\n[14] 统一设置页（左标题 + 右 SegmentedWidget 分页切换）"
 from qfluentwidgets.components.navigation.segmented_widget import (  # noqa: E402
     SegmentedItem)
 sh = w.settings_hub
-check("14.1 分组存在（应用配置3组/远程连接/工具2组含AI/性能/数据库/面板设置3组含上传/外观）",
+check("14.1 分组存在（应用配置4组含启动/远程连接/工具2组含AI/性能/数据库/面板设置3组含上传/外观）",
       all(hasattr(sh, m) for m in ("_group_appearance", "_group_perf",
-          "_group_tools", "_group_paths", "_group_remote", "_group_ai",
-          "_add_upload_rows", "_group_log_rules", "_group_database",
-          "_group_aftersale", "_group_ledger", "_group_management",
-          "_group_files")))
+          "_group_tools", "_group_paths", "_group_startup", "_group_remote",
+          "_group_ai", "_add_upload_rows", "_group_log_rules",
+          "_group_database", "_group_aftersale", "_group_ledger",
+          "_group_management", "_group_files")))
 # 2026-09-07：AI 分析组自应用配置迁入工具页（行为断言：切分段查组标题）
 def _page_has_group(page_widget, title):
     from qfluentwidgets import CaptionLabel as _CL
@@ -338,6 +398,32 @@ check("14.1b AI 组在工具分段页", _page_has_group(_t, "AI 分析"))
 _sh.setCurrentIndex(sh._keys.index("config"))
 _c = _sh.currentWidget()
 check("14.1c AI 组不在应用配置页", not _page_has_group(_c, "AI 分析"))
+# 2026-09-19：应用配置新增「启动」组（默认启动页面），位于日志高亮上方
+import core.app_settings as _fas  # noqa: E402
+check("14.1c2 应用配置页含「启动」组", _page_has_group(_c, "启动"))
+check("14.1c3 启动组含「默认启动页面」行", _page_has_text(_c, "默认启动页面"))
+# 切换行为：设 toolHub → _apply_startup_default_page → 当前页=工具
+# （走 win._save_settings 真实链路：门面落盘 + 内存缓存同步，
+#   _apply_startup_default_page 读的是 _load_settings 缓存）
+_snap_sdp = _fas.get("startup_default_page")
+w._save_settings({"startup_default_page": "toolHub"})
+w._apply_startup_default_page()
+check("14.1c4 配置 toolHub 后切换到工具页",
+      w.stackedWidget.currentWidget() is w.tool_hub,
+      repr(w.stackedWidget.currentWidget().objectName()))
+w._save_settings({"startup_default_page": "homeInterface"})
+w._apply_startup_default_page()
+check("14.1c5 配置 homeInterface 后切回工作台",
+      w.stackedWidget.currentWidget() is w.homeInterface)
+w._save_settings({"startup_default_page": "notExistPage"})
+w._apply_startup_default_page()
+check("14.1c6 非法值回退工作台",
+      w.stackedWidget.currentWidget() is w.homeInterface)
+if _snap_sdp is None:
+    _fas.remove("startup_default_page")
+    w._reload_settings_cache()
+else:
+    w._save_settings({"startup_default_page": _snap_sdp})
 # 2026-09-07：收集与上传自应用配置并入面板设置「运维」组
 _sh.setCurrentIndex(sh._keys.index("panels"))
 _p = _sh.currentWidget()

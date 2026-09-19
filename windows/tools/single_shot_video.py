@@ -23,13 +23,52 @@ logger = logging.getLogger("SingleShotVideo")
 try:
     from core.app_paths import get_resource_dir
     RESOURCE_DIR = os.path.join(get_resource_dir(), "resource")
-except Exception:  # 独立运行兜底：本文件所在目录
-    RESOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resource")
+except Exception:  # 独立运行兜底：本文件在 windows/tools/ 下，resource 在项目根
+    RESOURCE_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "resource")
 
 
 def resource_path(name):
     """解析单杆资源文件路径（位于项目 resource 目录，兼容 PyInstaller 打包）"""
     return os.path.join(RESOURCE_DIR, name)
+
+
+# --------------------------------------------------------------- 比分条底图
+# 比分条模板 image_0.png：960x32 RGBA，白底/黄名牌/青赛制块都是半透明甚至是
+# 全透明（alpha=0），叠加时下层原始帧会透上来。横向分区：
+#   0..183    左端空槽（带半透明白板）—— 选手0打杆时画「单杆N分」
+#   184..339  甲名牌 + 右缘打杆箭头（◀ 朝左，指向甲方）
+#   421..547  中央赛制块（青）
+#   629..783  乙名牌
+#   784..959  品牌区：球员剪影 + 「新锐计分」logo
+# 选手1打杆时版式要左右镜像（品牌挪到左端，把右端空槽让给画在右侧的「单杆N分」）。
+# 直接整体 transpose 会把品牌图形也镜像（logo 左右反向，2026-09-19 反馈），
+# 因此镜像后要按镜像坐标把 logo / 剪影用未镜像像素覆盖回去。
+# 注：image_1.png 是同一底图的「乙方打杆」版式（箭头在乙名牌左缘），
+# 整体镜像它反而会把箭头带到甲名牌上，故不再使用。
+BAR_TEMPLATE_NAME = "image_0.png"
+# 品牌图形原始位置（镜像后落点 = 960 - 右边界），顺序：新锐计分 logo、球员剪影
+BAR_BRAND_BOXES = ((856, 0, 947, 32), (826, 0, 856, 32))
+
+
+def build_bar_image(player):
+    """构建该打杆者用的比分条底图（RGBA，尺寸与模板一致）
+
+    - 选手0（甲方）打杆：直接用模板 —— 单杆分画在左端空槽，打杆箭头在甲名牌
+      右缘朝左，箭头与得分槽都在甲方一侧；
+    - 选手1（乙方）打杆：模板整体镜像 —— 品牌挪到左端、右端空槽留给画在右侧的
+      单杆分；镜像同时把打杆箭头带到乙名牌左缘并转为朝右，正好指向乙方；
+      品牌图形按镜像坐标用未镜像像素贴回，避免 logo 反向。
+    """
+    base = Image.open(resource_path(BAR_TEMPLATE_NAME)).convert("RGBA")
+    if player == 0:
+        return base
+    bar = base.transpose(Image.FLIP_LEFT_RIGHT)
+    for bx0, by0, bx1, by1 in BAR_BRAND_BOXES:
+        # paste 不传 mask：连同 alpha 一起原样搬，透明区仍是透明区
+        bar.paste(base.crop((bx0, by0, bx1, by1)), (bar.width - bx1, by0))
+    return bar
 
 
 class SingleShotVideoServer:
@@ -226,15 +265,8 @@ class SingleShotVideoServer:
                     # 下方区间判断里 frame_count 从 1 起算，条件天然成立，比分条从第一帧就出现
                     if item['scores'][index]['frame_id'] == item['start_frame']:
                         item['scores'][index]['frame_id'] = item['start_frame'] - 25
-                    # 底图按选手方向选（image_0/image_1），转 RGBA 供绘制
-                    if item['player'] == 0:
-                        image = Image.open(resource_path("image_0.png")).convert("RGBA")
-                    else:
-                        # 选手1打杆：单杆分画在右端，但底图模板的「新锐计分」固定印在右端，
-                        # 直接叠加会与单杆分重叠；水平翻转模板把「新锐计分」移到左端，
-                        # 让右端留给单杆分，实现顶部左右分居、不再重叠
-                        image = Image.open(resource_path("image_1.png")).convert("RGBA")
-                        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+                    # 底图按打杆者方向构建（见 build_bar_image），转 RGBA 供绘制
+                    image = build_bar_image(item['player'])
                     draw_ = ImageDraw.Draw(image)
 
                     font_0 = ImageFont.truetype(
@@ -382,7 +414,10 @@ class SingleShotVideoServer:
                             continue
                 out.release()
             cap.release()
-            cv2.destroyAllWindows()
+            # 不要调用 cv2.destroyAllWindows()：本模块从不创建窗口，而当前环境
+            # 装的是无 GUI 后端的 opencv（4.13.0），该调用会抛
+            # "cvDestroyAllWindows ... The function is not implemented"，
+            # 视频其实已经写盘成功，却让整个任务以失败收场（2026-09-19 反馈）
             return True
         except Exception as e:
             logger.error("single_shot_video failed,{}".format(e))

@@ -1206,7 +1206,7 @@ class UIMixin:
         检测逻辑；支持多端口同时占用，关闭弹窗自动释放全部端口。
         """
         from PySide6.QtWidgets import QDialog, QVBoxLayout
-        from windows.port_fake import PortFakeWidget
+        from windows.tools.port_fake import PortFakeWidget
         dlg = QDialog(self)
         dlg.setWindowTitle("端口占用")
         dlg.resize(480, 420)
@@ -1231,7 +1231,7 @@ class UIMixin:
             self._show_info_bar("单杆视频正在生成中，请等待完成", "warning")
             return
 
-        # 延迟 import：tools 依赖 cv2/numpy/Pillow，缺失时给出明确提示而非崩溃
+        # 延迟 import：单杆功能模块依赖 cv2/numpy/Pillow，缺失时给出明确提示而非崩溃
         try:
             import cv2  # noqa: F401
             import numpy  # noqa: F401
@@ -1311,7 +1311,7 @@ class UIMixin:
 
         # 延迟 import：newlog 依赖 openpyxl，缺失时给出明确提示而非崩溃
         try:
-            import newlog  # noqa: F401 —— 仅用于探测依赖（newlog 顶层 import openpyxl）
+            from windows.tools import newlog  # noqa: F401 —— 仅用于探测依赖（newlog 顶层 import openpyxl）
         except ImportError as e:
             self._show_info_bar(f"无法加载 newlog 模块（请确认已安装 openpyxl）: {e}",
                                 "error", duration=5000)

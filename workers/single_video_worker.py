@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """单杆视频生成 Worker（工具菜单「单杆视频」）
 
-后台线程运行 tools.single_video_tool.generate_json（逐帧渲染为 CPU
+后台线程运行 windows.tools.single_video_tool.generate_json（逐帧渲染为 CPU
 密集任务，必须离开 UI 线程），通过自定义 logging.Handler 捕获
 "SingleShotVideo" 模块日志逐行转发到 GUI。
 
-注意：tools 模块依赖 cv2/numpy/Pillow，import 延迟到 run() 内执行并带
+注意：功能模块依赖 cv2/numpy/Pillow，import 延迟到 run() 内执行并带
 ImportError 兜底（与 NewLogWorker 同模式，缺失依赖时给出明确提示）。
 """
 
@@ -55,7 +55,7 @@ class SingleVideoWorker(QThread):
         single_logger.setLevel(logging.INFO)
         try:
             try:
-                from tools.single_video_tool import generate_json
+                from windows.tools.single_video_tool import generate_json
             except ImportError as e:
                 self.error.emit(
                     f"无法加载单杆视频模块（请确认已安装 opencv-python、numpy、Pillow）: {e}")

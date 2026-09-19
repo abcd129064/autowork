@@ -4,9 +4,8 @@ import type { FormRules } from "element-plus";
 /**
  * 售后记录表单校验
  *
- * 只对**业务必填**字段设 required：
- * - 后端 `POST /api/records` 只要求「至少一个可写字段」（app.py:236），
- *   所以前端不该用一堆 required 把用户拦住 —— 这里只锁真正不能空的语义字段。
+ * 必填口径与桌面端 form.py `_required_map` 一致：
+ * 类型 / 球房 / 地区 / 问题；桌号桌面端为选填，这里同样不拦。
  */
 export const formRules = reactive(<FormRules>{
   problem: [
@@ -16,6 +15,10 @@ export const formRules = reactive(<FormRules>{
   issue_type: [
     { required: true, message: "请选择问题类型", trigger: "change" }
   ],
+  room_name: [
+    { required: true, message: "球房为必填项", trigger: "blur" }
+  ],
+  region: [{ required: true, message: "请选择/输入地区", trigger: "change" }],
   resolved: [
     { required: true, message: "请选择是否解决", trigger: "change" }
   ]

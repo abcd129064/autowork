@@ -111,8 +111,7 @@ export const isYes = (v: unknown) => String(v) === YES;
 /**
  * 新增记录时，后端白名单字段的初始化模板
  *
- * 注意 `resolved` 默认 `否`（新报的问题默认没解决），
- * 其余是/否字段默认 `否`，由表单让用户显式改。
+ * 默认值与桌面端 form.py 对齐：是否解决=是 / 主动发起=否 / 我方问题=是
  */
 export const NEW_RECORD_TEMPLATE: Partial<AftersaleRecord> = {
   issue_type: "",
@@ -122,14 +121,14 @@ export const NEW_RECORD_TEMPLATE: Partial<AftersaleRecord> = {
   problem: "",
   cause: "",
   solution: "",
-  resolved: NO,
+  resolved: YES,
   resolver: "",
   response_time: "",
   snk_code: "",
   device_code: "",
   cycle_start: "",
   is_initiative: NO,
-  is_our_problem: NO,
+  is_our_problem: YES,
   occurred_at: "",
   is_important: 0
 };
@@ -190,5 +189,20 @@ export const batchResolve = (ids: number[]) => {
 export const batchRemove = (ids: number[]) => {
   return http.request<any>("post", "/api/records/batch-delete", {
     data: { ids }
+  });
+};
+
+/** 球桌候选（球房带出桌号/SNK/城市，与桌面端同源 billiard_tables） */
+export interface TableRow {
+  name: string;
+  roomName: string;
+  snk_code: string;
+  city: string;
+}
+
+/** 按球房名模糊搜索球桌（后端排除公司测试与手动设备 @s） */
+export const searchTables = (room: string, limit = 30) => {
+  return http.request<{ rows: TableRow[] }>("get", "/api/tables/search", {
+    params: { room, limit }
   });
 };

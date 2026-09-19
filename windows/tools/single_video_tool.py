@@ -10,7 +10,7 @@ import json
 import shutil
 import logging
 
-from tools.single_shot_video import SingleShotVideoServer
+from windows.tools.single_shot_video import SingleShotVideoServer
 
 logger = logging.getLogger("SingleShotVideo")
 

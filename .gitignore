@@ -81,6 +81,9 @@ docs/二期自定义图表调研.md
 # 压测结果快照（运行产物）
 tools/stress_test/results/
 
+# 测试运行截图产物（perf/探针脚本生成，不随仓库分发）
+tests/*.png
+
 # 环境异常目录与临时探针（2026-09-07 项目清理）
 %SystemDrive*/
 .git_backup_20260901/

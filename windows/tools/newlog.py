@@ -3,8 +3,10 @@
 
 按当天 Excel（问题/未复现/精度 三个 sheet）中的署名筛选记录，逐条把
 视频、同名 log、daily 日志、detect.bin、日期文件夹从 videos/{球房}
-归档到输出目录下的「球房 and 球房」总文件夹。可独立 CLI 运行，
-也被 NewLogWorker 后台线程收编调用（传 target_name）。
+归档到输出目录下的「球房 and 球房」总文件夹。可独立 CLI 运行
+（仓库根下 `python -m windows.tools.newlog`，需项目根在 sys.path 上
+才能读到 core.app_settings 配置），也被 NewLogWorker 后台线程收编调用
+（传 target_name）。
 """
 import os
 import sys

@@ -50,3 +50,11 @@ export interface AftersaleFormItem {
 export interface AftersaleFormProps {
   formInline: AftersaleFormItem;
 }
+
+/** 记住上次填写（localStorage 持久化，对齐桌面端「记住上次」） */
+export interface LastUsed {
+  creator?: string;
+  resolver?: string;
+  /** YYYY-MM-DD */
+  occurred_at?: string;
+}
