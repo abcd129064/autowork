@@ -15,7 +15,8 @@ from windows.aftersale.common import (  # noqa: F401,F403
 from database import ledger_db
 
 __all__ = [
-    "TABLE_COLUMNS", "_COL_OPS", "CATEGORY_ACCENTS", "_category_badge",
+    "TABLE_COLUMNS", "_COL_OPS", "_OPS_LINKS",
+    "CATEGORY_ACCENTS", "_category_badge",
     "_category_color",
     "_FIXED_ROW_HEIGHT", "_popup_ani_type", "_default_creator",
     "_hex_rgba", "_SectionCard", "YesNoSegment",
@@ -50,6 +51,11 @@ TABLE_COLUMNS = (
     ("ops", "操作", 168),
 )
 _COL_OPS = len(TABLE_COLUMNS) - 1  # 操作列列号（最后一列）
+
+# 操作列链接清单（(文案, 色键, 动作键)）：由 core.ops_link_delegate 在单元格内
+# 自绘并反查命中，2026-09-19 取代原 cellWidget「编辑/删除」按钮
+_OPS_LINKS = (("编辑", "primary", "edit"),
+              ("删除", "danger", "delete"))
 
 # 分类徽章语义色：问题=红、未复现=橙、精度=蓝、使用=绿
 CATEGORY_ACCENTS = {

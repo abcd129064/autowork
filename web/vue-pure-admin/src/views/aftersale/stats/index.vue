@@ -239,7 +239,49 @@ function renderIssue() {
   });
 }
 
-/* ---------------- 5. 自定义图表 ---------------- */
+/* ---------------- 5. 未解决时长分布（横向条形图） ---------------- */
+const agingRef = ref();
+const { setOptions: setAging } = useECharts(agingRef, {
+  theme,
+  renderer: "svg"
+});
+
+function renderAging() {
+  const data = charts.value.aging ?? [];
+  if (!data.length) return setAging(emptyOption);
+  setAging({
+    color: ["#f56c6c"],
+    grid: { left: 8, right: 30, top: 12, bottom: 8, containLabel: true },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: {
+      type: "value",
+      splitLine: { lineStyle: { type: "dashed" } },
+      axisLabel: { fontSize: 11 }
+    },
+    yAxis: {
+      type: "category",
+      data: data.map(d => d.name),
+      axisLabel: { fontSize: 11 },
+      axisTick: { show: false }
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 14,
+        itemStyle: { borderRadius: [0, 3, 3, 0] },
+        label: {
+          show: true,
+          position: "right",
+          fontSize: 11,
+          color: "#909399"
+        },
+        data: data.map(d => d.value)
+      }
+    ]
+  });
+}
+
+/* ---------------- 6. 自定义图表 ---------------- */
 const customRef = ref();
 const { setOptions: setCustom } = useECharts(customRef, {
   theme,
@@ -395,6 +437,7 @@ async function renderAll() {
   renderDaily();
   renderOur();
   renderIssue();
+  renderAging();
   bindChartClicks();
 }
 
@@ -538,6 +581,13 @@ onBeforeUnmount(() => {
             问题类型分布<span class="chart-hint">点击条目跳列表筛选</span>
           </div>
           <div ref="issueRef" class="chart-box chart-clickable" />
+        </el-col>
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">
+            未解决时长分布
+            <span class="chart-hint">仅统计未解决记录 · 超期越久越需优先处理</span>
+          </div>
+          <div ref="agingRef" class="chart-box" />
         </el-col>
       </el-row>
     </el-card>

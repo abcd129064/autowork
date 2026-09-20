@@ -25,6 +25,7 @@ import json
 from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
+from core.ops_link_delegate import LINKS_ROLE, install_ops_links
 from core.perf import is_acrylic_enabled, apply_table_smooth_mode
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
@@ -46,10 +47,14 @@ _IMPORTANT_BG_DARK = QColor(64, 57, 28)
 # 惰性初始化，避免模块导入期依赖 QApplication 环境）
 _RO_FLAGS = None
 
-# S5（2026-09-06）：重要行 ops 容器底色样式串（浅/深主题各一套，常量预构建，
-# 原每行现拼字符串）
-_OPS_IMPORTANT_CSS_LIGHT = "background: #fff3cd;"
-_OPS_IMPORTANT_CSS_DARK = "background: #40391c;"
+# 操作列链接清单（(文案, 色键, 动作键)，由 core.ops_link_delegate 按矩形自绘）：
+# 未解决行 3 段、已解决行 2 段，按行取而非按行号（2026-09-19 取代原 cellWidget
+# 按钮与「重要行 ops 容器底色」样式串——现在 ops 格也是普通 item，背景随 _row_bg）
+_OPS_LINKS_UNRESOLVED = (("已解决", "primary", "resolve"),
+                         ("编辑", "ghost", "edit"),
+                         ("删除", "danger", "delete"))
+_OPS_LINKS_RESOLVED = (("编辑", "ghost", "edit"),
+                       ("删除", "danger", "delete"))
 
 
 class _SortKeyItem(QTableWidgetItem):
@@ -314,6 +319,11 @@ class RecordsPage(QWidget):
 
         # --- 表格 ---
         self._table = TableWidget(self)
+        # 操作列文字链接委托（2026-09-19）：单元格内自绘「已解决/编辑/删除」+ 矩形
+        # 命中，取代原 cellWidget（60 行一页 = 210 个 QWidget，刷新填充实测
+        # 31ms → 8ms）。必须装为视图级委托：qfluentwidgets 的 hover/selected 行
+        # 状态是视图推给视图级委托实例的，用 setItemDelegateForColumn 会丢整行高亮。
+        install_ops_links(self._table, self._on_ops_link)
         # 性能（2026-08-26）：默认关闭 qfluentwidgets 平滑滚动动画——滚轮触发
         # 动画引擎逐帧 moveScrollBar，50 行 + 行内控件逐帧重绘导致滚动卡顿；
         # NO_SMOOTH 走原生滚动。按 本面板覆盖→全局 生效，
@@ -897,25 +907,20 @@ class RecordsPage(QWidget):
         语义色前景/淡色背景——QTableWidget 的 cellWidget 在填充与滚动重绘时
         每个都要创建/重定位，每行 3 个徽章 × 50 行 = 150 个小部件是填充耗时
         第一名（cProfile 占 42%）；文本 item 零小部件开销，视觉用
-        彩色文字 + 淡底色近似胶囊徽章。行内操作按钮保留 cellWidget（交互必需），
-        但按钮样式循环外预构建，避免每按钮重复读主题/拼 QSS。
+        彩色文字 + 淡底色近似胶囊徽章。行内操作列同理已由 cellWidget 按钮改为
+        单元格内文字链接（core.ops_link_delegate 自绘 + 矩形命中，零子控件），
+        因此本函数不再预构建按钮 QSS。
         性能（2026-09-06 S2/S5）：勾选列 item 写入记录 id 锚（UserRole），
-        供表头排序后按可视行序回读重排 _rows；填充前清一次 DeferredDelete
-        僵尸控件（连续填充时上一代 cellWidget 堆积，实测 7 次后 139→1112）；
-        只读 flags 与重要行 ops 底色样式串循环外预计算。
+        供表头排序后按可视行序回读重排 _rows；只读 flags 循环外预计算。
         """
-        # 清掉上一代 deleteLater 僵尸控件（processEvents 不消化 DeferredDelete，
-        # 须显式派发），避免快速连续填充/排序期间多持有 ~1000 个控件对象
+        # 派发上一代 deleteLater 僵尸控件（processEvents 不消化 DeferredDelete，
+        # 须显式派发）。本面板 2026-09-19 操作列文字化后已无 cellWidget，
+        # 保留此行作为弹窗/其他控件延迟销毁的卫生兵（实测零开销）
         QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
             self._table.setRowCount(len(rows))
-            # 循环外预构建三种按钮 QSS（同一页填充期间主题不变）
-            btn_css = _prebuild_btn_css()
-            # 重要行 ops 容器底色样式串（浅/深主题各一套，循环外取一次）
-            imp_css = (_OPS_IMPORTANT_CSS_DARK if isDarkTheme()
-                       else _OPS_IMPORTANT_CSS_LIGHT)
             # 只读 item flags 预计算一次（720 次/页跨边界枚举运算 → 1 次）
             global _RO_FLAGS
             if _RO_FLAGS is None:
@@ -991,11 +996,15 @@ class RecordsPage(QWidget):
                         cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         cell.setFont(bold_font)
                     elif key == "ops":
-                        # 行内按钮捕获 rec 引用（非行号）：S2 排序移动整行后
-                        # 按钮仍指向该行显示的记录
-                        self._table.setCellWidget(
-                            r, col, self._make_ops_cell(item, btn_css, imp_css))
-                        continue
+                        # 操作列：空文本 item + 链接清单（LINKS_ROLE），由视图级
+                        # 委托按矩形自绘并反查命中，零子控件。清单按行取（未解决
+                        # 3 段 / 已解决 2 段），背景色/tooltip/flags 走循环尾统一代码
+                        cell = QTableWidgetItem("")
+                        cell.setData(
+                            LINKS_ROLE,
+                            _OPS_LINKS_RESOLVED
+                            if str(item.get("resolved") or "") == "是"
+                            else _OPS_LINKS_UNRESOLVED)
                     else:
                         val = str(item.get(key) or "")
                         cell = QTableWidgetItem(val)
@@ -1007,40 +1016,23 @@ class RecordsPage(QWidget):
         finally:
             self._table.setUpdatesEnabled(True)
             self._table.blockSignals(False)
-        # 刷新时 cellWidget 定位可能残留陈旧偏移（行内按钮整列下沉 8px），
-        # 延迟重排让 Qt 在事件循环中按最新布局重新定位所有 cellWidget
-        QTimer.singleShot(0, self._table.scheduleDelayedItemsLayout)
         self._sync_batch_bar()
 
-    def _make_ops_cell(self, rec: dict, btn_css: dict | None = None,
-                       imp_css: str = "") -> QWidget:
-        """操作列容器：未解决行 = [已解决 + 编辑 + 删除]，已解决行 = [编辑 + 删除]（删除常驻）
+    def _on_ops_link(self, row: int, _col: int, action: str):
+        """操作列文字链接点击分发（core.ops_link_delegate 的 editorEvent 回调）
 
-        btn_css: 预构建按钮样式（_populate 循环外算好传入，避免每按钮重复计算）。
-        imp_css: 重要行容器底色样式串（循环外预构建）。
-        按钮回调捕获 rec 引用而非行号——S2 表头排序（sortItems）移动整行后
-        行号失效，按记录引用/ id 定位保证按钮始终指向该行显示的记录。
+        行号就是表格可视行号：与 _rows 同序（_populate 按 rows 顺序填充，
+        表头排序后 _sync_rows_to_table 按 id 锚回读重排），与右键菜单同一口径。
         """
-        wrap = QWidget()
-        if bool(rec.get("is_important")):
-            wrap.setStyleSheet(imp_css)
-        lay = QHBoxLayout(wrap)
-        lay.setContentsMargins(4, 0, 4, 0)
-        lay.setSpacing(4)
-        is_yes = str(rec.get("resolved") or "") == "是"
-        if not is_yes:
-            lay.addWidget(_row_btn(
-                "已解决", "primary",
-                lambda: self._quick_resolve_rec(rec), wrap,
-                css=btn_css["primary"] if btn_css else None))
-        lay.addWidget(_row_btn(
-            "编辑", "ghost", lambda: self._on_edit_rec(rec), wrap,
-            css=btn_css["ghost"] if btn_css else None))
-        lay.addWidget(_row_btn(
-            "删除", "danger", lambda: self._on_delete_rec(rec), wrap,
-            css=btn_css["danger"] if btn_css else None))
-        lay.addStretch(1)
-        return wrap
+        if not (0 <= row < len(self._rows)):
+            return
+        rec = self._rows[row]
+        if action == "resolve":
+            self._quick_resolve_rec(rec)
+        elif action == "edit":
+            self._on_edit_rec(rec)
+        elif action == "delete":
+            self._on_delete_rec(rec)
 
     # ---------- 勾选与批量操作 ----------
 
@@ -1196,8 +1188,6 @@ class RecordsPage(QWidget):
             self._table.blockSignals(False)
             self._table.setUpdatesEnabled(True)
         self._sync_rows_to_table()
-        # cellWidget 随行移动后重新定位（与 _populate 同款延迟重排）
-        QTimer.singleShot(0, self._table.scheduleDelayedItemsLayout)
 
     def _on_click_header(self, col: int):
         """表头点击：首点升序、再点降序（勾选列不参与）"""

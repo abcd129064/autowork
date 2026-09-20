@@ -362,6 +362,10 @@ def apply_lean_delegate_globally():
         return
 
     enabled = is_lean_delegate_enabled()
+    try:  # 操作列文字链接委托（core.ops_link_delegate）需随开关换形态
+        from core.ops_link_delegate import rebuild_ops_delegate
+    except Exception:
+        rebuild_ops_delegate = None
     seen = set()
     tables = []
     for w in QApplication.topLevelWidgets():
@@ -373,6 +377,11 @@ def apply_lean_delegate_globally():
 
     for t in tables:
         try:
+            # 装了操作链接委托的表：由该模块按新开关重建同族委托后跳过，
+            # 否则下面的通用重建会把链接绘制顶掉（表现为操作列变空白）
+            if rebuild_ops_delegate is not None and rebuild_ops_delegate(t):
+                t.viewport().update()
+                continue
             is_lean = isinstance(t.delegate, LeanTableDelegate)
             if enabled and not is_lean:
                 t.setItemDelegate(LeanTableDelegate(t))

@@ -603,6 +603,258 @@ class TrendPage(QWidget):
         if code:
             self._jump_to_device({"device_code": code})
 
+class _HealthCopyTable(TableWidget):
+    """支持鼠标拖选文本复制的告警表格
+
+    QTableWidget 默认只能整格/整行选择，无法像文本编辑器那样拖动鼠标
+    选中部分文字。本类在单元格文本上实现字符级拖选：按住左键拖动即出
+    蓝色选区高亮，松开后 Ctrl+C 或右键「复制选中」写入系统剪贴板；
+    未拖选时 Ctrl+C / 右键复制整行（制表符分列，便于贴到表格）。
+    选区几何与 delegate 绘制文本完全同源（同字体 + 同 subElementRect
+    文本矩形），保证高亮与文字逐字对齐。
+    """
+
+    # 文本列（0 列是勾选框 cellWidget，不参与文本选择）
+    _TEXT_COLS = (1, 2, 3, 4)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sel_anchor = None   # (row, col, char_idx) 拖选起点
+        self._sel_cur = None      # (row, col, char_idx) 拖选当前点
+        self._dragging = False
+        self.setMouseTracking(True)
+
+    # ---------- 选区工具 ----------
+
+    def _has_selection(self):
+        return self._sel_anchor is not None and self._sel_cur is not None
+
+    def _ordered_sel(self):
+        """返回排序后的选区端点 (a, b)，a <= b（按 行→列→字符 序）"""
+        if not self._has_selection():
+            return None
+        a, b = self._sel_anchor, self._sel_cur
+        return (a, b) if a <= b else (b, a)
+
+    def _cell_text(self, row, col):
+        it = self.item(row, col)
+        return it.text() if it is not None else ""
+
+    # 单元格文本矩形相对单元格矩形的左右内缩（px）。
+    # 实测（Windows 风格 + qfluentwidgets TableItemDelegate，左对齐）：
+    # visualRect x+16 起绘、右侧对称内缩 16。不在事件回调里调
+    # style().subElementRect 动态测量——offscreen 平台下该调用会污染
+    # 状态导致后续 QTableView 原生鼠标/绘制路径访问违例崩溃。
+    _TEXT_INSET = (16, 16)
+
+    def _text_rect(self, row, col):
+        """单元格文本绘制矩形（视口坐标，纯几何近似 delegate 文本区）"""
+        vr = self.visualRect(self.model().index(row, col))
+        left, right = self._TEXT_INSET
+        return QRectF(vr.x() + left, vr.y(),
+                      max(1.0, vr.width() - left - right), vr.height())
+
+    def _char_index_at(self, row, col, pos):
+        """视口坐标 → 该单元格文本内的字符下标（0..len(text) 夹取）"""
+        text = self._cell_text(row, col)
+        if not text:
+            return 0
+        r = self._text_rect(row, col)
+        fm = QFontMetrics(self.font())
+        x = pos.x() - r.x()
+        # 逐字符前缀宽度定位（中文等宽场景二分亦可，行数少直接线性）
+        for i in range(len(text)):
+            w = fm.horizontalAdvance(text[:i + 1])
+            if x < w - fm.horizontalAdvance(text[i]) / 2.0:
+                return i
+        return len(text)
+
+    def _index_at_text_col(self, pos):
+        """视口坐标 → (row, col, char_idx)；不在文本列返回 None"""
+        idx = self.indexAt(pos)
+        if not idx.isValid():
+            return None
+        row, col = idx.row(), idx.column()
+        if col not in self._TEXT_COLS:
+            return None
+        return (row, col, self._char_index_at(row, col, pos))
+
+    def selection_text(self):
+        """当前拖选区间的文本（跨行以换行拼接，跨列以空格拼接）"""
+        pair = self._ordered_sel()
+        if not pair:
+            return ""
+        (r1, c1, i1), (r2, c2, i2) = pair
+        parts = []
+        for row in range(r1, r2 + 1):
+            line_parts = []
+            for col in self._TEXT_COLS:
+                if row == r1 and col < c1:
+                    continue
+                if row == r2 and col > c2:
+                    continue
+                text = self._cell_text(row, col)
+                if row == r1 and row == r2 and col == c1 == c2:
+                    seg = text[i1:i2]          # 单格内选区
+                elif row == r1 and col == c1:
+                    seg = text[i1:]            # 起始至格尾
+                elif row == r2 and col == c2:
+                    seg = text[:i2]            # 格头至终点
+                else:
+                    seg = text                 # 选区覆盖的中间格
+                if seg:
+                    line_parts.append(seg)
+            if line_parts:
+                parts.append(" ".join(line_parts))
+        return "\n".join(parts)
+
+    def row_text(self, row):
+        """整行文本（制表符分列，便于粘贴到 Excel/表格）"""
+        return "\t".join(self._cell_text(row, c) for c in self._TEXT_COLS)
+
+    def _copy_text(self, text):
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        show_info_bar("已复制到剪贴板", "success", title="复制",
+                      parent=self, duration=1500)
+
+    # ---------- 鼠标交互 ----------
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._index_at_text_col(event.position().toPoint())
+            if hit is not None:
+                # 记录拖选起点；仍交给 super 处理（保留点击选中整行的标准行为）
+                self._sel_anchor = hit
+                self._sel_cur = hit
+                self._dragging = True
+            else:
+                self._sel_anchor = self._sel_cur = None
+                self._dragging = False
+            self.viewport().update()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self._sel_anchor is not None:
+            hit = self._index_at_text_col(event.position().toPoint())
+            if hit is not None:
+                self._sel_cur = hit
+                self.viewport().update()
+            event.accept()
+            return
+        # 悬停文本列时给 I 型光标提示可选中
+        if event.buttons() == Qt.MouseButton.NoButton:
+            hit = self._index_at_text_col(event.position().toPoint())
+            self.viewport().setCursor(
+                Qt.CursorShape.IBeamCursor if hit is not None
+                else Qt.CursorShape.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            hit = self._index_at_text_col(event.position().toPoint())
+            if hit is not None:
+                self._sel_cur = hit
+            # 起点终点重合视为单击：清空选区（避免误留单字符选区）
+            if self._sel_anchor == self._sel_cur:
+                self._sel_anchor = self._sel_cur = None
+            self.viewport().update()
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """双击单元格：选中该格全部文本（贴近文本编辑器习惯）"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._index_at_text_col(event.position().toPoint())
+            if hit is not None:
+                row, col, _ = hit
+                self._sel_anchor = (row, col, 0)
+                self._sel_cur = (row, col, len(self._cell_text(row, col)))
+                self.viewport().update()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def _fallback_rows(self, at_row=-1):
+        """整行复制的回退行集合：优先行选择，其次指定行/当前行"""
+        rows = sorted({i.row() for i in self.selectedIndexes()})
+        if not rows:
+            r = at_row if at_row >= 0 else self.currentRow()
+            if 0 <= r < self.rowCount():
+                rows = [r]
+        return rows
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy):
+            text = self.selection_text() if self._has_selection() else ""
+            if not text:
+                rows = self._fallback_rows()
+                text = "\n".join(self.row_text(r) for r in rows)
+            self._copy_text(text)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self._has_selection():
+            self._sel_anchor = self._sel_cur = None
+            self.viewport().update()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        menu = RoundMenu(parent=self)
+        has_sel = bool(self.selection_text())
+        act_sel = Action(FluentIcon.COPY, "复制选中", self)
+        act_sel.setEnabled(has_sel)
+        act_sel.triggered.connect(
+            lambda: self._copy_text(self.selection_text()))
+        menu.addAction(act_sel)
+        idx = self.indexAt(event.pos())
+        rows = self._fallback_rows(idx.row() if idx.isValid() else -1)
+        act_row = Action(FluentIcon.COPY, "复制整行", self)
+        act_row.setEnabled(bool(rows))
+        act_row.triggered.connect(
+            lambda: self._copy_text("\n".join(self.row_text(r) for r in rows)))
+        menu.addAction(act_row)
+        menu.exec(event.globalPos())
+
+    # ---------- 选区高亮绘制 ----------
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        pair = self._ordered_sel()
+        if not pair:
+            return
+        (r1, c1, i1), (r2, c2, i2) = pair
+        p = QPainter(self.viewport())
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 120, 212, 70) if not isDarkTheme()
+                   else QColor(0, 120, 212, 90))
+        fm = QFontMetrics(self.font())
+        for row in range(r1, r2 + 1):
+            for col in self._TEXT_COLS:
+                if row == r1 and col < c1:
+                    continue
+                if row == r2 and col > c2:
+                    continue
+                text = self._cell_text(row, col)
+                r = self._text_rect(row, col)
+                if row == r1 and row == r2 and col == c1 == c2:
+                    lo, hi = i1, i2
+                elif row == r1 and col == c1:
+                    lo, hi = i1, len(text)
+                elif row == r2 and col == c2:
+                    lo, hi = 0, i2
+                else:
+                    lo, hi = 0, len(text)
+                if hi <= lo:
+                    continue
+                x0 = r.x() + fm.horizontalAdvance(text[:lo])
+                x1 = r.x() + fm.horizontalAdvance(text[:hi])
+                p.drawRect(QRectF(x0, r.y(), max(2.0, x1 - x0), r.height()))
+        p.end()
+
+
 class HealthPage(QWidget):
     """设备健康度管理页：健康度异常告警（wechat2-billiard 接口 health 字段）
 
@@ -657,6 +909,15 @@ class HealthPage(QWidget):
         header = QHBoxLayout()
         title = TitleLabel("健康度异常告警", self)
         header.addWidget(title)
+        # 搜索框：本地过滤已加载告警（球桌号/球房/在线状态/健康度），即时生效
+        self._search_edit = SearchLineEdit(self)
+        self._search_edit.setPlaceholderText("搜索（球桌 / 球房 / 状态 / 健康度）")
+        self._search_edit.setFixedWidth(240)
+        self._search_edit.setToolTip(
+            "在当前告警列表内即时过滤；清空恢复全部。"
+            "表格文本可用鼠标拖选后 Ctrl+C 或右键复制")
+        self._search_edit.textChanged.connect(self._apply_filter)
+        header.addWidget(self._search_edit)
         header.addStretch(1)
         self._btn_sync = PushButton(FluentIcon.SYNC, "手动同步", self)
         self._btn_sync.setToolTip(
@@ -674,7 +935,7 @@ class HealthPage(QWidget):
         #     "使用服务器 MySQL 时，他人标记的已处理在同步后自动对齐", self)
         # layout.addWidget(hint)
 
-        self._table = TableWidget(self)
+        self._table = _HealthCopyTable(self)
         # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
         apply_table_smooth_mode(self._table, panel="management")
         self._table.setColumnCount(5)
@@ -719,8 +980,50 @@ class HealthPage(QWidget):
             self._lbl_sync.setText(f"查询失败: {e}")
             return
         self._rows = rows
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        self._sync_base_text = f"{len(rows)} 条异常 · 展示刷新于 {now}"
+        self._rebuild_table()
+
+    @staticmethod
+    def _match_row(r, kw) -> bool:
+        """单条告警是否匹配关键词（不区分大小写，多字段子串）"""
+        if not kw:
+            return True
+        h = float(r.get("health") or 0)
+        severe = h > table_db.HEALTH_SEVERE
+        fields = (str(r.get("name") or ""), str(r.get("roomName") or ""),
+                  str(r.get("onlineStatusName") or ""), f"{h:.0f}",
+                  "严重异常" if severe else "健康度异常")
+        return any(kw in f.lower() for f in fields)
+
+    def _apply_filter(self, _text=""):
+        """搜索框输入：只切换行显隐过滤（2026-09-20 脱手感修复）
+
+        原实现每次输入都整表推倒重建（setRowCount(0)+逐行新建 CheckBox），
+        清空恢复全部时全量控件重建造成卡顿/闪烁/滚动归零/勾选丢失的脱手感；
+        改为 setRowHidden 显隐：零控件重建，滚动位置与勾选状态天然保留。
+        """
+        kw = self._search_edit.text().strip().lower()
+        t = self._table
+        shown = 0
+        for row in range(t.rowCount()):
+            r = self._rows[row] if row < len(self._rows) else None
+            ok = r is not None and self._match_row(r, kw)
+            if t.isRowHidden(row) == ok:  # 状态未变不重复设置，减少重绘
+                t.setRowHidden(row, not ok)
+            if ok:
+                shown += 1
+        base = getattr(self, "_sync_base_text", "")
+        raw = self._search_edit.text().strip()
+        if raw:
+            self._lbl_sync.setText(f"{base} · 搜索「{raw}」命中 {shown} 条")
+        else:
+            self._lbl_sync.setText(base)
+
+    def _rebuild_table(self):
+        """从 self._rows 全量重建表格行（仅数据刷新时调用），重建后套用过滤"""
         self._table.setRowCount(0)
-        for r in rows:
+        for r in self._rows:
             h = float(r.get("health") or 0)
             # 阈值分级：>5000 严重异常（红），4000~5000 健康度异常（橙）
             severe = h > table_db.HEALTH_SEVERE
@@ -753,8 +1056,7 @@ class HealthPage(QWidget):
                     "可能是数据源未刷新或重置未生效，可重新勾选处理")
             self._table.setItem(row, 4, it_h)
         self._update_resolved_enabled()
-        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        self._lbl_sync.setText(f"{len(rows)} 条异常 · 展示刷新于 {now}")
+        self._apply_filter()  # 重建后按当前搜索词套用显隐（含状态栏计数）
 
     def _iter_checkboxes(self):
         """逐行产出首列勾选框（跳过被其他控件占用的行）"""

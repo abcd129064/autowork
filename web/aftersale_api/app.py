@@ -128,6 +128,12 @@ def cycle_options():
     return {"options": opts, "type": mode, "current": opts[0]}
 
 
+# 排序白名单（防注入）：列名必须在此集合内才允许进 ORDER BY
+_SORTABLE = {"id", "created_at", "occurred_at", "issue_type", "region",
+             "room_name", "table_no", "resolved", "response_time",
+             "resolver", "creator", "cycle_start"}
+
+
 @app.get("/api/records")
 def records(
     page: int = Query(1, ge=1),
@@ -135,12 +141,19 @@ def records(
     keyword: str = "", cycle_start: str = "", issue_type: str = "",
     resolved: str = "", is_initiative: str = "", is_our_problem: str = "",
     occurred_at: str = "", region: str = "",
+    sort_by: str = "", sort_order: str = "",
 ):
     """分页列表 + 统计一次返回（与桌面端 query_with_stats 同口径）"""
     where, params = _build_where(keyword, issue_type, resolved,
                                  is_initiative, is_our_problem, cycle_start,
                                  occurred_at, region)
-    order = "ORDER BY created_at DESC"
+    # 排序：白名单列 + asc/desc；非法输入回退默认 created_at DESC。
+    # 追加 id 作稳定次序键（同 created_at 的行分页不抖动）。
+    order = "ORDER BY created_at DESC, id DESC"
+    s_by = str(sort_by or "").strip().lower()
+    s_ord = "ASC" if str(sort_order or "").strip().lower() == "asc" else "DESC"
+    if s_by in _SORTABLE:
+        order = f"ORDER BY {s_by} {s_ord}, id DESC"
     with _db() as c:
         with c.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) n FROM aftersale_records{where}", params)
@@ -423,12 +436,14 @@ def stats_charts(cycle_start: str = "", issue_type: str = "", resolved: str = ""
     # 未解决时长分布（aging）：只看 resolved='否'，不受用户 resolved 筛选影响；
     # 时长=今天 - 发生日期（occurred_at 缺失回退 created_at）
     aging_where = where + " AND resolved = '否'"
+    # 不用 STR_TO_DATE（% 会与 pymysql 参数化格式符冲突）：
+    # occurred_at/created_at 均为 'YYYY-MM-DD...' 字符串，MySQL 隐式转日期
     aging_sql = (
         "SELECT CASE "
         "WHEN dd <= 0 THEN '当日' WHEN dd <= 3 THEN '1-3天' "
         "WHEN dd <= 7 THEN '4-7天' WHEN dd <= 15 THEN '8-15天' "
         "ELSE '15天以上' END bucket, COUNT(*) n FROM (SELECT "
-        f"DATEDIFF(CURDATE(), STR_TO_DATE({DATE_EXPR}, '%Y-%m-%d')) dd "
+        f"DATEDIFF(CURDATE(), {DATE_EXPR}) dd "
         "FROM aftersale_records" + aging_where + ") t GROUP BY 1"
     )
     order_aging = ["当日", "1-3天", "4-7天", "8-15天", "15天以上"]

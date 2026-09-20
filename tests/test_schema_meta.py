@@ -161,7 +161,9 @@ CREATE TABLE IF NOT EXISTS aftersale_records (
     device_code   TEXT DEFAULT '',
     cycle_start   TEXT DEFAULT '',
     updated_at    TEXT DEFAULT '',
-    is_important INTEGER DEFAULT 0
+    is_important INTEGER DEFAULT 0,
+    deleted INTEGER DEFAULT 0,
+    deleted_at TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_aftersale_cycle
     ON aftersale_records(cycle_start, id);
@@ -334,6 +336,8 @@ GOLDEN_MYSQL_DDL = {
             cycle_start   VARCHAR(32) DEFAULT '',
             updated_at    VARCHAR(32) DEFAULT '',
             is_important TINYINT DEFAULT 0,
+            deleted TINYINT DEFAULT 0,
+            deleted_at VARCHAR(32) DEFAULT '',
             INDEX idx_aftersale_cycle (cycle_start),
             INDEX idx_aftersale_table_no (table_no)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4

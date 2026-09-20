@@ -19,6 +19,7 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
 
 from core.design_tokens import SEMANTIC
 from core.flow_widgets import FlowToolbarScrollArea
+from core.ops_link_delegate import LINKS_ROLE, install_ops_links
 from core.perf import apply_table_smooth_mode
 from core.utils import show_info_bar
 from database import ledger_db
@@ -295,6 +296,11 @@ class RecordsPage(QWidget):
 
         # --- 表格 ---
         self._table = TableWidget(self)
+        # 操作列文字链接委托（2026-09-19）：单元格内自绘「编辑/删除」+ 矩形命中，
+        # 取代原 cellWidget（50 行 × 1 容器 + 2 按钮 = 150 个 QWidget）。必须装为
+        # 视图级委托：qfluentwidgets 的 hover/selected 行状态是视图推给视图级委托
+        # 实例的，用 setItemDelegateForColumn 会丢整行高亮。
+        install_ops_links(self._table, self._on_ops_link)
         # 性能（2026-08-26）：默认关闭 qfluentwidgets 平滑滚动动画——滚轮触发
         # 动画引擎逐帧 moveScrollBar，50 行 + 行内控件逐帧重绘导致滚动卡顿；
         # NO_SMOOTH 走原生滚动（压测 20 步 410ms → 7ms）。按 本面板覆盖→全局 生效，
@@ -625,10 +631,10 @@ class RecordsPage(QWidget):
         try:
             self._table.clearContents()
             self._table.setRowCount(len(self._rows))
-            # 性能（2026-08-26）：按钮样式循环外预构建 + 徽章文本化——
-            # 分类徽章由 cellWidget 改为文本 item（语义色前景 + 淡色底），
-            # cellWidget 从每行 2 个降到 1 个（仅操作列），填充与滚动重绘双受益
-            btn_css = _prebuild_btn_css()
+            # 性能（2026-08-26）：徽章文本化——分类徽章由 cellWidget 改为文本 item
+            # （语义色前景 + 淡色底）；2026-09-19 操作列也改为单元格内文字链接
+            # （core.ops_link_delegate 自绘 + 命中），本面板已无 cellWidget，
+            # 因此不再预构建按钮 QSS
             # 徽章加粗字体（循环外构造一次：原每徽章 QFont(it.font()) 拷贝；
             # 默认应用字体加粗，渲染不变）
             bold_font = QFont()
@@ -675,8 +681,10 @@ class RecordsPage(QWidget):
                     if c == 7 and repro != short_repro:
                         it.setToolTip(repro)
                     self._table.setItem(r, c, it)
-                self._table.setCellWidget(r, _COL_OPS,
-                                          self._make_ops_widget(row, btn_css))
+                # 操作列：空文本 item + 链接清单，委托按矩形自绘并反查命中
+                ops = QTableWidgetItem("")
+                ops.setData(LINKS_ROLE, _OPS_LINKS)
+                self._table.setItem(r, _COL_OPS, ops)
         finally:
             self._table.setUpdatesEnabled(True)
             self._table.blockSignals(False)
@@ -688,25 +696,19 @@ class RecordsPage(QWidget):
         s = str(val or "").strip()
         return s[5:16] if len(s) >= 16 else s
 
-    def _make_ops_widget(self, row, btn_css: dict | None = None) -> QWidget:
-        """行内操作列：编辑（primary）/ 删除（danger）
+    def _on_ops_link(self, row: int, _col: int, action: str):
+        """操作列文字链接点击分发（core.ops_link_delegate 的 editorEvent 回调）
 
-        btn_css: 预构建按钮样式（_populate 循环外算好传入，避免每按钮重复计算）。
+        行号就是表格可视行号（_populate 按 _rows 顺序填充，本面板无表头排序），
+        取到 rec 后走与双击/右键同一入口。
         """
-        w = QWidget(self._table)
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(6)
-        btn_edit = _row_btn("编辑", "primary",
-                            lambda r=row: self._on_edit(r), w,
-                            css=btn_css["primary"] if btn_css else None)
-        btn_del = _row_btn("删除", "danger",
-                           lambda r=row: self._on_delete(r), w,
-                           css=btn_css["danger"] if btn_css else None)
-        lay.addWidget(btn_edit)
-        lay.addWidget(btn_del)
-        lay.addStretch(1)
-        return w
+        if not (0 <= row < len(self._rows)):
+            return
+        rec = self._rows[row]
+        if action == "edit":
+            self._on_edit(rec)
+        elif action == "delete":
+            self._on_delete(rec)
 
     # ---------- 右键菜单 ----------
 
@@ -716,13 +718,16 @@ class RecordsPage(QWidget):
             return
         self._table.selectRow(idx.row())
         menu = RoundMenu(parent=self._table)
+        rec = self._rows[idx.row()] if idx.row() < len(self._rows) else None
+        if rec is None:
+            return
         act_edit = Action(FluentIcon.EDIT, "编辑", self._table)
         act_edit.triggered.connect(
-            lambda _=False: self._on_edit(idx.row()))
+            lambda _=False, r=rec: self._on_edit(r))
         menu.addAction(act_edit)
         act_del = Action(FluentIcon.DELETE, "删除", self._table)
         act_del.triggered.connect(
-            lambda _=False: self._on_delete(idx.row()))
+            lambda _=False, r=rec: self._on_delete(r))
         menu.addAction(act_del)
         menu.exec_(self._table.viewport().mapToGlobal(pos),
                    aniType=_popup_ani_type())
@@ -738,6 +743,7 @@ class RecordsPage(QWidget):
             self._load()
 
     def _on_edit(self, row=None):
+        """编辑：row 为记录 dict（行内链接/右键菜单）或 None（取当前行）"""
         if row is None:
             idx = self._table.currentRow()
             if idx < 0 or idx >= len(self._rows):

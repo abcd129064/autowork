@@ -69,7 +69,10 @@ export function useAftersale(tableRef: Ref) {
     is_initiative: "",
     is_our_problem: "",
     // 按发生日期筛选（YYYY-MM-DD；来自总览页图表点击跳转）
-    occurred_at: ""
+    occurred_at: "",
+    // 排序（表头点击；空=后端默认 created_at DESC）
+    sort_by: "",
+    sort_order: ""
   });
 
   // 路由 query 初始化筛选（总览页/统计页图表点击跳转带参进入）；
@@ -83,7 +86,9 @@ export function useAftersale(tableRef: Ref) {
     "resolved",
     "is_initiative",
     "is_our_problem",
-    "occurred_at"
+    "occurred_at",
+    "sort_by",
+    "sort_order"
   ] as const;
   for (const k of QUERY_KEYS) {
     const v = route.query[k];
@@ -125,12 +130,14 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "ID",
       prop: "id",
+      sortable: "custom",
       width: 70,
       fixed: "left"
     },
     {
       label: "填写时间",
       prop: "created_at",
+      sortable: "custom",
       minWidth: 150,
       formatter: ({ created_at }) =>
         created_at ? dayjs(created_at).format("YYYY-MM-DD HH:mm") : "-"
@@ -138,11 +145,13 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "发生时间",
       prop: "occurred_at",
+      sortable: "custom",
       minWidth: 110
     },
     {
       label: "账期",
       prop: "cycle_start",
+      sortable: "custom",
       minWidth: 110,
       cellRenderer: ({ row, props }) =>
         row.cycle_start ? (
@@ -156,6 +165,7 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "类型",
       prop: "issue_type",
+      sortable: "custom",
       minWidth: 100,
       cellRenderer: ({ row, props }) =>
         row.issue_type ? (
@@ -169,16 +179,19 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "地区",
       prop: "region",
+      sortable: "custom",
       minWidth: 90
     },
     {
       label: "门店",
       prop: "room_name",
+      sortable: "custom",
       minWidth: 140
     },
     {
       label: "球桌号",
       prop: "table_no",
+      sortable: "custom",
       minWidth: 90
     },
     {
@@ -202,6 +215,7 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "解决",
       prop: "resolved",
+      sortable: "custom",
       minWidth: 90,
       align: "center",
       cellRenderer: ({ row, props }) => (
@@ -247,16 +261,19 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "响应",
       prop: "response_time",
+      sortable: "custom",
       minWidth: 100
     },
     {
       label: "处理人",
       prop: "resolver",
+      sortable: "custom",
       minWidth: 100
     },
     {
       label: "填写人",
       prop: "creator",
+      sortable: "custom",
       minWidth: 100
     },
     {
@@ -374,20 +391,19 @@ export function useAftersale(tableRef: Ref) {
         message("当前筛选没有可导出的记录", { type: "warning" });
         return;
       }
-      const headers = [
+      const headers: string[] = [
         "ID", "填写时间", "发生时间", "账期", "类型", "地区", "门店", "球桌号",
         "问题", "发生原因", "解决方案", "是否解决", "我方问题", "主动发起",
         "响应时间", "解决人", "填写人", "SNK码", "设备码", "重要"
       ];
-      const aoa = [headers].concat(
-        all.map(r => [
-          r.id, r.created_at, r.occurred_at, r.cycle_start, r.issue_type,
-          r.region, r.room_name, r.table_no, r.problem, r.cause, r.solution,
-          r.resolved, r.is_our_problem, r.is_initiative, r.response_time,
-          r.resolver, r.creator, r.snk_code, r.device_code,
-          Number(r.is_important) ? "是" : "否"
-        ])
-      );
+      const body = all.map(r => [
+        r.id, r.created_at, r.occurred_at, r.cycle_start, r.issue_type,
+        r.region, r.room_name, r.table_no, r.problem, r.cause, r.solution,
+        r.resolved, r.is_our_problem, r.is_initiative, r.response_time,
+        r.resolver, r.creator, r.snk_code, r.device_code,
+        Number(r.is_important) ? "是" : "否"
+      ]);
+      const aoa: Array<Array<string | number>> = [headers, ...body];
       const ws = XLSX.utils.aoa_to_sheet(aoa);
       ws["!cols"] = headers.map(h =>
         h === "问题" || h === "发生原因" || h === "解决方案" ? { wch: 40 } : { wch: 14 }
@@ -402,6 +418,18 @@ export function useAftersale(tableRef: Ref) {
     } finally {
       loading.value = false;
     }
+  }
+
+  /** 表头排序（pure-table sortable="custom" → 后端白名单排序） */
+  function handleSortChange({ prop, order }: { prop: string; order: string | null }) {
+    if (!order) {
+      form.sort_by = "";
+      form.sort_order = "";
+    } else {
+      form.sort_by = prop;
+      form.sort_order = order === "ascending" ? "asc" : "desc";
+    }
+    onSearch(false);
   }
 
   /** 未解决超时高亮：resolved=否 且 发生日期距今超过 7 天 */
@@ -669,6 +697,8 @@ export function useAftersale(tableRef: Ref) {
     if (!formEl) return;
     formEl.resetFields();
     form.occurred_at = ""; // 无对应表单项，手动清（图表点击跳转带入的日期筛选）
+    form.sort_by = ""; // 排序状态同样不在表单项里
+    form.sort_order = "";
     onSearch();
   }
 
@@ -701,6 +731,7 @@ export function useAftersale(tableRef: Ref) {
     openDetail,
     onExport,
     rowClassName,
+    handleSortChange,
     handleDelete,
     onBatchResolve,
     onBatchDelete,

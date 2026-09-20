@@ -63,8 +63,9 @@ def _seed(db, recs):
 # ==================== _build_where 条件拼接 ====================
 
 def test_build_where_empty():
+    # 无筛选时 WHERE 基线为软删除隔离（回收站记录对所有常规查询不可见）
     where, params = adb._build_where("", "", "")
-    assert where == ""
+    assert where == " WHERE deleted = 0"
     assert params == []
 
 
