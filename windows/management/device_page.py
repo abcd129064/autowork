@@ -517,6 +517,7 @@ class DevicePage(QWidget):
         self._collect_workers = []   # 收集 Worker 列表（不同设备可并行）
         self._upload_worker = None   # 打包上传 Worker（全局唯一）
         self._query_worker = None    # 异步查询 Worker
+        self._full_row_seq = 0       # 完整行懒加载序号（只采纳最后一次点击的结果）
         self._save_worker = None     # 异步保存 Worker
         self._export_worker = None   # CSV 导出异步查询 Worker（B6）
         self._last_submission_id = None  # 最近一条提交台账 id，供收集完成后回填（C1）
@@ -1061,21 +1062,45 @@ class DevicePage(QWidget):
             return rows[row_idx]
         return {}
 
-    def _get_full_row_at(self, row_idx) -> dict:
-        """获取指定行完整数据（含 8 类文件清单）：按数据源懒加载完整行
+    def _request_full_row(self, row_idx, on_ready):
+        """按 id 懒加载完整行（含 8 类文件清单）：查询放到后台线程
 
-        列表页缓存为轻量行（不含文件 JSON），仅在点开详情时单点查询；
+        列表页缓存为轻量行（不含文件 JSON），仅在点开详情时按 id 单点查询；
         kd/xqzg 接口同套字段、落库均含文件清单，按数据源分别懒加载。
+
+        2026-09-20 修复卡死：此前在 GUI 线程直连 MySQL，一旦连接被服务端
+        断开（远程主机 RST / wait_timeout），点击文件统计列要一直等到 TCP
+        超时（实测约 15s 假死）。改走 _DBQueryWorker，界面不再被网络裹住，
+        失败时弹 InfoBar 而不是静默无反应。
+
+        ``on_ready(row_or_None)``：None 表示查询失败（已弹提示）。
         """
         row = self._get_row_at(row_idx)
-        if not row:
-            return row
-        row_id = row.get("id")
-        if row_id is None:
-            return row
-        if self._active_source() == "kd":
-            return table_db.get_kd_row_full(row_id) or row
-        return table_db.get_xqzg_row_full(row_id) or row
+        row_id = row.get("id") if row else None
+        if not row or row_id is None:
+            on_ready(row)
+            return
+        fn = (table_db.get_kd_row_full if self._active_source() == "kd"
+              else table_db.get_xqzg_row_full)
+        self._full_row_seq += 1
+        seq = self._full_row_seq
+        worker = _DBQueryWorker(fn, int(row_id))
+        worker.result_ready.connect(
+            lambda full, s=seq, fb=row: self._on_full_row(s, on_ready,
+                                                          full or fb))
+        worker.error.connect(lambda msg, s=seq: self._on_full_row_error(s, msg))
+        worker.start()
+
+    def _on_full_row(self, seq, on_ready, row):
+        if seq != self._full_row_seq:
+            return  # 已有更新的点击，丢弃过期结果
+        on_ready(row)
+
+    def _on_full_row_error(self, seq, msg):
+        if seq != self._full_row_seq:
+            return
+        show_info_bar(str(msg).split(chr(10))[0], "error",
+                      title="读取文件清单失败", parent=self, duration=4000)
 
     def _show_context_menu(self, pos):
         """右键菜单：查看文件列表 / 复制文件列表 / 复制单元格 / 远程连接 / 清除映射"""
@@ -1205,18 +1230,22 @@ class DevicePage(QWidget):
         bridge.open_session(kind, snk, table_id, notifier=self, source="设备状态")
 
     def _show_files_dialog(self, row_idx):
-        """弹出该行全部文件分类的详情弹窗（kd 数据按 id 懒加载完整行）"""
-        row = self._get_full_row_at(row_idx)
-        if row:
-            DeviceFilesDialog(row, self).exec()
+        """弹出该行全部文件分类的详情弹窗（完整行按 id 异步懒加载）"""
+        def _open(row):
+            if row:
+                DeviceFilesDialog(row, self).exec()
+
+        self._request_full_row(row_idx, _open)
 
     def _copy_file_field(self, row_idx, field):
         """复制指定文件字段的全部文件名到剪贴板（每行一个）"""
-        row = self._get_full_row_at(row_idx)
-        files = row.get(field) or []
-        QApplication.clipboard().setText("\n".join(files))
-        show_info_bar(f"{len(files)} 个文件名已复制到剪贴板", "success",
-                      title="已复制", parent=self, duration=2000)
+        def _do(row):
+            files = (row or {}).get(field) or []
+            QApplication.clipboard().setText("\n".join(files))
+            show_info_bar(f"{len(files)} 个文件名已复制到剪贴板", "success",
+                          title="已复制", parent=self, duration=2000)
+
+        self._request_full_row(row_idx, _do)
 
     # ---------- 文件面板与迁移 ----------
 
@@ -1231,20 +1260,28 @@ class DevicePage(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_cell_clicked(self, row, col):
-        """点击文件统计列：滑出右侧文件面板展示对应分类（仅可点击列响应）"""
+        """点击文件统计列：滑出右侧文件面板展示对应分类（仅可点击列响应）
+
+        完整行（文件清单）在后台线程按 id 取，取到再开面板：避免死连接/慢
+        网络把界面卡住（见 _request_full_row）。
+        """
         key = DEVICE_COLUMNS[col][0]
         cfg = self._FILE_VIEW_FIELDS.get(key)
         if not cfg:
-            return
-        data = self._get_full_row_at(row)
-        if not data:
             return
         title, fields = cfg
         # xqzg 与 kd 同样按 file_path 日期分区，迁移路径拼接方式一致；
         # 此前误以为 xqzg 无日期分区而禁用，现已与 kd 对齐
         can_migrate = (bool(fields)
                        and all(f in _MIGRATABLE_FIELDS for f in fields))
-        self._file_panel.show_files(data, title, fields, can_migrate=can_migrate)
+
+        def _show(data):
+            if not data:
+                return
+            self._file_panel.show_files(
+                data, title, fields, can_migrate=can_migrate)
+
+        self._request_full_row(row, _show)
         # 注意：点击精度/问题单元格只展示文件列表，不触发收集；
         # 收集统一由迁移按钮（精度/问题提交）成功后在 _on_migrate_ok 中触发
 

@@ -138,6 +138,10 @@ KEY_DOMAIN = {
     "restore_remote_sessions": "remote",
     # ---- misc ----
     "web_port": "misc",
+    # 自动更新（2026-09-20 S1-S5）：更新源 base_url（nginx 静态目录，
+    # 下含 latest.json / AutoWork-*.zip / files/ 增量文件）
+    "update_base_url": "misc",
+    "update_auto_check": "misc",
     # 工具页·单杆视频行为开关（2026-09-07 二期）
     "single_random_session_code": "misc",
     "single_auto_open_dir": "misc",

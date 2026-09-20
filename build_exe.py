@@ -50,6 +50,26 @@ def _build(spec_name):
 _build('AutoWork.spec')   # 完整应用（onedir，aftersale/管理面板内置）
 _build('AfterSale.spec')  # 售后面板（onefile 单文件，独立分发）
 
+# ---- 构建期版本落盘：version.json 写到 exe 旁 ----
+# 打包环境无 .git，core/version.py 会回退 {BASE}.0；构建机（有 .git）
+# 在此算好完整版本号落盘，客户端「检查更新」的版本比较依赖它
+import json
+from datetime import datetime
+sys.path.insert(0, ROOT)
+from core.version import get_app_version, get_branch_name  # noqa: E402
+
+_version_info = {
+    "version": get_app_version(),
+    "branch": get_branch_name(),
+    "built_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+}
+for _vdest in (os.path.join(ROOT, 'dist', 'AutoWork'), os.path.join(ROOT, 'dist')):
+    if os.path.isdir(_vdest):
+        with open(os.path.join(_vdest, 'version.json'), 'w', encoding='utf-8') as _vf:
+            json.dump(_version_info, _vf, ensure_ascii=False, indent=2)
+        print(f'[build_exe] 已写 version.json -> {os.path.relpath(_vdest, ROOT)}/ '
+              f'({_version_info["version"]})')
+
 # ---- 构建后处理：复制 exe 旁边的运行时文件 ----
 # 完整版目录：config/（分域配置）+ frpc.exe（P2P 远程会话）
 # 单文件售后面板：config/ 复制到 dist/（aftersale.exe 旁）
@@ -105,8 +125,10 @@ expected = [
     ('dist/AutoWork/autowork.exe', '主程序（完整版，aftersale/管理面板内置）'),
     ('dist/AutoWork/frpc.exe', 'P2P 工具（与主程序同目录）'),
     ('dist/AutoWork/config', '主程序分域配置目录'),
+    ('dist/AutoWork/version.json', '构建期版本落盘（自动更新版本比较依赖）'),
     ('dist/aftersale.exe', '售后面板（单文件独立版，与主程序互不关联）'),
     ('dist/config', '售后面板分域配置目录（exe 旁）'),
+    ('dist/version.json', '售后面板版本落盘（自动更新版本比较依赖）'),
 ]
 all_ok = True
 for rel, desc in expected:

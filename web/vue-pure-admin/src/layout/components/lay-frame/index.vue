@@ -74,6 +74,11 @@ watch(
     </div>
   </template>
   <div v-show="!keep" class="size-full">
-    <slot :Comp="normalComp" :fullPath="currRoute.fullPath" frameInfo />
+    <slot
+      :Comp="normalComp"
+      :fullPath="currRoute.fullPath"
+      :path="currRoute.path"
+      frameInfo
+    />
   </div>
 </template>

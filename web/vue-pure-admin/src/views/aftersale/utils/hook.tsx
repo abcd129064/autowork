@@ -22,7 +22,7 @@ import type { AftersaleRecord, AftersaleStats } from "@/api/aftersale";
 import type { AftersaleFormItem } from "./types";
 import { loadLastUsed, saveLastUsed, pullLastUsedFromCloud } from "./lastUsed";
 import { pullPhrasesFromCloud } from "./quickPhrases";
-import { type Ref, h, ref, reactive, computed, onMounted } from "vue";
+import { type Ref, h, ref, reactive, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import FileListIcon from "~icons/ri/file-list-3-line";
@@ -94,6 +94,27 @@ export function useAftersale(tableRef: Ref) {
     const v = route.query[k];
     if (typeof v === "string" && v) form[k] = v;
   }
+
+  /**
+   * 路由 query 变化兜底：布局层组件 key 用 path（同页 query 变化不再重建组件），
+   * 已缓存的列表页收到外部跳转（总览/统计页图表点击带参）时在此同步筛选。
+   * 防回环：onSearch 的 router.replace 写回相同值时不重复触发查询。
+   */
+  watch(
+    () => route.fullPath,
+    () => {
+      if (!route.path.includes("/aftersale/list")) return;
+      let changed = false;
+      for (const k of QUERY_KEYS) {
+        const v = typeof route.query[k] === "string" ? route.query[k] : "";
+        if (form[k] !== v) {
+          form[k] = v as string;
+          changed = true;
+        }
+      }
+      if (changed) onSearch();
+    }
+  );
 
   const loading = ref(true);
   const dataList = ref<AftersaleRecord[]>([]);

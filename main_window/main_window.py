@@ -27,6 +27,7 @@ from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
 from .remote_mixin import RemoteMixin
 from .ui_mixin import UIMixin
+from .update_mixin import UpdateMixin
 from qfluentwidgets import Dialog
 
 
@@ -122,8 +123,8 @@ class _KdStatusQueryWorker(QThread):
         self.done.emit(info)
 
 
-class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow):
-    """主窗口：组合 SettingsMixin / ProcessMixin / RemoteMixin / UIMixin
+class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin, FluentWindow):
+    """主窗口：组合 SettingsMixin / ProcessMixin / RemoteMixin / UIMixin / UpdateMixin
 
     导航结构（2026-09-06 修订，FluentWindow 侧边导航）：
         工作台     ← 原 centralwidget 整体（状态栏 + 工具栏 + 三列 Splitter；
@@ -236,6 +237,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
         self.tool_hub = ToolHub(self)
         self.settings_hub = SettingsHubPage(self)
         self.about_page = AboutPage(self)
+        # 关于页「检查更新」按钮 → 主窗口编排（worker/对话框/安装退出都在 UpdateMixin）
+        self.about_page.on_check_update = self.check_for_update
 
         # 统一设置页 → 各 Hub 刷新（替代原面板内部信号连线）
         self.settings_hub.aftersale_cycle_saved.connect(

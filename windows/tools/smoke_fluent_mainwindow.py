@@ -658,6 +658,291 @@ try:
 except Exception as e:
     check("17.x 面板入口默认弹出", False, repr(e))
 
+print("\n[18] 自动更新（2026-09-21：关于页检查更新 + 下载对话框状态机 + 回执消费 + dev 安装守卫）")
+try:
+    import json as _json
+    import tempfile as _tf
+    from core import updater as _upd
+    from main_window import update_mixin as _um
+
+    # 18.1 UpdateMixin 已混入主窗口（四个编排方法齐全）
+    check("18.1 UpdateMixin 已混入 MainWindow",
+          all(callable(getattr(w, m, None)) for m in (
+              "check_for_update", "_install_update",
+              "consume_update_receipt_on_startup", "auto_check_update_on_startup")))
+
+    # 18.2 关于页按钮存在且已接线到主窗口
+    _btn = w.about_page.btn_check_update
+    check("18.2 关于页「检查更新」按钮存在",
+          _btn is not None and _btn.objectName() == "aboutCheckUpdateButton")
+    check("18.2b 按钮文案正确", _btn.text() == "检查更新", _btn.text())
+    check("18.2c 按钮已接线到 check_for_update",
+          w.about_page.on_check_update == w.check_for_update)
+    check("18.2d 按钮初始可用", _btn.isEnabled())
+
+    # 18.3 set_checking / show_check_result 状态回写
+    w.about_page.set_checking(True)
+    check("18.3a 检查中禁用按钮", not _btn.isEnabled())
+    check("18.3b 检查中文案", "正在检查" in w.about_page.update_status.text(),
+          w.about_page.update_status.text())
+    w.about_page.set_checking(False)
+    w.about_page.show_check_result("已是最新版本 3.11.280", "success")
+    check("18.3c 恢复可用并回写结果",
+          _btn.isEnabled() and "3.11.280" in w.about_page.update_status.text())
+
+    # 18.4 环境信息：dev 环境 frozen=False、main_exe 空、更新源为生产地址
+    _env = w._update_env()
+    check("18.4a dev 环境 frozen=False", _env["frozen"] is False)
+    check("18.4b dev 环境 main_exe 为空", _env["main_exe"] == "")
+    check("18.4c 更新源默认生产地址",
+          _env["base_url"] == _upd.DEFAULT_UPDATE_BASE_URL, _env["base_url"])
+    check("18.4d 本地版本非空", bool(_env["local_version"]), _env["local_version"])
+
+    # 18.5 配置键登记到 misc 域
+    from core import app_settings as _aps2
+    check("18.5 update_base_url/update_auto_check 登记 misc 域",
+          _aps2.domain_of("update_base_url") == "misc"
+          and _aps2.domain_of("update_auto_check") == "misc")
+
+    # 18.6 安全边界：dev 环境必须拒绝安装（否则会把源码目录替换掉）
+    _dev_staging = os.path.join(_tf.gettempdir(), "_aw_smoke_staging")
+    os.makedirs(_dev_staging, exist_ok=True)
+    check("18.6 dev 环境 _install_update 返回 False",
+          w._install_update(_dev_staging, "full") is False)
+
+    # 18.7 staging 缺失也必须拒绝（即便假装是打包版）
+    _orig_frozen = getattr(sys, "frozen", False)
+    try:
+        sys.frozen = True
+        check("18.7 frozen 下 staging 不存在仍拒绝",
+              w._install_update(os.path.join(_tf.gettempdir(), "_no_such_dir"),
+                                "full") is False)
+    finally:
+        if not _orig_frozen:
+            del sys.frozen
+
+    # 18.8 更新对话框状态机（offscreen 不 exec，直接驱动 phase 迁移）
+    from windows.update_dialog import UpdateDialog
+    _entry = {"version": "3.11.999", "_remote_version": "3.11.999",
+              "notes": "修复启动闪屏\n新增检查更新",
+              "min_version": "",
+              "_resolved_url": "http://h/u/packages/a.zip",
+              "package": {"mode": "full", "url": "packages/a.zip",
+                          "sha256": "abc", "size": 567 * 1048576}}
+    _dlg = UpdateDialog(w, _entry, "http://h/u", _env["app_dir"],
+                        main_exe="AutoWork.exe",
+                        local_version=_env["local_version"],
+                        on_install=lambda s, m: True)
+    check("18.8a 初始 phase=found", _dlg._phase == "found")
+    check("18.8b 版本对比文案含箭头", "→" in _dlg.ver_label.text(),
+          _dlg.ver_label.text())
+    check("18.8c 包大小人类可读", "567.0 MB" in _dlg.meta_label.text(),
+          _dlg.meta_label.text())
+    check("18.8d 完整包标识", "完整包" in _dlg.meta_label.text())
+    check("18.8e 更新说明已填入", "修复启动闪屏" in _dlg.notes_edit.toPlainText())
+    check("18.8f 进度区初始隐藏", not _dlg.prog_bar.isVisibleTo(_dlg))
+    check("18.8g yes=立即更新 / cancel=稍后",
+          _dlg.yesButton.text() == "立即更新" and _dlg.cancelButton.text() == "稍后")
+
+    # 下载中：进度区显示、yes 禁用、忙碌动画（total 未知）
+    _dlg._enter_downloading()
+    check("18.8h phase=downloading", _dlg._phase == "downloading")
+    check("18.8i 进度区可见", _dlg.prog_bar.isVisibleTo(_dlg))
+    check("18.8j yes 禁用", not _dlg.yesButton.isEnabled())
+    check("18.8k cancel 变为取消", _dlg.cancelButton.text() == "取消")
+    _dlg._on_progress(50 * 1048576, 100 * 1048576)
+    check("18.8l 进度百分比正确", _dlg.prog_bar.value() == 50,
+          str(_dlg.prog_bar.value()))
+    check("18.8m 进度文案含 MB 与百分比",
+          "50.0 MB" in _dlg.stage_label.text()
+          and "50%" in _dlg.stage_label.text(), _dlg.stage_label.text())
+    _dlg._on_progress(10, 0)     # total 未知 → 忙碌动画
+    check("18.8n total=0 走忙碌动画", _dlg.prog_bar.maximum() == 0)
+
+    # 下载中禁止关闭（防信号打到已销毁控件）
+    _dlg._phase = "downloading"
+    _dlg.reject()
+    check("18.8o 下载中 reject 被忽略", _dlg._phase == "downloading")
+
+    # ready：进度满、yes=安装并重启
+    _dlg._enter_ready({"staging_dir": _dev_staging, "mode": "full",
+                       "files_count": 3210})
+    check("18.8p phase=ready", _dlg._phase == "ready")
+    check("18.8q 进度 100%", _dlg.prog_bar.value() == 100)
+    check("18.8r yes=安装并重启", _dlg.yesButton.text() == "安装并重启")
+    check("18.8s 文件数写入文案", "3210" in _dlg.stage_label.text(),
+          _dlg.stage_label.text())
+
+    # error：原因可见、yes=重试
+    _dlg._enter_error("sha256 校验失败")
+    check("18.8t phase=error", _dlg._phase == "error")
+    check("18.8u 失败原因可见", "sha256" in _dlg.notes_edit.toPlainText())
+    check("18.8v yes=重试", _dlg.yesButton.text() == "重试")
+    _dlg._back_to_found()
+    check("18.8w 重试回到 found 且说明复原",
+          _dlg._phase == "found" and "修复启动闪屏" in _dlg.notes_edit.toPlainText())
+    _dlg.deleteLater()
+    for _ in range(3):
+        app.processEvents()
+
+    # 18.9 增量模式标签（min_version 不满足时显示为完整包）
+    _inc_entry = dict(_entry)
+    _inc_entry["package"] = {"mode": "incremental", "url": "p.zip",
+                             "sha256": "", "size": 1048576}
+    _inc_entry["min_version"] = "3.11.280"
+    _d2 = UpdateDialog(w, _inc_entry, "http://h/u", _env["app_dir"],
+                       main_exe="AutoWork.exe", local_version="3.11.999",
+                       on_install=None)
+    check("18.9a 满足 min_version 显示增量更新",
+          "增量更新" in _d2.meta_label.text(), _d2.meta_label.text())
+    _d2.deleteLater()
+    _d3 = UpdateDialog(w, _inc_entry, "http://h/u", _env["app_dir"],
+                       main_exe="AutoWork.exe", local_version="3.11.100",
+                       on_install=None)
+    check("18.9b 低于 min_version 降级显示完整包",
+          "完整包" in _d3.meta_label.text(), _d3.meta_label.text())
+    # on_install 未注入时安装必须报错而非静默
+    _d3._staging_dir = _dev_staging
+    _d3._do_install()
+    check("18.9c 未注入安装回调时进入 error",
+          _d3._phase == "error" and "回调" in _d3.notes_edit.toPlainText(),
+          _d3.notes_edit.toPlainText()[:40])
+    _d3.deleteLater()
+    for _ in range(3):
+        app.processEvents()
+
+    # 18.10 回执消费：成功路径（patch app_dir 到临时目录，不碰真实项目）
+    _rc_dir = os.path.join(_tf.mkdtemp(prefix="aw_smoke_rc_"))
+    _upd.mark_update_pending(_rc_dir, {"version": "3.11.999", "mode": "full"})
+    with open(os.path.join(_rc_dir, _upd.RESULT_LOG), "w",
+              encoding="utf-8") as _f:
+        _f.write('{"ok": true}')
+    _orig_getdir = _um.get_app_dir
+    try:
+        _um.get_app_dir = lambda: _rc_dir
+        _r = w.consume_update_receipt_on_startup()
+        check("18.10a 成功回执被消费", bool(_r) and _r["ok"] is True, str(_r))
+        check("18.10b 版本号带回", _r.get("version") == "3.11.999")
+        check("18.10c 消费后 pending 删除",
+              not os.path.isfile(os.path.join(_rc_dir, _upd.PENDING_FLAG)))
+        check("18.10d 消费后 result.log 删除",
+              not os.path.isfile(os.path.join(_rc_dir, _upd.RESULT_LOG)))
+        check("18.10e 二次消费返回 None（不重复提示）",
+              w.consume_update_receipt_on_startup() is None)
+
+        # 18.11 失败路径：有 pending 无回执 → 判失败且绝不重试
+        _upd.mark_update_pending(_rc_dir, {"version": "9.9.9"})
+        _r2 = w.consume_update_receipt_on_startup()
+        check("18.11a 无回执判定失败", bool(_r2) and _r2["ok"] is False, str(_r2))
+        check("18.11b 失败原因可读", bool(_r2.get("error")), _r2.get("error"))
+        check("18.11c 失败后 pending 已清（防死循环）",
+              not os.path.isfile(os.path.join(_rc_dir, _upd.PENDING_FLAG)))
+
+        # 18.12 残留 staging 被清理
+        _st = os.path.join(_rc_dir, _upd.STAGING_DIRNAME, "sub")
+        os.makedirs(_st, exist_ok=True)
+        with open(os.path.join(_st, "leftover.dll"), "w") as _f:
+            _f.write("x")
+        _upd.mark_update_pending(_rc_dir, {"version": "1.0.0"})
+        w.consume_update_receipt_on_startup()
+        check("18.12 残留 staging 已清理",
+              not os.path.isdir(os.path.join(_rc_dir, _upd.STAGING_DIRNAME)))
+    finally:
+        _um.get_app_dir = _orig_getdir
+        import shutil as _sh
+        _sh.rmtree(_rc_dir, ignore_errors=True)
+        _sh.rmtree(_dev_staging, ignore_errors=True)
+
+    # 18.13 updater 脚本生成安全约束（bat 必须在安装目录之外 + 占位符全解析）
+    _bat_txt = _upd.build_bat(r"C:\Fake Install\AutoWork", r"C:\stg dir",
+                              "AutoWork.exe", 4321, "full")
+    check("18.13a bat 占位符全解析", "__INSTALL_DIR__" not in _bat_txt
+          and "__WAIT_PID__" not in _bat_txt)
+    check("18.13b bat 用 System32 绝对路径（防 PATH 污染穿透等待循环）",
+          "%SYS32%\\tasklist.exe" in _bat_txt and "%SYS32%\\Robocopy.exe" in _bat_txt)
+    check("18.13c bat 未用 timeout（改 ping，不依赖 console stdin）",
+          "timeout" not in "\n".join(
+              ln for ln in _bat_txt.splitlines()
+              if not ln.strip().lower().startswith(("rem", "::"))).lower())
+    check("18.13d vbs 用 Chr(34) 拼引号（防 raw 三引号吞转义）",
+          "Chr(34)" in _upd._VBS_TEMPLATE)
+    check("18.13e 用户数据排除目录齐全",
+          all(d in _bat_txt for d in _upd.EXCLUDE_DIRS))
+
+    # 18.14 打包版真正安装路径（生产主路径）：frozen + staging 存在
+    #      → 必须调 launch_updater 并传对 app_dir/staging/main_exe/mode/pending
+    _calls = []
+    _orig_launch = _upd.launch_updater
+    _inst2 = os.path.join(_tf.mkdtemp(prefix="aw_smoke_inst_"), "AutoWork")
+    os.makedirs(_inst2, exist_ok=True)
+    _stg2 = os.path.join(_tf.gettempdir(), "_aw_smoke_stg2")
+    os.makedirs(_stg2, exist_ok=True)
+    _orig_quit = _um.QTimer.singleShot
+    try:
+        sys.frozen = True
+        sys.executable = os.path.join(_inst2, "AutoWork.exe")
+        _upd.launch_updater = lambda *a, **kw: (_calls.append((a, kw)), True)[1]
+        _um.QTimer.singleShot = lambda *a, **kw: None   # 不真退出事件循环
+        # 走对话框 → on_install 注入的完整链路（版本号由对话框显式传出）
+        _d4 = UpdateDialog(w, dict(_entry, _remote_version="3.11.999"),
+                           "http://h/u", _inst2, main_exe="AutoWork.exe",
+                           local_version="3.11.273",
+                           on_install=w._install_update)
+        _d4._staging_dir = _stg2
+        _d4._mode = "full"
+        _d4._do_install()
+        for _ in range(3):
+            app.processEvents()
+        check("18.14a frozen+staging 存在 → 调用 launch_updater",
+              len(_calls) == 1, str(len(_calls)))
+        if _calls:
+            _a, _kw = _calls[0]
+            check("18.14b app_dir 传对", _a[0] == _inst2, _a[0])
+            check("18.14c staging_dir 传对", _a[1] == _stg2, _a[1])
+            check("18.14d main_exe 传对", _a[2] == "AutoWork.exe", _a[2])
+            check("18.14e mode 传对", _kw.get("mode") == "full", str(_kw.get("mode")))
+            _pi = _kw.get("pending_info") or {}
+            check("18.14f pending_info 含目标版本",
+                  _pi.get("version") == "3.11.999", str(_pi))
+            check("18.14g pending_info 含来源版本（失败时可提示回退到哪个版本）",
+                  bool(_pi.get("from_version")), str(_pi))
+        check("18.14h 安装发起后对话框 accept 关闭",
+              not _d4.isVisible() or _d4._phase == "ready")
+        _d4.deleteLater()
+        # 18.15 launch_updater 抛异常 → 必须报错且对话框进入 error（不静默退出）
+        _calls.clear()
+
+        def _boom(*a, **kw):
+            raise OSError("wscript 不可用")
+
+        _upd.launch_updater = _boom
+        _d5 = UpdateDialog(w, dict(_entry), "http://h/u", _inst2,
+                           main_exe="AutoWork.exe", local_version="3.11.273",
+                           on_install=w._install_update)
+        _d5._staging_dir = _stg2
+        _d5._do_install()
+        for _ in range(3):
+            app.processEvents()
+        check("18.15 拉起异常 → 对话框进入 error 且不退出程序",
+              _d5._phase == "error" and "更新程序" in _d5.notes_edit.toPlainText(),
+              _d5.notes_edit.toPlainText()[:60])
+        _d5.deleteLater()
+    finally:
+        _upd.launch_updater = _orig_launch
+        _um.QTimer.singleShot = _orig_quit
+        if not _orig_frozen:
+            del sys.frozen
+        import shutil as _sh2
+        _sh2.rmtree(os.path.dirname(_inst2), ignore_errors=True)
+        _sh2.rmtree(_stg2, ignore_errors=True)
+        for _ in range(3):
+            app.processEvents()
+
+    check("18.13f 收尾关闭更新对话框无异常", True)
+except Exception as e:
+    import traceback as _tb
+    check("18.x 自动更新", False, repr(e) + "\n" + _tb.format_exc()[-600:])
+
 print("\n" + "=" * 56)
 print("冒烟结论：" + ("全部通过" if ok else "存在失败项"))
 sys.stdout.flush()

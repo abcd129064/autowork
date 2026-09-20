@@ -4,11 +4,13 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
+/build/
 develop-eggs/
-dist/
+/dist/
 *.egg-info/
 *.egg
+# 更新发布打包产物（tools/publish_update.py 输出，含大 zip，不入库）
+/out/
 
 # Virtual Environment
 venv/
@@ -17,8 +19,8 @@ ENV/
 _uic_venv/
 
 # IDE
-.idea/
-.vscode/
+/.idea/
+/.vscode/
 *.swp
 *.swo
 *~
@@ -35,7 +37,7 @@ Thumbs.db
 database/*.db
 database/*.db-shm
 database/*.db-wal
-logs/
+/logs/
 videos/*
 !videos/.gitkeep
 settings.json
@@ -89,3 +91,12 @@ tests/*.png
 .git_backup_20260901/
 _qss_qa_tmp/
 _perf_probe/
+
+# 一次性设计/验证产物（2026-09-20 版本管理盘点）
+tools/_pa_shots/
+web/aftersale_front/tools/*.png
+# 前端构建产物（/dist/ 已锚定为仓库根，这里补子目录）
+web/**/dist/
+.pytest_cache/
+# 业务数据表（含客户库存，不入库）
+总部仓库库存明细.xlsx

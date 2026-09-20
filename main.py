@@ -44,9 +44,9 @@ except Exception:
 # 【关键】在 qfluentwidgets 导入前注入亚克力 PIL 补丁（打包环境无 numpy/scipy 时生效）
 import core.acrylic_patch  # noqa: F401
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, qInstallMessageHandler
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtCore import Qt, QRect, qInstallMessageHandler
+from PySide6.QtGui import QFont, QIcon, QColor, QPainter, QPixmap
 from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 
 # 中央拦截菜单弹出动画：按「面板覆盖→全局」生效值降级（含库内硬编码的
@@ -74,6 +74,42 @@ from core.app_paths import get_resource_dir
 from core.conn_logger import conn_logger, qt_message_handler
 from core.design_tokens import pt_to_px
 from main_window import MainWindow
+
+
+def _make_splash(app, is_dark):
+    """启动闪屏：遮住主窗口首帧布局/样式预热过程，避免用户看到半成品界面
+
+    主窗口 show 后第一帧 FlowLayout 工具栏尚未完成布局、qfw polish 与
+    按钮高度强制（singleShot(0)）也未执行，直接暴露会出现控件错位/半样式
+    的闪乱帧。闪屏在预热期间常驻前台，预热完成后随主窗口首帧一起撤掉。
+    """
+    try:
+        pm = QPixmap(420, 150)
+        pm.fill(QColor("#202124") if is_dark else QColor("#ffffff"))
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        icon = app.windowIcon()
+        if not icon.isNull():
+            icon.paint(p, QRect(24, 24, 44, 44))
+        p.setPen(QColor("#e8ebef") if is_dark else QColor("#202124"))
+        f = QFont(app.font())
+        f.setPixelSize(20)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QRect(84, 26, 320, 30), Qt.AlignmentFlag.AlignLeft
+                   | Qt.AlignmentFlag.AlignVCenter, "AutoWork")
+        f.setPixelSize(12)
+        f.setBold(False)
+        p.setFont(f)
+        p.setPen(QColor("#9aa0a6"))
+        p.drawText(QRect(84, 62, 320, 22), Qt.AlignmentFlag.AlignLeft
+                   | Qt.AlignmentFlag.AlignVCenter, "正在启动…")
+        p.end()
+        sp = QSplashScreen(pm)
+        sp.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        return sp
+    except Exception:
+        return None
 
 
 def main():
@@ -164,9 +200,44 @@ def main():
     except Exception:
         pass
 
-    # 创建并显示主窗口
+    # 创建并显示主窗口（闪屏遮首帧：offscreen 预热布局/样式后再 reveal）
+    splash = _make_splash(app, _is_dark)
+    if splash is not None:
+        splash.show()
+        app.processEvents()
     window = MainWindow()
+    # offscreen 预热：强制完成首帧布局（FlowLayout 工具栏/按钮高度强制/
+    # qfw polish 的 singleShot(0) 任务），用户不会看到半成品第一帧。
+    # ⚠️ WA_DontShowOnScreen 下 show() 已把 isVisible 置 True，撤属性后
+    # 再 show() 是空操作（原生窗口不会创建）——必须先 hide() 复位可见态；
+    # try/finally 保证预热异常也一定走到真 show，闪屏不会把程序"带走"。
+    try:
+        window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        window.show()
+        for _ in range(10):
+            app.processEvents()
+    finally:
+        window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        window.hide()  # 复位可见态，确保下面的 show() 真正创建原生窗口
+    if splash is not None:
+        splash.showMessage("正在准备工作台…", Qt.AlignmentFlag.AlignLeft
+                           | Qt.AlignmentFlag.AlignBottom,
+                           QColor("#9aa0a6"))
+        app.processEvents()
     window.show()
+    window.raise_()
+    window.activateWindow()
+    if splash is not None:
+        splash.finish(window)
+
+    # 自动更新（S3）：先消费上次安装的回执（成功/失败都给用户交代），
+    # 再按配置静默自检新版本。两者都延后到事件循环起来之后，不抢启动资源。
+    try:
+        from PySide6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(0, window.consume_update_receipt_on_startup)
+        _QTimer.singleShot(0, window.auto_check_update_on_startup)
+    except Exception:
+        pass
 
     sys.exit(app.exec())
 

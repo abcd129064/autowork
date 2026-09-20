@@ -1051,11 +1051,17 @@ class SettingsHubPage(QWidget):
 # ==================== 关于（底部） ====================
 
 class AboutPage(QWidget):
-    """关于：应用信息卡"""
+    """关于：应用信息卡 + 检查更新（S3）
+
+    「检查更新」由主窗口注入的 on_check_update 回调执行（主窗口持有 worker
+    与安装/退出能力）；本页只负责按钮状态与结果文案，避免 UI 层各持一套
+    更新逻辑。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("aboutPage")
+        self.on_check_update = None      # 主窗口注入：() -> None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 20)
 
@@ -1071,6 +1077,7 @@ class AboutPage(QWidget):
             from core.version import APP_VERSION
         except Exception:
             APP_VERSION = "2.9"
+        self._version_text = str(APP_VERSION)
         ver = CaptionLabel(f"版本 {APP_VERSION} · PySide6 6.11 · qfluentwidgets 1.11", card)
         v.addWidget(ver)
 
@@ -1081,6 +1088,24 @@ class AboutPage(QWidget):
         v.addWidget(desc)
 
         v.addSpacing(8)
+
+        # ---------- 检查更新 ----------
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(10)
+        from qfluentwidgets import PrimaryPushButton
+        self.btn_check_update = PrimaryPushButton(FluentIcon.SYNC, "检查更新", card)
+        self.btn_check_update.setObjectName("aboutCheckUpdateButton")
+        self.btn_check_update.setFixedHeight(34)
+        self.btn_check_update.setToolTip("连接更新服务器检查是否有新版本")
+        self.btn_check_update.clicked.connect(self._on_check_update)
+        upd_row.addWidget(self.btn_check_update)
+        self.update_status = CaptionLabel("尚未检查", card)
+        self.update_status.setObjectName("aboutUpdateStatus")
+        upd_row.addWidget(self.update_status)
+        upd_row.addStretch(1)
+        v.addLayout(upd_row)
+
+        v.addSpacing(8)
         row = QHBoxLayout()
         repo = CaptionLabel("FluentWindow 单窗口导航版 · design/fluent_window_proposal.html", card)
         row.addWidget(repo)
@@ -1089,3 +1114,23 @@ class AboutPage(QWidget):
 
         lay.addWidget(card)
         lay.addStretch(1)
+
+    # ---------- 检查更新接线（由主窗口驱动状态） ----------
+
+    def _on_check_update(self):
+        if self.on_check_update is not None:
+            self.on_check_update()
+
+    def set_checking(self, checking: bool):
+        """检查中：禁用按钮 + 转圈文案"""
+        self.btn_check_update.setEnabled(not checking)
+        if checking:
+            self.update_status.setText("正在检查更新…")
+
+    def show_check_result(self, text: str, kind: str = "info"):
+        """回写检查结果文案（kind: info/success/warning/error 仅用于语义标记）"""
+        self.update_status.setText(str(text))
+
+    @property
+    def version_text(self) -> str:
+        return self._version_text
