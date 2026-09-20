@@ -41,6 +41,12 @@ const {
   handleCurrentChange,
   handleSelectionChange
 } = useAftersale(tableRef);
+
+/** 清除「发生日期」筛选（总览页图表点击跳转带入） */
+function clearOccurred() {
+  form.occurred_at = "";
+  onSearch();
+}
 </script>
 
 <template>
@@ -80,6 +86,11 @@ const {
           class="w-45!"
           @keyup.enter="onSearch()"
         />
+      </el-form-item>
+      <el-form-item v-if="form.occurred_at" label="发生日期：">
+        <el-tag closable type="primary" @close="clearOccurred">
+          {{ form.occurred_at }}
+        </el-tag>
       </el-form-item>
       <el-form-item label="账期：" prop="cycle_start">
         <el-select

@@ -37,25 +37,29 @@ const statCards = computed(() => [
     label: "记录总数",
     value: stats.value.total,
     icon: FileListIcon,
-    color: "#409eff"
+    color: "#409eff",
+    query: {} as Record<string, string>
   },
   {
     label: "未解决",
     value: stats.value.unresolved,
     icon: ErrorIcon,
-    color: "#f56c6c"
+    color: "#f56c6c",
+    query: { resolved: "否" }
   },
   {
     label: "主动发起",
     value: stats.value.initiative,
     icon: ThumbIcon,
-    color: "#67c23a"
+    color: "#67c23a",
+    query: { is_initiative: "是" }
   },
   {
     label: "我方问题",
     value: stats.value.our_problem,
     icon: UserWarnIcon,
-    color: "#e6a23c"
+    color: "#e6a23c",
+    query: { is_our_problem: "是" }
   }
 ]);
 
@@ -63,8 +67,38 @@ const statCards = computed(() => [
 const theme = computed(() => (isDark.value ? "dark" : "light"));
 const dailyRef = ref();
 const typeRef = ref();
-const { setOptions: setDaily } = useECharts(dailyRef, { theme, renderer: "svg" });
-const { setOptions: setType } = useECharts(typeRef, { theme, renderer: "svg" });
+const {
+  setOptions: setDaily,
+  getInstance: getDailyInstance
+} = useECharts(dailyRef, { theme, renderer: "svg" });
+const {
+  setOptions: setType,
+  getInstance: getTypeInstance
+} = useECharts(typeRef, { theme, renderer: "svg" });
+
+/** 图表点击 → 跳列表筛选（每日点击按发生日期，类型点击按问题类型） */
+let dailyDates: string[] = [];
+let chartClickBound = false;
+function bindChartClick() {
+  if (chartClickBound) return;
+  const dailyChart = getDailyInstance();
+  if (dailyChart) {
+    dailyChart.on("click", params => {
+      if (params.componentType !== "series") return;
+      const date = dailyDates[params.dataIndex];
+      if (date) goListWith({ occurred_at: date });
+    });
+    chartClickBound = true;
+  }
+  const typeChart = getTypeInstance();
+  if (typeChart) {
+    typeChart.on("click", params => {
+      if (params.componentType === "series" && params.name) {
+        goListWith({ issue_type: String(params.name) });
+      }
+    });
+  }
+}
 
 const emptyOption = {
   title: {
@@ -77,6 +111,7 @@ const emptyOption = {
 
 function renderDaily(daily: Array<{ date: string; count: number }>) {
   if (!daily?.length) return setDaily(emptyOption);
+  dailyDates = daily.map(d => d.date); // 供点击跳转取完整日期
   const step = Math.max(1, Math.ceil(daily.length / 12));
   setDaily({
     tooltip: { trigger: "axis" },
@@ -182,6 +217,9 @@ async function loadAll() {
     getHealth()
       .then(h => (dbStatus.value = h))
       .catch(() => (dbStatus.value = null));
+    // 图表实例就绪后绑定点击跳转（幂等）
+    await nextTick();
+    bindChartClick();
   } catch (err) {
     message("总览数据加载失败，请检查后端服务", { type: "error" });
     console.error("[welcome] loadAll failed:", err);
@@ -192,6 +230,14 @@ async function loadAll() {
 
 function goList() {
   router.push("/aftersale/list");
+}
+/** 带筛选跳列表（KPI 卡/图表点击） */
+function goListWith(query?: Record<string, string>) {
+  if (!query || Object.keys(query).length === 0) {
+    router.push("/aftersale/list");
+    return;
+  }
+  router.push({ path: "/aftersale/list", query });
 }
 function goStats() {
   router.push("/aftersale/stats");
@@ -242,7 +288,12 @@ onBeforeUnmount(() => {
         :sm="12"
         :xs="24"
       >
-        <el-card shadow="never" class="kpi-card">
+        <el-card
+          shadow="never"
+          class="kpi-card kpi-clickable"
+          :title="`点击查看${card.label}明细`"
+          @click="goListWith(card.query)"
+        >
           <div class="kpi-body">
             <div class="kpi-icon" :style="{ color: card.color }">
               <IconifyIconOffline :icon="card.icon" width="20" height="20" />
@@ -262,19 +313,25 @@ onBeforeUnmount(() => {
         <el-card shadow="never">
           <div class="flex justify-between items-center">
             <span class="card-title">近 90 天售后量</span>
-            <el-button link type="primary" @click="goStats">
-              查看看板
-            </el-button>
+            <div class="flex items-center gap-2">
+              <span class="chart-hint">点击某天可筛选当天记录</span>
+              <el-button link type="primary" @click="goStats">
+                查看看板
+              </el-button>
+            </div>
           </div>
-          <div ref="dailyRef" class="chart-box" />
+          <div ref="dailyRef" class="chart-box chart-clickable" />
         </el-card>
       </re-col>
 
       <!-- 类型分布 -->
       <re-col class="mb-4" :value="8" :lg="8" :md="24" :sm="24" :xs="24">
         <el-card shadow="never">
-          <div class="card-title">问题类型分布</div>
-          <div ref="typeRef" class="chart-box" />
+          <div class="flex justify-between items-center">
+            <span class="card-title">问题类型分布</span>
+            <span class="chart-hint">点击类型可筛选该类记录</span>
+          </div>
+          <div ref="typeRef" class="chart-box chart-clickable" />
         </el-card>
       </re-col>
     </el-row>
@@ -350,6 +407,26 @@ onBeforeUnmount(() => {
   :deep(.el-card__body) {
     padding: 16px 18px;
   }
+}
+
+/* 图表/KPI 点击跳转：手型光标 + 悬停反馈 */
+.kpi-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.2s;
+
+  &:hover {
+    box-shadow: var(--el-box-shadow-light);
+    transform: translateY(-2px);
+  }
+}
+
+.chart-clickable {
+  cursor: pointer;
+}
+
+.chart-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .kpi-body {

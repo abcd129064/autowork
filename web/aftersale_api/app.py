@@ -63,7 +63,8 @@ def _cycle_range(cycle_start: str) -> tuple | None:
 
 
 def _build_where(keyword: str, issue_type: str, resolved: str,
-                 is_initiative: str, is_our_problem: str, cycle_start: str):
+                 is_initiative: str, is_our_problem: str, cycle_start: str,
+                 occurred_at: str = ""):
     conds, params = [], []
     if issue_type:
         conds.append("issue_type = %s"); params.append(str(issue_type).strip())
@@ -73,6 +74,9 @@ def _build_where(keyword: str, issue_type: str, resolved: str,
         conds.append("is_initiative = %s"); params.append(str(is_initiative).strip())
     if is_our_problem:
         conds.append("is_our_problem = %s"); params.append(str(is_our_problem).strip())
+    if occurred_at:
+        # 按发生日期精确筛（记录归属日期口径与账期一致：occurred_at 缺失回退 created_at）
+        conds.append(f"{DATE_EXPR} = %s"); params.append(str(occurred_at).strip()[:10])
     if keyword:
         k = f"%{str(keyword).strip()}%"
         conds.append("(table_no LIKE %s OR room_name LIKE %s OR problem LIKE %s OR "
@@ -126,10 +130,12 @@ def records(
     page_size: int = Query(50, ge=1, le=200),
     keyword: str = "", cycle_start: str = "", issue_type: str = "",
     resolved: str = "", is_initiative: str = "", is_our_problem: str = "",
+    occurred_at: str = "",
 ):
     """分页列表 + 统计一次返回（与桌面端 query_with_stats 同口径）"""
     where, params = _build_where(keyword, issue_type, resolved,
-                                 is_initiative, is_our_problem, cycle_start)
+                                 is_initiative, is_our_problem, cycle_start,
+                                 occurred_at)
     order = "ORDER BY created_at DESC"
     with _db() as c:
         with c.cursor() as cur:

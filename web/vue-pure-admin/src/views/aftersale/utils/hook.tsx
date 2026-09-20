@@ -21,6 +21,7 @@ import type { AftersaleRecord, AftersaleStats } from "@/api/aftersale";
 import type { AftersaleFormItem } from "./types";
 import { loadLastUsed, saveLastUsed } from "./lastUsed";
 import { type Ref, h, ref, reactive, computed, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
 
 import FileListIcon from "~icons/ri/file-list-3-line";
 import ErrorIcon from "~icons/ri/error-warning-line";
@@ -63,8 +64,25 @@ export function useAftersale(tableRef: Ref) {
     issue_type: "",
     resolved: "",
     is_initiative: "",
-    is_our_problem: ""
+    is_our_problem: "",
+    // 按发生日期筛选（YYYY-MM-DD；来自总览页图表点击跳转）
+    occurred_at: ""
   });
+
+  // 路由 query 初始化筛选（总览页图表/KPI 点击跳转带参进入）
+  const route = useRoute();
+  const QUERY_KEYS = [
+    "keyword",
+    "issue_type",
+    "resolved",
+    "is_initiative",
+    "is_our_problem",
+    "occurred_at"
+  ] as const;
+  for (const k of QUERY_KEYS) {
+    const v = route.query[k];
+    if (typeof v === "string" && v) form[k] = v;
+  }
 
   const loading = ref(true);
   const dataList = ref<AftersaleRecord[]>([]);
@@ -573,6 +591,7 @@ export function useAftersale(tableRef: Ref) {
   function resetForm(formEl) {
     if (!formEl) return;
     formEl.resetFields();
+    form.occurred_at = ""; // 无对应表单项，手动清（图表点击跳转带入的日期筛选）
     onSearch();
   }
 
