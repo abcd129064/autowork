@@ -20,6 +20,40 @@ import shutil
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
+# ---- Qt 运行时引导（conda base 下 import core.version 经 conn_logger 拉起
+# PySide6.QtCore，PATH 注入的 conda 自带 Qt DLL 与 PySide6 冲突 → DLL load
+# failed；见 docs/Qt内联引导说明.md）。必须在任何项目模块 import 之前执行。----
+import importlib.util as _qt_iu
+_qt_handles = []
+try:
+    _qt_spec = _qt_iu.find_spec('PySide6')
+    if _qt_spec is not None:
+        _qt_locs = list(getattr(_qt_spec, 'submodule_search_locations', None) or [])
+        if _qt_locs:
+            _qt_pkg = _qt_locs[0]
+            for _d in (_qt_pkg, os.path.dirname(_qt_pkg),
+                       os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')):
+                if os.path.isdir(_d):
+                    try:
+                        _qt_handles.append(os.add_dll_directory(_d))
+                    except OSError:
+                        pass
+            os.environ['QT_PLUGIN_PATH'] = os.path.join(_qt_pkg, 'plugins')
+            os.environ.setdefault('QT_QPA_PLATFORM_PLUGIN_PATH',
+                                  os.path.join(_qt_pkg, 'plugins', 'platforms'))
+except Exception:
+    pass
+
+# ---- --qt-check：解释器自检短路（release.py 预检调用，见 docs/Qt内联引导说明.md）----
+# 与真实构建相同的导入链（core/__init__ → conn_logger → PySide6.QtCore），
+# 秒级验证「当前解释器 + 上方引导」能加载 Qt——2026-09-21 事故：裸 conda python
+# 跑 release.py，引导缺失下在构建收尾 import 处崩，白烧 6 分钟且 dist 已被挪走。
+if "--qt-check" in sys.argv[1:]:
+    sys.path.insert(0, ROOT)
+    from core.version import get_app_version  # noqa: E402
+    print("qt-ok", get_app_version())
+    sys.exit(0)
+
 # ---- 打包前：球桌库 WAL checkpoint ----
 # database/tables.db 以 WAL 模式运行，未合并的增量数据在 tables.db-wal 中；
 # spec 只分发主库文件，打包前必须 checkpoint 将 WAL 全部合入主库，

@@ -117,6 +117,7 @@ Headers:
 5. `value/` 响应结构（2026-09-20 晚真机补测）：成功 `{"code":200,"msg":"提交成功","data":{"errorcode":0,"pushStatus":"SENT","pushMessage":"WebSocket 指令已发送",...}}`——**errorcode/errortext 嵌在 data 里，顶层无这些键**（只看顶层会假失败）；失败 `data.errorcode=-1 + errortext`（如 datacode 传 todesk_id → "该设备号没找到"），HTTP 恒 200，必须解析 body 判定。
 6. `status/` 过滤参数实测（2026-09-20 晚）：`table_id=` 与 `device_code=` **均无效**（恒 total=0）；`keyword=` **有效**（模糊匹配，如 keyword=49-04 命中该行）——单设备轮询用 keyword 缩量 + 本地精确匹配 table_id。
 7. **todesk_status 的实时性边界（2026-09-20 真机 49-04 实测）**：指令送达（errorcode=0）后实时行的 todesk_status **不即时翻转**（观测 >5 分钟），该字段只在设备主动上报 `to_desk/status/` 时更新——用户在设备/ToDesk 平台侧手工开关同样不触发上报。因此「指令已生效」与「状态已上报」是两件事，界面着色以最新上报为准，开关后乐观显示目标状态并标注"待上报"。
+8. **`todesk_action` 字段语义（2026-09-21 网页 JS 逆向 + 真机核对，权威显示口径）**：`status/` 实时行（及落库 xqzg 行）中的 `todesk_action`（'20'开/'80'关）是**服务端收到 `value/` 下发时立即记录的最后一次指令值**——不依赖设备上报，设备端关闭不上报也能更新。xqzg 网页端设备状态页正是读 `record.todesk_action` 着色（20=绿/80=灰），**与真实开关状态经 49 号球房 10 台实测完全一致**。桌面端球桌管理 ToDesk 列已切换为同口径：`query_page` 富集时 action='20'→显示开、'80'→显示关、无 action 才回退 todesk_status。注意：该字段仅记录指令值，设备侧平台手工开关不经过 `value/` 不会写入（但设备端开机/开启时会上报 action=20）。
 
 ### 1.4 发现的接口侧问题
 

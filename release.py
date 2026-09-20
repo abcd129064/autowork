@@ -28,7 +28,7 @@
      新版本必须更大（--force 可跳过，用于重发同号）
   4. 发布：调 tools/publish_update.py（远端 sha256 复核 + latest.json 原子切换）
   5. 验证：公网 fetch_latest 解析 + 版本比较 + 包体 HEAD 可达性/大小一致
-  AFT_SSH_PASS='<SSH密码>' python release.py --notes "本次更新说明"
+ $env:AFT_SSH_PASS='Kaidao!2'; python release.py; Remove-Item Env:AFT_SSH_PASS
 """
 import argparse
 import glob
@@ -45,6 +45,30 @@ _here = os.path.dirname(os.path.abspath(__file__))
 ROOT = _here if os.path.isfile(os.path.join(_here, "build_exe.py")) \
     else os.path.dirname(_here)
 sys.path.insert(0, ROOT)
+
+# ---- Qt 运行时引导（conda base 下步骤5 from core.updater import 经
+# core/__init__ → conn_logger 拉起 PySide6.QtCore，conda 自带 Qt DLL 与
+# PySide6 冲突 → DLL load failed；见 docs/Qt内联引导说明.md）。----
+import importlib.util as _qt_iu
+_qt_handles = []
+try:
+    _qt_spec = _qt_iu.find_spec('PySide6')
+    if _qt_spec is not None:
+        _qt_locs = list(getattr(_qt_spec, 'submodule_search_locations', None) or [])
+        if _qt_locs:
+            _qt_pkg = _qt_locs[0]
+            for _d in (_qt_pkg, os.path.dirname(_qt_pkg),
+                       os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')):
+                if os.path.isdir(_d):
+                    try:
+                        _qt_handles.append(os.add_dll_directory(_d))
+                    except OSError:
+                        pass
+            os.environ['QT_PLUGIN_PATH'] = os.path.join(_qt_pkg, 'plugins')
+            os.environ.setdefault('QT_QPA_PLATFORM_PLUGIN_PATH',
+                                  os.path.join(_qt_pkg, 'plugins', 'platforms'))
+except Exception:
+    pass
 
 PY = sys.executable
 DIST = os.path.join(ROOT, "dist", "AutoWork")
@@ -77,6 +101,19 @@ def preflight(need_pass):
              "         cmd: set AFT_SSH_PASS=*** 后再运行")
     if not os.path.isfile(os.path.join(ROOT, "build_exe.py")):
         fail("build_exe.py 不存在，请在项目根目录运行")
+    # 解释器秒级自检：构建收尾会 import core.version（经 core/__init__ 拉起
+    # PySide6.QtCore）。2026-09-21 事故：裸 conda python 缺 Qt 引导，跑满
+    # 6 分钟构建后在最后一行 import 崩掉，且旧 dist 已被改名挪走。引导已
+    # 内置于 build_exe.py，此预检兜底任何解释器/引导失效的组合。
+    chk = subprocess.run([PY, "build_exe.py", "--qt-check"], cwd=ROOT,
+                         capture_output=True, text=True, timeout=60)
+    if chk.returncode != 0 or "qt-ok" not in (chk.stdout or ""):
+        tail = ((chk.stderr or "").strip().splitlines() or ["无输出"])[-1]
+        fail(f"当前解释器无法加载 Qt（{PY}）：{tail}\n"
+             f"  请用项目标准环境重试（见 docs/Qt内联引导说明.md）：\n"
+             f"  C:\\Users\\...\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe release.py ...")
+    else:
+        log(f"解释器自检通过：{PY.split(os.sep)[-1]} → {chk.stdout.strip()}")
     # git 状态提示（版本号 = BASE + 提交数，未提交的改动不会体现在版本里）
     try:
         dirty = subprocess.run(
