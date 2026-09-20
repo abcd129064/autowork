@@ -188,18 +188,18 @@
 ### 7.4 发布 SOP（日常手动打包 → 发包）
 
 > 首次正式发布已完成：3.11.276（2026-09-20 20:53，44s，端到端验证通过）。
-> **推荐用一键脚本 `tools/release.py`**（下述手动步骤已全部固化进去）：
+> **推荐用一键脚本 `release.py`**（下述手动步骤已全部固化进去）：
 
 ```bash
 # 标准全流程：预检 → 构建(自动挪开旧产物防删除守卫) → 版本比较 → 发布 → 线上验证
-AFT_SSH_PASS='<SSH密码>' python tools/release.py --notes "本次更新说明"
+AFT_SSH_PASS='<SSH密码>' python release.py --notes "本次更新说明"
 
 # 常用变体
-python tools/release.py --notes "..." --yes            # 免确认（CI/脚本化）
-python tools/release.py --notes "..." --skip-build     # 跳过构建，直发现有产物
-python tools/release.py --notes "..." --pack-only      # 只本地打包演练，不上传
-python tools/release.py --notes "..." --incremental    # 增量热修（自动找线上版 manifest 基线）
-python tools/release.py --notes "..." --force          # 允许重发不高于线上的版本
+python release.py --notes "..." --yes            # 免确认（CI/脚本化）
+python release.py --notes "..." --skip-build     # 跳过构建，直发现有产物
+python release.py --notes "..." --pack-only      # 只本地打包演练，不上传
+python release.py --notes "..." --incremental    # 增量热修（自动找线上版 manifest 基线）
+python release.py --notes "..." --force          # 允许重发不高于线上的版本
 ```
 
 脚本内置安全检查：未设 AFT_SSH_PASS 拒绝上传；本地版本 ≤ 线上版本拒绝发布

@@ -640,7 +640,7 @@ TUIDAN_STATUS = "2"
 
 
 def get_todesk_ids(codes) -> dict:
-    """按设备编码批量取最新非空 ToDesk 号与开启状态（球桌管理 todesk 列数据源）
+    """按设备编码批量取最新非空 ToDesk 号与开关状态（球桌管理 todesk 列数据源）
 
     xqzg_status 按日期分区快照存储，同一设备存在多日记录；按 file_path
     降序扫描，各字段独立取首个非空值（即最近一次上报）：
@@ -662,19 +662,23 @@ def get_todesk_ids(codes) -> dict:
         ph = ",".join(["?"] * len(chunk))
         try:
             cur = conn.execute(
-                f"SELECT device_code, todesk_id, todesk_status FROM xqzg_status "
+                f"SELECT device_code, todesk_id, todesk_status, todesk_action "
+                f"FROM xqzg_status "
                 f"WHERE device_code IN ({ph}) "
-                f"AND (todesk_id != '' OR todesk_status != '') "
+                f"AND (todesk_id != '' OR todesk_status != '' OR todesk_action != '') "
                 f"ORDER BY file_path DESC", chunk)
         except Exception:
             # 旧库未迁移/测试隔离库无 xqzg_status：跳过该块，不阻断球桌管理
             continue
-        for code, tid, tst in cur.fetchall():
-            rec = result.setdefault(code, {"todesk_id": "", "todesk_status": ""})
+        for code, tid, tst, tact in cur.fetchall():
+            rec = result.setdefault(code, {"todesk_id": "", "todesk_status": "",
+                                           "todesk_action": ""})
             if not rec["todesk_id"] and tid:
                 rec["todesk_id"] = str(tid)
             if not rec["todesk_status"] and tst:
                 rec["todesk_status"] = str(tst)
+            if not rec["todesk_action"] and tact:
+                rec["todesk_action"] = str(tact)
     return result
 
 
@@ -740,7 +744,17 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
     for r in rows:
         rec = todesk_map.get(str(r.get("code") or "").strip(), {})
         r["todesk_id"] = rec.get("todesk_id", "")
-        r["todesk_status"] = rec.get("todesk_status", "")
+        # 显示口径与 xqzg 网页端一致（2026-09-21 网页 JS 逆向确认）：
+        # todesk_action=服务端记录的最后一次指令值（20=开 80=关，下发即
+        # 记录不依赖设备上报）；todesk_status 依赖设备上报且关闭不上报
+        # （恒停 true）仅作无 action 时的兜底
+        action = str(rec.get("todesk_action") or "")
+        if action == "20":
+            r["todesk_status"] = "1"
+        elif action == "80":
+            r["todesk_status"] = "0"
+        else:
+            r["todesk_status"] = rec.get("todesk_status", "")
         # 向日葵号：仅存于 remark 文本，查询时直接解析（无 API 字段/落库）
         r["sunflower_id"] = parse_sunflower_id(r.get("remark") or "")
     return total, rows
@@ -1192,16 +1206,18 @@ def _norm_todesk_status(v) -> str:
 
 
 def update_todesk_status(device_code: str, todesk_status) -> int:
-    """开关指令确认后回写 todesk_status 到该设备最新分区行（返回受影响行数）
+    """开关指令确认后回写到该设备最新分区行（返回受影响行数）
 
-    query_page 的 todesk 富集按 file_path DESC 取各字段首个非空值，因此
-    只需更新该设备最新分区的一行即可让列表刷新着色；当日未同步过 xqzg
-    分区时找不到行返回 0（下次同步会带服务端真实状态，无损）。
+    显示口径以 todesk_action 为准（与网页端一致），故把确认状态映射回
+    指令值（'1'→'20' / '0'→'80'）写入 todesk_action 列；query_page 富集
+    按 file_path DESC 取值，只需更新最新分区一行即可让列表刷新着色；
+    当日未同步过 xqzg 分区时找不到行返回 0（下次同步无损）。
     """
     status = _norm_todesk_status(todesk_status)
     code = str(device_code or "").strip()
-    if not code:
+    if not code or not status:
         return 0
+    action = "20" if status == "1" else "80"
     conn = _get_conn()
     row = conn.execute(
         "SELECT id FROM xqzg_status WHERE TRIM(device_code) = ? "
@@ -1209,7 +1225,7 @@ def update_todesk_status(device_code: str, todesk_status) -> int:
     if row is None:
         return 0
     cur = conn.execute(
-        "UPDATE xqzg_status SET todesk_status = ? WHERE id = ?", (status, row[0]))
+        "UPDATE xqzg_status SET todesk_action = ? WHERE id = ?", (action, row[0]))
     conn.commit()
     return cur.rowcount
 
@@ -1236,17 +1252,19 @@ def save_xqzg(rows: list, file_path: str = "") -> int:
         # 只删除该日期的数据，保留其他日期
         conn.execute("DELETE FROM xqzg_status WHERE file_path = ?", (file_path,))
         all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
-        # id + file_path + todesk_id + todesk_status + fields（todesk 两列为
-        # xqzg 专属：号=parse_todesk_id 解析，状态=_norm_todesk_status 归一化）
-        placeholders = ", ".join(["?"] * (len(all_fields) + 4))
-        col_names = ("id, file_path, todesk_id, todesk_status, "
+        # id + file_path + todesk_id + todesk_status + todesk_action + fields
+        # （todesk 三列为 xqzg 专属：号=parse_todesk_id 解析，
+        # 状态=_norm_todesk_status 归一化，action=服务端最后指令值原样存）
+        placeholders = ", ".join(["?"] * (len(all_fields) + 5))
+        col_names = ("id, file_path, todesk_id, todesk_status, todesk_action, "
                      + ", ".join(all_fields))
         # 获取当前最大 id，续接编号
         max_id = conn.execute("SELECT MAX(id) FROM xqzg_status").fetchone()[0] or 0
         data = []
         for idx, item in enumerate(rows, max_id + 1):
             row_vals = [idx, file_path, parse_todesk_id(item),
-                        _norm_todesk_status(item.get("todesk_status"))]
+                        _norm_todesk_status(item.get("todesk_status")),
+                        str(item.get("todesk_action") or "")]
             for f in STATUS_FIELDS:
                 row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
             for f in KD_EXTRA_FIELDS:

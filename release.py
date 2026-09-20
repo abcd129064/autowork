@@ -6,19 +6,19 @@
 用法（项目根目录执行）：
   # 标准全流程（构建 + 发布 + 验证），发布前会显示摘要并要确认
   set AFT_SSH_PASS=***          # bash: AFT_SSH_PASS='***'
-  python tools/release.py --notes "修复xxx；新增yyy"
+  python release.py --notes "修复xxx；新增yyy"
 
   # 免确认（CI / 脚本化）
-  python tools/release.py --notes "..." --yes
+  python release.py --notes "..." --yes
 
   # 跳过构建，直接发布现有 dist/AutoWork（已确认产物是新的时候）
-  python tools/release.py --notes "..." --skip-build
+  python release.py --notes "..." --skip-build
 
   # 只演练：走完构建与校验，发布环节仅本地打包不上传
-  python tools/release.py --notes "..." --pack-only
+  python release.py --notes "..." --pack-only
 
   # 增量热修：自动以线上当前版本为基线（找 out/update_manifest_<线上版>.json）
-  python tools/release.py --notes "热修xxx" --incremental
+  python release.py --notes "热修xxx" --incremental
 
 流程与安全检查（每步失败即中止，线上不受影响）：
   1. 预检：AFT_SSH_PASS 已设置（--pack-only 除外）、工作区 git 状态提示
@@ -28,7 +28,7 @@
      新版本必须更大（--force 可跳过，用于重发同号）
   4. 发布：调 tools/publish_update.py（远端 sha256 复核 + latest.json 原子切换）
   5. 验证：公网 fetch_latest 解析 + 版本比较 + 包体 HEAD 可达性/大小一致
-  AFT_SSH_PASS='<SSH密码>' python tools/release.py --notes "本次更新说明"
+  AFT_SSH_PASS='<SSH密码>' python release.py --notes "本次更新说明"
 """
 import argparse
 import glob
@@ -40,7 +40,10 @@ import subprocess
 import sys
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 本脚本位于项目根目录（2026-09-20 从 tools/ 移出）；若在 tools/ 下运行则回退旧推导
+_here = os.path.dirname(os.path.abspath(__file__))
+ROOT = _here if os.path.isfile(os.path.join(_here, "build_exe.py")) \
+    else os.path.dirname(_here)
 sys.path.insert(0, ROOT)
 
 PY = sys.executable
@@ -70,7 +73,7 @@ def run(cmd, **kw):
 def preflight(need_pass):
     if need_pass and not os.environ.get("AFT_SSH_PASS"):
         fail("未设置 AFT_SSH_PASS（上传需要 SSH 密码）。"
-             "bash: AFT_SSH_PASS='***' python tools/release.py ...\n"
+             "bash: AFT_SSH_PASS='***' python release.py ...\n"
              "         cmd: set AFT_SSH_PASS=*** 后再运行")
     if not os.path.isfile(os.path.join(ROOT, "build_exe.py")):
         fail("build_exe.py 不存在，请在项目根目录运行")

@@ -63,6 +63,7 @@ __all__ = [
     "_LINK_COLOR", "_DEVICE_STATUS_MAP", "_load_settings", "_save_settings",
     "_fmt_size", "_EXPORT_MAX_ROWS", "_HF_DAYS", "_HF_THRESHOLD", "_HF_COLOR",
     "_query_kd_page_with_stats", "_query_xqzg_page_with_stats",
+    "_query_tables_page_with_stats",
     "_confirm_offline_connect", "_open_in_explorer", "_show_export_bar",
     "_DBQueryWorker", "_SortableTableWidget", "_ReadOnlySelectDelegate",
     "_copy_table_selection", "_FIXED_ROW_HEIGHT", "_fit_table_rows",
@@ -321,6 +322,25 @@ def _query_xqzg_page_with_stats(page_no, page_size, keyword, date,
     return total, rows, hf
 
 
+def _query_tables_page_with_stats(page_no, page_size, keyword, hf_days,
+                                  include_test, include_manual,
+                                  include_tuidan):
+    """球桌分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）
+
+    高频统计若留在 _populate 里，GUI 线程每次查询完成都要同步查一次远程
+    MySQL：网络闪断后旧连接半开，SQL 挂到 TCP 读超时才返回，实测可冻结
+    界面十秒上下（搜索/翻页全部经 _populate，症状表现为"概率性卡死"）。
+    """
+    total, rows = table_db.query_page(
+        page_no, page_size, keyword, include_test=include_test,
+        include_manual=include_manual, include_tuidan=include_tuidan)
+    try:
+        hf = table_db.get_submission_stats(days=hf_days)
+    except Exception:
+        hf = {"by_device": {}, "by_table": {}}
+    return total, rows, hf
+
+
 def _confirm_offline_connect(parent, last_report: str) -> bool:
     """A2 离线确认：设备下线时弹醒目确认框，返回是否仍要继续连接"""
     box = MessageBox(
@@ -384,10 +404,20 @@ class _DBQueryWorker(QThread):
 
     def run(self):
         try:
+            # 中断检查点：页面快速切换（连续翻页/改搜索词）会 requestInterruption
+            # 旧的排队 Worker。它们虽然已断开信号，但若不在此拦截，仍会照常
+            # 打一次库——MySQL 闪断窗口里每个陈旧 Worker 都要挂到 TCP 读超时
+            # 才退出，堆积起来就是连接风暴。开跑前已被取代的直接放弃。
+            if self.isInterruptionRequested():
+                return
             result = self.func(*self.args, **self.kwargs)
+            if self.isInterruptionRequested():
+                # 查询期间被取代：结果已过时，不再回抛
+                return
             self.result_ready.emit(result)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self.isInterruptionRequested():
+                self.error.emit(str(e))
 
 
 # ==================== 通用组件 ====================

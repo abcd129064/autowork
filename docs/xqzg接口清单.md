@@ -110,10 +110,13 @@ Headers:
 ```
 
 实测结论（2026-09-20，签名探针验证）：
-1. **两上报端点仅支持 POST**（GET 返回 405 `Method "GET" not allowed`）——纯写入通道，**不可用于查询**；桌面端查询实时状态必须走 `GET status/?table_id=xxx`（Session 认证，返回 file_path=None 的实时行）。
+1. **两上报端点仅支持 POST**（GET 返回 405 `Method "GET" not allowed`）——纯写入通道，**不可用于查询**；桌面端查询实时状态走 `GET status/`（Session 认证，不带 `file_path` 返回 file_path=None 的实时聚合行）。
 2. **桌面端严禁调用上报端点**：POST 会伪造设备状态写入（写 Redis 并反映到 status/），仅设备侧程序（如生产机 `todesk.sh`）使用。
 3. `http://192.168.0.160:8001` 为**本地开发环境**地址（外部不可达）；生产环境一律走 `https://xqzg.newbv.cn`。
-4. `value/` 指令下发的实测细节（2026-09-20 补充）：**form 提交**（JSON body 被忽略，报缺参）；`datatype` 传任意值均被规范化为 `action`；`datacode` 必须是**设备编码**（table_id 报"该设备号没找到"）；成功响应同步返回 `errorcode:0 + pushStatus:"SENT" + pushMessage:"WebSocket 指令已发送"`——服务端经 **WebSocket 即时推送**到在线设备。
+4. `value/` 指令下发的实测细节（2026-09-20 补充）：**form 提交**（JSON body 被忽略，报缺参）；`datatype` 传任意值均被规范化为 `action`；`datacode` 必须是**设备编码**（table_id 报"该设备号没找到"）；服务端经 **WebSocket 即时推送**到在线设备。
+5. `value/` 响应结构（2026-09-20 晚真机补测）：成功 `{"code":200,"msg":"提交成功","data":{"errorcode":0,"pushStatus":"SENT","pushMessage":"WebSocket 指令已发送",...}}`——**errorcode/errortext 嵌在 data 里，顶层无这些键**（只看顶层会假失败）；失败 `data.errorcode=-1 + errortext`（如 datacode 传 todesk_id → "该设备号没找到"），HTTP 恒 200，必须解析 body 判定。
+6. `status/` 过滤参数实测（2026-09-20 晚）：`table_id=` 与 `device_code=` **均无效**（恒 total=0）；`keyword=` **有效**（模糊匹配，如 keyword=49-04 命中该行）——单设备轮询用 keyword 缩量 + 本地精确匹配 table_id。
+7. **todesk_status 的实时性边界（2026-09-20 真机 49-04 实测）**：指令送达（errorcode=0）后实时行的 todesk_status **不即时翻转**（观测 >5 分钟），该字段只在设备主动上报 `to_desk/status/` 时更新——用户在设备/ToDesk 平台侧手工开关同样不触发上报。因此「指令已生效」与「状态已上报」是两件事，界面着色以最新上报为准，开关后乐观显示目标状态并标注"待上报"。
 
 ### 1.4 发现的接口侧问题
 

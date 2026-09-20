@@ -164,7 +164,12 @@ TABLE_COLUMNS = {
         # 优先，remark「我的识别码」兜底，save_xqzg 解析后落库
         ColumnDef("todesk_id", "TEXT", "VARCHAR(64)", "''", "''"),
         # ToDesk 开启状态（xqzg API todesk_status：True=开启；'1'/'0'/'' 存储）
+        # ⚠️ 该字段依赖设备上报且关闭不产生上报（恒停 true），仅作兜底；
+        # 界面显示口径以 todesk_action（服务端记录的最后一次指令值）为准
         ColumnDef("todesk_status", "TEXT", "VARCHAR(8)", "''", "''"),
+        # ToDesk 最后一次指令值（value/ 下发即记录：20=开 80=关，与网页端
+        # todesk_action 显示口径一致；'20'/'80'/'' 存储）
+        ColumnDef("todesk_action", "TEXT", "VARCHAR(8)", "''", "''"),
         # 8 类文件清单存 JSON：SQLite TEXT 带默认 '[]'；MySQL LONGTEXT
         # 不允许 DEFAULT 子句（读取端 json.loads(None) 兼容）
         ColumnDef("normal_files", "TEXT", "LONGTEXT", "'[]'", None),
@@ -431,6 +436,8 @@ MIGRATIONS: dict = {
         ColumnMigration("xqzg_status", "todesk_id", "TEXT", "''",
                         "VARCHAR(64)", "''"),
         ColumnMigration("xqzg_status", "todesk_status", "TEXT", "''",
+                        "VARCHAR(8)", "''"),
+        ColumnMigration("xqzg_status", "todesk_action", "TEXT", "''",
                         "VARCHAR(8)", "''"),
     ],
     "kd_status": [

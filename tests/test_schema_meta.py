@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS xqzg_status (
     status          TEXT DEFAULT '',
     todesk_id       TEXT DEFAULT '',
     todesk_status   TEXT DEFAULT '',
+    todesk_action   TEXT DEFAULT '',
     normal_files    TEXT DEFAULT '[]',
     except_files    TEXT DEFAULT '[]',
     untreated_files TEXT DEFAULT '[]',
@@ -242,6 +243,7 @@ GOLDEN_MYSQL_DDL = {
             status           VARCHAR(32) DEFAULT '',
             todesk_id        VARCHAR(64) DEFAULT '',
             todesk_status    VARCHAR(8) DEFAULT '',
+            todesk_action    VARCHAR(8) DEFAULT '',
             normal_files     LONGTEXT,
             except_files     LONGTEXT,
             untreated_files  LONGTEXT,
@@ -379,7 +381,8 @@ def normalize(sql: str) -> str:
 
 
 def test_table_names_cover_all_nine_tables():
-    """TABLE_NAMES 覆盖全部 9 张双方言表"""
+    """TABLE_NAMES 覆盖全部 9 张双方言表（todesk_override 覆盖层已弃用：
+    显示口径改用 xqzg todesk_action，与网页端一致）"""
     assert schema.TABLE_NAMES == [
         "billiard_tables", "sync_meta", "xqzg_status", "kd_status",
         "submission_log", "device_mapping", "health_alerts",

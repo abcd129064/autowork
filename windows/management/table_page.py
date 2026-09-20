@@ -73,7 +73,11 @@ class TablePage(QWidget):
         self._query_worker = None
         self._save_worker = None
         self._export_worker = None
-        self._todesk_worker = None  # ToDesk 开关指令 Worker（右键菜单触发）
+        # ToDesk 开关 Worker 池：按设备编码并发（轮询窗口最长 2 分钟，
+        # 单实例引用会把其他设备的点击全部挡住）；同设备反向指令可打断旧轮询
+        self._todesk_workers = {}
+        self._todesk_ctx_map = {}  # device_code -> {row, old_status, turn_on}
+        self._xqzg_sync_worker = None  # xqzg 实时行同步 Worker（同步数据追加）
         self._hidden_cols = {2, 8}  # 在线状态/设备编码 默认隐藏（ToDesk号/向日葵 插列后设备编码 7→8），「筛选」菜单可勾选显示
         self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
         self._show_manual = False  # 是否显示手动版本设备（name 或 roomName 含 @s，默认不显示）
@@ -241,18 +245,21 @@ class TablePage(QWidget):
             self._query_worker.disconnect(self)
         keyword = self._search_edit.text().strip()
         self._query_worker = _DBQueryWorker(
-            table_db.query_page, self._page_no, self._page_size, keyword,
-            include_test=self._show_test, include_manual=self._show_manual,
-            include_tuidan=self._show_tuidan)
+            _query_tables_page_with_stats,
+            self._page_no, self._page_size, keyword, _HF_DAYS,
+            self._show_test, self._show_manual, self._show_tuidan)
         self._query_worker.result_ready.connect(
             lambda result, kw=keyword: self._on_query_finished(result, kw))
+        self._query_worker.error.connect(
+            lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
+                                      title="查询失败", parent=self, duration=4000))
         self._query_worker.start()
 
     def _on_query_finished(self, result, keyword=""):
-        """查询完成回调：更新表格与分页"""
-        total, rows = result
+        """查询完成回调：更新表格与分页（高频统计已随分页同批返回）"""
+        total, rows, hf_stats = result
         self._total = total
-        self._populate(rows)
+        self._populate(rows, hf_stats)
         self._update_pager(keyword)
         # 异步获取同步时间
         self._time_worker = _DBQueryWorker(table_db.get_meta)
@@ -282,24 +289,60 @@ class TablePage(QWidget):
         self._save_worker.start()
 
     def _on_save_finished(self, count):
-        """保存完成：重置页码并重新加载"""
+        """保存完成：重置页码并重新加载；追加同步 xqzg 实时行（todesk 源）"""
         self._page_no = 1
         self._load_local()
         self._refresh_btn.setEnabled(True)
         self._lbl_info.setText(f"同步完成，共 {count} 条")
+        self._sync_xqzg_live()
+
+    def _sync_xqzg_live(self):
+        """追加拉取 xqzg 实时行落当日分区（ToDesk号/状态着色的数据源）
+
+        wechat listext 不含 todesk 字段；不追加这步，ToDesk 列会一直显示
+        旧快照状态（设备已关闭仍绿色）。实时行单页 993 条（pagesize 1000
+        自动翻页兜底），file_path 传空即实时聚合行。失败静默：账号未配置/
+        网络异常只记日志，不影响主同步流程。
+        """
+        if self._xqzg_sync_worker and self._xqzg_sync_worker.isRunning():
+            return
+        self._xqzg_sync_worker = SnookerOmFetchWorker(file_path="")
+        self._xqzg_sync_worker.result_ready.connect(self._on_xqzg_live_done)
+        self._xqzg_sync_worker.error.connect(
+            lambda msg: logger.warning("xqzg 实时行同步失败（不影响球桌数据）: %s", msg))
+        self._xqzg_sync_worker.start()
+
+    def _on_xqzg_live_done(self, rows):
+        """xqzg 实时行拉取完成：落今日分区后重查（着色即最新上报状态）
+
+        落库不能在本回调（GUI 线程）里同步做：批量写远程 MySQL 撞上网络
+        闪断会挂到超时才返回，整个界面冻结十秒上下。改走 Worker，
+        完成后在回调里重查。
+        """
+        if not rows:
+            return
+        today = datetime.now().strftime("%Y/%m/%d")
+        self._save_worker = _DBQueryWorker(table_db.save_xqzg, rows, today)
+        self._save_worker.result_ready.connect(
+            lambda _count: self._load_local())
+        self._save_worker.error.connect(
+            lambda msg: logger.warning("xqzg 实时行落库失败: %s", msg))
+        self._save_worker.start()
 
     def _on_sync_error(self, msg):
         """API 同步失败：恢复刷新按钮并展示错误"""
         self._refresh_btn.setEnabled(True)
         self._lbl_info.setText(f"同步失败: {msg}")
 
-    def _populate(self, rows):
-        """行数据 → 表格：高频问题设备状态列标红，填充期关更新防闪烁"""
-        # 高频问题标记：一次聚合查询（无 N+1），失败静默不标记
-        try:
-            hf_map = table_db.get_submission_stats(days=_HF_DAYS)["by_table"]
-        except Exception:
-            hf_map = {}
+    def _populate(self, rows, hf_stats=None):
+        """行数据 → 表格：高频问题设备状态列标红，填充期关更新防闪烁
+
+        高频统计必须由 Worker 随分页查询一起传入（界面零同步查询）：
+        旧版本页在 GUI 线程里同步查 get_submission_stats，MySQL 闪断后
+        旧连接半开，每次搜索/翻页都会白挂到 TCP 读超时（~10s）才返回。
+        传入为空时降级为不标记（防御，正常链路不会发生）。
+        """
+        hf_map = (hf_stats or {}).get("by_table") or {}
         # 填充期间关闭界面更新与信号，完成后一次性恢复
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
@@ -618,11 +661,11 @@ class TablePage(QWidget):
                 return i
         return -1
 
-    def _set_todesk_cell(self, row, status="", busy=False):
+    def _set_todesk_cell(self, row, status="", busy=False, note=""):
         """原地刷新 ToDesk 号单元格着色与 tooltip（不重查库，保证实时反馈）
 
         busy=True 表示指令已受理待设备确认（置灰）；status='1' 绿色开启，
-        其余恢复默认色并标注 关闭/未上报。
+        其余恢复默认色并标注 关闭/未上报；note 附加说明（如「已下发」）。
         """
         col = self._todesk_col()
         if col < 0:
@@ -631,6 +674,7 @@ class TablePage(QWidget):
         if item is None:
             return
         tip = item.text().strip()
+        suffix = f"（{note}）" if note else ""
         if busy:
             item.setForeground(QColor(SEMANTIC["neutral"]))
             item.setToolTip(f"{tip}\nToDesk 指令下发中，等待设备确认…")
@@ -638,24 +682,24 @@ class TablePage(QWidget):
         item.setData(Qt.ItemDataRole.UserRole, str(status or ""))
         if str(status or "") == "1":
             item.setForeground(QColor(SEMANTIC["success"]))
-            item.setToolTip(f"{tip}\nToDesk 状态：开启")
+            item.setToolTip(f"{tip}\nToDesk 状态：开启{suffix}")
         else:
             item.setForeground(
                 self._table.palette().color(QPalette.ColorRole.Text))
             state_txt = "关闭" if str(status or "") == "0" else "未上报"
-            item.setToolTip(f"{tip}\nToDesk 状态：{state_txt}")
+            item.setToolTip(f"{tip}\nToDesk 状态：{state_txt}{suffix}")
 
     def _toggle_todesk(self, row):
-        """右键开关 ToDesk：确认 → 下发指令 → 乐观置灰 → 轮询确认后刷新着色"""
+        """右键开关 ToDesk：确认 → 下发指令 → 乐观置灰 → 轮询确认后刷新着色
+
+        Worker 按设备编码并发：不同设备可同时操作；同设备反向指令打断
+        旧轮询立即重发（乐观显示本就以目标态为准，无需等旧轮询退出）。
+        """
         col = self._todesk_col()
         if col < 0:
             return
         item = self._table.item(row, col)
         if item is None or not item.text().strip():
-            return
-        if self._todesk_worker and self._todesk_worker.isRunning():
-            show_info_bar("已有 ToDesk 开关指令执行中，请稍候", "warning",
-                          title="提示", parent=self, duration=2500)
             return
         device_code = str(item.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
         if not device_code:
@@ -666,6 +710,19 @@ class TablePage(QWidget):
         table_name = name_item.text().strip() if name_item else ""
         old_status = str(item.data(Qt.ItemDataRole.UserRole) or "")
         turn_on = old_status != "1"
+        old_worker = self._todesk_workers.get(device_code)
+        if old_worker and old_worker.isRunning():
+            if old_worker.turn_on == turn_on:
+                # 同方向重复点击：指令已受理，拒绝重复下发
+                show_info_bar(f"球桌「{table_name}」的开关指令执行中，请稍候",
+                              "warning", title="提示", parent=self, duration=2500)
+                return
+            # 反向指令：断开旧 worker 回调（防 late 信号干扰）并打断轮询
+            try:
+                old_worker.disconnect(self)
+            except (TypeError, RuntimeError):
+                pass
+            old_worker.requestInterruption()
         verb = "开启" if turn_on else "关闭"
         box = MessageBox(
             f"确认{verb} ToDesk",
@@ -675,50 +732,76 @@ class TablePage(QWidget):
         box.cancelButton.setText("取消")
         if not box.exec():
             return
-        # 记录上下文供信号回调定位单元格与失败恢复
-        self._todesk_ctx = {"row": row, "dev": device_code,
-                            "name": table_name, "old_status": old_status}
+        # 上下文按设备编码存取：信号回调经 sender() 归属到具体 worker
+        self._todesk_ctx_map[device_code] = {
+            "row": row, "old_status": old_status, "turn_on": turn_on,
+            "name": table_name}
         self._set_todesk_cell(row, busy=True)
-        self._todesk_worker = TodeskToggleWorker(device_code, table_name, turn_on)
-        self._todesk_worker.sent_ok.connect(self._on_todesk_sent)
-        self._todesk_worker.confirmed.connect(self._on_todesk_confirmed)
-        self._todesk_worker.unconfirmed.connect(self._on_todesk_unconfirmed)
-        self._todesk_worker.error.connect(self._on_todesk_error)
-        self._todesk_worker.start()
+        worker = TodeskToggleWorker(device_code, table_name, turn_on)
+        # ⚠️ 不能用 self.sender() 归属回调：PySide6 中 Python 侧 emit 时
+        # sender() 恒为 None，连接时闭包捕获 worker 才可靠
+        worker.sent_ok.connect(lambda w=worker: self._on_todesk_sent(w))
+        worker.confirmed.connect(lambda s, w=worker: self._on_todesk_confirmed(s, w))
+        worker.unconfirmed.connect(
+            lambda s, w=worker: self._on_todesk_unconfirmed(s, w))
+        worker.error.connect(lambda m, w=worker: self._on_todesk_error(m, w))
+        # 线程结束后清理池引用（按身份比较，防止误删同设备的后继 worker）
+        worker.finished.connect(
+            lambda w=worker, d=device_code:
+            self._todesk_workers.pop(d, None) if self._todesk_workers.get(d) is w else None)
+        self._todesk_workers[device_code] = worker
+        worker.start()
 
-    def _on_todesk_sent(self):
-        """指令已被服务端受理（WebSocket 已推送），置灰等待设备确认"""
-        show_info_bar("指令已下发，等待设备确认…", "info",
-                      title="ToDesk", parent=self, duration=2500)
+    def _todesk_ctx_for(self, worker) -> dict:
+        """按信号发送者（worker）取对应设备上下文；无归属直接忽略"""
+        dev = str(getattr(worker, "device_code", "") or "").strip()
+        return self._todesk_ctx_map.get(dev) or {} if dev else {}
 
-    def _on_todesk_confirmed(self, status):
-        """设备已确认新状态：回写本地最新分区并原地刷新着色"""
-        ctx = getattr(self, "_todesk_ctx", None)
+    def _on_todesk_sent(self, worker=None):
+        """指令已被服务端受理（errorcode=0，WebSocket 已推送）
+
+        实测指令秒级生效，但设备状态上报有延迟——立即乐观显示目标状态
+        （tooltip 标注待上报），后续 confirmed 再补「已确认」。
+        """
+        ctx = self._todesk_ctx_for(worker)
+        if not ctx:
+            return
+        target = "1" if ctx.get("turn_on") else "0"
+        self._set_todesk_cell(ctx["row"], status=target,
+                              note="已下发，待设备上报")
+        verb = "开启" if ctx.get("turn_on") else "关闭"
+        show_info_bar(f"指令已下发（{verb}），设备状态上报可能有延迟",
+                      "success", title="ToDesk", parent=self, duration=3000)
+
+    def _on_todesk_confirmed(self, status, worker=None):
+        """设备已上报新状态：回写本地最新分区并原地刷新着色"""
+        ctx = self._todesk_ctx_for(worker)
         if not ctx:
             return
         try:
-            table_db.update_todesk_status(ctx["dev"], status)
+            dev = str(getattr(worker, "device_code", "") or "")
+            table_db.update_todesk_status(dev, status)
         except Exception:
             logger.exception("回写 todesk_status 失败（不影响界面刷新）")
         self._set_todesk_cell(ctx["row"], status=str(status or ""))
         verb = "开启" if str(status) == "1" else "关闭"
-        show_info_bar(f"球桌「{ctx['name']}」ToDesk 已确认{verb}", "success",
-                      title="已确认", parent=self, duration=3000)
+        show_info_bar(f"球桌「{ctx.get('name', '')}」ToDesk 已确认{verb}",
+                      "success", title="已确认", parent=self, duration=3000)
 
-    def _on_todesk_unconfirmed(self, last_status):
-        """轮询超时未确认（设备可能离线）：恢复原状态显示并提示"""
-        ctx = getattr(self, "_todesk_ctx", None)
+    def _on_todesk_unconfirmed(self, last_status, worker=None):
+        """轮询期内设备未上报新状态（2026-09-20 真机实测：上报有延迟且
+        可能超过轮询窗口）。指令已受理且大概率生效，**不回滚**界面状态，
+        仅提示。"""
+        ctx = self._todesk_ctx_for(worker)
         if not ctx:
             return
-        self._set_todesk_cell(ctx["row"], status=ctx.get("old_status") or "")
-        suffix = f"（当前读到: {last_status}）" if last_status else ""
         show_info_bar(
-            f"指令已受理但设备未在限时内确认，可能离线{suffix}，可稍后刷新核实",
-            "warning", title="未确认", parent=self, duration=5000)
+            "指令已生效，但设备状态上报有延迟，稍后「同步数据」后以最新上报为准",
+            "warning", title="待上报", parent=self, duration=5000)
 
-    def _on_todesk_error(self, msg):
+    def _on_todesk_error(self, msg, worker=None):
         """下发失败：恢复原状态显示并提示错误"""
-        ctx = getattr(self, "_todesk_ctx", None)
+        ctx = self._todesk_ctx_for(worker)
         if ctx:
             self._set_todesk_cell(ctx["row"], status=ctx.get("old_status") or "")
         show_info_bar(str(msg).split("\n")[0], "error",

@@ -77,7 +77,8 @@ def _prep_xqzg_db(db):
     """按 save_xqzg 实际写入的列预建 xqzg_status + sync_meta（隔离真实库）"""
     sl = sqlite3.connect(db)
     cols = ["id INTEGER PRIMARY KEY", "file_path TEXT DEFAULT ''",
-            "todesk_id TEXT DEFAULT ''", "todesk_status TEXT DEFAULT ''"]
+            "todesk_id TEXT DEFAULT ''", "todesk_status TEXT DEFAULT ''",
+            "todesk_action TEXT DEFAULT ''"]
     cols += [f"{f} TEXT" for f in table_db.STATUS_FIELDS]
     cols += [f"{f} TEXT" for f in table_db.KD_EXTRA_FIELDS]
     sl.execute(f"CREATE TABLE xqzg_status ({', '.join(cols)})")

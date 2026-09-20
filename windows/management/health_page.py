@@ -973,12 +973,27 @@ class HealthPage(QWidget):
     # ---------- 展示 ----------
 
     def _refresh_display(self):
-        """重载告警条目重建表格（展示刷新定时器 / 拉取完成后调用）"""
-        try:
-            rows = table_db.query_health_alerts()
-        except Exception as e:
-            self._lbl_sync.setText(f"查询失败: {e}")
-            return
+        """重载告警条目重建表格（展示刷新定时器 / 拉取完成后调用）
+
+        查询走 Worker 线程：GUI 线程直接查库在 MySQL 闪断（旧连接半开）时
+        会挂到 TCP 超时才返回，定时刷新撞上就是整界面冻结十秒上下。
+        同名旧任务在途时断开信号丢弃（告警数据以最后一次为准）。
+        """
+        old = getattr(self, "_alerts_worker", None)
+        if old is not None and old.isRunning():
+            try:
+                old.disconnect(self)
+            except (RuntimeError, TypeError):
+                pass
+        worker = _DBQueryWorker(table_db.query_health_alerts)
+        self._alerts_worker = worker
+        worker.result_ready.connect(self._on_alerts_loaded)
+        worker.error.connect(
+            lambda msg: self._lbl_sync.setText(f"查询失败: {msg}"))
+        worker.start()
+
+    def _on_alerts_loaded(self, rows):
+        """告警查询完成：回写行数据并重建表格（Worker 线程零界面操作）"""
         self._rows = rows
         now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
         self._sync_base_text = f"{len(rows)} 条异常 · 展示刷新于 {now}"

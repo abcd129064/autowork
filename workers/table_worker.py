@@ -677,22 +677,67 @@ TODESK_VALUE_ON = "20"
 TODESK_VALUE_OFF = "80"
 
 
+def parse_value_response(data) -> tuple:
+    """解析 value/ 响应，返回 (ok, errtext)
+
+    成功形如 {"code":200,"msg":"提交成功","data":{"errorcode":0,
+    "pushStatus":"SENT","pushMessage":"WebSocket 指令已发送"}}——
+    errorcode/errortext 嵌在 data 里（2026-09-20 真机实测，顶层无这些键，
+    只看顶层会假失败）。失败形如 data.errorcode=-1 + errortext="该设备号没找到"
+    （datacode 必须传设备编码，传 todesk_id 即此错）。
+    """
+    if not isinstance(data, dict):
+        return False, str(data)[:160]
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    # errorcode 兼容嵌套/顶层，值兼容 int 0 与字符串 "0"
+    ec = payload.get("errorcode", data.get("errorcode"))
+    if ec in (0, "0"):
+        return True, ""
+    err = (payload.get("errortext") or data.get("errortext")
+           or data.get("msg") or "接口返回失败")
+    return False, str(err)[:160]
+
+
+def pick_todesk_status(rows, table_id, device_code=""):
+    """从 status/ 返回行中挑出目标设备的 todesk_status 原始值（未命中 None）
+
+    实测 status/ 不支持 table_id=/device_code= 精确参数（恒 total=0），
+    但支持 keyword 模糊过滤；先 keyword 缩量再本地精确匹配 table_id，
+    兜底按设备编码匹配。返回原始值（True/False/None/字符串），
+    归一化由调用方处理。
+    """
+    tid = str(table_id or "").strip()
+    code = str(device_code or "").strip().lower()
+    for row in rows or []:
+        if tid and str(row.get("table_id") or "").strip() == tid:
+            return row.get("todesk_status")
+    for row in rows or []:
+        if code and str(row.get("device_code") or "").strip().lower() == code:
+            return row.get("todesk_status")
+    return None
+
+
 class TodeskToggleWorker(QThread):
     """点击 ToDesk 号开关：下发 value/ 指令 → 轮询实时状态确认
 
     全链路：Session 登录 → 补种 csrftoken → form POST value/
     （datacode=设备编码, datatype=action, datavalue=20/80，JSON 会被接口
     忽略必须 data= 提交）→ 服务端 WebSocket 即时推送设备 → 轮询
-    GET status/?table_id=（不带 file_path 即实时行，单设备轻量查询）
-    核对 todesk_status 是否翻转到期望值。
+    GET status/?keyword=<球桌号>（table_id=/device_code= 参数实测无效，
+    keyword 有效）核对 todesk_status 是否翻转到期望值。
 
-    轮询参数可在配置 api_credentials.todesk_toggle 覆盖：
-    poll_interval（秒，默认 3）/ max_polls（次数，默认 10）。
+    ⚠️ 实测（2026-09-20 真机）：to_desk_status 只在设备主动上报时更新，
+    指令送达（errorcode=0）后实时行可能长时间不翻转（>5 分钟观测）——
+    confirmed 仅代表设备已上报新状态；超时 unconfirmed 不代表指令失败
+    （指令大概率已生效），UI 侧应乐观显示目标状态、提示上报延迟。
+
+    轮询参数可在配置 todesk_toggle 域覆盖：
+    poll_interval（秒，默认 10）/ max_polls（次数，默认 12）。
 
     Signals:
-        sent_ok(): 指令已被服务端受理（pushStatus=SENT），UI 可置灰等待
-        confirmed(str): 设备已确认新状态，参数=归一化 todesk_status（'1'/'0'）
-        unconfirmed(str): 下发受理但轮询超时未确认（可能设备离线），
+        sent_ok(): 指令已被服务端受理（errorcode=0），UI 可乐观显示目标状态
+        confirmed(str): 设备已上报新状态，参数=归一化 todesk_status（'1'/'0'）
+        unconfirmed(str): 轮询期内设备未上报新状态（上报有延迟，非指令失败），
             参数=最后一次读到的状态（可能为空）
         error(str): 下发失败 / 登录失败等整体错误
     """
@@ -713,13 +758,13 @@ class TodeskToggleWorker(QThread):
         # 轮询参数：merged 配置顶层 todesk_toggle 优先，兼容 api_credentials 子键
         toggle_cfg = creds.get("todesk_toggle") or _load_toggle_config()
         try:
-            self.poll_interval = max(0.5, float(toggle_cfg.get("poll_interval", 3)))
+            self.poll_interval = max(0.5, float(toggle_cfg.get("poll_interval", 10)))
         except (TypeError, ValueError):
-            self.poll_interval = 3.0
+            self.poll_interval = 10.0
         try:
-            self.max_polls = max(1, int(toggle_cfg.get("max_polls", 10)))
+            self.max_polls = max(1, int(toggle_cfg.get("max_polls", 12)))
         except (TypeError, ValueError):
-            self.max_polls = 10
+            self.max_polls = 12
 
     @staticmethod
     def _norm_status(v) -> str:
@@ -780,14 +825,9 @@ class TodeskToggleWorker(QThread):
                 return False, "SESSION"
             if resp.status_code != 200:
                 return False, f"HTTP {resp.status_code}: {resp.text[:120]}"
-            data = resp.json()
-            # 成功形如 {"errorcode": 0, "pushStatus": "SENT", ...}；
-            # 只看 HTTP 状态码会假成功（业务失败同样可能 200）
-            if isinstance(data, dict) and data.get("errorcode") == 0:
-                return True, ""
-            msg = (data.get("msg") or data.get("detail") or str(data)) \
-                if isinstance(data, dict) else str(data)
-            return False, str(msg)[:160]
+            # 成功/失败判定走 parse_value_response（errorcode 嵌在 data 里，
+            # 失败时 errortext 给出原因如「该设备号没找到」）
+            return parse_value_response(resp.json())
         except requests.exceptions.Timeout:
             return False, "请求超时"
         except requests.exceptions.RequestException:
@@ -796,19 +836,18 @@ class TodeskToggleWorker(QThread):
             return False, "响应解析失败"
 
     def _read_live_status(self, session) -> str:
-        """GET status/?table_id=（无 file_path）读该设备实时 todesk_status"""
-        params = {"page": 1, "pagesize": 20, "table_id": self.table_id}
+        """GET status/?keyword=<球桌号> 读该设备实时 todesk_status（归一化）
+
+        实测 table_id=/device_code= 精确参数无效（恒 total=0），
+        keyword 模糊过滤有效；keyword 缩量后本地精确匹配 table_id。
+        """
+        params = {"page": 1, "pagesize": 20,
+                  "keyword": self.table_id or self.device_code}
         resp = session.get(API1_DATA_URL, params=params, timeout=20)
         resp.raise_for_status()
         rows = resp.json().get("results") or []
-        code = self.device_code.lower()
-        for row in rows:
-            if str(row.get("device_code") or "").strip().lower() == code:
-                return self._norm_status(row.get("todesk_status"))
-        # 设备码没对上但 table_id 精确查询仅返回一行时采信该行
-        if len(rows) == 1:
-            return self._norm_status(rows[0].get("todesk_status"))
-        return ""
+        raw = pick_todesk_status(rows, self.table_id, self.device_code)
+        return self._norm_status(raw)
 
     def run(self):
         """下发 → 轮询确认主流程（Session 过期自动重登重试一次）"""
