@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AutoWork 售后管理系统 · 入口</title>
+    <link rel="icon" href="/v2/favicon.ico" />
+    <style>
+      :root {
+        --cyan: #00bcd4;
+        --cyan-dark: #0097a7;
+        --bg: #f2f6f8;
+        --surface: #ffffff;
+        --text: #1d2129;
+        --text-2: #6b7785;
+        --border: #e3e8ee;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.06);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial,
+          sans-serif;
+        background: var(--bg);
+        /* 极淡的青色网格，呼应 Fluent 扁平风 */
+        background-image:
+          linear-gradient(rgba(0, 188, 212, 0.05) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(0, 188, 212, 0.05) 1px, transparent 1px);
+        background-size: 44px 44px;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 40px 20px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .wrap {
+        width: 100%;
+        max-width: 920px;
+      }
+
+      header {
+        text-align: center;
+        margin-bottom: 40px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+
+      .brand-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--cyan), var(--cyan-dark));
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        font-weight: 700;
+        font-size: 20px;
+        letter-spacing: -0.5px;
+        box-shadow: 0 4px 12px rgba(0, 188, 212, 0.32);
+      }
+
+      h1 {
+        font-size: 27px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+
+      .sub {
+        color: var(--text-2);
+        font-size: 14px;
+        margin: 0;
+        line-height: 1.7;
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 20px;
+      }
+
+      .card {
+        position: relative;
+        display: block;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 26px 24px 22px;
+        text-decoration: none;
+        color: inherit;
+        box-shadow: var(--shadow);
+        transition:
+          transform 0.18s ease,
+          box-shadow 0.18s ease,
+          border-color 0.18s ease;
+        overflow: hidden;
+      }
+
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto 0;
+        height: 3px;
+        background: linear-gradient(90deg, var(--cyan), var(--cyan-dark));
+        opacity: 0;
+        transition: opacity 0.18s ease;
+      }
+
+      .card:hover {
+        transform: translateY(-3px);
+        border-color: rgba(0, 188, 212, 0.45);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.07), 0 16px 36px rgba(0, 0, 0, 0.1);
+      }
+
+      .card:hover::before {
+        opacity: 1;
+      }
+
+      .card.is-old:hover {
+        border-color: rgba(144, 147, 153, 0.4);
+      }
+
+      .card.is-old:hover::before {
+        background: linear-gradient(90deg, #b0b6bd, #909399);
+      }
+
+      .card-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+
+      .ver {
+        font-size: 23px;
+        font-weight: 700;
+        letter-spacing: -0.4px;
+      }
+
+      .ver small {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-2);
+        margin-left: 6px;
+        letter-spacing: 0;
+      }
+
+      .badge {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 9px;
+        border-radius: 999px;
+        letter-spacing: 0.3px;
+      }
+
+      .badge.new {
+        color: var(--cyan-dark);
+        background: rgba(0, 188, 212, 0.12);
+      }
+
+      .badge.old {
+        color: #6b7785;
+        background: rgba(144, 147, 153, 0.14);
+      }
+
+      .desc {
+        font-size: 13px;
+        color: var(--text-2);
+        line-height: 1.75;
+        margin: 0 0 16px;
+        min-height: 44px;
+      }
+
+      ul {
+        list-style: none;
+        margin: 0 0 20px;
+        padding: 0;
+      }
+
+      li {
+        font-size: 13px;
+        color: var(--text);
+        padding: 3px 0 3px 20px;
+        position: relative;
+        line-height: 1.6;
+      }
+
+      li::before {
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 11px;
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--cyan);
+      }
+
+      .card.is-old li::before {
+        background: #b0b6bd;
+      }
+
+      .go {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--cyan-dark);
+      }
+
+      .card.is-old .go {
+        color: #6b7785;
+      }
+
+      .go svg {
+        transition: transform 0.18s ease;
+      }
+
+      .card:hover .go svg {
+        transform: translateX(3px);
+      }
+
+      footer {
+        margin-top: 34px;
+        text-align: center;
+        font-size: 12px;
+        color: var(--text-2);
+        line-height: 1.9;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: rgba(0, 188, 212, 0.09);
+        color: var(--cyan-dark);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 11.5px;
+      }
+
+      @media (max-width: 720px) {
+        .cards {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        h1 {
+          font-size: 22px;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="brand">
+          <div class="brand-mark">AW</div>
+          <h1>AutoWork 售后管理系统</h1>
+        </div>
+        <p class="sub">
+          新旧两版并行运行中，请选择要进入的版本<br />
+          两版共用同一套数据与后端接口
+        </p>
+      </header>
+
+      <div class="cards">
+        <!-- 新版 -->
+        <a class="card" href="/v2/">
+          <div class="card-top">
+            <div class="ver">新版 <small>v2</small></div>
+            <span class="badge new">推荐</span>
+          </div>
+          <p class="desc">
+            基于 Vue3 + Element Plus 重写。功能最全，后续迭代都在这一版上进行。
+          </p>
+          <ul>
+            <li>售后记录增删改查</li>
+            <li>多条件筛选与统计看板</li>
+            <li>图表联动与自定义维度</li>
+          </ul>
+          <span class="go">
+            进入
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 12h14M13 6l6 6-6 6" />
+            </svg>
+          </span>
+        </a>
+
+        <!-- 老版 -->
+        <a class="card is-old" href="/v1/">
+          <div class="card-top">
+            <div class="ver">老版 <small>v1</small></div>
+            <span class="badge old">只读</span>
+          </div>
+          <p class="desc">
+            原售后面板，仅提供查询与导出查看，保留作为对照与兜底入口。
+          </p>
+          <ul>
+            <li>售后记录查询</li>
+            <li>条件筛选</li>
+            <li>图表统计</li>
+          </ul>
+          <span class="go">
+            进入
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 12h14M13 6l6 6-6 6" />
+            </svg>
+          </span>
+        </a>
+      </div>
+
+      <footer>
+        直接访问地址：新版 <code>/v2/</code> ｜ 老版 <code>/v1/</code>
+      </footer>
+    </div>
+  </body>
+</html>

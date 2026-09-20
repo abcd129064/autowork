@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoWork 售后总览 · 图表设计稿</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0b1220;
+    color:#e6edf7;
+    font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    padding:28px 32px 40px;
+  }
+  .head { display:flex; align-items:baseline; gap:14px; margin-bottom:6px; }
+  .head h1 { font-size:22px; font-weight:600; letter-spacing:.5px; }
+  .head .tag {
+    font-size:12px; color:#67e8f9; border:1px solid #164e63;
+    background:#083344; padding:2px 10px; border-radius:20px;
+  }
+  .sub { color:#7d8db1; font-size:12.5px; margin-bottom:22px; }
+  .grid {
+    display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:16px;
+  }
+  .kpi {
+    background:linear-gradient(160deg,#121c30 0%,#0d1526 100%);
+    border:1px solid #1e2a44; border-radius:14px; padding:16px 18px 10px;
+    position:relative; overflow:hidden;
+  }
+  .kpi::before {
+    content:""; position:absolute; top:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg, var(--c1), transparent);
+  }
+  .kpi .label { font-size:12.5px; color:#8fa3c8; }
+  .kpi .row { display:flex; align-items:flex-end; justify-content:space-between; }
+  .kpi .num {
+    font-size:34px; font-weight:700; line-height:1.15;
+    font-variant-numeric:tabular-nums;
+    background:linear-gradient(180deg,#f2f7ff 30%,var(--c1));
+    -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+  }
+  .kpi .spark { width:110px; height:44px; }
+  .kpi .delta { font-size:11.5px; margin-top:2px; }
+  .kpi .delta.up { color:#f59e0b; }
+  .kpi .delta.ok { color:#34d399; }
+  .card {
+    background:#101a2e; border:1px solid #1e2a44; border-radius:14px;
+    padding:18px 20px 8px; margin-bottom:16px;
+  }
+  .card h3 { font-size:14.5px; font-weight:600; margin-bottom:2px; }
+  .card .desc { font-size:12px; color:#7d8db1; margin-bottom:6px; }
+  .chart { width:100%; }
+  #trend { height:330px; }
+  .two { display:grid; grid-template-columns:1.15fr .85fr; gap:16px; }
+  #types { height:330px; }
+  #region { height:330px; }
+  .notes {
+    margin-top:6px; background:#101a2e; border:1px solid #1e2a44;
+    border-radius:14px; padding:18px 22px; font-size:13px; line-height:2;
+    color:#b7c5e0;
+  }
+  .notes b { color:#67e8f9; font-weight:600; }
+  .notes .t { color:#e6edf7; font-weight:600; font-size:14px; margin-bottom:6px; }
+  .sw { display:inline-block; width:12px; height:12px; border-radius:3px; margin:0 4px 0 10px; vertical-align:-1px; }
+</style>
+</head>
+<body>
+  <div class="head"><h1>AutoWork 售后总览 · 图表设计稿</h1><span class="tag">真实生产数据 · 380 条</span></div>
+  <div class="sub">深色玻璃拟态数据板 —— 渐变面积趋势 + 移动均线 + 峰值标注 / 轨道条形 Top1 高亮 / 环形占比中心总计 / KPI 迷你走势</div>
+
+  <div class="grid" id="kpis"></div>
+
+  <div class="card">
+    <h3>近 90 天售后量</h3>
+    <div class="desc">单日峰值与 7 日移动均线自动标注 —— 面积看体量，虚线均线看走向，基线看水位</div>
+    <div id="trend" class="chart"></div>
+  </div>
+
+  <div class="two">
+    <div class="card">
+      <h3>问题类型分布</h3>
+      <div class="desc">Top1 用警示琥珀高亮，其余青蓝梯度；灰色轨道衬托量级</div>
+      <div id="types" class="chart"></div>
+    </div>
+    <div class="card">
+      <h3>地区分布</h3>
+      <div class="desc">Top5 + 其他 合并环形；中心显示总量与覆盖地区数</div>
+      <div id="region" class="chart"></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="t">设计说明（对应 ECharts 能力，落地即改 welcome/index.vue 的 option）</div>
+    ① <b>趋势图</b>：纯蓝柱 → 青色渐变面积线（series.areaStyle 线性渐变）+ <b>7 日移动均线</b>（第二条 smooth 虚线）+ 峰值 <b>markPoint</b> pin + 均值 <b>markLine</b> 基线 + 底部 <b>dataZoom 缩略轴</b>（inside+slider）；<br>
+    ② <b>类型分布</b>：普通横条 → <b>showBackground 轨道</b> + 圆角渐变条 + Top1 琥珀高亮（itemStyle 回调）+ 条尾数值标签；<br>
+    ③ <b>地区环形</b>：半径 [52,74]、padAngle 间隙 + 圆角、<b>graphic 中心文本</b>「总量 / 覆盖 N 个地区」，Top5 合并「其他」，图例竖排右侧；<br>
+    ④ <b>KPI 卡</b>：数字下加 90 天迷你面积 sparkline（同色渐变）、卡顶渐变描边、渐变数字；<br>
+    ⑤ <b>配色</b>（≤4 色系）：<span class="sw" style="background:#22d3ee"></span>青（主）<span class="sw" style="background:#0e7490"></span>深青（辅）<span class="sw" style="background:#f59e0b"></span>琥珀（警示/Top1）<span class="sw" style="background:#64748b"></span>石板灰（轨道/次要）；底 #0b1220 / 卡片 #101a2e。<br>
+    <b>硬约束</b>：无 3D、无双 Y 轴、色盲安全（青-琥珀组合）、每图一个观点标题（正式落地时替换现在的描述性标题）。
+  </div>
+
+<script>
+const DATA = __DATA__;
+const CYAN='#22d3ee', CYAN_D='#0e7490', AMBER='#f59e0b', SLATE='#64748b';
+const AXIS = { axisLine:{lineStyle:{color:'#2a3a5c'}}, axisLabel:{color:'#8fa3c8'}, splitLine:{lineStyle:{color:'#18233c'}} };
+
+/* ---------- KPI 卡 + sparkline ---------- */
+const daily = DATA.daily, days = daily.map(d=>d.date.slice(5)), vals = daily.map(d=>d.count);
+const total=DATA.stats.total||0, unresolved=DATA.stats.unresolved||0,
+      initiative=DATA.stats.initiative||0, our=DATA.stats.our_problem||0;
+const kpis=[
+  {label:'记录总数', num:total, delta:'90 天累计', cls:'ok', c:CYAN, sub:vals},
+  {label:'未解决', num:unresolved, delta:'需跟进处理', cls:'up', c:AMBER, sub:vals},
+  {label:'主动发起', num:initiative, delta:'我们主动上门', cls:'ok', c:CYAN_D, sub:vals},
+  {label:'我方问题', num:our, delta:'占比 '+Math.round(our/total*100)+'%', cls:'up', c:AMBER, sub:vals}
+];
+const kpiBox=document.getElementById('kpis');
+kpis.forEach((k,i)=>{
+  const div=document.createElement('div');
+  div.className='kpi'; div.style.setProperty('--c1',k.c);
+  div.innerHTML='<div class="label">'+k.label+'</div>'+
+    '<div class="row"><div><div class="num">'+k.num+'</div>'+
+    '<div class="delta '+k.cls+'">'+k.delta+'</div></div><div class="spark" id="sp'+i+'"></div></div>';
+  kpiBox.appendChild(div);
+  const ch=echarts.init(document.getElementById('sp'+i));
+  ch.setOption({grid:{left:0,right:0,top:4,bottom:0},
+    xAxis:{type:'category',data:vals.map((_,j)=>j),show:false},
+    yAxis:{type:'value',show:false},
+    series:[{type:'line',data:k.sub,smooth:true,symbol:'none',
+      lineStyle:{color:k.c,width:1.5},
+      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+        {offset:0,color:k.c+'55'},{offset:1,color:k.c+'00'}])}}]});
+});
+
+/* ---------- 趋势：渐变面积 + 移动均线 + 标注 ---------- */
+const ma7 = vals.map((_,i)=>{
+  const s=vals.slice(Math.max(0,i-6), i+1);
+  return +(s.reduce((a,b)=>a+b,0)/s.length).toFixed(1);
+});
+const maxV=Math.max(...vals), maxIdx=vals.indexOf(maxV);
+const avg=+(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1);
+echarts.init(document.getElementById('trend')).setOption({
+  tooltip:{trigger:'axis',backgroundColor:'#16233d',borderColor:'#2a3a5c',
+    textStyle:{color:'#e6edf7'},axisPointer:{type:'line',lineStyle:{color:'#33507a'}}},
+  legend:{data:['每日售后量','7 日移动均线'],textStyle:{color:'#8fa3c8'},top:0,right:10,
+    itemWidth:14,itemHeight:8,icon:'roundRect'},
+  grid:{left:44,right:24,top:36,bottom:52},
+  xAxis:{type:'category',data:days,boundaryGap:false,...AXIS},
+  yAxis:{type:'value',minInterval:1,...AXIS},
+  dataZoom:[
+    {type:'inside',start:0,end:100},
+    {type:'slider',height:16,bottom:8,borderColor:'#1e2a44',
+     backgroundColor:'#0d1526',fillerColor:'#12305a',
+     handleStyle:{color:'#22d3ee'},textStyle:{color:'#5d7096'},
+     dataBackground:{lineStyle:{color:'#1d4e6b'},areaStyle:{color:'#0f2d47'}}}
+  ],
+  series:[
+    {name:'每日售后量',type:'line',data:vals,smooth:0.4,symbol:'circle',symbolSize:5,
+     showSymbol:false, z:3,
+     lineStyle:{width:2.5,color:CYAN,
+       shadowColor:CYAN+'66',shadowBlur:12,shadowOffsetY:4},
+     itemStyle:{color:CYAN,borderColor:'#0b1220',borderWidth:1.5},
+     areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+       {offset:0,color:CYAN+'59'},{offset:0.6,color:CYAN+'1f'},{offset:1,color:CYAN+'00'}])},
+     markPoint:{data:[{coord:[maxIdx,maxV],value:maxV+' 峰值'}],
+       symbol:'pin',symbolSize:52,itemStyle:{color:AMBER},
+       label:{color:'#1a1206',fontSize:10,fontWeight:600}}},
+    {name:'7 日移动均线',type:'line',data:ma7,smooth:true,symbol:'none',z:2,
+     lineStyle:{width:1.5,type:'dashed',color:'#7dd3fc'},
+     markLine:{silent:true,symbol:'none',lineStyle:{color:SLATE,type:'dashed'},
+       label:{color:'#8fa3c8',formatter:'均值 {c}'},
+       data:[{yAxis:avg}]}}
+  ]
+});
+
+/* ---------- 类型分布：轨道条 + Top1 高亮 ---------- */
+const types=[...DATA.issue_types].sort((a,b)=>b.value-a.value);
+echarts.init(document.getElementById('types')).setOption({
+  tooltip:{trigger:'axis',axisPointer:{type:'shadow',shadowStyle:{color:'#ffffff08'}},
+    backgroundColor:'#16233d',borderColor:'#2a3a5c',textStyle:{color:'#e6edf7'}},
+  grid:{left:80,right:52,top:8,bottom:8},
+  xAxis:{type:'value',minInterval:1,...AXIS,splitLine:{show:false},axisLabel:{show:false},axisLine:{show:false}},
+  yAxis:{type:'category',data:types.map(t=>t.name).reverse(),
+    axisLine:{show:false},axisTick:{show:false},axisLabel:{color:'#a9b8d8',fontSize:12}},
+  series:[{type:'bar',data:types.map(t=>t.value).reverse(),
+    barWidth:12,
+    showBackground:true,backgroundStyle:{color:'#1a2440',borderRadius:6},
+    itemStyle:{borderRadius:6,
+      color:function(p){
+        const i=types.length-1-p.dataIndex; // 反转后仍按降序定位
+        const c = i===0 ? AMBER : (i<3 ? CYAN : CYAN_D);
+        return new echarts.graphic.LinearGradient(0,0,1,0,[
+          {offset:0,color:c+'cc'},{offset:1,color:c}]);}},
+    label:{show:true,position:'right',color:'#c9d6ef',fontSize:12}}
+  ]
+});
+
+/* ---------- 地区环形：Top5+其他 ---------- */
+const regs=[...DATA.regions].sort((a,b)=>b.value-a.value);
+const top5=regs.slice(0,5), restSum=regs.slice(5).reduce((a,b)=>a+b.value,0);
+const ringData=top5.slice();
+if(restSum>0) ringData.push({name:'其他',value:restSum,itemStyle:{color:SLATE}});
+const palette=[CYAN,'#38bdf8',CYAN_D,'#155e75','#67e8f9'];
+ringData.forEach(function(d,i){ if(i<5) d.itemStyle={color:palette[i]}; });
+echarts.init(document.getElementById('region')).setOption({
+  tooltip:{trigger:'item',backgroundColor:'#16233d',borderColor:'#2a3a5c',
+    textStyle:{color:'#e6edf7'},formatter:'{b}：{c} 条（{d}%）'},
+  legend:{orient:'vertical',right:8,top:'middle',textStyle:{color:'#8fa3c8'},
+    itemWidth:12,itemHeight:8,icon:'circle'},
+  color:palette,
+  series:[{type:'pie',radius:['52%','74%'],center:['36%','50%'],
+    padAngle:2,
+    itemStyle:{borderRadius:8,borderColor:'#101a2e',borderWidth:2},
+    label:{show:false},
+    emphasis:{scale:true,scaleSize:6},
+    data:ringData}],
+  graphic:[
+   {type:'text',left:'27%',top:'42%',style:{text:String(DATA.stats.total),
+    fill:'#f2f7ff',fontSize:30,fontWeight:700}},
+   {type:'text',left:'25%',top:'58%',style:{text:'覆盖 '+regs.length+' 个地区',
+    fill:'#7d8db1',fontSize:12}}]
+});
+
+window.addEventListener('resize',function(){});
+</script>
+</body>
+</html>
