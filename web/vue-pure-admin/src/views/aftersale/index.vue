@@ -28,6 +28,7 @@ const {
   pagination,
   cycleOptions,
   issueTypes,
+  regions,
   yesNoOptions,
   selectedNum,
   onSearch,
@@ -118,6 +119,22 @@ function clearOccurred() {
         >
           <el-option
             v-for="item in issueTypes"
+            :key="item"
+            :label="item"
+            :value="item"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="地区：" prop="region">
+        <el-select
+          v-model="form.region"
+          placeholder="全部地区"
+          clearable
+          filterable
+          class="w-32!"
+        >
+          <el-option
+            v-for="item in regions"
             :key="item"
             :label="item"
             :value="item"

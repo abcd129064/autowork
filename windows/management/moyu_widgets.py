@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""摸鱼中心控件集合：2048 / 小说阅读器
+"""摸鱼中心控件集合：2048 / 贪吃蛇 / 扫雷 / 小说阅读器
 
-供 management_panel.py 的 GamePage 组装使用。状态（最高分、字号、
-滚动进度、上次 txt 路径/章节 URL）持久化到独立的 moyu_state.json，不写
-settings.json——规避既有配置缓存覆盖问题（settings_mixin 会对
-settings.json 做全量回写）。
+供 management_panel.py 的 GamePage 组装使用。状态（最高分、最快用时、
+难度选择、字号、滚动进度、上次 txt 路径/章节 URL）持久化到独立的
+moyu_state.json，不写 settings.json——规避既有配置缓存覆盖问题
+（settings_mixin 会对 settings.json 做全量回写）。
+
+贪吃蛇/扫雷的分难度成绩以 {难度: 成绩} 字典存（best_snake / best_mines），
+旧版单值 int 自动归入当时的默认难度，读取端兼容两种形态。
 
 小说阅读器网页抓取：站点规则/通用 XPath → trafilatura → html.parser
 三级提取链，自动解析上一章/下一章与章节列表（目录页），支持续读。
@@ -21,13 +24,14 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QPoint, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont,
-                           QKeySequence, QPainter, QPen, QShortcut)
+                           QKeySequence, QPainter, QPen, QPolygon,
+                           QShortcut)
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout,
                                QListWidget, QListWidgetItem, QStackedWidget,
                                QTextBrowser, QVBoxLayout, QWidget)
-from qfluentwidgets import (BodyLabel, CaptionLabel, FluentIcon,
+from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon,
                             LineEdit, PlainTextEdit, PushButton, ToolButton)
 
 from core.app_paths import get_app_dir
@@ -65,6 +69,64 @@ def save_moyu_state(patch: dict):
         os.replace(tmp, path)
     except Exception:
         logger.debug("moyu_state.json 保存失败", exc_info=True)
+
+
+# ---------- 分难度成绩（同 key 下以 {难度: 成绩} 存一张表） ----------
+
+def _level_bests(name: str, legacy_level: str) -> dict:
+    """读分难度成绩表；旧版单值 int 视为 legacy_level 的历史纪录
+
+    贪吃蛇改版前只有一档速度，best_snake 是裸整数；直接当字典用会
+    AttributeError，故两种形态在此收敛为 {难度: 成绩}。
+    """
+    raw = load_moyu_state().get(name)
+    table = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                table[str(k)] = int(v)
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(raw, (int, float)) and raw > 0:
+        table[legacy_level] = int(raw)
+    return table
+
+
+def _submit_level_best(name: str, level: str, value: int, *, minimize: bool,
+                       legacy_level: str) -> bool:
+    """刷新单难度成绩并落盘，破纪录返回 True（旧单值一并升格为表）"""
+    table = _level_bests(name, legacy_level)
+    old = table.get(level)
+    if old is None or (value < old if minimize else value > old):
+        table[level] = value
+        save_moyu_state({name: table})
+        return True
+    return False
+
+
+def _saved_level(key: str, levels: dict, default: str) -> str:
+    """读上次选择的难度；值已不在配置表里时回退默认档"""
+    saved = str(load_moyu_state().get(key) or "")
+    return saved if saved in levels else default
+
+
+def _draw_overlay(p, w, h, title, subtitle):
+    """棋盘通用遮罩层：半透明黑底 + 居中标题/副标题（贪吃蛇与扫雷共用）"""
+    p.setBrush(QBrush(QColor(0, 0, 0, 150)))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRect(0, 0, w + 1, h + 1)
+    p.setPen(QPen(QColor("#e5e7eb")))
+    f1 = QFont("Segoe UI", 10, QFont.Weight.Bold)
+    f1.setPixelSize(28)
+    p.setFont(f1)
+    p.drawText(0, h // 2 - 44, w + 1, 34,
+               Qt.AlignmentFlag.AlignCenter, title)
+    f2 = QFont("Segoe UI", 10)
+    f2.setPixelSize(14)
+    p.setFont(f2)
+    p.setPen(QPen(QColor("#9ca3af")))
+    p.drawText(0, h // 2 + 2, w + 1, 22,
+               Qt.AlignmentFlag.AlignCenter, subtitle)
 
 
 # ==================== 2048 ====================
@@ -333,20 +395,31 @@ class Game2048Widget(QWidget):
 
 # ==================== 贪吃蛇 ====================
 
+# 难度 → 走格节奏与计分：step 起步间隔ms，accel 每吃一个提速 ms，
+# floor 间隔下限（防止后期失控不可玩），gain 单食得分（难度越高得分越高）
+_SNAKE_LEVELS = {
+    "easy": {"label": "简单", "step": 170, "accel": 0, "floor": 170, "gain": 5},
+    "normal": {"label": "普通", "step": 120, "accel": 2, "floor": 70, "gain": 10},
+    "hard": {"label": "困难", "step": 85, "accel": 2, "floor": 50, "gain": 20},
+}
+_SNAKE_DEFAULT_LEVEL = "normal"   # 旧版单一速度即此档，历史纪录归入这里
+
+
 class _SnakeBoard(QWidget):
-    """贪吃蛇棋盘：QTimer 驱动 + QPainter 绘制"""
+    """贪吃蛇棋盘：QTimer 驱动 + QPainter 绘制，难度决定走格节奏"""
 
     COLS, ROWS, CELL = 24, 17, 22
     score_changed = Signal(int)
     state_changed = Signal(str)  # idle / running / paused / over
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, level=_SNAKE_DEFAULT_LEVEL):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(self.COLS * self.CELL + 2,
                           self.ROWS * self.CELL + 2)
+        self._level = level if level in _SNAKE_LEVELS else _SNAKE_DEFAULT_LEVEL
         self._timer = QTimer(self)
-        self._timer.setInterval(120)
+        self._timer.setInterval(_SNAKE_LEVELS[self._level]["step"])
         self._timer.timeout.connect(self._tick)
         self._queue = deque()
         self._resume_on_show = False
@@ -355,7 +428,10 @@ class _SnakeBoard(QWidget):
     # ---------- 状态机 ----------
 
     def _reset(self):
-        """重置蛇身/方向/食物，回到待开始态"""
+        """重置蛇身/方向/食物与节奏，回到待开始态"""
+        self._timer.stop()
+        self._step = _SNAKE_LEVELS[self._level]["step"]
+        self._timer.setInterval(self._step)
         cy = self.ROWS // 2
         self._snake = deque([(8, cy), (7, cy), (6, cy)])  # 头在前
         self._dir = (1, 0)
@@ -374,10 +450,31 @@ class _SnakeBoard(QWidget):
         """当前状态机状态（idle/running/paused/over）"""
         return self._state
 
+    def level(self):
+        """当前难度 key（easy/normal/hard）"""
+        return self._level
+
+    def set_level(self, level):
+        """切难度：换节奏并回到待开始态，避开低难度续刷高难度纪录"""
+        if level not in _SNAKE_LEVELS or level == self._level:
+            return
+        self._level = level
+        self._reset()
+        self.state_changed.emit(self._state)
+        self.update()
+
     def start(self):
         """开始/重开游戏并启动走格定时器"""
         if self._state in ("idle", "over"):
             self._reset()
+        self._state = "running"
+        self._timer.start()
+        self.state_changed.emit(self._state)
+        self.update()
+
+    def restart(self):
+        """强制重开一局：运行中点「重开」也应清盘（只清分数会接着长蛇玩）"""
+        self._reset()
         self._state = "running"
         self._timer.start()
         self.state_changed.emit(self._state)
@@ -419,7 +516,8 @@ class _SnakeBoard(QWidget):
             return
         self._snake.appendleft((nx, ny))
         if eating:
-            self.score_changed.emit(10)
+            self.score_changed.emit(_SNAKE_LEVELS[self._level]["gain"])
+            self._speed_up()
             self._food = self._spawn_food()
             if self._food is None:  # 占满全场，胜利结束
                 self._die()
@@ -427,6 +525,14 @@ class _SnakeBoard(QWidget):
         else:
             self._snake.pop()
         self.update()
+
+    def _speed_up(self):
+        """吃食物按难度设定提速（accel=0 即定速档，floor 为上限速度）"""
+        cfg = _SNAKE_LEVELS[self._level]
+        if not cfg["accel"] or self._step <= cfg["floor"]:
+            return
+        self._step = max(cfg["floor"], self._step - cfg["accel"])
+        self._timer.setInterval(self._step)
 
     def _die(self):
         """判死：停表并切 over 态"""
@@ -517,30 +623,22 @@ class _SnakeBoard(QWidget):
             "over": ("游戏结束", "按「开始」或方向键重新开始"),
         }.get(self._state)
         if overlay:
-            p.setBrush(QBrush(QColor(0, 0, 0, 150)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRect(0, 0, w + 1, h + 1)
-            p.setPen(QPen(QColor("#e5e7eb")))
-            f1 = QFont("Segoe UI", 10, QFont.Weight.Bold)
-            f1.setPixelSize(28)
-            p.setFont(f1)
-            p.drawText(0, h // 2 - 44, w + 1, 34,
-                       Qt.AlignmentFlag.AlignCenter, overlay[0])
-            f2 = QFont("Segoe UI", 10)
-            f2.setPixelSize(14)
-            p.setFont(f2)
-            p.setPen(QPen(QColor("#9ca3af")))
-            p.drawText(0, h // 2 + 2, w + 1, 22,
-                       Qt.AlignmentFlag.AlignCenter, overlay[1])
+            _draw_overlay(p, w, h, overlay[0], overlay[1])
 
 
 class SnakeWidget(QWidget):
-    """贪吃蛇：信息栏（得分/最高分/控制按钮）+ 棋盘"""
+    """贪吃蛇：信息栏（得分/最高分/难度/控制按钮）+ 棋盘
+
+    最高分按难度分档记账（moyu_state.json 的 best_snake）。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._level = _saved_level("snake_level", _SNAKE_LEVELS,
+                                   _SNAKE_DEFAULT_LEVEL)
         self._score = 0
-        self._best = int(load_moyu_state().get("best_snake") or 0)
+        self._best = _level_bests("best_snake", _SNAKE_DEFAULT_LEVEL).get(
+            self._level, 0)
         self._auto_paused = False  # 页签切走导致的暂停，切回自动恢复
 
         layout = QVBoxLayout(self)
@@ -553,7 +651,24 @@ class SnakeWidget(QWidget):
         bar.addWidget(self._lbl_score)
         bar.addSpacing(16)
         bar.addWidget(self._lbl_best)
+        bar.addSpacing(16)
+        bar.addWidget(CaptionLabel("难度", self))
+        self._combo_level = ComboBox(self)
+        self._combo_level.setFixedWidth(88)
+        for key, cfg in _SNAKE_LEVELS.items():
+            # qfw addItem 第二参是 icon，userData 必须关键字传参
+            self._combo_level.addItem(cfg["label"], userData=key)
+        # 先回显再连接，初始化不误触发切换逻辑
+        self._combo_level.setCurrentIndex(
+            list(_SNAKE_LEVELS).index(self._level))
+        self._combo_level.currentIndexChanged.connect(self._on_level)
+        bar.addWidget(self._combo_level)
         bar.addStretch(1)
+        hint = CaptionLabel("方向键 / WASD 移动 · R 重开 · 难度越高节奏越快",
+                            self)
+        hint.setStyleSheet("color: #8a8f98;")
+        bar.addWidget(hint)
+        bar.addSpacing(12)
         self._btn_toggle = PushButton("开始", self)
         self._btn_toggle.clicked.connect(self._toggle)
         self._btn_restart = PushButton("重开", self)
@@ -562,14 +677,33 @@ class SnakeWidget(QWidget):
         bar.addWidget(self._btn_restart)
         layout.addLayout(bar)
 
-        self._board = _SnakeBoard(self)
+        self._board = _SnakeBoard(self, level=self._level)
         self._board.score_changed.connect(self._on_score)
         self._board.state_changed.connect(self._on_state)
+        # 堆栈页高取各页最大值（2048 棋盘 min 420），而本盘固定尺寸。
+        # 子布局（信息栏）是可拉伸项，不给尾部弹性项的话多余高度全被它
+        # 吞掉，标签在拉高的格子里居中——就是信息栏上方那条通栏空白
         layout.addWidget(self._board, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
 
     def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
         super().setFocus(reason)
         self._board.setFocus(reason)
+
+    def _on_level(self, _index):
+        """难度切换：重开棋局、刷新该档最高分并记住选择"""
+        level = self._combo_level.currentData()
+        if not level:
+            return
+        self._level = level
+        self._board.set_level(level)
+        self._score = 0
+        self._lbl_score.setText("得分：0")
+        self._best = _level_bests("best_snake",
+                                  _SNAKE_DEFAULT_LEVEL).get(level, 0)
+        self._lbl_best.setText(f"最高分：{self._best}")
+        save_moyu_state({"snake_level": level})
+        self._board.setFocus()
 
     def _toggle(self):
         """开始/暂停/继续三态切换按钮"""
@@ -582,20 +716,21 @@ class SnakeWidget(QWidget):
             self._board.start()
 
     def _restart(self):
-        """重开：清零得分并直接开局"""
+        """重开：清零得分并清盘重新开局"""
         self._score = 0
         self._lbl_score.setText("得分：0")
-        self._board.start()
+        self._board.restart()
         self._board.setFocus()
 
     def _on_score(self, gained):
-        """吃食物加分，刷新最高分并落盘"""
+        """吃食物加分，刷新当前难度最高分并落盘"""
         self._score += gained
         self._lbl_score.setText(f"得分：{self._score}")
-        if self._score > self._best:
+        if _submit_level_best("best_snake", self._level, self._score,
+                              minimize=False,
+                              legacy_level=_SNAKE_DEFAULT_LEVEL):
             self._best = self._score
             self._lbl_best.setText(f"最高分：{self._best}")
-            save_moyu_state({"best_snake": self._best})
 
     def _on_state(self, state):
         """状态机变化 → 切换按钮文案（开始/暂停/继续）"""
@@ -615,6 +750,484 @@ class SnakeWidget(QWidget):
         if self._auto_paused:
             self._auto_paused = False
             self._board.resume()
+
+
+# ==================== 扫雷 ====================
+
+# 难度 → (中文名, 列, 行, 雷数)：最大档 16x12 仍能在摸鱼面板内完整显示
+_MINES_LEVELS = {
+    "easy": ("初级", 9, 9, 10),
+    "normal": ("中级", 12, 12, 26),
+    "hard": ("高级", 16, 12, 45),
+}
+_MINES_DEFAULT_LEVEL = "easy"
+_MINES_CELL = 26
+
+# 单元格状态
+_HIDDEN, _OPEN, _FLAG = 0, 1, 2
+# 八邻域偏移
+_MINES_ADJ = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+              (1, 0), (-1, 1), (0, 1), (1, 1))
+# 数字 1-8 配色（与贪吃蛇同款深底亮字色系）
+_MINES_NUM_COLORS = ("#60a5fa", "#4ade80", "#f87171", "#c084fc",
+                     "#fb923c", "#2dd4bf", "#e5e7eb", "#9ca3af")
+
+
+class _MinesBoard(QWidget):
+    """扫雷棋盘：左键翻开、右键插旗、双击数字快速展开
+
+    雷在首次翻开时才生成（避开首点及其邻域），保证第一下不踩雷且
+    能自动展开一片；计时也从那一刻起跳。
+    """
+
+    time_changed = Signal(int)    # 已用时秒
+    left_changed = Signal(int)    # 剩余雷数（雷数 - 旗数）
+    state_changed = Signal(str)   # idle / running / paused / over / win
+
+    def __init__(self, parent=None, level=_MINES_DEFAULT_LEVEL):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._level = level if level in _MINES_LEVELS else _MINES_DEFAULT_LEVEL
+        _, self._cols, self._rows, self._mines = _MINES_LEVELS[self._level]
+        self.setFixedSize(self._cols * _MINES_CELL + 2,
+                          self._rows * _MINES_CELL + 2)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._on_second)
+        self._resume_on_show = False
+        self._reset()
+
+    # ---------- 状态机 ----------
+
+    def _reset(self):
+        """重开一局：清雷清旗，回到等待首点的态"""
+        self._timer.stop()
+        self._state = "idle"
+        self._seconds = 0
+        self._grid = [[_HIDDEN] * self._cols for _ in range(self._rows)]
+        self._numbers = [[0] * self._cols for _ in range(self._rows)]
+        self._mineset = set()
+        self._planted = False
+        self._flags = 0
+        self._opened = 0
+        self._boom = None
+        self.time_changed.emit(0)
+        self.left_changed.emit(self._mines)
+        self.state_changed.emit(self._state)
+        self.update()
+
+    def restart(self):
+        """重开（按钮 / R 键）"""
+        self._reset()
+
+    def state(self):
+        """当前状态机状态（idle/running/paused/over/win）"""
+        return self._state
+
+    def level(self):
+        """当前难度 key（easy/normal/hard）"""
+        return self._level
+
+    def seconds(self):
+        """本局已用秒数（胜利计时与破纪录判定用）"""
+        return self._seconds
+
+    def set_level(self, level):
+        """切难度：换棋盘尺寸与雷数并重开（不保留半局）"""
+        if level not in _MINES_LEVELS or level == self._level:
+            return
+        self._level = level
+        _, self._cols, self._rows, self._mines = _MINES_LEVELS[level]
+        self.setFixedSize(self._cols * _MINES_CELL + 2,
+                          self._rows * _MINES_CELL + 2)
+        self._reset()
+
+    def _begin(self):
+        """首次操作起表；暂停中被点击则顺带恢复计时"""
+        if self._state == "idle":
+            self._state = "running"
+            self._timer.start()
+            self.state_changed.emit(self._state)
+        elif self._state == "paused":
+            self.resume()
+
+    def pause(self):
+        """运行中暂停（停表保局面）"""
+        if self._state == "running":
+            self._state = "paused"
+            self._timer.stop()
+            self.state_changed.emit(self._state)
+            self.update()
+
+    def resume(self):
+        """从暂停恢复计时"""
+        if self._state == "paused":
+            self._state = "running"
+            self._timer.start()
+            self.state_changed.emit(self._state)
+            self.update()
+
+    def _on_second(self):
+        self._seconds += 1
+        self.time_changed.emit(self._seconds)
+
+    # ---------- 游戏逻辑 ----------
+
+    def _in_board(self, x, y):
+        return 0 <= x < self._cols and 0 <= y < self._rows
+
+    def _plant(self, safe):
+        """首点后布雷：避开首点及其邻域，保证开局可展开一片"""
+        banned = {safe}
+        banned.update((safe[0] + dx, safe[1] + dy) for dx, dy in _MINES_ADJ)
+        cells = [(x, y) for y in range(self._rows) for x in range(self._cols)
+                 if (x, y) not in banned]
+        if len(cells) < self._mines:  # 雷密到禁区容不下时只避开首点
+            cells = [(x, y) for y in range(self._rows) for x in range(self._cols)
+                     if (x, y) != safe]
+        self._mineset = set(random.sample(cells, self._mines))
+        self._numbers = [[self._adj_count(x, y) for x in range(self._cols)]
+                         for y in range(self._rows)]
+        self._planted = True
+
+    def _adj_count(self, x, y):
+        """周雷数：扫雷格子的数字提示"""
+        return sum(1 for dx, dy in _MINES_ADJ if (x + dx, y + dy) in self._mineset)
+
+    def _neighbors(self, x, y):
+        return [(x + dx, y + dy) for dx, dy in _MINES_ADJ
+                if self._in_board(x + dx, y + dy)]
+
+    def reveal(self, x, y):
+        """左键翻开：首点布雷并起表，踩雷判负，否则洪水展开"""
+        if self._state in ("over", "win") or not self._in_board(x, y):
+            return
+        if self._grid[y][x] != _HIDDEN:
+            return
+        self._begin()
+        if not self._planted:
+            self._plant((x, y))
+        if (x, y) in self._mineset:
+            self._boom = (x, y)
+            self._lose()
+            return
+        self._flood(x, y)
+        self._check_win()
+        self.update()
+
+    def _flood(self, x, y):
+        """从 (x,y) 洪水铺开：数字格止步，0 格继续扩散邻域"""
+        stack = deque([(x, y)])
+        while stack:
+            cx, cy = stack.popleft()
+            if self._grid[cy][cx] != _HIDDEN or (cx, cy) in self._mineset:
+                continue
+            self._grid[cy][cx] = _OPEN
+            self._opened += 1
+            if self._numbers[cy][cx]:
+                continue
+            for nx, ny in self._neighbors(cx, cy):
+                if self._grid[ny][nx] == _HIDDEN:
+                    stack.append((nx, ny))
+
+    def toggle_flag(self, x, y):
+        """右键插旗/取消旗：只在未翻开的格上生效"""
+        if self._state in ("over", "win") or not self._in_board(x, y):
+            return
+        st = self._grid[y][x]
+        if st == _OPEN:
+            return
+        self._begin()
+        self._grid[y][x] = _HIDDEN if st == _FLAG else _FLAG
+        self._flags += -1 if st == _FLAG else 1
+        self.left_changed.emit(self._mines - self._flags)
+        self.update()
+
+    def chord(self, x, y):
+        """双击已翻开的数字：邻旗数吻合时一次展开其余邻格（旗标错会踩雷）"""
+        if self._state != "running" or not self._in_board(x, y):
+            return
+        n = self._numbers[y][x]
+        if self._grid[y][x] != _OPEN or not n:
+            return
+        around = self._neighbors(x, y)
+        if sum(1 for nx, ny in around
+               if self._grid[ny][nx] == _FLAG) != n:
+            return
+        for nx, ny in around:
+            if self._grid[ny][nx] != _HIDDEN:
+                continue
+            if (nx, ny) in self._mineset:
+                self._boom = (nx, ny)
+                self._lose()
+                return
+            self._flood(nx, ny)
+        self._check_win()
+        self.update()
+
+    def _lose(self):
+        """踩雷：停表并摊开全盘雷与错旗"""
+        self._state = "over"
+        self._timer.stop()
+        self.state_changed.emit(self._state)
+        self.update()
+
+    def _check_win(self):
+        """翻开格数达总数-雷数即胜利：剩余雷自动补旗收尾"""
+        if self._state in ("over", "win"):
+            return
+        if self._opened != self._cols * self._rows - self._mines:
+            return
+        self._state = "win"
+        self._timer.stop()
+        for y in range(self._rows):
+            for x in range(self._cols):
+                if self._grid[y][x] == _HIDDEN and (x, y) in self._mineset:
+                    self._grid[y][x] = _FLAG
+        self._flags = self._mines
+        self.left_changed.emit(0)
+        self.state_changed.emit(self._state)
+
+    # ---------- 事件 ----------
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_R:
+            self._reset()
+            return
+        super().keyPressEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.reveal(int(e.position().x()) // _MINES_CELL,
+                        int(e.position().y()) // _MINES_CELL)
+        elif e.button() == Qt.MouseButton.RightButton:
+            self.toggle_flag(int(e.position().x()) // _MINES_CELL,
+                             int(e.position().y()) // _MINES_CELL)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        self.chord(int(e.position().x()) // _MINES_CELL,
+                   int(e.position().y()) // _MINES_CELL)
+
+    def hideEvent(self, e):
+        """页面不可见时停表，避免后台空跑计时"""
+        super().hideEvent(e)
+        if self._state == "running":
+            self._resume_on_show = True
+            self.pause()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._resume_on_show:
+            self._resume_on_show = False
+            self.resume()
+
+    # ---------- 绘制 ----------
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self._cols * _MINES_CELL
+        h = self._rows * _MINES_CELL
+        p.setPen(QPen(QColor("#232a35"), 1))
+        p.setBrush(QBrush(QColor("#10141a")))
+        p.drawRect(0, 0, w + 1, h + 1)
+        dead = self._state == "over"
+        for y in range(self._rows):
+            for x in range(self._cols):
+                self._draw_cell(p, x, y, dead)
+        overlay = {
+            "idle": ("扫雷", "左键翻开 · 右键插旗 · 首点必定安全"),
+            "paused": ("已暂停", "点击棋盘或「继续」恢复计时"),
+            "over": ("踩雷了", "按 R 或点「重开」再来一局"),
+            "win": ("排雷成功", f"用时 {self._seconds} 秒 · 按 R 重开"),
+        }.get(self._state)
+        if overlay:
+            _draw_overlay(p, w, h, overlay[0], overlay[1])
+
+    def _draw_cell(self, p, x, y, dead):
+        """单格绘制：未开=凸起方块，已开=数字/雷，旗=小旗（错旗画红叉）"""
+        px, py = x * _MINES_CELL + 1, y * _MINES_CELL + 1
+        size = _MINES_CELL - 2
+        st = self._grid[y][x]
+        is_mine = (x, y) in self._mineset
+        if st == _HIDDEN and not (dead and is_mine):
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("#3b4553")))
+            p.drawRoundedRect(px, py, size, size, 3, 3)
+            return
+        # 以下内容一律先铺开格底（雷/错旗同底层）
+        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
+        p.setBrush(QBrush(QColor("#7f1d1d") if (x, y) == self._boom
+                          else QColor("#151a22")))
+        p.drawRect(px, py, size, size)
+        if st == _FLAG:
+            if dead and not is_mine:
+                p.setPen(QPen(QColor("#f87171"), 2))
+                p.drawLine(px + 7, py + 7, px + size - 7, py + size - 7)
+                p.drawLine(px + size - 7, py + 7, px + 7, py + size - 7)
+            else:
+                self._draw_flag(p, px, py, mine=dead)
+            return
+        if is_mine:
+            self._draw_mine(p, px, py)
+            return
+        n = self._numbers[y][x]
+        if n:
+            f = QFont("Segoe UI", 10, QFont.Weight.Bold)
+            f.setPixelSize(15)
+            p.setFont(f)
+            p.setPen(QPen(QColor(_MINES_NUM_COLORS[n - 1])))
+            p.drawText(px, py, size, size, Qt.AlignmentFlag.AlignCenter, str(n))
+
+    @staticmethod
+    def _draw_flag(p, px, py, mine=False):
+        """旗子：橙色三角旗面 + 旗杆；终局已标对的雷改用中性灰"""
+        cx = px + _MINES_CELL // 2
+        p.setPen(QPen(QColor("#cbd5e1"), 2))
+        p.drawLine(cx, py + 6, cx, py + _MINES_CELL - 9)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor("#9ca3af") if mine else QColor("#f97316")))
+        p.drawPolygon(QPolygon([QPoint(cx, py + 4), QPoint(cx + 8, py + 8),
+                                QPoint(cx, py + 12)]))
+
+    @staticmethod
+    def _draw_mine(p, px, py):
+        """雷：中心圆 + 八向短刺"""
+        cx, cy = px + _MINES_CELL // 2, py + _MINES_CELL // 2
+        p.setPen(QPen(QColor("#cbd5e1"), 2))
+        for dx, dy in ((0, -9), (0, 9), (-9, 0), (9, 0),
+                       (-7, -7), (7, -7), (-7, 7), (7, 7)):
+            p.drawLine(cx + dx * 3 // 5, cy + dy * 3 // 5, cx + dx, cy + dy)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor("#cbd5e1")))
+        p.drawEllipse(cx - 5, cy - 5, 11, 11)
+
+
+class MinesweeperWidget(QWidget):
+    """扫雷：信息栏（雷数/用时/最快纪录/难度/控制）+ 棋盘
+
+    最快用时按难度分档记账（moyu_state.json 的 best_mines）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = _saved_level("mines_level", _MINES_LEVELS,
+                                   _MINES_DEFAULT_LEVEL)
+        self._best = _level_bests("best_mines", _MINES_DEFAULT_LEVEL).get(
+            self._level)   # None = 该档暂无纪录（0 秒也是真纪录）
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+
+        bar = QHBoxLayout()
+        self._lbl_left = BodyLabel(f"剩余雷数：{_MINES_LEVELS[self._level][3]}",
+                                   self)
+        self._lbl_time = BodyLabel("用时：0 秒", self)
+        self._lbl_best = BodyLabel(self._best_text(), self)
+        bar.addWidget(self._lbl_left)
+        bar.addSpacing(16)
+        bar.addWidget(self._lbl_time)
+        bar.addSpacing(16)
+        bar.addWidget(self._lbl_best)
+        bar.addSpacing(16)
+        bar.addWidget(CaptionLabel("难度", self))
+        self._combo_level = ComboBox(self)
+        self._combo_level.setFixedWidth(88)
+        for key, cfg in _MINES_LEVELS.items():
+            # qfw addItem 第二参是 icon，userData 必须关键字传参
+            self._combo_level.addItem(cfg[0], userData=key)
+        # 先回显再连接，初始化不误触发切换逻辑
+        self._combo_level.setCurrentIndex(
+            list(_MINES_LEVELS).index(self._level))
+        self._combo_level.currentIndexChanged.connect(self._on_level)
+        bar.addWidget(self._combo_level)
+        bar.addStretch(1)
+        hint = CaptionLabel("左键翻开 · 右键插旗 · 双击数字展开邻域 · R 重开", self)
+        hint.setStyleSheet("color: #8a8f98;")
+        bar.addWidget(hint)
+        bar.addSpacing(12)
+        self._btn_toggle = PushButton("暂停", self)
+        self._btn_toggle.setEnabled(False)
+        self._btn_toggle.clicked.connect(self._toggle)
+        self._btn_restart = PushButton("重开", self)
+        self._btn_restart.clicked.connect(self._restart)
+        bar.addWidget(self._btn_toggle)
+        bar.addWidget(self._btn_restart)
+        layout.addLayout(bar)
+
+        self._board = _MinesBoard(self, level=self._level)
+        self._board.time_changed.connect(self._on_time)
+        self._board.left_changed.connect(self._on_left)
+        self._board.state_changed.connect(self._on_state)
+        # 同贪吃蛇：固定尺寸棋盘必须配尾部弹性项，否则页高被 2048 撑开、
+        # 多余高度被信息栏子布局吞掉露空白
+        layout.addWidget(self._board, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+
+    def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
+        """页签切入时由 GamePage 调用，把键盘焦点转给棋盘"""
+        super().setFocus(reason)
+        self._board.setFocus(reason)
+
+    def _best_text(self):
+        return ("最快：暂无纪录" if self._best is None
+                else f"最快：{self._best} 秒")
+
+    def _on_level(self, _index):
+        """难度切换：换棋盘重开，刷新该档纪录并记住选择"""
+        level = self._combo_level.currentData()
+        if not level:
+            return
+        self._level = level
+        self._board.set_level(level)
+        self._best = _level_bests("best_mines",
+                                  _MINES_DEFAULT_LEVEL).get(level)
+        self._lbl_best.setText(self._best_text())
+        save_moyu_state({"mines_level": level})
+        self._board.setFocus()
+
+    def _toggle(self):
+        """暂停/继续：扫雷无“开始”态，首次翻开自动起表"""
+        s = self._board.state()
+        if s == "running":
+            self._board.pause()
+        elif s == "paused":
+            self._board.resume()
+
+    def _restart(self):
+        self._board.restart()
+        self._board.setFocus()
+
+    def _on_time(self, seconds):
+        self._lbl_time.setText(f"用时：{seconds} 秒")
+
+    def _on_left(self, left):
+        self._lbl_left.setText(f"剩余雷数：{left}")
+
+    def _on_state(self, state):
+        """状态机变化：按钮联动 + 胜利时按难度刷新最快纪录"""
+        self._btn_toggle.setText("继续" if state == "paused" else "暂停")
+        self._btn_toggle.setEnabled(state in ("running", "paused"))
+        if state == "win":
+            used = self._board.seconds()
+            if _submit_level_best("best_mines", self._level, used,
+                                  minimize=True,
+                                  legacy_level=_MINES_DEFAULT_LEVEL):
+                self._best = used
+                self._lbl_best.setText(self._best_text())
+
+    # ---------- 页签切换联动 ----------
+
+    def auto_pause(self):
+        """页签切走：计时中则暂停并记录，供切回恢复"""
+        self._board.pause()
+
+    def auto_resume(self):
+        """页签切回：恢复被 auto_pause 暂停的局"""
+        self._board.resume()
 
 
 # ==================== 小说阅读器 ====================

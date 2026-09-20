@@ -374,13 +374,12 @@ class Ui_MainWindow(object):
         _fit_toolbar_qf(self.write_table)  # 强制 32px 行高，避免 min35>max32 底部露背景
         self.horizontalLayout.addWidget(self.write_table)
 
-        # 写入表格：布局调整 — 从第二行移至第一行「打开目录」右侧
-        self.btn_write_table = FluentPushButton(
-            FluentIcon.DOWNLOAD, "跑视频面板", self.row1_left)
-        self.btn_write_table.setObjectName(u"btn_write_table")
-        _fit_toolbar_qf(self.btn_write_table)
-        self.btn_write_table.setToolTip("打开跑视频面板并预填当前球桌会话")
-        self.horizontalLayout.addWidget(self.btn_write_table)
+        # CPP日志：布局调整 — 2026-09-20 自第二行移至第一行，
+        # 接替「跑视频面板」原位置（打开目录右侧）
+        self.open_daily = FluentPushButton(self.row1_left)
+        self.open_daily.setObjectName(u"open_daily")
+        _fit_toolbar_qf(self.open_daily)
+        self.horizontalLayout.addWidget(self.open_daily)
 
         # 右侧信息组：系统时间 + 数据库连接状态（布局调整 — 与入口组对调至第一行；
         # 左键测试连通性，右键进数据库设置）
@@ -456,11 +455,6 @@ class Ui_MainWindow(object):
         self.input_frame.setFixedHeight(32)
         self.horizontalLayout2.addWidget(self.input_frame)
 
-        self.open_daily = FluentPushButton(self.row2_left)
-        self.open_daily.setObjectName(u"open_daily")
-        _fit_toolbar_qf(self.open_daily)
-        self.horizontalLayout2.addWidget(self.open_daily)
-
         self.start = PrimaryPushButton(self.row2_left)
         self.start.setObjectName(u"start")
         _fit_toolbar_qf(self.start)
@@ -484,6 +478,15 @@ class Ui_MainWindow(object):
         self.row2_right_layout = QHBoxLayout(self.row2_right)
         self.row2_right_layout.setContentsMargins(0, 0, 0, 0)
         self.row2_right_layout.setSpacing(6)
+
+        # 跑视频面板：布局调整 — 2026-09-20 自第一行移至第二行右侧入口组，
+        # 位于「售后面板」左侧
+        self.btn_write_table = FluentPushButton(
+            FluentIcon.DOWNLOAD, "跑视频面板", self.row2_right)
+        self.btn_write_table.setObjectName(u"btn_write_table")
+        _fit_toolbar_qf(self.btn_write_table)
+        self.btn_write_table.setToolTip("打开跑视频面板并预填当前球桌会话")
+        self.row2_right_layout.addWidget(self.btn_write_table)
 
         self.btn_aftersale = FluentPushButton(
             FluentIcon.EDIT, "售后面板", self.row2_right)

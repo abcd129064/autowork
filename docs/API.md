@@ -1178,7 +1178,7 @@ SingleVideoDialog(parent, settings=None)
 
 ### MoyuReaderWidget
 
-摸鱼阅读器（`QWidget`），内置文本阅读（TXT/粘贴）、网页正文抓取、2048/贪吃蛇小游戏。
+摸鱼阅读器（`QWidget`），内置文本阅读（TXT/粘贴）、网页正文抓取；与 2048/贪吃蛇/扫雷 小游戏同属摸鱼中心（`GamePage`）。
 
 ---
 
@@ -1199,7 +1199,7 @@ ManagementPanelWindow(parent=None)
 | 设备健康度管理 | `HealthPage` | 健康度异常告警：每 30 分钟全量拉取 health（`TableFetchWorker` → `sync_health_alerts` 落库），每 1 小时重载展示；阈值 4000/5000/40 万；支持标记已处理 |
 | 管理设置 | `AdminSettingsPage` | 数据源选择（kd/xqzg）、双接口账号密码、测试连接，合并写入 `settings.json` |
 | 控件测试 | `WidgetPage` | FluentIcon 图标库（175 个，搜索过滤、点击复制枚举名）+ qfluentwidgets 控件墙（按钮/输入/日期/弹窗等分组演示，可直接交互） |
-| 小游戏 | `GamePage` | 摸鱼中心（2048/贪吃蛇等） |
+| 小游戏 | `GamePage` | 摸鱼中心（小说阅读 / 2048 / 贪吃蛇 / 扫雷）；后两者带难度选择，成绩按难度分档存 `moyu_state.json` |
 | （隐藏）健康趋势 | `TrendPage` | 健康度趋势看板（C3）：突增预警 + 单设备趋势折线 + TOP N 排行，仅 kd 数据源可用；导航入口已注释隐藏，恢复取消注释即可 |
 
 **图片迁移交互（DevicePage）**：

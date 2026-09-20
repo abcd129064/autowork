@@ -18,9 +18,9 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget,
                                QHBoxLayout, QScrollArea, QFrame)
-from qfluentwidgets import (Pivot, TitleLabel, CaptionLabel, CardWidget,
-                            PushButton, setCustomStyleSheet, ToolButton,
-                            FluentIcon)
+from qfluentwidgets import (Pivot, TitleLabel, CaptionLabel, BodyLabel,
+                            CardWidget, PushButton, setCustomStyleSheet,
+                            ToolButton, FluentIcon)
 
 
 class PivotPage(QWidget):
@@ -64,6 +64,12 @@ class PivotPage(QWidget):
         self.btn_popout.clicked.connect(self._on_popout)
         self.btn_popout.raise_()
 
+        # 常驻文本提示（2026-09-20 反馈）：纯图标按钮辨识度不足，
+        # 在按钮左侧固定显示「点击此按钮弹出面板」，随按钮一起定位/显隐
+        self.lbl_popout_hint = BodyLabel("点击此按钮弹出面板", self)
+        self.lbl_popout_hint.setObjectName("popoutHintLabel")
+        self.lbl_popout_hint.raise_()
+
     def _on_popout(self):
         win = self.window()
         fn = getattr(win, "open_hub_popout", None)
@@ -72,17 +78,28 @@ class PivotPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self.btn_popout.isVisible():
-            self._reposition_popout_btn()
+        self._sync_popout_hint()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.btn_popout.isVisible():
+        self._sync_popout_hint()
+
+    def _sync_popout_hint(self):
+        """提示文本与弹出按钮同显隐（弹出窗口内隐藏按钮时文本一并隐藏）"""
+        visible = self.btn_popout.isVisible()
+        self.lbl_popout_hint.setVisible(visible)
+        if visible:
             self._reposition_popout_btn()
 
     def _reposition_popout_btn(self):
-        """按钮贴页面右上角（垂直对齐 Pivot 切换条行中部）"""
-        self.btn_popout.move(self.width() - self.btn_popout.width() - 16, 10)
+        """按钮贴页面右上角（垂直对齐 Pivot 切换条行中部），
+        提示文本紧贴按钮左侧并垂直居中"""
+        x = self.width() - self.btn_popout.width() - 16
+        self.btn_popout.move(x, 10)
+        hint = self.lbl_popout_hint
+        hint.adjustSize()
+        hint.move(x - hint.width() - 8,
+                  10 + (self.btn_popout.height() - hint.height()) // 2)
 
     # ---------- 注册 ----------
 

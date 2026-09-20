@@ -64,6 +64,7 @@ const statCards = computed(() => [
 ]);
 
 /** ===== 图表 ===== */
+const { isDark } = useDark();
 const theme = computed(() => (isDark.value ? "dark" : "light"));
 const dailyRef = ref();
 const typeRef = ref();
@@ -105,7 +106,11 @@ const emptyOption = {
     text: "暂无数据",
     left: "center",
     top: "center",
-    textStyle: { color: "#909399", fontSize: 14, fontWeight: "normal" }
+    textStyle: {
+      color: "#909399",
+      fontSize: 14,
+      fontWeight: "normal" as const
+    }
   }
 };
 
@@ -114,7 +119,15 @@ function renderDaily(daily: Array<{ date: string; count: number }>) {
   dailyDates = daily.map(d => d.date); // 供点击跳转取完整日期
   const step = Math.max(1, Math.ceil(daily.length / 12));
   setDaily({
-    tooltip: { trigger: "axis" },
+    tooltip: {
+      trigger: "axis",
+      // 完整日期（轴标签为 MM-DD 短格式）
+      formatter: (ps: any) => {
+        const p = ps[0];
+        const full = dailyDates[p.dataIndex] || p.name;
+        return `${full}<br/>${p.marker}售后量：${p.value} 条（点击看当天明细）`;
+      }
+    },
     grid: { left: 40, right: 20, top: 30, bottom: 30 },
     xAxis: {
       type: "category",

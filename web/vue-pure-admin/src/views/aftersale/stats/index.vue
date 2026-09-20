@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { useRouter } from "vue-router";
 import { useDark, useECharts } from "@pureadmin/utils";
 import { useAftersaleCharts, PALETTE, DIM_OPTIONS, MEASURE_OPTIONS, CHART_TYPE_OPTIONS } from "./utils/hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
@@ -26,6 +27,12 @@ const {
 const formRef = ref();
 const { isDark } = useDark();
 const theme = computed(() => (isDark.value ? "dark" : "light"));
+const router = useRouter();
+
+/** 图表点击 → 跳列表带筛选（与总览页 goListWith 同模式） */
+function goListWith(query: Record<string, string>) {
+  router.push({ path: "/aftersale/list", query });
+}
 
 /** 统一的空态提示配置 */
 const emptyOption = {
@@ -39,10 +46,13 @@ const emptyOption = {
 
 /* ---------------- 1. 地区分布（环形图） ---------------- */
 const regionRef = ref();
-const { setOptions: setRegion } = useECharts(regionRef, {
-  theme,
-  renderer: "svg"
-});
+const { setOptions: setRegion, getInstance: getRegionInstance } = useECharts(
+  regionRef,
+  {
+    theme,
+    renderer: "svg"
+  }
+);
 
 function renderRegion() {
   const data = charts.value.region_dist ?? [];
@@ -77,23 +87,41 @@ function renderRegion() {
 
 /* ---------------- 2. 每日售后量（柱状图） ---------------- */
 const dailyRef = ref();
-const { setOptions: setDaily } = useECharts(dailyRef, {
-  theme,
-  renderer: "svg"
-});
+const { setOptions: setDaily, getInstance: getDailyInstance } = useECharts(
+  dailyRef,
+  {
+    theme,
+    renderer: "svg"
+  }
+);
+
+/** 每日图完整日期（与 x 轴 dataIndex 对齐，点击跳转用） */
+let dailyDates: string[] = [];
 
 function renderDaily() {
   const raw = charts.value.daily ?? [];
-  if (!raw.length) return setDaily(emptyOption);
+  if (!raw.length) {
+    dailyDates = [];
+    return setDaily(emptyOption);
+  }
   // 日期点较多时抽样显示 x 轴标签，避免挤成一团（保留首尾）
   const step = Math.max(1, Math.ceil(raw.length / 12));
+  dailyDates = raw.map(r => r.date);
   setDaily({
     color: [PALETTE[0]],
     grid: { left: 8, right: 16, top: 24, bottom: 8, containLabel: true },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      // 悬浮显示完整日期；点击柱子按同日期跳列表筛选
+      formatter: (ps: any) => {
+        const full = dailyDates[ps[0].dataIndex] ?? ps[0].name;
+        return `${full}<br/>${ps[0].marker}售后量：${ps[0].value}`;
+      }
+    },
     xAxis: {
       type: "category",
-      data: raw.map(r => r.date),
+      data: raw.map(r => r.date.slice(5)),
       axisLabel: {
         fontSize: 11,
         // 超过 12 条才抽样；否则全显示
@@ -119,7 +147,7 @@ function renderDaily() {
 
 /* ---------------- 3. 我方问题占比（环形图） ---------------- */
 const ourRef = ref();
-const { setOptions: setOur } = useECharts(ourRef, {
+const { setOptions: setOur, getInstance: getOurInstance } = useECharts(ourRef, {
   theme,
   renderer: "svg"
 });
@@ -167,10 +195,13 @@ function renderOur() {
 
 /* ---------------- 4. 问题类型分布（横向条形图） ---------------- */
 const issueRef = ref();
-const { setOptions: setIssue } = useECharts(issueRef, {
-  theme,
-  renderer: "svg"
-});
+const { setOptions: setIssue, getInstance: getIssueInstance } = useECharts(
+  issueRef,
+  {
+    theme,
+    renderer: "svg"
+  }
+);
 
 function renderIssue() {
   // 横向条形图从下往上画，倒序让最大值在顶部
@@ -321,6 +352,42 @@ function renderCustom() {
   });
 }
 
+/**
+ * 图表点击 → 跳列表筛选：
+ * - 地区环形图：点扇区 → region=<地区>
+ * - 每日柱状图：点柱子 → occurred_at=<完整日期>（dataIndex 对齐 dailyDates）
+ * - 我方问题环：点扇区 → is_our_problem=是/否
+ * - 类型条形图：点条目 → issue_type=<类型>
+ * off+on 幂等：主题切换/resize 重绘后重绑也不会重复触发
+ */
+function bindChartClicks() {
+  const regionChart = getRegionInstance();
+  regionChart?.off("click");
+  regionChart?.on("click", (p: any) => {
+    if (p?.name) goListWith({ region: String(p.name) });
+  });
+
+  const dailyChart = getDailyInstance();
+  dailyChart?.off("click");
+  dailyChart?.on("click", (p: any) => {
+    const date = dailyDates[p?.dataIndex];
+    if (date) goListWith({ occurred_at: date });
+  });
+
+  const ourChart = getOurInstance();
+  ourChart?.off("click");
+  ourChart?.on("click", (p: any) => {
+    if (p?.name === "我方问题") goListWith({ is_our_problem: "是" });
+    else if (p?.name === "非我方问题") goListWith({ is_our_problem: "否" });
+  });
+
+  const issueChart = getIssueInstance();
+  issueChart?.off("click");
+  issueChart?.on("click", (p: any) => {
+    if (p?.name) goListWith({ issue_type: String(p.name) });
+  });
+}
+
 /** 数据变化后统一重绘（nextTick 等 DOM 尺寸就绪） */
 async function renderAll() {
   await nextTick();
@@ -328,6 +395,7 @@ async function renderAll() {
   renderDaily();
   renderOur();
   renderIssue();
+  bindChartClicks();
 }
 
 watch(charts, renderAll, { deep: true });
@@ -448,20 +516,28 @@ onBeforeUnmount(() => {
 
       <el-row :gutter="16" v-loading="loading">
         <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
-          <div class="chart-title">地区分布</div>
-          <div ref="regionRef" class="chart-box" />
+          <div class="chart-title">
+            地区分布<span class="chart-hint">点击扇区跳列表筛选</span>
+          </div>
+          <div ref="regionRef" class="chart-box chart-clickable" />
         </el-col>
         <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
-          <div class="chart-title">每日售后量</div>
-          <div ref="dailyRef" class="chart-box" />
+          <div class="chart-title">
+            每日售后量<span class="chart-hint">点击柱子按发生日期筛选</span>
+          </div>
+          <div ref="dailyRef" class="chart-box chart-clickable" />
         </el-col>
         <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
-          <div class="chart-title">我方问题占比</div>
-          <div ref="ourRef" class="chart-box" />
+          <div class="chart-title">
+            我方问题占比<span class="chart-hint">点击扇区跳列表筛选</span>
+          </div>
+          <div ref="ourRef" class="chart-box chart-clickable" />
         </el-col>
         <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
-          <div class="chart-title">问题类型分布</div>
-          <div ref="issueRef" class="chart-box" />
+          <div class="chart-title">
+            问题类型分布<span class="chart-hint">点击条目跳列表筛选</span>
+          </div>
+          <div ref="issueRef" class="chart-box chart-clickable" />
         </el-col>
       </el-row>
     </el-card>
@@ -555,6 +631,18 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-regular);
   margin-bottom: 4px;
   padding-left: 2px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.chart-hint {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
+.chart-clickable {
+  cursor: pointer;
 }
 
 .chart-box {

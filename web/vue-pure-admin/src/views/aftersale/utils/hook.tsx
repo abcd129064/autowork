@@ -62,6 +62,7 @@ export function useAftersale(tableRef: Ref) {
     keyword: "",
     cycle_start: "",
     issue_type: "",
+    region: "",
     resolved: "",
     is_initiative: "",
     is_our_problem: "",
@@ -69,11 +70,12 @@ export function useAftersale(tableRef: Ref) {
     occurred_at: ""
   });
 
-  // 路由 query 初始化筛选（总览页图表/KPI 点击跳转带参进入）
+  // 路由 query 初始化筛选（总览页/统计页图表点击跳转带参进入）
   const route = useRoute();
   const QUERY_KEYS = [
     "keyword",
     "issue_type",
+    "region",
     "resolved",
     "is_initiative",
     "is_our_problem",
@@ -552,9 +554,11 @@ export function useAftersale(tableRef: Ref) {
                 resolver: curData.resolver || undefined,
                 occurred_at: curData.occurred_at || undefined
               });
-              message(`已新增售后记录（编号 ${res?.id ?? "-"}）`, {
+              message(`已新增售后记录（编号 ${res?.id ?? "-"}），可连续录入`, {
                 type: "success"
               });
+              // 连续录入：不关弹窗，清空问题相关字段（保留 填写人/解决人/发生日期）
+              formRef.value?.resetForContinue?.();
             } else {
               await updateRecord(curData.id, {
                 ...payload,
@@ -562,8 +566,8 @@ export function useAftersale(tableRef: Ref) {
                 updated_at: curData.updated_at
               });
               message(`已更新编号为 ${curData.id} 的记录`, { type: "success" });
+              done(); // 关闭弹框（编辑仍是单条语义）
             }
-            done(); // 关闭弹框
             onSearch(false); // 保持当前页码刷新
           } catch (err) {
             const s = statusOf(err);

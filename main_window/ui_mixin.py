@@ -1166,24 +1166,48 @@ class UIMixin:
         self._show_status_message("已添加记录到本地数据库", 3000)
         self._append_log("[添加] 手动添加一条球桌记录到本地数据库")
 
+    def _panel_entry_popout_enabled(self):
+        """工具栏面板入口（跑视频/售后/球桌管理）是否默认弹出独立面板。
+
+        设置项 panel_entry_popout（ui 域，默认 True，2026-09-20）：
+        开 = 点入口弹出独立面板窗口（open_hub_popout）；
+        关 = 回落为主窗口内导航跳转（switchTo）。
+        """
+        try:
+            return bool(self._load_settings().get("panel_entry_popout", True))
+        except Exception:
+            return True
+
     def _on_open_table_panel(self):
-        """打开球桌管理：跳转主窗口「运维管理」页（单窗口导航版）
+        """打开球桌管理：默认弹出独立面板（2026-09-20 设置项
+        panel_entry_popout，默认开）；关闭该设置时回落为跳转主窗口
+        「运维管理」页（单窗口导航版）。
 
         原 FluentWindow 独立面板保留（windows/management_panel.py shim 仍可
-        独立进程启动），主窗口入口统一收敛到侧边导航。
+        独立进程启动）。
         """
         hub = getattr(self, "management_hub", None)
-        if hub is not None:
+        if hub is None:
+            return
+        if self._panel_entry_popout_enabled():
+            self.open_hub_popout(hub)
+        else:
             self.switchTo(hub)
 
     def _on_open_aftersale(self):
-        """打开售后面板：跳转主窗口「售后」页（单窗口导航版）
+        """打开售后面板：默认弹出独立面板（2026-09-20 设置项
+        panel_entry_popout，默认开）；关闭该设置时回落为跳转主窗口
+        「售后」页（单窗口导航版）。
 
         原 AftersalePanelWindow 独立面板保留（windows/aftersale_panel.py shim
-        仍可独立进程启动），主窗口入口统一收敛到侧边导航。
+        仍可独立进程启动）。
         """
         hub = getattr(self, "aftersale_hub", None)
-        if hub is not None:
+        if hub is None:
+            return
+        if self._panel_entry_popout_enabled():
+            self.open_hub_popout(hub)
+        else:
             self.switchTo(hub)
 
     def _on_open_conn_diag(self):

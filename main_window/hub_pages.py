@@ -876,6 +876,13 @@ class SettingsHubPage(QWidget):
                        lambda v: win._save_settings(
                            {"startup_default_page": v}),
                        width=180)))
+        g.addRow(SettingRow(
+            FluentIcon.FIT_PAGE, "面板入口默认弹出",
+            "工具栏「跑视频 / 售后面板 / 球桌管理」点击后弹出独立面板窗口；"
+            "关闭则改为在主窗口内跳转对应页面",
+            make_switch(bool(settings.get("panel_entry_popout", True)),
+                        lambda v: win._save_settings(
+                            {"panel_entry_popout": bool(v)}))))
         return g
 
     def _group_log_rules(self, parent):

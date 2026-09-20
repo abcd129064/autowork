@@ -64,10 +64,12 @@ def _cycle_range(cycle_start: str) -> tuple | None:
 
 def _build_where(keyword: str, issue_type: str, resolved: str,
                  is_initiative: str, is_our_problem: str, cycle_start: str,
-                 occurred_at: str = ""):
+                 occurred_at: str = "", region: str = ""):
     conds, params = [], []
     if issue_type:
         conds.append("issue_type = %s"); params.append(str(issue_type).strip())
+    if region:
+        conds.append("region = %s"); params.append(str(region).strip())
     if resolved:
         conds.append("resolved = %s"); params.append(str(resolved).strip())
     if is_initiative:
@@ -130,12 +132,12 @@ def records(
     page_size: int = Query(50, ge=1, le=200),
     keyword: str = "", cycle_start: str = "", issue_type: str = "",
     resolved: str = "", is_initiative: str = "", is_our_problem: str = "",
-    occurred_at: str = "",
+    occurred_at: str = "", region: str = "",
 ):
     """分页列表 + 统计一次返回（与桌面端 query_with_stats 同口径）"""
     where, params = _build_where(keyword, issue_type, resolved,
                                  is_initiative, is_our_problem, cycle_start,
-                                 occurred_at)
+                                 occurred_at, region)
     order = "ORDER BY created_at DESC"
     with _db() as c:
         with c.cursor() as cur:
@@ -395,7 +397,9 @@ def stats_charts(cycle_start: str = "", issue_type: str = "", resolved: str = ""
     region = [{"name": r.get("region") or "未知", "value": r["n"]}
               for r in group("SELECT region, COUNT(*) n FROM aftersale_records")
               if r.get("region")]
-    daily = [{"date": r["d"][5:] if r["d"] else "", "count": r["n"]}
+    # date 输出完整 yyyy-MM-dd（前端展示自行截取 MM-DD；跨年窗口无歧义，
+    # 且总览页点击某天跳列表筛选需要完整日期）
+    daily = [{"date": r["d"] or "", "count": r["n"]}
              for r in group("SELECT " + DATE_EXPR + " d, COUNT(*) n FROM aftersale_records")]
     # 我方问题占比（NULL 视为否）
     with _db() as c, c.cursor() as cur:

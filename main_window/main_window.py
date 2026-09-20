@@ -1414,16 +1414,30 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
     @Slot()
     def _on_open_ledger(self):
-        """跑视频：跳转主窗口「跑视频」页并预填当前球桌会话（表单确认后入库）
+        """跑视频：默认弹出独立面板并预填当前球桌会话（2026-09-20 设置项
+        panel_entry_popout，默认开）；关闭该设置时回落为跳转主窗口
+        「跑视频」页并预填（表单确认后入库）。
 
         未选设备时也可打开（球房预填空），表单内可手填/修改；
         数据经 ledger_db 双后端路由写入（MySQL 开启时即服务器）。
-        原 LedgerPanelWindow 独立面板保留（shim 独立进程仍可用）。
+        原 LedgerPanelWindow 独立面板保留（shim 独立进程仍可用），
+        其 open_entry_with_context 与 Hub 同签名，弹出态同样预填。
         """
         hub = getattr(self, 'ledger_hub', None)
         if hub is None:
             return
         ctx = self._current_ledger_context()
+        if self._panel_entry_popout_enabled():
+            win = self.open_hub_popout(hub)
+            if win is not None:
+                try:
+                    win.open_entry_with_context(ctx)
+                except Exception:
+                    pass
+            self._append_log(
+                f"[跑视频] 已弹出跑视频面板并预填会话: 球房={ctx['room_name'] or '-'} "
+                f"视频={ctx['video_name'] or '-'} 帧={ctx['frame']}")
+            return
         self.switchTo(hub)
         hub.open_entry_with_context(ctx)
         self._append_log(

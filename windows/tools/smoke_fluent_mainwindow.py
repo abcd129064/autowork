@@ -558,6 +558,18 @@ try:
           _t is not None and type(_t).__name__ == "HubPopoutWindow"
           and _t.hub is not w.tool_hub)
     check("16.4 嵌入 hub 隐藏二次弹出按钮", not _t.hub.btn_popout.isVisible())
+    check("16.4b 弹出窗内提示文本随按钮隐藏", _t.hub.lbl_popout_hint.isHidden())
+    w.switchTo(w.management_hub)
+    for _ in range(4):
+        app.processEvents()
+    _mh = w.management_hub
+    check("16.4c 弹出提示文本可见且贴按钮左侧",
+          _mh.lbl_popout_hint.isVisible()
+          and "弹出面板" in _mh.lbl_popout_hint.text()
+          and _mh.lbl_popout_hint.x() + _mh.lbl_popout_hint.width()
+          <= _mh.btn_popout.x(),
+          f"hint=({_mh.lbl_popout_hint.x()},{_mh.lbl_popout_hint.width()}) "
+          f"btn.x={_mh.btn_popout.x()}")
     _t._single_video_worker = "X"
     check("16.5 busy 守卫属性写透主窗口",
           getattr(w, "_single_video_worker", None) == "X")
@@ -589,6 +601,62 @@ try:
     check("16.11 收尾关闭弹出窗口无异常", True)
 except Exception as e:
     check("16.x 弹出面板", False, repr(e))
+
+print("\n[17] 面板入口默认弹出（2026-09-20：跑视频/售后/球桌管理默认弹面板，设置可关）")
+try:
+    from PySide6.QtWidgets import QLabel as _QL
+    # 17.1 设置页「启动」组存在开关行
+    _found = False
+    for _lbl in w.settings_hub.findChildren(_QL):
+        if _lbl.text() == "面板入口默认弹出":
+            _found = True
+            break
+    check("17.1 设置-应用配置-启动 含「面板入口默认弹出」行", _found)
+    # 17.2 键登记 ui 域
+    from core import app_settings as _aps
+    check("17.2 panel_entry_popout 登记 ui 域",
+          _aps.domain_of("panel_entry_popout") == "ui")
+    # 17.3 默认开 → 入口走弹出（先备份原值，收尾恢复，避免污染真实配置）
+    _orig_pop = w._load_settings().get("panel_entry_popout", True)
+    w._save_settings({"panel_entry_popout": True})
+    check("17.3 默认判定为弹出", w._panel_entry_popout_enabled() is True)
+    _p = w._hub_popouts
+    w.ui.table_panel_btn.click()
+    for _ in range(6):
+        app.processEvents()
+    check("17.4 球桌管理入口弹出旧 ManagementPanelWindow",
+          type(_p.get("managementHub")).__name__ == "ManagementPanelWindow")
+    w.ui.btn_aftersale.click()
+    for _ in range(6):
+        app.processEvents()
+    check("17.5 售后入口弹出旧 AftersalePanelWindow",
+          type(_p.get("aftersaleHub")).__name__ == "AftersalePanelWindow")
+    w.ui.btn_write_table.click()
+    for _ in range(6):
+        app.processEvents()
+    check("17.6 跑视频入口弹出旧 LedgerPanelWindow",
+          type(_p.get("ledgerHub")).__name__ == "LedgerPanelWindow")
+    # 17.7 关闭设置 → 回落页内跳转（当前页变为对应 Hub，登记表不新增）
+    _n_before = len(_p)
+    w._save_settings({"panel_entry_popout": False})
+    check("17.7a 判定为页内跳转", w._panel_entry_popout_enabled() is False)
+    w.ui.table_panel_btn.click()
+    for _ in range(6):
+        app.processEvents()
+    check("17.7b 关闭后球桌管理走 switchTo",
+          w.stackedWidget.currentWidget() is w.management_hub
+          and len(_p) == _n_before)
+    # 恢复用户原值并收尾
+    w._save_settings({"panel_entry_popout": bool(_orig_pop)})
+    for _k in ("managementHub", "aftersaleHub", "ledgerHub"):
+        _v = _p.get(_k)
+        if _v is not None:
+            _v.close()
+    for _ in range(4):
+        app.processEvents()
+    check("17.8 收尾关闭弹出窗口无异常", True)
+except Exception as e:
+    check("17.x 面板入口默认弹出", False, repr(e))
 
 print("\n" + "=" * 56)
 print("冒烟结论：" + ("全部通过" if ok else "存在失败项"))

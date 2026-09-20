@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import ReCol from "@/components/ReCol";
+import CloseIcon from "~icons/ep/close";
 import { formRules } from "../utils/rule";
 import { YES_NO_OPTIONS, searchTables } from "@/api/aftersale";
 import type { TableRow } from "@/api/aftersale";
 import type { AftersaleFormProps } from "../utils/types";
+import {
+  loadQuickPhrases,
+  addQuickPhrase,
+  removeQuickPhrase
+} from "../utils/quickPhrases";
 
 /**
  * 售后表单（对齐桌面端 windows/aftersale/form.py）：
@@ -127,11 +133,55 @@ watch(
   }
 );
 
+// ---------- 常用句库 ----------
+// 对齐桌面端 QuickPhraseDialog：点击句填入问题框；localStorage 持久化（可增删）
+const phrases = ref<string[]>(loadQuickPhrases());
+const newPhrase = ref("");
+
+/** 点击常用句：问题框为空直接填入；已有内容则以「；」追加 */
+function applyPhrase(p: string) {
+  const cur = String(newFormInline.value.problem || "").trim();
+  newFormInline.value.problem = cur ? `${cur}；${p}` : p;
+}
+
+function onAddPhrase() {
+  phrases.value = addQuickPhrase(newPhrase.value);
+  newPhrase.value = "";
+}
+
+function onRemovePhrase(i: number) {
+  phrases.value = removeQuickPhrase(i);
+}
+
+/** 连续录入：新增成功后由 hook 调用 —— 清空问题相关字段，
+ *  保留 填写人/解决人/发生日期/判定默认值，等待录入下一条 */
+function resetForContinue() {
+  const f = newFormInline.value;
+  f.issue_type = "";
+  f.table_no = "";
+  f.room_name = "";
+  f.region = "";
+  f.problem = "";
+  f.cause = "";
+  f.solution = "";
+  f.snk_code = "";
+  f.device_code = "";
+  f.response_time = "";
+  f.is_important = 0;
+  f.resolved = "是";
+  f.is_initiative = "否";
+  f.is_our_problem = "是";
+  linked.value = null;
+  lastLinkedCity = "";
+  // 清除上一条的校验残留提示
+  ruleFormRef.value?.clearValidate?.();
+}
+
 function getRef() {
   return ruleFormRef.value;
 }
 
-defineExpose({ getRef });
+defineExpose({ getRef, resetForContinue });
 </script>
 
 <template>
@@ -253,13 +303,62 @@ defineExpose({ getRef });
       <!-- ===== 问题描述 ===== -->
       <re-col :value="24">
         <el-form-item label="问题" prop="problem">
-          <el-input
-            v-model="newFormInline.problem"
-            type="textarea"
-            :rows="2"
-            clearable
-            placeholder="请描述客户反馈的问题"
-          />
+          <div class="problem-wrap">
+            <div class="problem-toolbar">
+              <el-popover
+                placement="bottom-end"
+                :width="320"
+                trigger="click"
+                popper-class="qp-popper"
+              >
+                <template #reference>
+                  <el-button link type="primary" size="small">
+                    常用句
+                  </el-button>
+                </template>
+                <div class="qp-panel">
+                  <div class="qp-list">
+                    <div
+                      v-for="(p, i) in phrases"
+                      :key="p"
+                      class="qp-item"
+                      @click="applyPhrase(p)"
+                    >
+                      <span class="qp-text">{{ p }}</span>
+                      <el-icon
+                        class="qp-del"
+                        title="删除该常用句"
+                        @click.stop="onRemovePhrase(i)"
+                      >
+                        <component :is="CloseIcon" />
+                      </el-icon>
+                    </div>
+                    <div v-if="!phrases.length" class="qp-empty">
+                      暂无常用句，在下方输入添加
+                    </div>
+                  </div>
+                  <div class="qp-add">
+                    <el-input
+                      v-model="newPhrase"
+                      size="small"
+                      placeholder="输入新的常用句，回车添加"
+                      @keyup.enter="onAddPhrase"
+                    />
+                    <el-button size="small" type="primary" @click="onAddPhrase">
+                      添加
+                    </el-button>
+                  </div>
+                </div>
+              </el-popover>
+            </div>
+            <el-input
+              v-model="newFormInline.problem"
+              type="textarea"
+              :rows="2"
+              clearable
+              placeholder="请描述客户反馈的问题（可点右上「常用句」快速填入）"
+            />
+          </div>
         </el-form-item>
       </re-col>
 
@@ -391,6 +490,15 @@ defineExpose({ getRef });
 .link-bar {
   margin-bottom: 18px;
 }
+.problem-wrap {
+  width: 100%;
+}
+.problem-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  line-height: 1;
+  margin-bottom: 2px;
+}
 .room-item {
   display: flex;
   align-items: center;
@@ -407,5 +515,59 @@ defineExpose({ getRef });
 .room-item .city {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+/* 常用句面板（popper 渲染在 body 下，样式走 popper-class） */
+.qp-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.qp-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.qp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 20px;
+}
+.qp-item:hover {
+  background: var(--el-fill-color-light);
+}
+.qp-text {
+  flex: 1;
+  word-break: break-all;
+}
+.qp-del {
+  flex: none;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  border-radius: 4px;
+  padding: 2px;
+}
+.qp-del:hover {
+  color: var(--el-color-danger);
+  background: var(--el-fill-color);
+}
+.qp-empty {
+  padding: 12px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.qp-add {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  padding-top: 8px;
 }
 </style>
