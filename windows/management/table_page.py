@@ -40,7 +40,7 @@ from core.utils import show_info_bar
 from workers.table_worker import (TableFetchWorker, DevicesFetchWorker,
                                   SnookerOmFetchWorker, MigrateImageWorker,
                                   LoginTestWorker, get_active_api_source,
-                                  CATEGORY_DIRS)
+                                  TodeskToggleWorker, CATEGORY_DIRS)
 from workers.collect_worker import (CollectFilesWorker, ZipUploadWorker,
                                     clip_base_name, date_from_base,
                                     resolve_device_dir,
@@ -73,6 +73,7 @@ class TablePage(QWidget):
         self._query_worker = None
         self._save_worker = None
         self._export_worker = None
+        self._todesk_worker = None  # ToDesk 开关指令 Worker（右键菜单触发）
         self._hidden_cols = {2, 8}  # 在线状态/设备编码 默认隐藏（ToDesk号/向日葵 插列后设备编码 7→8），「筛选」菜单可勾选显示
         self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
         self._show_manual = False  # 是否显示手动版本设备（name 或 roomName 含 @s，默认不显示）
@@ -323,11 +324,22 @@ class TablePage(QWidget):
                             cell.setForeground(_HF_COLOR)
                             cell.setToolTip(
                                 f"{tip}\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）")
-                    elif key == "todesk_id" and val:
-                        # ToDesk 号着色：接口上报开启→绿色；关闭/未上报→默认色
-                        if str(item.get("todesk_status") or "") == "1":
-                            cell.setForeground(QColor(SEMANTIC["success"]))
-                            cell.setToolTip(f"{tip}\nToDesk 状态：开启")
+                    elif key == "todesk_id":
+                        # UserRole 存 todesk_status、UserRole+1 存设备编码：
+                        # 右键开关动作据此生成指令参数（无需跨列回查行数据）
+                        todesk_status = str(item.get("todesk_status") or "")
+                        cell.setData(Qt.ItemDataRole.UserRole, todesk_status)
+                        cell.setData(Qt.ItemDataRole.UserRole + 1,
+                                     str(item.get("code") or "").strip())
+                        if val:
+                            # ToDesk 号着色：接口上报开启→绿色；关闭/未上报→默认色
+                            if todesk_status == "1":
+                                cell.setForeground(QColor(SEMANTIC["success"]))
+                                cell.setToolTip(f"{tip}\nToDesk 状态：开启")
+                            else:
+                                state_txt = ("关闭" if todesk_status == "0"
+                                             else "未上报")
+                                cell.setToolTip(f"{tip}\nToDesk 状态：{state_txt}（右键可开关）")
                     self._table.setItem(r, c, cell)
         finally:
             self._table.blockSignals(False)
@@ -428,6 +440,22 @@ class TablePage(QWidget):
                 act_snk.triggered.connect(
                     lambda _=False, n=table_name, c=current: self._edit_snk(n, c))
                 menu.addAction(act_snk)
+        # 右键 ToDesk 号列：开关指令入口（实时下发 + 轮询确认）
+        if idx.isValid() and TABLE_COLUMNS[idx.column()][0] == "todesk_id":
+            td_item = self._table.item(idx.row(), idx.column())
+            if td_item and td_item.text().strip():
+                turn_on = str(td_item.data(Qt.ItemDataRole.UserRole) or "") != "1"
+                act_td = Action(
+                    FluentIcon.PLAY if turn_on else FluentIcon.PAUSE,
+                    "开启 ToDesk" if turn_on else "关闭 ToDesk", self._table)
+                if not str(td_item.data(Qt.ItemDataRole.UserRole + 1) or "").strip():
+                    # 无设备编码无法下发（datacode 是 value/ 指令的必填定位参数）
+                    act_td.setEnabled(False)
+                    act_td.setToolTip("该球桌无设备编码，无法下发指令")
+                else:
+                    act_td.triggered.connect(
+                        lambda _=False, r=idx.row(): self._toggle_todesk(r))
+                menu.addAction(act_td)
         # 远程连接入口（SSH / SFTP），与设备状态页交互一致
         if idx.isValid():
             self._add_remote_actions(menu, idx.row())
@@ -580,3 +608,118 @@ class TablePage(QWidget):
         else:
             show_info_bar("未找到匹配的球桌记录", "warning",
                           title="未修改", parent=self, duration=2500)
+
+    # ---------- ToDesk 开关（右键指令下发 + 轮询确认） ----------
+
+    def _todesk_col(self) -> int:
+        """ToDesk 号列索引（按 TABLE_COLUMNS 动态定位，防插列漂移）"""
+        for i, (key, _, _) in enumerate(TABLE_COLUMNS):
+            if key == "todesk_id":
+                return i
+        return -1
+
+    def _set_todesk_cell(self, row, status="", busy=False):
+        """原地刷新 ToDesk 号单元格着色与 tooltip（不重查库，保证实时反馈）
+
+        busy=True 表示指令已受理待设备确认（置灰）；status='1' 绿色开启，
+        其余恢复默认色并标注 关闭/未上报。
+        """
+        col = self._todesk_col()
+        if col < 0:
+            return
+        item = self._table.item(row, col)
+        if item is None:
+            return
+        tip = item.text().strip()
+        if busy:
+            item.setForeground(QColor(SEMANTIC["neutral"]))
+            item.setToolTip(f"{tip}\nToDesk 指令下发中，等待设备确认…")
+            return
+        item.setData(Qt.ItemDataRole.UserRole, str(status or ""))
+        if str(status or "") == "1":
+            item.setForeground(QColor(SEMANTIC["success"]))
+            item.setToolTip(f"{tip}\nToDesk 状态：开启")
+        else:
+            item.setForeground(
+                self._table.palette().color(QPalette.ColorRole.Text))
+            state_txt = "关闭" if str(status or "") == "0" else "未上报"
+            item.setToolTip(f"{tip}\nToDesk 状态：{state_txt}")
+
+    def _toggle_todesk(self, row):
+        """右键开关 ToDesk：确认 → 下发指令 → 乐观置灰 → 轮询确认后刷新着色"""
+        col = self._todesk_col()
+        if col < 0:
+            return
+        item = self._table.item(row, col)
+        if item is None or not item.text().strip():
+            return
+        if self._todesk_worker and self._todesk_worker.isRunning():
+            show_info_bar("已有 ToDesk 开关指令执行中，请稍候", "warning",
+                          title="提示", parent=self, duration=2500)
+            return
+        device_code = str(item.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+        if not device_code:
+            show_info_bar("该球桌无设备编码，无法下发指令", "warning",
+                          title="无法操作", parent=self, duration=2500)
+            return
+        name_item = self._table.item(row, 0)
+        table_name = name_item.text().strip() if name_item else ""
+        old_status = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        turn_on = old_status != "1"
+        verb = "开启" if turn_on else "关闭"
+        box = MessageBox(
+            f"确认{verb} ToDesk",
+            f"将对球桌「{table_name}」（设备 {device_code}）下发{verb}指令，"
+            f"设备确认通常需要数秒。", self)
+        box.yesButton.setText(verb)
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        # 记录上下文供信号回调定位单元格与失败恢复
+        self._todesk_ctx = {"row": row, "dev": device_code,
+                            "name": table_name, "old_status": old_status}
+        self._set_todesk_cell(row, busy=True)
+        self._todesk_worker = TodeskToggleWorker(device_code, table_name, turn_on)
+        self._todesk_worker.sent_ok.connect(self._on_todesk_sent)
+        self._todesk_worker.confirmed.connect(self._on_todesk_confirmed)
+        self._todesk_worker.unconfirmed.connect(self._on_todesk_unconfirmed)
+        self._todesk_worker.error.connect(self._on_todesk_error)
+        self._todesk_worker.start()
+
+    def _on_todesk_sent(self):
+        """指令已被服务端受理（WebSocket 已推送），置灰等待设备确认"""
+        show_info_bar("指令已下发，等待设备确认…", "info",
+                      title="ToDesk", parent=self, duration=2500)
+
+    def _on_todesk_confirmed(self, status):
+        """设备已确认新状态：回写本地最新分区并原地刷新着色"""
+        ctx = getattr(self, "_todesk_ctx", None)
+        if not ctx:
+            return
+        try:
+            table_db.update_todesk_status(ctx["dev"], status)
+        except Exception:
+            logger.exception("回写 todesk_status 失败（不影响界面刷新）")
+        self._set_todesk_cell(ctx["row"], status=str(status or ""))
+        verb = "开启" if str(status) == "1" else "关闭"
+        show_info_bar(f"球桌「{ctx['name']}」ToDesk 已确认{verb}", "success",
+                      title="已确认", parent=self, duration=3000)
+
+    def _on_todesk_unconfirmed(self, last_status):
+        """轮询超时未确认（设备可能离线）：恢复原状态显示并提示"""
+        ctx = getattr(self, "_todesk_ctx", None)
+        if not ctx:
+            return
+        self._set_todesk_cell(ctx["row"], status=ctx.get("old_status") or "")
+        suffix = f"（当前读到: {last_status}）" if last_status else ""
+        show_info_bar(
+            f"指令已受理但设备未在限时内确认，可能离线{suffix}，可稍后刷新核实",
+            "warning", title="未确认", parent=self, duration=5000)
+
+    def _on_todesk_error(self, msg):
+        """下发失败：恢复原状态显示并提示错误"""
+        ctx = getattr(self, "_todesk_ctx", None)
+        if ctx:
+            self._set_todesk_cell(ctx["row"], status=ctx.get("old_status") or "")
+        show_info_bar(str(msg).split("\n")[0], "error",
+                      title="ToDesk 指令失败", parent=self, duration=4000)

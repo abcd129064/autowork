@@ -1191,6 +1191,29 @@ def _norm_todesk_status(v) -> str:
     return "1" if v in (True, 1, "1", "true", "True") else "0"
 
 
+def update_todesk_status(device_code: str, todesk_status) -> int:
+    """开关指令确认后回写 todesk_status 到该设备最新分区行（返回受影响行数）
+
+    query_page 的 todesk 富集按 file_path DESC 取各字段首个非空值，因此
+    只需更新该设备最新分区的一行即可让列表刷新着色；当日未同步过 xqzg
+    分区时找不到行返回 0（下次同步会带服务端真实状态，无损）。
+    """
+    status = _norm_todesk_status(todesk_status)
+    code = str(device_code or "").strip()
+    if not code:
+        return 0
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id FROM xqzg_status WHERE TRIM(device_code) = ? "
+        "ORDER BY file_path DESC, id DESC LIMIT 1", (code,)).fetchone()
+    if row is None:
+        return 0
+    cur = conn.execute(
+        "UPDATE xqzg_status SET todesk_status = ? WHERE id = ?", (status, row[0]))
+    conn.commit()
+    return cur.rowcount
+
+
 def save_xqzg(rows: list, file_path: str = "") -> int:
     """按日期替换接口1数据（含扩展字段：状态/设备码/文件清单），返回写入条数
 

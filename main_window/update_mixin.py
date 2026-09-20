@@ -106,13 +106,13 @@ class UpdateMixin:
         if about is not None:
             about.show_check_result(f"发现新版本 {remote}", "warning")
         if silent:
-            # 启动自检发现新版本：弹提示条（可点「查看」），并在导航挂更新图标
+            # 启动自检发现新版本（2026-09-20 需求）：弹出更新对话框 + 导航挂
+            # 更新图标。「立即更新」→ 关对话框转后台下载（图标显示进度）；
+            # 「稍后」→ 图标保留 found 态，随时可点。
             self._update_pending_entry = entry
             self._update_pending_env = env
-            self._show_info_bar(
-                f"发现新版本 {remote}，点击左侧更新图标即可下载",
-                "info", duration=8000)
             self._set_update_nav("found", f"发现新版本 {remote}，点击下载")
+            self._open_update_dialog(entry, env)
             return
         self._open_update_dialog(entry, env)
 
