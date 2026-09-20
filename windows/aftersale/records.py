@@ -51,9 +51,9 @@ _RO_FLAGS = None
 # 未解决行 3 段、已解决行 2 段，按行取而非按行号（2026-09-19 取代原 cellWidget
 # 按钮与「重要行 ops 容器底色」样式串——现在 ops 格也是普通 item，背景随 _row_bg）
 _OPS_LINKS_UNRESOLVED = (("已解决", "primary", "resolve"),
-                         ("编辑", "ghost", "edit"),
+                         ("编辑", "primary", "edit"),
                          ("删除", "danger", "delete"))
-_OPS_LINKS_RESOLVED = (("编辑", "ghost", "edit"),
+_OPS_LINKS_RESOLVED = (("编辑", "primary", "edit"),
                        ("删除", "danger", "delete"))
 
 

@@ -21,6 +21,17 @@ def _load_api_credentials():
     return app_settings.get("api_credentials") or {}
 
 
+def _load_toggle_config() -> dict:
+    """读取 ToDesk 开关轮询参数（merged 配置顶层 todesk_toggle 域）"""
+    from core import app_settings
+    try:
+        merged = app_settings.get_merged() or {}
+    except Exception:
+        merged = {}
+    cfg = merged.get("todesk_toggle")
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def get_active_api_source() -> str:
     """读取当前启用的设备数据源（'kd' / 'xqzg'），默认 kd"""
     src = str(_load_api_credentials().get("active_source", "kd")).lower()
@@ -653,6 +664,198 @@ class HealthUpdateWorker(QThread):
             self.result_ready.emit(ok_names, fails)
         except Exception as e:
             self.error.emit(f"重置健康度失败: {e}")
+
+
+# ==================== ToDesk 开关指令（xqzg value/） ====================
+
+API1_VALUE_URL = f"{API1_BASE}/api/snooker_om/value/"
+
+# value/ 指令约定（datatype=action）：datavalue 20=开启 todesk / 80=关闭
+# （30/70=frp、10=更新提醒、90=重启，桌面端目前只用 todesk 一组）
+TODESK_ACTION = "action"
+TODESK_VALUE_ON = "20"
+TODESK_VALUE_OFF = "80"
+
+
+class TodeskToggleWorker(QThread):
+    """点击 ToDesk 号开关：下发 value/ 指令 → 轮询实时状态确认
+
+    全链路：Session 登录 → 补种 csrftoken → form POST value/
+    （datacode=设备编码, datatype=action, datavalue=20/80，JSON 会被接口
+    忽略必须 data= 提交）→ 服务端 WebSocket 即时推送设备 → 轮询
+    GET status/?table_id=（不带 file_path 即实时行，单设备轻量查询）
+    核对 todesk_status 是否翻转到期望值。
+
+    轮询参数可在配置 api_credentials.todesk_toggle 覆盖：
+    poll_interval（秒，默认 3）/ max_polls（次数，默认 10）。
+
+    Signals:
+        sent_ok(): 指令已被服务端受理（pushStatus=SENT），UI 可置灰等待
+        confirmed(str): 设备已确认新状态，参数=归一化 todesk_status（'1'/'0'）
+        unconfirmed(str): 下发受理但轮询超时未确认（可能设备离线），
+            参数=最后一次读到的状态（可能为空）
+        error(str): 下发失败 / 登录失败等整体错误
+    """
+    sent_ok = Signal()
+    confirmed = Signal(str)
+    unconfirmed = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, device_code, table_id, turn_on, parent=None):
+        super().__init__(parent)
+        self.device_code = str(device_code or "").strip()
+        self.table_id = str(table_id or "").strip()
+        self.turn_on = bool(turn_on)
+        creds = _load_api_credentials()
+        api1_cfg = creds.get("api1", {})
+        self.username = api1_cfg.get("username", "")
+        self.password = api1_cfg.get("password", "")
+        # 轮询参数：merged 配置顶层 todesk_toggle 优先，兼容 api_credentials 子键
+        toggle_cfg = creds.get("todesk_toggle") or _load_toggle_config()
+        try:
+            self.poll_interval = max(0.5, float(toggle_cfg.get("poll_interval", 3)))
+        except (TypeError, ValueError):
+            self.poll_interval = 3.0
+        try:
+            self.max_polls = max(1, int(toggle_cfg.get("max_polls", 10)))
+        except (TypeError, ValueError):
+            self.max_polls = 10
+
+    @staticmethod
+    def _norm_status(v) -> str:
+        """接口返回的 todesk_status 归一化：bool→'1'/'0'，其余转字符串。
+
+        与 table_db._norm_todesk_status 同口径（Worker 线程不 import
+        table_db，避免拉起数据库连接；两处规则需保持同步）。"""
+        if isinstance(v, bool):
+            return "1" if v else "0"
+        s = str(v if v is not None else "").strip()
+        if s in ("1", "true", "True"):
+            return "1"
+        if s in ("0", "false", "False"):
+            return "0"
+        return s
+
+    def _login(self):
+        """登录获取 session（与 SnookerOmFetchWorker 同款），失败返回 None"""
+        session = requests.Session()
+        try:
+            resp = session.post(API1_LOGIN_URL, json={
+                "username": self.username,
+                "password": self.password,
+            }, timeout=15)
+            if resp.status_code == 200:
+                return session
+        except requests.exceptions.RequestException:
+            pass
+        return None
+
+    @staticmethod
+    def _ensure_csrf(session):
+        """确保 session 带 csrftoken cookie（登录后一般已种；无则 GET 首页补种）"""
+        if session.cookies.get("csrftoken"):
+            return
+        try:
+            session.get(f"{API1_BASE}/", timeout=15)
+        except requests.exceptions.RequestException:
+            pass
+
+    def _post_value(self, session) -> tuple:
+        """form POST 一次开关指令，返回 (ok, err)；err='SESSION' 表示需重登"""
+        headers = {
+            "Referer": f"{API1_BASE}/",
+            "X-CSRFToken": session.cookies.get("csrftoken") or "",
+        }
+        try:
+            resp = session.post(
+                API1_VALUE_URL,
+                data={
+                    "datacode": self.device_code,
+                    "datatype": TODESK_ACTION,
+                    "datavalue": (TODESK_VALUE_ON if self.turn_on
+                                  else TODESK_VALUE_OFF),
+                },
+                headers=headers, timeout=20)
+            if resp.status_code in (401, 403):
+                return False, "SESSION"
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code}: {resp.text[:120]}"
+            data = resp.json()
+            # 成功形如 {"errorcode": 0, "pushStatus": "SENT", ...}；
+            # 只看 HTTP 状态码会假成功（业务失败同样可能 200）
+            if isinstance(data, dict) and data.get("errorcode") == 0:
+                return True, ""
+            msg = (data.get("msg") or data.get("detail") or str(data)) \
+                if isinstance(data, dict) else str(data)
+            return False, str(msg)[:160]
+        except requests.exceptions.Timeout:
+            return False, "请求超时"
+        except requests.exceptions.RequestException:
+            return False, "网络连接失败"
+        except ValueError:
+            return False, "响应解析失败"
+
+    def _read_live_status(self, session) -> str:
+        """GET status/?table_id=（无 file_path）读该设备实时 todesk_status"""
+        params = {"page": 1, "pagesize": 20, "table_id": self.table_id}
+        resp = session.get(API1_DATA_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        rows = resp.json().get("results") or []
+        code = self.device_code.lower()
+        for row in rows:
+            if str(row.get("device_code") or "").strip().lower() == code:
+                return self._norm_status(row.get("todesk_status"))
+        # 设备码没对上但 table_id 精确查询仅返回一行时采信该行
+        if len(rows) == 1:
+            return self._norm_status(rows[0].get("todesk_status"))
+        return ""
+
+    def run(self):
+        """下发 → 轮询确认主流程（Session 过期自动重登重试一次）"""
+        try:
+            if not self.device_code:
+                self.error.emit("该球桌无设备编码，无法下发指令")
+                return
+            if not self.username or not self.password:
+                self.error.emit("接口1账号密码未配置，请在 settings.json 的 api_credentials.api1 中填写")
+                return
+            session = self._login()
+            if session is None:
+                self.error.emit("接口1登录失败，请检查账号密码")
+                return
+            self._ensure_csrf(session)
+
+            ok, err = self._post_value(session)
+            if err == "SESSION":
+                session = self._login()
+                if session is None:
+                    self.error.emit("会话过期且重新登录失败")
+                    return
+                self._ensure_csrf(session)
+                ok, err = self._post_value(session)
+            if not ok:
+                self.error.emit(f"指令下发失败: {err or '未知错误'}")
+                return
+            self.sent_ok.emit()
+
+            expect = "1" if self.turn_on else "0"
+            last = ""
+            for _ in range(self.max_polls):
+                # 按小步进 sleep 便于及时响应打断（面板关闭不悬挂线程）
+                for _ in range(max(1, int(self.poll_interval / 0.2))):
+                    if self.isInterruptionRequested():
+                        return
+                    QThread.msleep(200)
+                try:
+                    last = self._read_live_status(session)
+                except (requests.exceptions.RequestException, ValueError):
+                    continue  # 单次读状态失败不终止轮询，等下一轮
+                if last == expect:
+                    self.confirmed.emit(last)
+                    return
+            self.unconfirmed.emit(last)
+        except Exception as e:
+            self.error.emit(f"ToDesk 开关执行失败: {e}")
 
 
 # ==================== 登录测试（管理设置页「测试连接」用） ====================

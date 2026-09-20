@@ -88,6 +88,33 @@
 
 前端 Web 控制台 JS 完全不调用这些端点（0 次出现）——控制链路属桌面端/设备侧专用。
 
+#### 1.3.1 上报端点官方规范（2026-09-20 用户提供）与实测结论
+
+设备→服务器上报端点（`to_desk/status/`、`frp/status/`）的权威规范：
+
+```
+frp 状态上报:   POST /api/snooker_om/frp/status/
+todesk 状态上报: POST /api/snooker_om/to_desk/status/
+参数（form）:
+  datacode  设备号
+  status    状态（true=成功，false=失败）
+  action    frp: 30=启动 / 70=关闭    todesk: 20=启动 / 80=关闭
+Headers:
+  X-App-Key:  images          （固定值）
+  X-Timestamp: <当前时间戳 10 位>
+  X-Sign:     Sign
+签名规则:
+  raw  = {APP_KEY}{timestamp}{APP_SECRET}{METHOD}{PATH}
+       = images + <10位时间戳> + snooker_images + <请求方式大写> + <实际请求路径，前后都有/>
+  Sign = MD5(raw)
+```
+
+实测结论（2026-09-20，签名探针验证）：
+1. **两上报端点仅支持 POST**（GET 返回 405 `Method "GET" not allowed`）——纯写入通道，**不可用于查询**；桌面端查询实时状态必须走 `GET status/?table_id=xxx`（Session 认证，返回 file_path=None 的实时行）。
+2. **桌面端严禁调用上报端点**：POST 会伪造设备状态写入（写 Redis 并反映到 status/），仅设备侧程序（如生产机 `todesk.sh`）使用。
+3. `http://192.168.0.160:8001` 为**本地开发环境**地址（外部不可达）；生产环境一律走 `https://xqzg.newbv.cn`。
+4. `value/` 指令下发的实测细节（2026-09-20 补充）：**form 提交**（JSON body 被忽略，报缺参）；`datatype` 传任意值均被规范化为 `action`；`datacode` 必须是**设备编码**（table_id 报"该设备号没找到"）；成功响应同步返回 `errorcode:0 + pushStatus:"SENT" + pushMessage:"WebSocket 指令已发送"`——服务端经 **WebSocket 即时推送**到在线设备。
+
 ### 1.4 发现的接口侧问题
 
 1. **`wechat_mini/` 缺参数直接 500**：`int() argument must be ... not 'NoneType'`，后端未校验必填参数。

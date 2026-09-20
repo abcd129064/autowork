@@ -964,13 +964,21 @@ try:
     check("19.3d hidden 态重新隐藏",
           not _btn.isVisibleTo(w) and _btn.state == "hidden")
 
-    # 19.4 静默检查发现新版 → 挂 found 态并保存 entry
+    # 19.4 静默检查发现新版 → 挂 found 态 + 弹更新对话框（需求：打开程序弹出提示）
     _entry19 = {"version": "3.11.999", "_remote_version": "3.11.999",
                 "notes": "x", "package": {"mode": "full", "url": "u",
                                           "sha256": "s", "size": 1}}
     _env19 = w._update_env()
-    w._on_update_found(_entry19, True, _env19)
+    _dlg_calls = []
+    _orig_open_dlg = w._open_update_dialog
+    w._open_update_dialog = lambda e, env: _dlg_calls.append(e)
+    try:
+        w._on_update_found(_entry19, True, _env19)
+    finally:
+        w._open_update_dialog = _orig_open_dlg
     check("19.4a silent 发现新版 → 导航挂 found", _btn.state == "found")
+    check("19.4a2 silent 发现新版 → 弹出更新对话框",
+          _dlg_calls and _dlg_calls[0] is _entry19)
     check("19.4b entry/env 已保存供图标点击使用",
           getattr(w, "_update_pending_entry", None) is _entry19
           and getattr(w, "_update_pending_env", None) is _env19)
@@ -1033,6 +1041,12 @@ try:
     _d19._on_yes()
     check("19.10a 立即更新 → on_download 收到 entry",
           _dl_calls and _dl_calls[0] is _entry19)
+    # MaskDialogBase.done() 有 100ms 淡出动画，result 在动画结束后才落值
+    import time as _t19
+    _t0 = _t19.time()
+    while _d19.result() == 0 and _t19.time() - _t0 < 2.0:
+        app.processEvents()
+        _t19.sleep(0.01)
     check("19.10b 对话框已关闭（result=accepted）",
           _d19.result() == 1, str(_d19.result()))
     _d19.deleteLater()
