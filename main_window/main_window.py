@@ -261,6 +261,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self.addSubInterface(hub, icon, text)
 
         self.navigationInterface.addSeparator()
+        # 更新状态图标（2026-09-20 需求）：必须在设置项之前加入，
+        # BOTTOM 位按加入顺序排 → 更新 在 设置 上方；平时隐藏，发现新版才显示
+        self.init_update_nav()
         self.addSubInterface(self.settings_hub, FluentIcon.SETTING, "设置",
                              NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.about_page, FluentIcon.INFO, "关于",

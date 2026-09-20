@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     cameraPassExt TEXT DEFAULT '',
     snk_code TEXT DEFAULT '',
     code    TEXT DEFAULT '',
-    city    TEXT DEFAULT ''
+    city    TEXT DEFAULT '',
+    deviceVersion TEXT DEFAULT '',
+    status  TEXT DEFAULT ''
 );
 """,
     "sync_meta": """
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS xqzg_status (
     device_code     TEXT DEFAULT '',
     target_directory TEXT DEFAULT '',
     status          TEXT DEFAULT '',
+    todesk_id       TEXT DEFAULT '',
     normal_files    TEXT DEFAULT '[]',
     except_files    TEXT DEFAULT '[]',
     untreated_files TEXT DEFAULT '[]',
@@ -205,7 +208,9 @@ GOLDEN_MYSQL_DDL = {
             cameraPassExt    VARCHAR(512) DEFAULT '',
             snk_code         VARCHAR(128) DEFAULT '',
             code             VARCHAR(255) DEFAULT '',
-            city             VARCHAR(255) DEFAULT ''
+            city             VARCHAR(255) DEFAULT '',
+            deviceVersion    VARCHAR(255) DEFAULT '',
+            status           VARCHAR(16) DEFAULT ''
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     "sync_meta": """
@@ -234,6 +239,7 @@ GOLDEN_MYSQL_DDL = {
             device_code      VARCHAR(255) DEFAULT '',
             target_directory VARCHAR(512) DEFAULT '',
             status           VARCHAR(32) DEFAULT '',
+            todesk_id        VARCHAR(64) DEFAULT '',
             normal_files     LONGTEXT,
             except_files     LONGTEXT,
             untreated_files  LONGTEXT,

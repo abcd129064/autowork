@@ -130,6 +130,10 @@ TABLE_COLUMNS = {
         ColumnDef("snk_code", "TEXT", "VARCHAR(128)", "''", "''"),
         ColumnDef("code", "TEXT", "VARCHAR(255)", "''", "''"),
         ColumnDef("city", "TEXT", "VARCHAR(255)", "''", "''"),
+        # 设备版本（wechat listext deviceVersion，如 "200070-20061-100836"）
+        ColumnDef("deviceVersion", "TEXT", "VARCHAR(255)", "''", "''"),
+        # 设备状态（wechat listext status：0=正常启动 2=退单，TEXT 存储）
+        ColumnDef("status", "TEXT", "VARCHAR(16)", "''", "''"),
     ],
     "sync_meta": [
         ColumnDef("key", "TEXT", "VARCHAR(128)", sqlite_extra="PRIMARY KEY",
@@ -156,6 +160,11 @@ TABLE_COLUMNS = {
         ColumnDef("device_code", "TEXT", "VARCHAR(255)", "''", "''"),
         ColumnDef("target_directory", "TEXT", "VARCHAR(512)", "''", "''"),
         ColumnDef("status", "TEXT", "VARCHAR(32)", "''", "''"),
+        # ToDesk 号（球桌管理 todesk 列数据源）：xqzg API todesk_id 字段
+        # 优先，remark「我的识别码」兜底，save_xqzg 解析后落库
+        ColumnDef("todesk_id", "TEXT", "VARCHAR(64)", "''", "''"),
+        # ToDesk 开启状态（xqzg API todesk_status：True=开启；'1'/'0'/'' 存储）
+        ColumnDef("todesk_status", "TEXT", "VARCHAR(8)", "''", "''"),
         # 8 类文件清单存 JSON：SQLite TEXT 带默认 '[]'；MySQL LONGTEXT
         # 不允许 DEFAULT 子句（读取端 json.loads(None) 兼容）
         ColumnDef("normal_files", "TEXT", "LONGTEXT", "'[]'", None),
@@ -367,6 +376,10 @@ MIGRATIONS: dict = {
                         "VARCHAR(255)", "''"),
         ColumnMigration("billiard_tables", "city", "TEXT", "''",
                         "VARCHAR(255)", "''"),
+        ColumnMigration("billiard_tables", "deviceVersion", "TEXT", "''",
+                        "VARCHAR(255)", "''"),
+        ColumnMigration("billiard_tables", "status", "TEXT", "''",
+                        "VARCHAR(16)", "''"),
     ],
     "health_alerts": [
         # 旧库补 device_code（xqzg update_health 接口入参，见 TABLE_COLUMNS）
@@ -415,6 +428,10 @@ MIGRATIONS: dict = {
                         "LONGTEXT", None),
         ColumnMigration("xqzg_status", "file_path", "TEXT", "''",
                         "VARCHAR(64)", "''"),
+        ColumnMigration("xqzg_status", "todesk_id", "TEXT", "''",
+                        "VARCHAR(64)", "''"),
+        ColumnMigration("xqzg_status", "todesk_status", "TEXT", "''",
+                        "VARCHAR(8)", "''"),
     ],
     "kd_status": [
         ColumnMigration("kd_status", "device_code", "TEXT", "''",

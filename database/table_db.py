@@ -614,31 +614,79 @@ def save_all(rows: list) -> int:
                 snk,
                 str(item.get("code") or ""),
                 parse_city(item),
+                # 设备版本（如 "200070-20061-100836"）与状态（0=正常 2=退单）
+                str(item.get("deviceVersion") or ""),
+                str(item.get("status") if item.get("status") is not None else ""),
             ))
         conn.executemany(
             "INSERT OR REPLACE INTO billiard_tables "
-            "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+            "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city, "
+            "deviceVersion, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # 同步时间戳：双后端兼容 upsert（MySQL 下 INSERT 已存在 key 会 1062）
         _upsert_sync_meta(conn, "last_sync", now)
     return len(data)
 
 
-# 「公司测试」球房名称（内部测试数据，面板筛选默认不展示，数据仍入库保留）
-TEST_ROOM_NAME = "公司测试"
+# 内部测试球房（公司测试/办公室测试/外借测试，面板筛选默认不展示，数据仍入库保留）
+TEST_ROOM_NAMES = ("公司测试", "办公室测试", "外借测试")
 
 # 手动版本设备标识（name 或 roomName 中含 @s，面板筛选默认不展示，数据仍入库保留）
 MANUAL_DEVICE_FLAG = "@s"
 
+# 退单设备状态值（wechat listext status：0=正常启动 2=退单；面板默认不展示）
+TUIDAN_STATUS = "2"
+
+
+def get_todesk_ids(codes) -> dict:
+    """按设备编码批量取最新非空 ToDesk 号与开启状态（球桌管理 todesk 列数据源）
+
+    xqzg_status 按日期分区快照存储，同一设备存在多日记录；按 file_path
+    降序扫描，各字段独立取首个非空值（即最近一次上报）：
+    返回 {device_code: {"todesk_id": str, "todesk_status": '1'/'0'/''}}。
+    单条批量查询（分块防 SQLite 参数上限），无 N+1。
+    """
+    uniq, seen = [], set()
+    for c in codes:
+        c = str(c or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    if not uniq:
+        return {}
+    conn = _get_conn()
+    result = {}
+    for i in range(0, len(uniq), 500):
+        chunk = uniq[i:i + 500]
+        ph = ",".join(["?"] * len(chunk))
+        try:
+            cur = conn.execute(
+                f"SELECT device_code, todesk_id, todesk_status FROM xqzg_status "
+                f"WHERE device_code IN ({ph}) "
+                f"AND (todesk_id != '' OR todesk_status != '') "
+                f"ORDER BY file_path DESC", chunk)
+        except Exception:
+            # 旧库未迁移/测试隔离库无 xqzg_status：跳过该块，不阻断球桌管理
+            continue
+        for code, tid, tst in cur.fetchall():
+            rec = result.setdefault(code, {"todesk_id": "", "todesk_status": ""})
+            if not rec["todesk_id"] and tid:
+                rec["todesk_id"] = str(tid)
+            if not rec["todesk_status"] and tst:
+                rec["todesk_status"] = str(tst)
+    return result
+
 
 def query_page(page_no: int, page_size: int, keyword: str = "",
-               include_test: bool = True, include_manual: bool = True) -> tuple:
+               include_test: bool = True, include_manual: bool = True,
+               include_tuidan: bool = True) -> tuple:
     """本地分页查询，支持全字段模糊搜索
 
     Args:
         include_test: 是否包含「公司测试」球房数据；False 时排除（面板默认）
         include_manual: 是否包含手动版本设备（name 或 roomName 含 @s）；False 时排除（面板默认）
+        include_tuidan: 是否包含退单设备（status=2）；False 时排除（面板默认）
 
     Returns:
         (total, rows)  rows 为 list[dict]
@@ -647,12 +695,16 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
     conds = []
     params = []
     if not include_test:
-        conds.append("TRIM(roomName) != ?")
-        params.append(TEST_ROOM_NAME)
+        conds.append("TRIM(roomName) NOT IN (?, ?, ?)")
+        params.extend(TEST_ROOM_NAMES)
     if not include_manual:
         # 实际数据中 @s 标记出现在球房名（roomName）里，仅查 name 会漏排
         conds.append("(name NOT LIKE ? AND roomName NOT LIKE ?)")
         params.extend([f"%{MANUAL_DEVICE_FLAG}%", f"%{MANUAL_DEVICE_FLAG}%"])
+    if not include_tuidan:
+        # 退单设备（status=2）默认排除；IFNULL 兜底 NULL/空串（非退单正常展示）
+        conds.append("IFNULL(status, '') != ?")
+        params.append(TUIDAN_STATUS)
     kw = keyword.strip()
     if kw:
         # 优先 FTS5 trigram 索引（子串匹配），短关键词/不可用时回退多列 LIKE
@@ -673,11 +725,24 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
 
     offset = (page_no - 1) * page_size
     cursor = conn.execute(
-        f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code "
+        f"SELECT id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, "
+        f"deviceVersion, status "
         f"FROM billiard_tables{where} ORDER BY id DESC LIMIT ? OFFSET ?",
         params + [page_size, offset])
     cols = [d[0] for d in cursor.description]
     rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+    # ToDesk 号/开启状态富集：billiard_tables.code ↔ xqzg_status.device_code
+    # 关联，取最新分区非空值（异常兜底空值，xqzg 数据缺失不影响球桌管理）
+    try:
+        todesk_map = get_todesk_ids([r.get("code") for r in rows])
+    except Exception:
+        todesk_map = {}
+    for r in rows:
+        rec = todesk_map.get(str(r.get("code") or "").strip(), {})
+        r["todesk_id"] = rec.get("todesk_id", "")
+        r["todesk_status"] = rec.get("todesk_status", "")
+        # 向日葵号：仅存于 remark 文本，查询时直接解析（无 API 字段/落库）
+        r["sunflower_id"] = parse_sunflower_id(r.get("remark") or "")
     return total, rows
 
 
@@ -693,11 +758,11 @@ def query_tables_by_room(room_kw: str, limit: int = 30) -> list:
     conn = _get_conn()
     like = f"%{kw}%"
     conds = [
-        "TRIM(roomName) != ?",
+        "TRIM(roomName) NOT IN (?, ?, ?)",
         "(name NOT LIKE ? AND roomName NOT LIKE ?)",
         "roomName LIKE ?",
     ]
-    params = [TEST_ROOM_NAME,
+    params = [*TEST_ROOM_NAMES,
               f"%{MANUAL_DEVICE_FLAG}%", f"%{MANUAL_DEVICE_FLAG}%",
               like]
     cursor = conn.execute(
@@ -857,7 +922,7 @@ def _filter_alert_items(rows) -> list:
         # 排除：默认值/正常（<=4000）与脏数据（>40万）
         if h <= HEALTH_WARN or h > HEALTH_INVALID_MAX:
             continue
-        if str(item.get("roomName") or "").strip() == TEST_ROOM_NAME:
+        if str(item.get("roomName") or "").strip() in TEST_ROOM_NAMES:
             continue
         items[name] = (
             name,
@@ -1071,6 +1136,61 @@ def _probe_status_ext_cols(conn, table: str):
             f"{table} 表缺少扩展列 normal_files，自动迁移未生效，请升级数据库结构: {e}") from e
 
 
+def parse_todesk_id(item: dict) -> str:
+    """从 xqzg status 行提取 ToDesk 号（球桌管理 todesk 列数据源）
+
+    优先级（2026-09-20 口径修正，admin-billiard 后台对齐）：
+    1. todesk_id 字段（xqzg 接口上报，如 "897832375"，权威来源）；
+    2. remark 中 ToDesk 自己的号：「ToDesk:549 211 574」直接跟号，或
+       「ToDesk:\\n设备代码:942 598 500（...）」的设备代码；
+    ⚠️ 「我的识别码:xxx」「向日葵:xxx」是向日葵的号，绝不匹配。
+    返回去空格的纯数字串（与 todesk_id 字段格式一致）。
+    """
+    v = str(item.get("todesk_id") or "").strip()
+    if v:
+        return v
+    remark = str(item.get("remark") or "")
+    # ① ToDesk: 后直接跟号（可含空格，如 "ToDesk:295 534 145（...）"）
+    m = re.search(r"todesk\s*[:：]\s*(\d[\d ]*)", remark, re.IGNORECASE)
+    if m:
+        return m.group(1).replace(" ", "")
+    # ② ToDesk 块内的设备代码（"ToDesk:\n设备代码:734 741 984（...）"）
+    m = re.search(r"设备代码\s*[:：]\s*(\d[\d ]*)", remark)
+    if m:
+        return m.group(1).replace(" ", "")
+    return ""
+
+
+def parse_sunflower_id(item) -> str:
+    """从 remark 文本提取向日葵识别码（球桌管理「向日葵」列数据源）
+
+    向日葵号只存在于 remark 文本（无 API 字段），三种写法
+    （2026-09-20 口径，与 ToDesk 严格区分）：
+    - 「向日葵识别码:448 240 371」（明确向日葵标记，优先）
+    - 「向日葵：224 222 122」
+    - 「我的识别码:263034244」（默认指向向日葵）
+    返回去空格的纯数字串；无则空串。item 可传 dict（取 remark）或纯文本。
+    """
+    if isinstance(item, dict):
+        remark = str(item.get("remark") or "")
+    else:
+        remark = str(item or "")
+    for pat in (r"向日葵识别码\s*[:：]\s*(\d[\d ]*)",
+                r"向日葵\s*[:：]\s*(\d[\d ]*)",
+                r"我的识别码\s*[:：]\s*(\d[\d ]*)"):
+        m = re.search(pat, remark)
+        if m:
+            return m.group(1).replace(" ", "")
+    return ""
+
+
+def _norm_todesk_status(v) -> str:
+    """todesk_status 归一化：True→'1'，False→'0'，None/空→''（落库存储格式）"""
+    if v is None or v == "":
+        return ""
+    return "1" if v in (True, 1, "1", "true", "True") else "0"
+
+
 def save_xqzg(rows: list, file_path: str = "") -> int:
     """按日期替换接口1数据（含扩展字段：状态/设备码/文件清单），返回写入条数
 
@@ -1093,13 +1213,17 @@ def save_xqzg(rows: list, file_path: str = "") -> int:
         # 只删除该日期的数据，保留其他日期
         conn.execute("DELETE FROM xqzg_status WHERE file_path = ?", (file_path,))
         all_fields = STATUS_FIELDS + KD_EXTRA_FIELDS
-        placeholders = ", ".join(["?"] * (len(all_fields) + 2))  # id + file_path + fields
-        col_names = "id, file_path, " + ", ".join(all_fields)
+        # id + file_path + todesk_id + todesk_status + fields（todesk 两列为
+        # xqzg 专属：号=parse_todesk_id 解析，状态=_norm_todesk_status 归一化）
+        placeholders = ", ".join(["?"] * (len(all_fields) + 4))
+        col_names = ("id, file_path, todesk_id, todesk_status, "
+                     + ", ".join(all_fields))
         # 获取当前最大 id，续接编号
         max_id = conn.execute("SELECT MAX(id) FROM xqzg_status").fetchone()[0] or 0
         data = []
         for idx, item in enumerate(rows, max_id + 1):
-            row_vals = [idx, file_path]
+            row_vals = [idx, file_path, parse_todesk_id(item),
+                        _norm_todesk_status(item.get("todesk_status"))]
             for f in STATUS_FIELDS:
                 row_vals.append(str(item.get(f) if item.get(f) is not None else ""))
             for f in KD_EXTRA_FIELDS:

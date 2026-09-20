@@ -73,9 +73,10 @@ class TablePage(QWidget):
         self._query_worker = None
         self._save_worker = None
         self._export_worker = None
-        self._hidden_cols = {2, 6}  # 在线状态/设备编码 默认隐藏，可在「筛选」菜单勾选显示
+        self._hidden_cols = {2, 8}  # 在线状态/设备编码 默认隐藏（ToDesk号/向日葵 插列后设备编码 7→8），「筛选」菜单可勾选显示
         self._show_test = False    # 是否显示「公司测试」数据（默认不显示）
         self._show_manual = False  # 是否显示手动版本设备（name 或 roomName 含 @s，默认不显示）
+        self._show_tuidan = False  # 是否显示退单设备（接口 status=2，默认不显示）
         # 搜索防抖：停止输入 300ms 后才查库重建表格，避免逐字触发同步查询
         self._search_timer = QTimer(self)
         self._search_timer.setInterval(300)
@@ -202,7 +203,7 @@ class TablePage(QWidget):
         self._test_cb = CheckBox("公司测试", self)
         self._test_cb.setChecked(self._show_test)
         self._test_cb.setFixedSize(max(self._test_cb.sizeHint().width() + 30, 120), 36)
-        self._test_cb.setToolTip("显示内部测试球房数据")
+        self._test_cb.setToolTip("显示内部测试球房（公司测试/办公室测试/外借测试）")
         self._test_cb.checkStateChanged.connect(self._toggle_test_data)
         menu.addWidget(self._test_cb, selectable=False)
         # 「手动版本」设备开关：默认不勾选（不显示 name/roomName 含 @s 的设备），勾选后才展示
@@ -212,6 +213,13 @@ class TablePage(QWidget):
         self._manual_cb.setToolTip("显示手动版本设备（名称或球房名含 @s）")
         self._manual_cb.checkStateChanged.connect(self._toggle_manual_data)
         menu.addWidget(self._manual_cb, selectable=False)
+        # 「退单设备」开关：默认不勾选（不显示接口 status=2 的设备），勾选后才展示
+        self._tuidan_cb = CheckBox("退单设备", self)
+        self._tuidan_cb.setChecked(self._show_tuidan)
+        self._tuidan_cb.setFixedSize(max(self._tuidan_cb.sizeHint().width() + 30, 120), 36)
+        self._tuidan_cb.setToolTip("显示退单设备（接口 status=2）")
+        self._tuidan_cb.checkStateChanged.connect(self._toggle_tuidan_data)
+        menu.addWidget(self._tuidan_cb, selectable=False)
         # 菜单由 ToolButton 代为弹出（库内固定 DROP_DOWN），打实例补丁以跟随动画开关
         _patch_menu_animation(menu)
         self._col_btn.setMenu(menu)
@@ -233,7 +241,8 @@ class TablePage(QWidget):
         keyword = self._search_edit.text().strip()
         self._query_worker = _DBQueryWorker(
             table_db.query_page, self._page_no, self._page_size, keyword,
-            include_test=self._show_test, include_manual=self._show_manual)
+            include_test=self._show_test, include_manual=self._show_manual,
+            include_tuidan=self._show_tuidan)
         self._query_worker.result_ready.connect(
             lambda result, kw=keyword: self._on_query_finished(result, kw))
         self._query_worker.start()
@@ -314,6 +323,11 @@ class TablePage(QWidget):
                             cell.setForeground(_HF_COLOR)
                             cell.setToolTip(
                                 f"{tip}\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）")
+                    elif key == "todesk_id" and val:
+                        # ToDesk 号着色：接口上报开启→绿色；关闭/未上报→默认色
+                        if str(item.get("todesk_status") or "") == "1":
+                            cell.setForeground(QColor(SEMANTIC["success"]))
+                            cell.setToolTip(f"{tip}\nToDesk 状态：开启")
                     self._table.setItem(r, c, cell)
         finally:
             self._table.blockSignals(False)
@@ -384,6 +398,12 @@ class TablePage(QWidget):
         self._page_no = 1
         self._load_local()
 
+    def _toggle_tuidan_data(self, state):
+        """「退单设备」显隐切换：回到第一页重新查询（接口 status=2）"""
+        self._show_tuidan = (state == Qt.CheckState.Checked)
+        self._page_no = 1
+        self._load_local()
+
     def _show_copy_menu(self, pos):
         """右键菜单：复制单元格；SNK 列额外提供修改入口与远程连接入口"""
         idx = self._table.indexAt(pos)
@@ -451,9 +471,11 @@ class TablePage(QWidget):
         snk 优先取行数据 snk_code 列（存储时已从 remark 解析/手动写入），
         兜底再从 remark 正则解析；两者皆无则该球桌不可远程。
         """
-        # 列索引：5=SNK标识列（存储时已从 remark 解析/手动写入），3=备注列兑底正则解析
-        snk_item = self._table.item(row_idx, 5)
-        remark_item = self._table.item(row_idx, 3)
+        # 列索引按 TABLE_COLUMNS 动态定位（相机密码/SNK 之间插 ToDesk号 列后，
+        # 硬编码索引会随插列漂移）；球桌号恒为第 0 列
+        col_of = {k: i for i, (k, _, _) in enumerate(TABLE_COLUMNS)}
+        snk_item = self._table.item(row_idx, col_of.get("snk_code", 6))
+        remark_item = self._table.item(row_idx, col_of.get("remark", 3))
         table_item = self._table.item(row_idx, 0)
         table_id = table_item.text().strip() if table_item else ""
         snk = (snk_item.text().strip() if snk_item else "") or \
@@ -516,7 +538,8 @@ class TablePage(QWidget):
         # （遵循当前「公司测试」与「手动版本」筛选状态）
         self._export_worker = _DBQueryWorker(
             table_db.query_page, 1, _EXPORT_MAX_ROWS, keyword,
-            include_test=self._show_test, include_manual=self._show_manual)
+            include_test=self._show_test, include_manual=self._show_manual,
+            include_tuidan=self._show_tuidan)
         self._export_worker.result_ready.connect(
             lambda result, p=path: self._on_export_query(result, p))
         self._export_worker.error.connect(

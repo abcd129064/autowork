@@ -43,7 +43,7 @@ class UpdateDialog(MessageBoxBase):
 
     def __init__(self, parent, entry: dict, base_url: str, app_dir: str,
                  main_exe: str = "", local_version: str = "",
-                 on_install=None):
+                 on_install=None, on_download=None):
         super().__init__(parent)
         self._entry = entry or {}
         self._base_url = base_url
@@ -55,6 +55,9 @@ class UpdateDialog(MessageBoxBase):
         # min_version 不满足时实际会降级为 full，标签按 resolve 后的模式显示
         self._mode = updater.resolve_mode(self._entry, local_version)
         self.on_install = on_install   # (staging_dir, mode) -> bool
+        # on_download：注入后「立即更新」改为关闭对话框 → 主窗口后台下载
+        # （导航图标显示进度）；未注入保持原对话框内下载（冒烟测试依赖）
+        self.on_download = on_download
         self._worker = None
 
         pkg = self._entry.get("package") or {}
@@ -176,6 +179,15 @@ class UpdateDialog(MessageBoxBase):
 
     def _on_yes(self):
         if self._phase == "found":
+            if self.on_download is not None:
+                # 主窗口后台下载模式：关对话框，进度走导航图标
+                cb = self.on_download
+                self.accept()
+                try:
+                    cb(self._entry)
+                except Exception:
+                    pass
+                return
             self._start_download()
         elif self._phase == "error":
             self._back_to_found()

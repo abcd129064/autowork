@@ -146,8 +146,14 @@ TABLE_COLUMNS = [
     ("onlineStatusName", "在线状态", 80),
     ("remark", "备注", 360),
     ("cameraPassExt", "相机密码", 220),
+    # ToDesk 号：query_page 按 code↔xqzg_status.device_code 关联富集
+    ("todesk_id", "ToDesk号", 130),
+    # 向日葵号：query_page 从 remark 文本解析（我的识别码/向日葵）
+    ("sunflower_id", "向日葵", 110),
     ("snk_code", "SNK标识", 110),
     ("code", "设备编码", 200),
+    # 设备版本（wechat listext deviceVersion，如 200070-20061-100836）
+    ("deviceVersion", "版本号", 170),
 ]
 
 _STATUS_COLORS = {

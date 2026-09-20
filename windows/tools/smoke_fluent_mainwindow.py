@@ -943,6 +943,120 @@ except Exception as e:
     import traceback as _tb
     check("18.x 自动更新", False, repr(e) + "\n" + _tb.format_exc()[-600:])
 
+# ==================== 19. 导航更新按钮（设置上方，下载进度/就绪提示） ====================
+try:
+    print("\n--- [19] 导航更新按钮 ---")
+    _btn = getattr(w, "_update_nav_btn", None)
+    check("19.1 导航更新按钮已创建", _btn is not None)
+    check("19.2 初始隐藏（无更新不打扰）",
+          _btn is not None and not _btn.isVisibleTo(w))
+
+    # 19.3 状态机：found → downloading → ready → hidden
+    w._set_update_nav("found", "发现新版本 3.11.999，点击下载")
+    check("19.3a found 态可见且 tooltip 正确",
+          _btn.isVisibleTo(w) and _btn.state == "found"
+          and "3.11.999" in _btn.toolTip())
+    w._set_update_nav("downloading", "正在下载更新 42%")
+    check("19.3b downloading 态图标切换（DOWNLOAD）", _btn.state == "downloading")
+    w._set_update_nav("ready", "已就绪，点击安装")
+    check("19.3c ready 态", _btn.state == "ready")
+    w._set_update_nav("hidden")
+    check("19.3d hidden 态重新隐藏",
+          not _btn.isVisibleTo(w) and _btn.state == "hidden")
+
+    # 19.4 静默检查发现新版 → 挂 found 态并保存 entry
+    _entry19 = {"version": "3.11.999", "_remote_version": "3.11.999",
+                "notes": "x", "package": {"mode": "full", "url": "u",
+                                          "sha256": "s", "size": 1}}
+    _env19 = w._update_env()
+    w._on_update_found(_entry19, True, _env19)
+    check("19.4a silent 发现新版 → 导航挂 found", _btn.state == "found")
+    check("19.4b entry/env 已保存供图标点击使用",
+          getattr(w, "_update_pending_entry", None) is _entry19
+          and getattr(w, "_update_pending_env", None) is _env19)
+
+    # 19.5 点击图标（found 态）→ 走后台下载（mock worker，不真起线程）
+    _bg_calls = []
+    _orig_bg = w._start_background_download
+
+    def _fake_bg(entry, env):
+        _bg_calls.append((entry, env))
+        w._set_update_nav("downloading", "正在下载更新…")
+
+    w._start_background_download = _fake_bg
+    w._on_update_nav_clicked()
+    check("19.5a found 态点击 → 触发后台下载",
+          len(_bg_calls) == 1 and _bg_calls[0][0] is _entry19)
+    check("19.5b 点击后进入 downloading 态", _btn.state == "downloading")
+
+    # 19.6 下载中点击 → 提示进度（不重复起下载）
+    w._update_progress_text = "正在下载更新 50%（100.0 MB/200.1 MB）"
+    _before = len(_bg_calls)
+    w._on_update_nav_clicked()
+    check("19.6 downloading 态点击不再起下载", len(_bg_calls) == _before)
+
+    # 19.7 进度回调 → 文案与 tooltip 同步
+    w._on_bg_progress(100 * 1048576, 200 * 1048576)
+    check("19.7a 进度文案含百分比",
+          "50%" in getattr(w, "_update_progress_text", ""),
+          getattr(w, "_update_progress_text", ""))
+    check("19.7b tooltip 同步", "50%" in _btn.toolTip(), _btn.toolTip())
+
+    # 19.8 ready → 图标切 ready + 保存 staging；点击弹安装确认（mock 确认框）
+    w._on_bg_ready({"staging_dir": "/tmp/stg", "mode": "full",
+                    "files_count": 10})
+    check("19.8a ready 态且 staging 保存",
+          _btn.state == "ready"
+          and getattr(w, "_update_staging_dir", "") == "/tmp/stg"
+          and getattr(w, "_update_ready_mode", "") == "full")
+    _inst_calls = []
+    _orig_confirm = w._open_install_confirm
+    w._open_install_confirm = lambda: _inst_calls.append(1)
+    w._on_update_nav_clicked()
+    check("19.8b ready 态点击 → 安装确认被调用", len(_inst_calls) == 1)
+    w._open_install_confirm = _orig_confirm
+
+    # 19.9 error → 回 error 态可重试；点击重新下载
+    w._on_bg_error("sha256 校验失败")
+    check("19.9a error 态且 tooltip 带原因",
+          _btn.state == "error" and "sha256" in _btn.toolTip())
+    w._on_update_nav_clicked()
+    check("19.9b error 态点击 → 重试下载", len(_bg_calls) == 2)
+
+    # 19.10 对话框注入 on_download：found 态点「立即更新」→ 关对话框转后台
+    from windows.update_dialog import UpdateDialog
+    _dl_calls = []
+    _d19 = UpdateDialog(w, _entry19, "http://h/u", _env19["app_dir"],
+                        main_exe="AutoWork.exe", local_version="3.11.0",
+                        on_install=lambda s, m, v="": True,
+                        on_download=lambda e: _dl_calls.append(e))
+    _d19._on_yes()
+    check("19.10a 立即更新 → on_download 收到 entry",
+          _dl_calls and _dl_calls[0] is _entry19)
+    check("19.10b 对话框已关闭（result=accepted）",
+          _d19.result() == 1, str(_d19.result()))
+    _d19.deleteLater()
+    # 未注入 on_download 时保持原对话框内下载入口（phase 迁移到 downloading）
+    _d19b = UpdateDialog(w, _entry19, "http://h/u", _env19["app_dir"],
+                         main_exe="AutoWork.exe", local_version="3.11.0",
+                         on_install=None)
+    _orig_start_dl = _d19b._start_download
+    _inner = []
+    _d19b._start_download = lambda: _inner.append(1)
+    _d19b._on_yes()
+    check("19.10c 未注入回调时走对话框内下载（兼容旧行为）",
+          _inner == [1] and _d19b._phase == "found")
+    _d19b.deleteLater()
+
+    w._start_background_download = _orig_bg
+    w._set_update_nav("hidden")
+    for _ in range(3):
+        app.processEvents()
+    check("19.11 收尾恢复并隐藏按钮无异常", True)
+except Exception as e:
+    import traceback as _tb
+    check("19.x 导航更新按钮", False, repr(e) + "\n" + _tb.format_exc()[-600:])
+
 print("\n" + "=" * 56)
 print("冒烟结论：" + ("全部通过" if ok else "存在失败项"))
 sys.stdout.flush()
