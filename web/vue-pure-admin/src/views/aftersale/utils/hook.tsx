@@ -4,6 +4,7 @@ import editForm from "../form/index.vue";
 import { addDialog } from "@/components/ReDialog";
 import type { PaginationProps } from "@pureadmin/table";
 import { ElMessageBox } from "element-plus";
+import * as XLSX from "xlsx";
 import {
   getRecords,
   getCycleOptions,
@@ -19,7 +20,8 @@ import {
 } from "@/api/aftersale";
 import type { AftersaleRecord, AftersaleStats } from "@/api/aftersale";
 import type { AftersaleFormItem } from "./types";
-import { loadLastUsed, saveLastUsed } from "./lastUsed";
+import { loadLastUsed, saveLastUsed, pullLastUsedFromCloud } from "./lastUsed";
+import { pullPhrasesFromCloud } from "./quickPhrases";
 import { type Ref, h, ref, reactive, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
@@ -70,8 +72,10 @@ export function useAftersale(tableRef: Ref) {
     occurred_at: ""
   });
 
-  // 路由 query 初始化筛选（总览页/统计页图表点击跳转带参进入）
+  // 路由 query 初始化筛选（总览页/统计页图表点击跳转带参进入）；
+  // 搜索时也会把当前筛选回写到 URL（刷新不丢、可直接分享带筛选的链接）
   const route = useRoute();
+  const router = useRouter();
   const QUERY_KEYS = [
     "keyword",
     "issue_type",
@@ -258,13 +262,17 @@ export function useAftersale(tableRef: Ref) {
     {
       label: "操作",
       fixed: "right",
-      // 200px 才放得下「编辑 + 删除」两个带图标的 link 按钮；
-      // 之前 150px 会把「编辑」挤到视口外，且表格 overflow-x:hidden 无法横向滚出，
-      // 表现为编辑按钮完全不可见（只有删除的红色图标能露出来）
-      width: 200,
+      // 260px 放「详情 + 编辑 + 删除」三个带图标的 link 按钮（原 200px 只够两个）
+      width: 260,
       slot: "operation"
     }
   ];
+
+  /** 详情抽屉：当前查看的记录（null=关闭） */
+  const detailRow = ref<AftersaleRecord | null>(null);
+  function openDetail(row: AftersaleRecord) {
+    detailRow.value = row;
+  }
 
   /** KPI 统计卡（stats 由后端按同一筛选口径返回） */
   const statCards = computed(() => [
@@ -326,6 +334,12 @@ export function useAftersale(tableRef: Ref) {
 
   async function onSearch(resetPage = true) {
     if (resetPage) pagination.currentPage = 1;
+    // 筛选条件回写 URL（去掉分页与空值；刷新/分享保留筛选视图）
+    const query: Record<string, string> = {};
+    for (const k of QUERY_KEYS) {
+      if (form[k]) query[k] = String(form[k]);
+    }
+    router.replace({ query }).catch(() => void 0);
     loading.value = true;
     try {
       const res = await getRecords(buildParams());
@@ -338,6 +352,65 @@ export function useAftersale(tableRef: Ref) {
     } finally {
       loading.value = false;
     }
+  }
+
+  /**
+   * 导出当前筛选结果为 Excel（xlsx 前端生成，无需后端支持）：
+   * 按当前筛选分页拉全量（每页 200，上限 50 页 = 1 万条保护），列头中文
+   */
+  async function onExport() {
+    loading.value = true;
+    try {
+      const base = buildParams();
+      delete base.page;
+      base.page_size = 200;
+      const all: AftersaleRecord[] = [];
+      for (let p = 1; p <= 50; p++) {
+        const res = await getRecords({ ...base, page: p });
+        all.push(...(res.rows ?? []));
+        if (!res.rows || res.rows.length < 200) break;
+      }
+      if (!all.length) {
+        message("当前筛选没有可导出的记录", { type: "warning" });
+        return;
+      }
+      const headers = [
+        "ID", "填写时间", "发生时间", "账期", "类型", "地区", "门店", "球桌号",
+        "问题", "发生原因", "解决方案", "是否解决", "我方问题", "主动发起",
+        "响应时间", "解决人", "填写人", "SNK码", "设备码", "重要"
+      ];
+      const aoa = [headers].concat(
+        all.map(r => [
+          r.id, r.created_at, r.occurred_at, r.cycle_start, r.issue_type,
+          r.region, r.room_name, r.table_no, r.problem, r.cause, r.solution,
+          r.resolved, r.is_our_problem, r.is_initiative, r.response_time,
+          r.resolver, r.creator, r.snk_code, r.device_code,
+          Number(r.is_important) ? "是" : "否"
+        ])
+      );
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws["!cols"] = headers.map(h =>
+        h === "问题" || h === "发生原因" || h === "解决方案" ? { wch: 40 } : { wch: 14 }
+      );
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "售后记录");
+      XLSX.writeFile(wb, `售后记录_${dayjs().format("YYYYMMDD_HHmmss")}.xlsx`);
+      message(`已导出 ${all.length} 条记录`, { type: "success" });
+    } catch (err) {
+      message("导出失败", { type: "error" });
+      console.error("[aftersale] export failed:", err);
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  /** 未解决超时高亮：resolved=否 且 发生日期距今超过 7 天 */
+  function rowClassName({ row }: { row: AftersaleRecord }) {
+    if (String(row.resolved) === YES) return "";
+    const base = row.occurred_at || row.created_at;
+    if (!base) return "";
+    const days = dayjs().diff(dayjs(base), "day");
+    return days > 7 ? "overdue-row" : "";
   }
 
   /** 账期候选（后端按当前模式给出合法起点） */
@@ -603,6 +676,9 @@ export function useAftersale(tableRef: Ref) {
     onSearch();
     loadCycleOptions();
     loadFacets();
+    // 云端偏好预热：服务端的常用句/上次填写覆盖本地缓存（多端共享）
+    pullPhrasesFromCloud();
+    pullLastUsedFromCloud();
   });
 
   return {
@@ -618,9 +694,13 @@ export function useAftersale(tableRef: Ref) {
     regions,
     yesNoOptions,
     selectedNum,
+    detailRow,
     onSearch,
     resetForm,
     openDialog,
+    openDetail,
+    onExport,
+    rowClassName,
     handleDelete,
     onBatchResolve,
     onBatchDelete,

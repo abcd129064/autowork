@@ -260,6 +260,9 @@ TABLE_COLUMNS = {
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
         # 重要标记（需求：勾选「重要」后在记录与统计列表该条显示淡黄色底色）
         ColumnDef("is_important", "INTEGER", "TINYINT", "0", "0"),
+        # 软删除回收站（Web 端删除先进回收站，deleted=1；桌面端仅读取过滤）
+        ColumnDef("deleted", "INTEGER", "TINYINT", "0", "0"),
+        ColumnDef("deleted_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
     # 跑视频记录（跑视频面板，双后端）：字段来源 在线模板.xlsx 的
     # 问题/未复现/精度/使用 四个数据 sheet（sheet 名即 category 分类；

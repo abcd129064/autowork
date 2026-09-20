@@ -645,6 +645,10 @@ def _build_where(keyword: str, issue_type: str, resolved: str,
     统计函数单独调用时传空串即得「已解决/未解决」分组基数与全景计数。
     """
     conds, params = [], []
+    # 软删除隔离：Web 回收站中的记录（deleted=1）桌面端一律不可见。
+    # 该列由 schema.py 声明、_ensure_initialized 自动补列，历史库首次
+    # 迁移后即存在；本函数是列表/统计的共同 WHERE 入口。
+    conds.append("deleted = 0")
     if issue_type:
         conds.append("issue_type = ?")
         params.append(str(issue_type).strip())

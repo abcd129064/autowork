@@ -55,7 +55,11 @@ def _stat_card(parent, color):
 
 
 def _row_buttons(parent, specs):
-    """操作列按钮组（specs=[(文本, 回调, tooltip)]），返回容器 widget"""
+    """操作列按钮组（specs=[(文本, 回调, tooltip)]），返回容器 widget
+
+    按钮宽度按字体度量自适应（2026-09-20 修复：原默认 sizeHint 在
+    大字号/缩放环境下偏窄，「SSH/SFTP/RDP/断开/删除」文字被裁切显示不全）。
+    """
     holder = QWidget(parent)
     h = QHBoxLayout(holder)
     h.setContentsMargins(0, 0, 0, 0)
@@ -65,6 +69,8 @@ def _row_buttons(parent, specs):
         b.setFixedHeight(26)
         b.setToolTip(tip)
         b.clicked.connect(cb)
+        fm = b.fontMetrics()
+        b.setFixedWidth(fm.horizontalAdvance(text) + 24)
         h.addWidget(b)
     return holder
 
@@ -138,7 +144,9 @@ class SessionWork(QWidget):
         self.table.setColumnWidth(3, 80)
         self.table.setColumnWidth(4, 96)
         self.table.setColumnWidth(5, 100)
-        self.table.setColumnWidth(6, 250)
+        # 操作列需容纳 5 个自适应宽按钮（SSH/SFTP/RDP/断开/删除 + 间距），
+        # 250px 在默认字号下即不足（2026-09-20 字体裁切修复）
+        self.table.setColumnWidth(6, 330)
         self.table.setMinimumHeight(260)
         cl.addWidget(self.table, 1)
         lay.addWidget(card, 1)

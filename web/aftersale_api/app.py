@@ -66,6 +66,8 @@ def _build_where(keyword: str, issue_type: str, resolved: str,
                  is_initiative: str, is_our_problem: str, cycle_start: str,
                  occurred_at: str = "", region: str = ""):
     conds, params = [], []
+    # 软删除隔离：回收站（deleted=1）不出现在任何常规查询
+    conds.append("deleted = 0")
     if issue_type:
         conds.append("issue_type = %s"); params.append(str(issue_type).strip())
     if region:
@@ -323,6 +325,7 @@ def create_record(rec: dict = Body(...), user = Depends(require_auth)):
     with _db() as c, c.cursor() as cur:
         cur.execute(f"INSERT INTO aftersale_records ({cols}) VALUES ({placeholders})", values)
         rid = cur.lastrowid
+    _audit(user, "create", rid, detail=str(rec.get("issue_type") or ""))
     return {"id": rid, "creator": user}
 
 @app.put("/api/records/{rid}")
@@ -344,14 +347,18 @@ def update_record(rid: int, rec: dict = Body(...), user = Depends(require_auth))
         cur.execute(sql, values)
         if cur.rowcount == 0:
             raise HTTPException(409, "conflict: record changed by another client")
+    _audit(user, "update", rid,
+           detail=",".join(k for k, v in rec.items() if k in _WRITABLE))
     return {"id": rid, "updated": True}
 
 @app.delete("/api/records/{rid}")
 def delete_record(rid: int, user = Depends(require_auth)):
     if not _write_enabled(): raise HTTPException(503, "write not enabled")
     with _db() as c, c.cursor() as cur:
-        cur.execute("DELETE FROM aftersale_records WHERE id=%s", [rid])
-    return {"deleted": rid}
+        cur.execute("UPDATE aftersale_records SET deleted=1, deleted_at=NOW() WHERE id=%s", [rid])
+        n = cur.rowcount
+    _audit(user, "delete", rid)
+    return {"deleted": rid, "soft": True}
 
 @app.post("/api/records/batch-resolve")
 def batch_resolve(payload: dict = Body(...), user = Depends(require_auth)):
@@ -362,6 +369,7 @@ def batch_resolve(payload: dict = Body(...), user = Depends(require_auth)):
     with _db() as c, c.cursor() as cur:
         cur.execute(f"UPDATE aftersale_records SET resolved='是', updated_at=NOW() WHERE id IN ({placeholders})", ids)
         n = cur.rowcount
+    _audit(user, "batch_resolve", detail=f"ids={ids}")
     return {"updated": n}
 
 @app.post("/api/records/batch-delete")
@@ -371,9 +379,10 @@ def batch_delete(payload: dict = Body(...), user = Depends(require_auth)):
     if not ids: raise HTTPException(400, "ids required")
     placeholders = ",".join(["%s"]*len(ids))
     with _db() as c, c.cursor() as cur:
-        cur.execute(f"DELETE FROM aftersale_records WHERE id IN ({placeholders})", ids)
+        cur.execute(f"UPDATE aftersale_records SET deleted=1, deleted_at=NOW() WHERE id IN ({placeholders})", ids)
         n = cur.rowcount
-    return {"deleted": n}
+    _audit(user, "batch_delete", detail=f"ids={ids}")
+    return {"deleted": n, "soft": True}
 
 
 # ===== PHASE-1.5 APPEND: charts stats API =====
@@ -410,8 +419,25 @@ def stats_charts(cycle_start: str = "", issue_type: str = "", resolved: str = ""
     our = {"yes": yes, "no": max(0, total - yes)}
     issue = [{"name": r.get("issue_type") or "未填", "value": r["n"]}
              for r in group("SELECT issue_type, COUNT(*) n FROM aftersale_records")]
+
+    # 未解决时长分布（aging）：只看 resolved='否'，不受用户 resolved 筛选影响；
+    # 时长=今天 - 发生日期（occurred_at 缺失回退 created_at）
+    aging_where = where + " AND resolved = '否'"
+    aging_sql = (
+        "SELECT CASE "
+        "WHEN dd <= 0 THEN '当日' WHEN dd <= 3 THEN '1-3天' "
+        "WHEN dd <= 7 THEN '4-7天' WHEN dd <= 15 THEN '8-15天' "
+        "ELSE '15天以上' END bucket, COUNT(*) n FROM (SELECT "
+        f"DATEDIFF(CURDATE(), STR_TO_DATE({DATE_EXPR}, '%Y-%m-%d')) dd "
+        "FROM aftersale_records" + aging_where + ") t GROUP BY 1"
+    )
+    order_aging = ["当日", "1-3天", "4-7天", "8-15天", "15天以上"]
+    with _db() as c, c.cursor() as cur:
+        cur.execute(aging_sql, params)
+        aging_map = {r["bucket"]: r["n"] for r in cur.fetchall() if r.get("bucket")}
+    aging = [{"name": b, "value": aging_map.get(b, 0)} for b in order_aging]
     return {"region_dist": region, "daily": daily, "our_problem": our,
-            "issue_type_dist": issue, "total": total}
+            "issue_type_dist": issue, "aging": aging, "total": total}
 
 
 # ===== PHASE-2A APPEND: generic aggregation (custom charts) =====
@@ -462,3 +488,207 @@ def stats_query(payload: dict = Body(...)):
             x["percent"] = round(x["value"] * 100 / total, 1)
     return {"columns": out, "dimension": dim, "measure": measure, "chart": chart,
             "total": total, "limit": limit}
+
+
+# ===== PHASE-3 APPEND: 审计 / 回收站 / 批量导入 / 用户偏好 =====
+# Web 端自有表（桌面端 schema.py 不管理，后端启动时自愈建表）：
+# - aftersale_audit_log   写操作审计（谁在何时对哪条记录做了什么）
+# - aftersale_user_prefs  用户偏好 KV（常用句库 / 上次填写，多端共享）
+# 另：aftersale_records 需 deleted/deleted_at 两列（软删除回收站），
+#     由 _ensure_web_tables 启动时检测补列（幂等）。
+
+def _ensure_web_tables():
+    """启动时建 Web 自有表 + 补软删除列（幂等；需要账号有 CREATE/ALTER 权限，
+    失败不阻断服务——审计/偏好/回收站相应降级）"""
+    with _db() as c, c.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS aftersale_audit_log ("
+            "id INT AUTO_INCREMENT PRIMARY KEY, "
+            "ts DATETIME NOT NULL, "
+            "user VARCHAR(64) NOT NULL DEFAULT '', "
+            "action VARCHAR(32) NOT NULL DEFAULT '', "
+            "record_id INT NULL, "
+            "detail VARCHAR(512) NOT NULL DEFAULT '', "
+            "KEY idx_ts (ts)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS aftersale_user_prefs ("
+            "username VARCHAR(64) NOT NULL PRIMARY KEY, "
+            "prefs LONGTEXT NULL, "
+            "updated_at DATETIME NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+        cur.execute(
+            "SELECT COUNT(*) n FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='aftersale_records' "
+            "AND COLUMN_NAME='deleted'")
+        if cur.fetchone()["n"] == 0:
+            cur.execute("ALTER TABLE aftersale_records "
+                        "ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0")
+        cur.execute(
+            "SELECT COUNT(*) n FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='aftersale_records' "
+            "AND COLUMN_NAME='deleted_at'")
+        if cur.fetchone()["n"] == 0:
+            cur.execute("ALTER TABLE aftersale_records "
+                        "ADD COLUMN deleted_at DATETIME NULL")
+
+try:
+    _ensure_web_tables()
+except Exception as _e:  # 表已存在/权限不足等：打印后继续，端点内再报错
+    print("[aftersale-web] _ensure_web_tables failed:", _e)
+
+
+def _audit(user: str, action: str, record_id=None, detail: str = ""):
+    """写操作审计（尽力而为：审计失败不影响主操作）"""
+    try:
+        with _db() as c, c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO aftersale_audit_log (ts, user, action, record_id, detail) "
+                "VALUES (NOW(), %s, %s, %s, %s)",
+                [user, action, record_id, str(detail or "")[:500]])
+    except Exception as e:
+        print("[aftersale-web] audit failed:", e)
+
+
+@app.get("/api/audit")
+def audit_list(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+               action: str = "", user=Depends(require_auth)):
+    where, params = "", []
+    if action:
+        where = " WHERE action=%s"; params.append(action.strip())
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) n FROM aftersale_audit_log{where}", params)
+        total = cur.fetchone()["n"]
+        cur.execute(f"SELECT * FROM aftersale_audit_log{where} "
+                    "ORDER BY id DESC LIMIT %s OFFSET %s",
+                    params + [page_size, (page - 1) * page_size])
+        rows = cur.fetchall()
+    return {"total": total, "rows": rows, "page": page, "page_size": page_size}
+
+
+def _deleted_where(deleted: int) -> str:
+    return " WHERE deleted = %d" % (1 if deleted else 0)
+
+
+@app.get("/api/records/recycle")
+def recycle_list(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+                 keyword: str = "", user=Depends(require_auth)):
+    """回收站：deleted=1 的记录（按删除时间倒序）"""
+    conds, params = ["deleted = 1"], []
+    if keyword:
+        k = f"%{keyword.strip()}%"
+        conds.append("(table_no LIKE %s OR room_name LIKE %s OR problem LIKE %s OR creator LIKE %s)")
+        params += [k] * 4
+    where = " WHERE " + " AND ".join(conds)
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) n FROM aftersale_records{where}", params)
+        total = cur.fetchone()["n"]
+        cur.execute(f"SELECT * FROM aftersale_records{where} "
+                    "ORDER BY deleted_at DESC, id DESC LIMIT %s OFFSET %s",
+                    params + [page_size, (page - 1) * page_size])
+        rows = cur.fetchall()
+    return {"total": total, "rows": rows, "page": page, "page_size": page_size}
+
+
+@app.post("/api/records/restore")
+def restore_records(payload: dict = Body(...), user = Depends(require_auth)):
+    """从回收站恢复（deleted 置回 0）"""
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    ids = payload.get("ids", [])
+    if not ids: raise HTTPException(400, "ids required")
+    placeholders = ",".join(["%s"]*len(ids))
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"UPDATE aftersale_records SET deleted=0, deleted_at=NULL "
+                    f"WHERE id IN ({placeholders})", ids)
+        n = cur.rowcount
+    _audit(user, "restore", detail=f"ids={ids}")
+    return {"restored": n}
+
+
+@app.post("/api/records/purge")
+def purge_records(payload: dict = Body(...), user = Depends(require_auth)):
+    """彻底删除（硬删，回收站不可恢复）"""
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    ids = payload.get("ids", [])
+    if not ids: raise HTTPException(400, "ids required")
+    placeholders = ",".join(["%s"]*len(ids))
+    with _db() as c, c.cursor() as cur:
+        cur.execute(f"DELETE FROM aftersale_records WHERE id IN ({placeholders})", ids)
+        n = cur.rowcount
+    _audit(user, "purge", detail=f"ids={ids}")
+    return {"purged": n}
+
+
+@app.post("/api/records/batch-import")
+def batch_import(payload: dict = Body(...), user = Depends(require_auth)):
+    """批量导入（Excel 历史数据；行字段已由前端按桌面端 parse_excel_rows 语义映射）
+
+    每行至少要有 room_name/table_no/problem 之一，否则跳过；
+    系统字段（created_at/occurred_at/cycle_start）由后端统一补齐。
+    单次 ≤ 500 行，防止误传大包。
+    """
+    if not _write_enabled(): raise HTTPException(503, "write not enabled")
+    rows = payload.get("rows") or []
+    if not rows: raise HTTPException(400, "rows required")
+    if len(rows) > 500: raise HTTPException(400, "too many rows (max 500 per request)")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    imported, skipped = 0, 0
+    with _db() as c, c.cursor() as cur:
+        for r in rows:
+            if not isinstance(r, dict): skipped += 1; continue
+            fields, values = [], []
+            for k in _WRITABLE:
+                v = r.get(k)
+                if v is not None and str(v).strip() != "":
+                    fields.append(k); values.append(str(v).strip())
+            if not any(k in fields for k in ("room_name", "table_no", "problem")):
+                skipped += 1; continue
+            fields += ["created_at", "updated_at"]; values += [now_str, now_str]
+            if "occurred_at" not in fields:
+                fields.append("occurred_at"); values.append(now_str[:10])
+            occ = str(values[fields.index("occurred_at")])[:10]
+            if "cycle_start" not in fields:
+                fields.append("cycle_start"); values.append(_cycle_start_of(occ))
+            if "creator" not in fields:
+                fields.append("creator"); values.append(user)
+            placeholders = ",".join(["%s"]*len(fields))
+            cur.execute(f"INSERT INTO aftersale_records ({','.join(fields)}) "
+                        f"VALUES ({placeholders})", values)
+            imported += 1
+    _audit(user, "import", detail=f"imported={imported},skipped={skipped}")
+    return {"imported": imported, "skipped": skipped}
+
+
+@app.get("/api/user/prefs")
+def get_prefs(user=Depends(require_auth)):
+    """当前用户偏好（常用句库 / 上次填写等），多端共享"""
+    with _db() as c, c.cursor() as cur:
+        cur.execute("SELECT prefs, updated_at FROM aftersale_user_prefs WHERE username=%s", [user])
+        row = cur.fetchone()
+    if not row or not row.get("prefs"):
+        return {"prefs": {}, "updated_at": None}
+    try:
+        return {"prefs": _json.loads(row["prefs"]), "updated_at": str(row.get("updated_at") or "")}
+    except Exception:
+        return {"prefs": {}, "updated_at": None}
+
+
+@app.put("/api/user/prefs")
+def put_prefs(payload: dict = Body(...), user = Depends(require_auth)):
+    """合并写偏好：客户端传增量 dict，服务端与已有值浅合并后存储（≤128KB）"""
+    patch = payload.get("prefs") or {}
+    if not isinstance(patch, dict): raise HTTPException(400, "prefs must be object")
+    with _db() as c, c.cursor() as cur:
+        cur.execute("SELECT prefs FROM aftersale_user_prefs WHERE username=%s", [user])
+        row = cur.fetchone()
+        cur_prefs = {}
+        if row and row.get("prefs"):
+            try: cur_prefs = _json.loads(row["prefs"])
+            except Exception: cur_prefs = {}
+        cur_prefs.update(patch)
+        raw = _json.dumps(cur_prefs, ensure_ascii=False)
+        if len(raw.encode("utf-8")) > 128 * 1024:
+            raise HTTPException(400, "prefs too large")
+        cur.execute(
+            "INSERT INTO aftersale_user_prefs (username, prefs, updated_at) "
+            "VALUES (%s, %s, NOW()) ON DUPLICATE KEY UPDATE prefs=%s, updated_at=NOW()",
+            [user, raw, raw])
+    return {"ok": True}

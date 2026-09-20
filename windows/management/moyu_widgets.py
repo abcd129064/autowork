@@ -29,8 +29,9 @@ from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont,
                            QKeySequence, QPainter, QPen, QPolygon,
                            QShortcut)
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout,
-                               QListWidget, QListWidgetItem, QStackedWidget,
-                               QTextBrowser, QVBoxLayout, QWidget)
+                               QListWidget, QListWidgetItem, QSizePolicy,
+                               QStackedWidget, QTextBrowser, QVBoxLayout,
+                               QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon,
                             LineEdit, PlainTextEdit, PushButton, ToolButton)
 
@@ -110,22 +111,40 @@ def _saved_level(key: str, levels: dict, default: str) -> str:
     return saved if saved in levels else default
 
 
-def _draw_overlay(p, w, h, title, subtitle):
-    """棋盘通用遮罩层：半透明黑底 + 居中标题/副标题（贪吃蛇与扫雷共用）"""
+def _grid_geom(avail_w, avail_h, cols, rows, cell_min, cell_max, margin=6):
+    """按可用宽高求格子边长与棋盘左上角，返回 (cell, x0, y0, w, h)
+
+    边长受三重约束：塞得进可用区、不低于 cell_min（保证可看可点）、
+    不高于 cell_max（大屏上不至于糊成巨型方块）。整块棋盘在控件内居中，
+    绘制与鼠标命中测试共用这一套坐标，避免两处算式漂移。
+    """
+    cell = min((avail_w - margin * 2) // cols,
+               (avail_h - margin * 2) // rows, cell_max)
+    cell = max(cell, cell_min)
+    w, h = cell * cols, cell * rows
+    return (cell, max(0, (avail_w - w) // 2),
+            max(0, (avail_h - h) // 2), w, h)
+
+
+def _draw_overlay(p, x, y, w, h, title, subtitle):
+    """棋盘通用遮罩层：半透明黑底 + 居中标题/副标题（贪吃蛇与扫雷共用）
+
+    字号随盘面高度收放，窗口压矮时不至于把标题顶出遮罩。
+    """
     p.setBrush(QBrush(QColor(0, 0, 0, 150)))
     p.setPen(Qt.PenStyle.NoPen)
-    p.drawRect(0, 0, w + 1, h + 1)
+    p.drawRect(x, y, w + 1, h + 1)
     p.setPen(QPen(QColor("#e5e7eb")))
     f1 = QFont("Segoe UI", 10, QFont.Weight.Bold)
-    f1.setPixelSize(28)
+    f1.setPixelSize(max(18, min(28, h // 12)))
     p.setFont(f1)
-    p.drawText(0, h // 2 - 44, w + 1, 34,
+    p.drawText(x, y + h // 2 - 44, w + 1, 34,
                Qt.AlignmentFlag.AlignCenter, title)
     f2 = QFont("Segoe UI", 10)
-    f2.setPixelSize(14)
+    f2.setPixelSize(max(11, min(14, h // 24)))
     p.setFont(f2)
     p.setPen(QPen(QColor("#9ca3af")))
-    p.drawText(0, h // 2 + 2, w + 1, 22,
+    p.drawText(x, y + h // 2 + 2, w + 1, 22,
                Qt.AlignmentFlag.AlignCenter, subtitle)
 
 
@@ -406,17 +425,25 @@ _SNAKE_DEFAULT_LEVEL = "normal"   # 旧版单一速度即此档，历史纪录�
 
 
 class _SnakeBoard(QWidget):
-    """贪吃蛇棋盘：QTimer 驱动 + QPainter 绘制，难度决定走格节奏"""
+    """贪吃蛇棋盘：QTimer 驱动 + QPainter 绘制，难度决定走格节奏
 
-    COLS, ROWS, CELL = 24, 17, 22
+    格子边长按可用宽高现算（见 _geom），面板给多大盘面就铺多大，
+    不再钉死 22px 导致高窗口下半页空白。
+    """
+
+    COLS, ROWS = 24, 17
+    CELL_MIN, CELL_MAX = 14, 30   # 边长区间：小面板保得住、大屏不失控
     score_changed = Signal(int)
     state_changed = Signal(str)  # idle / running / paused / over
 
     def __init__(self, parent=None, level=_SNAKE_DEFAULT_LEVEL):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFixedSize(self.COLS * self.CELL + 2,
-                          self.ROWS * self.CELL + 2)
+        # 只钉最小占位，多余空间由父布局的 stretch 交给本控件
+        self.setMinimumSize(self.COLS * self.CELL_MIN + 2,
+                            self.ROWS * self.CELL_MIN + 2)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
         self._level = level if level in _SNAKE_LEVELS else _SNAKE_DEFAULT_LEVEL
         self._timer = QTimer(self)
         self._timer.setInterval(_SNAKE_LEVELS[self._level]["step"])
@@ -589,33 +616,43 @@ class _SnakeBoard(QWidget):
 
     # ---------- 绘制 ----------
 
+    def _geom(self):
+        """当前尺寸下的 (格边长, 盘左上x, 盘左上y, 盘宽, 盘高)"""
+        return _grid_geom(self.width(), self.height(), self.COLS, self.ROWS,
+                          self.CELL_MIN, self.CELL_MAX)
+
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = self.COLS * self.CELL
-        h = self.ROWS * self.CELL
+        cell, x0, y0, w, h = self._geom()
         p.setPen(QPen(QColor("#232a35"), 1))
         p.setBrush(QBrush(QColor("#10141a")))
-        p.drawRect(0, 0, w + 1, h + 1)
+        p.drawRect(x0, y0, w + 1, h + 1)
         # 淡网格
         p.setPen(QPen(QColor(255, 255, 255, 10), 1))
-        for x in range(1, self.COLS):
-            p.drawLine(x * self.CELL, 0, x * self.CELL, h)
-        for y in range(1, self.ROWS):
-            p.drawLine(0, y * self.CELL, w, y * self.CELL)
-        # 食物
+        for i in range(1, self.COLS):
+            gx = x0 + i * cell
+            p.drawLine(gx, y0, gx, y0 + h)
+        for i in range(1, self.ROWS):
+            gy = y0 + i * cell
+            p.drawLine(x0, gy, x0 + w, gy)
+        # 食物与蛇身的内缩/圆角按边长等比，否则大格下看着挤成一团
+        inset = max(3, cell // 5)
         if self._food:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(QColor("#ff6b6b")))
             fx, fy = self._food
-            p.drawEllipse(fx * self.CELL + 5, fy * self.CELL + 5,
-                          self.CELL - 10, self.CELL - 10)
+            p.drawEllipse(x0 + fx * cell + inset, y0 + fy * cell + inset,
+                          cell - inset * 2, cell - inset * 2)
         # 蛇身
+        pad = max(1, cell // 11)
+        radius = max(3, cell // 6)
         for i, (x, y) in enumerate(self._snake):
             color = "#86efac" if i == 0 else "#4ade80"
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(QColor(color)))
-            p.drawRoundedRect(x * self.CELL + 2, y * self.CELL + 2,
-                              self.CELL - 4, self.CELL - 4, 4, 4)
+            p.drawRoundedRect(x0 + x * cell + pad, y0 + y * cell + pad,
+                              cell - pad * 2, cell - pad * 2, radius, radius)
         # 覆盖层
         overlay = {
             "idle": ("贪吃蛇", "方向键 / WASD 开始并控制方向"),
@@ -623,7 +660,7 @@ class _SnakeBoard(QWidget):
             "over": ("游戏结束", "按「开始」或方向键重新开始"),
         }.get(self._state)
         if overlay:
-            _draw_overlay(p, w, h, overlay[0], overlay[1])
+            _draw_overlay(p, x0, y0, w, h, overlay[0], overlay[1])
 
 
 class SnakeWidget(QWidget):
@@ -680,11 +717,10 @@ class SnakeWidget(QWidget):
         self._board = _SnakeBoard(self, level=self._level)
         self._board.score_changed.connect(self._on_score)
         self._board.state_changed.connect(self._on_state)
-        # 堆栈页高取各页最大值（2048 棋盘 min 420），而本盘固定尺寸。
-        # 子布局（信息栏）是可拉伸项，不给尾部弹性项的话多余高度全被它
-        # 吞掉，标签在拉高的格子里居中——就是信息栏上方那条通栏空白
-        layout.addWidget(self._board, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch(1)
+        # 棋盘自己会按可用宽高算格边长，给满 stretch 让它吃掉页高；
+        # 不留弹性项的话多余高度会被可拉伸的信息栏子布局吞掉，
+        # 标签在拉高的格子里居中——就是信息栏上方那条通栏空白
+        layout.addWidget(self._board, 1)
 
     def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
         super().setFocus(reason)
@@ -761,7 +797,8 @@ _MINES_LEVELS = {
     "hard": ("高级", 16, 12, 45),
 }
 _MINES_DEFAULT_LEVEL = "easy"
-_MINES_CELL = 26
+# 格子边长区间：小面板压到下限仍可点，大屏放大到上限即止
+_MINES_CELL_MIN, _MINES_CELL_MAX = 16, 34
 
 # 单元格状态
 _HIDDEN, _OPEN, _FLAG = 0, 1, 2
@@ -777,7 +814,8 @@ class _MinesBoard(QWidget):
     """扫雷棋盘：左键翻开、右键插旗、双击数字快速展开
 
     雷在首次翻开时才生成（避开首点及其邻域），保证第一下不踩雷且
-    能自动展开一片；计时也从那一刻起跳。
+    能自动展开一片；计时也从那一刻起跳。格子边长按可用宽高现算，
+    绘制与命中测试共用 _geom 一套坐标，盘面缩放后不会点偏。
     """
 
     time_changed = Signal(int)    # 已用时秒
@@ -789,8 +827,11 @@ class _MinesBoard(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._level = level if level in _MINES_LEVELS else _MINES_DEFAULT_LEVEL
         _, self._cols, self._rows, self._mines = _MINES_LEVELS[self._level]
-        self.setFixedSize(self._cols * _MINES_CELL + 2,
-                          self._rows * _MINES_CELL + 2)
+        # 只钉最小占位，多余空间由父布局的 stretch 交给本控件
+        self.setMinimumSize(self._cols * _MINES_CELL_MIN + 2,
+                            self._rows * _MINES_CELL_MIN + 2)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._on_second)
@@ -838,8 +879,8 @@ class _MinesBoard(QWidget):
             return
         self._level = level
         _, self._cols, self._rows, self._mines = _MINES_LEVELS[level]
-        self.setFixedSize(self._cols * _MINES_CELL + 2,
-                          self._rows * _MINES_CELL + 2)
+        self.setMinimumSize(self._cols * _MINES_CELL_MIN + 2,
+                            self._rows * _MINES_CELL_MIN + 2)
         self._reset()
 
     def _begin(self):
@@ -988,7 +1029,20 @@ class _MinesBoard(QWidget):
         self.left_changed.emit(0)
         self.state_changed.emit(self._state)
 
-    # ---------- 事件 ----------
+    # ---------- 几何与事件 ----------
+
+    def _geom(self):
+        """当前尺寸下的 (格边长, 盘左上x, 盘左上y, 盘宽, 盘高)"""
+        return _grid_geom(self.width(), self.height(), self._cols, self._rows,
+                          _MINES_CELL_MIN, _MINES_CELL_MAX)
+
+    def _hit(self, pos):
+        """鼠标坐标 → 格子坐标；落在盘外返回 None"""
+        cell, x0, y0, w, h = self._geom()
+        gx, gy = int(pos.x()) - x0, int(pos.y()) - y0
+        if not (0 <= gx < w and 0 <= gy < h):
+            return None
+        return gx // cell, gy // cell
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_R:
@@ -997,18 +1051,23 @@ class _MinesBoard(QWidget):
         super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.reveal(int(e.position().x()) // _MINES_CELL,
-                        int(e.position().y()) // _MINES_CELL)
-        elif e.button() == Qt.MouseButton.RightButton:
-            self.toggle_flag(int(e.position().x()) // _MINES_CELL,
-                             int(e.position().y()) // _MINES_CELL)
+        left = e.button() == Qt.MouseButton.LeftButton
+        if not left and e.button() != Qt.MouseButton.RightButton:
+            return
+        cell_pos = self._hit(e.position())
+        if cell_pos is None:
+            return
+        if left:
+            self.reveal(*cell_pos)
+        else:
+            self.toggle_flag(*cell_pos)
 
     def mouseDoubleClickEvent(self, e):
         if e.button() != Qt.MouseButton.LeftButton:
             return
-        self.chord(int(e.position().x()) // _MINES_CELL,
-                   int(e.position().y()) // _MINES_CELL)
+        cell_pos = self._hit(e.position())
+        if cell_pos is not None:
+            self.chord(*cell_pos)
 
     def hideEvent(self, e):
         """页面不可见时停表，避免后台空跑计时"""
@@ -1028,15 +1087,14 @@ class _MinesBoard(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = self._cols * _MINES_CELL
-        h = self._rows * _MINES_CELL
+        cell, x0, y0, w, h = self._geom()
         p.setPen(QPen(QColor("#232a35"), 1))
         p.setBrush(QBrush(QColor("#10141a")))
-        p.drawRect(0, 0, w + 1, h + 1)
+        p.drawRect(x0, y0, w + 1, h + 1)
         dead = self._state == "over"
         for y in range(self._rows):
             for x in range(self._cols):
-                self._draw_cell(p, x, y, dead)
+                self._draw_cell(p, x, y, dead, cell, x0, y0)
         overlay = {
             "idle": ("扫雷", "左键翻开 · 右键插旗 · 首点必定安全"),
             "paused": ("已暂停", "点击棋盘或「继续」恢复计时"),
@@ -1044,12 +1102,15 @@ class _MinesBoard(QWidget):
             "win": ("排雷成功", f"用时 {self._seconds} 秒 · 按 R 重开"),
         }.get(self._state)
         if overlay:
-            _draw_overlay(p, w, h, overlay[0], overlay[1])
+            _draw_overlay(p, x0, y0, w, h, overlay[0], overlay[1])
 
-    def _draw_cell(self, p, x, y, dead):
-        """单格绘制：未开=凸起方块，已开=数字/雷，旗=小旗（错旗画红叉）"""
-        px, py = x * _MINES_CELL + 1, y * _MINES_CELL + 1
-        size = _MINES_CELL - 2
+    def _draw_cell(self, p, x, y, dead, cell, x0, y0):
+        """单格绘制：未开=凸起方块，已开=数字/雷，旗=小旗（错旗画红叉）
+
+        尺寸均按 cell 等比，不再假定 26px 格边长。
+        """
+        px, py = x0 + x * cell + 1, y0 + y * cell + 1
+        size = cell - 2
         st = self._grid[y][x]
         is_mine = (x, y) in self._mineset
         if st == _HIDDEN and not (dead and is_mine):
@@ -1064,45 +1125,53 @@ class _MinesBoard(QWidget):
         p.drawRect(px, py, size, size)
         if st == _FLAG:
             if dead and not is_mine:
+                cut = max(4, cell * 27 // 100)   # 错旗红叉的内缩
                 p.setPen(QPen(QColor("#f87171"), 2))
-                p.drawLine(px + 7, py + 7, px + size - 7, py + size - 7)
-                p.drawLine(px + size - 7, py + 7, px + 7, py + size - 7)
+                p.drawLine(px + cut, py + cut, px + size - cut, py + size - cut)
+                p.drawLine(px + size - cut, py + cut, px + cut, py + size - cut)
             else:
-                self._draw_flag(p, px, py, mine=dead)
+                self._draw_flag(p, px, py, cell, mine=dead)
             return
         if is_mine:
-            self._draw_mine(p, px, py)
+            self._draw_mine(p, px, py, cell)
             return
         n = self._numbers[y][x]
         if n:
             f = QFont("Segoe UI", 10, QFont.Weight.Bold)
-            f.setPixelSize(15)
+            f.setPixelSize(max(11, cell * 15 // 26))
             p.setFont(f)
             p.setPen(QPen(QColor(_MINES_NUM_COLORS[n - 1])))
             p.drawText(px, py, size, size, Qt.AlignmentFlag.AlignCenter, str(n))
 
     @staticmethod
-    def _draw_flag(p, px, py, mine=False):
+    def _draw_flag(p, px, py, cell, mine=False):
         """旗子：橙色三角旗面 + 旗杆；终局已标对的雷改用中性灰"""
-        cx = px + _MINES_CELL // 2
+        cx = px + cell // 2
         p.setPen(QPen(QColor("#cbd5e1"), 2))
-        p.drawLine(cx, py + 6, cx, py + _MINES_CELL - 9)
+        p.drawLine(cx, py + max(4, cell * 6 // 26),
+                   cx, py + cell - max(6, cell * 9 // 26))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor("#9ca3af") if mine else QColor("#f97316")))
-        p.drawPolygon(QPolygon([QPoint(cx, py + 4), QPoint(cx + 8, py + 8),
-                                QPoint(cx, py + 12)]))
+        p.drawPolygon(QPolygon([
+            QPoint(cx, py + max(3, cell * 4 // 26)),
+            QPoint(cx + max(5, cell * 8 // 26), py + max(5, cell * 8 // 26)),
+            QPoint(cx, py + max(7, cell * 12 // 26))]))
 
     @staticmethod
-    def _draw_mine(p, px, py):
-        """雷：中心圆 + 八向短刺"""
-        cx, cy = px + _MINES_CELL // 2, py + _MINES_CELL // 2
+    def _draw_mine(p, px, py, cell):
+        """雷：中心圆 + 八向短刺（均按格边长等比）"""
+        cx, cy = px + cell // 2, py + cell // 2
+        spike = max(5, cell * 9 // 26)
+        diag = spike * 7 // 9
         p.setPen(QPen(QColor("#cbd5e1"), 2))
-        for dx, dy in ((0, -9), (0, 9), (-9, 0), (9, 0),
-                       (-7, -7), (7, -7), (-7, 7), (7, 7)):
+        for dx, dy in ((0, -spike), (0, spike), (-spike, 0), (spike, 0),
+                       (-diag, -diag), (diag, -diag), (-diag, diag),
+                       (diag, diag)):
             p.drawLine(cx + dx * 3 // 5, cy + dy * 3 // 5, cx + dx, cy + dy)
+        ball = max(5, cell * 11 // 26)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor("#cbd5e1")))
-        p.drawEllipse(cx - 5, cy - 5, 11, 11)
+        p.drawEllipse(cx - ball // 2, cy - ball // 2, ball, ball)
 
 
 class MinesweeperWidget(QWidget):
@@ -1162,10 +1231,8 @@ class MinesweeperWidget(QWidget):
         self._board.time_changed.connect(self._on_time)
         self._board.left_changed.connect(self._on_left)
         self._board.state_changed.connect(self._on_state)
-        # 同贪吃蛇：固定尺寸棋盘必须配尾部弹性项，否则页高被 2048 撑开、
-        # 多余高度被信息栏子布局吞掉露空白
-        layout.addWidget(self._board, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch(1)
+        # 同贪吃蛇：棋盘自适配格边长，给满 stretch 把页高交给盘面
+        layout.addWidget(self._board, 1)
 
     def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
         """页签切入时由 GamePage 调用，把键盘焦点转给棋盘"""

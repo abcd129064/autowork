@@ -88,6 +88,8 @@ export type ChartsResult = {
   daily: Array<{ date: string; count: number }>;
   our_problem: { yes: number; no: number };
   issue_type_dist: Array<{ name: string; value: number }>;
+  /** 未解决时长分布（当日/1-3天/4-7天/8-15天/15天以上） */
+  aging: Array<{ name: string; value: number }>;
   total: number;
 };
 
@@ -204,5 +206,82 @@ export interface TableRow {
 export const searchTables = (room: string, limit = 30) => {
   return http.request<{ rows: TableRow[] }>("get", "/api/tables/search", {
     params: { room, limit }
+  });
+};
+
+/** ===== 回收站（软删除） ===== */
+
+export const getRecycleRecords = (params?: {
+  page?: number;
+  page_size?: number;
+  keyword?: string;
+}) => {
+  return http.request<{ total: number; rows: AftersaleRecord[] }>(
+    "get",
+    "/api/records/recycle",
+    { params }
+  );
+};
+
+/** 从回收站恢复 */
+export const restoreRecords = (ids: number[]) => {
+  return http.request<{ restored: number }>("post", "/api/records/restore", {
+    data: { ids }
+  });
+};
+
+/** 彻底删除（硬删，不可恢复） */
+export const purgeRecords = (ids: number[]) => {
+  return http.request<{ purged: number }>("post", "/api/records/purge", {
+    data: { ids }
+  });
+};
+
+/** ===== 批量导入（Excel） ===== */
+
+export const batchImportRows = (rows: object[]) => {
+  return http.request<{ imported: number; skipped: number }>(
+    "post",
+    "/api/records/batch-import",
+    { data: { rows } }
+  );
+};
+
+/** ===== 操作审计 ===== */
+
+export type AuditLogRow = {
+  id: number;
+  ts: string;
+  user: string;
+  action: string;
+  record_id: number | null;
+  detail: string;
+};
+
+export const getAuditLog = (params?: {
+  page?: number;
+  page_size?: number;
+  action?: string;
+}) => {
+  return http.request<{
+    total: number;
+    rows: AuditLogRow[];
+    page: number;
+    page_size: number;
+  }>("get", "/api/audit", { params });
+};
+
+/** ===== 用户偏好（常用句库 / 上次填写，多端共享） ===== */
+
+export const getUserPrefs = () => {
+  return http.request<{
+    prefs: Record<string, any>;
+    updated_at: string | null;
+  }>("get", "/api/user/prefs");
+};
+
+export const putUserPrefs = (patch: Record<string, any>) => {
+  return http.request<{ ok: boolean }>("put", "/api/user/prefs", {
+    data: { prefs: patch }
   });
 };
