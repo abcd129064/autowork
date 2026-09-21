@@ -179,6 +179,36 @@ a.datas = [
             and os.path.basename(_d[0]) not in _babel_keep)
 ]
 
+# ---- PATH 污染矫正（同 AutoWork.spec，3.13.304 SSL 事故）----
+_py_home = os.path.dirname(os.path.dirname(os.__file__))
+_py_dlls = os.path.join(_py_home, 'DLLs')
+_redirect_if_foreign = ('libssl-', 'libcrypto-')
+_drop_if_foreign = ('api-ms-win-', 'ucrtbase.dll')
+
+
+def _src_is_home(src: str) -> bool:
+    s = str(src).replace('\\', '/').lower()
+    return ('versions/' in s and '/dlls/' in s) or '/lib/site-packages/' in s
+
+
+_bin_fixed = []
+for _b in a.binaries:
+    _name, _src = str(_b[0]), str(_b[1])
+    _low = os.path.basename(_name).lower()
+    if _low.startswith(_redirect_if_foreign + _drop_if_foreign) \
+            and not _src_is_home(_src):
+        _alt = os.path.join(_py_dlls, _low)
+        if (_low.startswith(_drop_if_foreign)
+                or _low not in os.listdir(_py_dlls)
+                or not os.path.isfile(_alt)):
+            print('[spec] 剔除外部副本: %s <- %s' % (_low, _src))
+            continue
+        print('[spec] 重定向官方版本: %s %s -> %s' % (_low, _src, _alt))
+        _bin_fixed.append((_b[0], _alt, _b[2]))
+        continue
+    _bin_fixed.append(_b)
+a.binaries = _bin_fixed
+
 pyz = PYZ(a.pure)
 
 # 单文件模式：EXE 直接内嵌 binaries + datas（onedir 版用 COLLECT 分目录，

@@ -84,3 +84,4 @@ tools/_scratch/*
 !tools/_scratch/.gitkeep
 
 /frp-dev
+/version.json

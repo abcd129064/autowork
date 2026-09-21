@@ -246,6 +246,44 @@ a.binaries = [
     _b for _b in a.binaries
     if not os.path.basename(_b[0]).lower().startswith(_mkl_drop)
 ]
+# ---- PATH 污染矫正（3.13.304 用户端 SSL 事故，2026-09-22）----
+# 构建机系统 PATH 含 MySQL Shell 8.4\bin、JDK17\bin 等第三方目录，PyInstaller
+# 二进制依赖扫描沿 PATH 搜索，把与官方 _ssl.pyd（按 OpenSSL 3.5.7 编译）不配对
+# 的 libssl/libcrypto 3.0.16 收进产物 → 冻结版 import _ssl 失败，全部 HTTPS 报
+# "Can't connect to HTTPS URL because the SSL module is not available"（xqzg
+# 连接失败）。JDK 的 api-ms-win-*/ucrtbase.dll 同理混入。
+# 规则：敏感同名二进制必须来自官方 Python（versions/…\DLLs）或 venv site-packages；
+# 外部副本能定位官方版本就重定向，定位不到（api-ms/ucrtbase）直接剔除——
+# 这类 DLL 用户机 System32 本就有，外来的旧版反而危险。PATH 干净时本段零操作。
+_py_home = os.path.dirname(os.path.dirname(os.__file__))  # 官方 base 目录
+_py_dlls = os.path.join(_py_home, 'DLLs')
+_redirect_if_foreign = ('libssl-', 'libcrypto-')
+_drop_if_foreign = ('api-ms-win-', 'ucrtbase.dll')
+
+
+def _src_is_home(src: str) -> bool:
+    s = str(src).replace('\\', '/').lower()
+    return ('versions/' in s and '/dlls/' in s) or '/lib/site-packages/' in s
+
+
+_bin_fixed = []
+for _b in a.binaries:
+    _name, _src = str(_b[0]), str(_b[1])
+    _low = os.path.basename(_name).lower()
+    if _low.startswith(_redirect_if_foreign + _drop_if_foreign) \
+            and not _src_is_home(_src):
+        _alt = os.path.join(_py_dlls, _low)
+        if (_low.startswith(_drop_if_foreign)
+                or _low not in os.listdir(_py_dlls)
+                or not os.path.isfile(_alt)):
+            print('[spec] 剔除外部副本: %s <- %s' % (_low, _src))
+            continue
+        print('[spec] 重定向官方版本: %s %s -> %s' % (_low, _src, _alt))
+        _bin_fixed.append((_b[0], _alt, _b[2]))
+        continue
+    _bin_fixed.append(_b)
+a.binaries = _bin_fixed
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
