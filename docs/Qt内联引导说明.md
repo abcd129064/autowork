@@ -86,6 +86,24 @@ import core.acrylic_patch  # noqa: F401
 | 跑视频面板 `windows/ledger_panel.py` | ✅ |
 | 管理面板 `windows/management_panel.py` | ✅ |
 | PyInstaller spec（`AutoWork.spec` / `AfterSale.spec`） | ✅（打包侧固定 Qt 搜索路径） |
+| 构建脚本 `build_exe.py` | ✅（2026-09-21 补：收尾 `import core.version` 经 conn_logger 拉起 QtCore；支持 `--qt-check` 自检短路） |
+| 发布脚本 `release.py` | ✅（2026-09-21 补：步骤 5 `from core.updater import`；预检调 `build_exe.py --qt-check` 秒级验证解释器） |
+
+> **教训一（2026-09-21，构建脚本缺引导）**：裸 conda base python 跑 `release.py`，PyInstaller 跑满 6 分钟后才在最后
+> 一行 `from core.version import` 崩掉（`core/__init__ → conn_logger → QtCore`），此时旧
+> `dist/AutoWork` 已被改名挪走、新产物缺 version.json/config/frpc——白烧一次构建还差点丢产物。
+> 现在解释器问题会在预检 1 秒内被拦下；任何会 `import core.*` 的新独立脚本同样必须内置引导。
+
+> **教训二（2026-09-21，conda 解释器构建产物混装）**：给构建脚本补上引导后，用 conda base python
+> 构建**仍然会成功**（脚本不崩了），但产物双击启动报
+> `no Qt platform plugin could be initialized. Available platform plugins are: direct2d, minimal, offscreen, windows`。
+> 根因：引导只固定了**运行时**的 DLL 搜索路径，管不了 **PyInstaller 的收集来源**——conda 装的
+> PySide6 把 Qt 插件目录指向 conda qtbase（`<conda>\Library\lib\qt6\plugins`），PyInstaller 按包元数据
+> 收集到的是 conda 编译的 `qwindows.dll`（约 1008968B，依赖 `api-ms-win-core-winrt-error-l1-1-1.dll`），
+> 与 pip 版 `Qt6Core.dll/Qt6Gui.dll` 混装进同一产物，插件加载即失败。PE 导入表解析实锤。
+> 结论：**运行可以用 conda（有内联引导兜底），构建必须用项目 venv**（`~\.workbuddy\binaries\python\envs\default`，
+> PySide6 6.11.2 纯 pip 链）。`build_exe.py` 已加 conda 守卫（检测 `sys.prefix\conda-meta` 直接拒建，
+> 逃生门 `AUTOWORK_ALLOW_CONDA_BUILD=1`）；venv 产物里 `qwindows.dll` 应为约 991032B 且不依赖 winrt-error。
 
 ## 六、新增入口/冒烟脚本时
 

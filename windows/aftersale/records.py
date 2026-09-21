@@ -987,6 +987,10 @@ class RecordsPage(QWidget):
                         is_yes = str(item.get(key) or "") == "是"
                         yes_c, _no_c = _YES_NO_COLORS[key]
                         badge_c = yes_c if is_yes else SEMANTIC["neutral"]
+                        if isDarkTheme():
+                            # SEMANTIC 为浅色底选的低饱和色，深色背景上「否」的
+                            # 石板灰近乎全黑、「是」的蓝也偏暗 → 统一提亮 35%
+                            badge_c = lighten(badge_c, 0.35)
                         cell = QTableWidgetItem("是" if is_yes else "否")
                         cell.setForeground(QColor(badge_c))
                         if _row_bg is None and is_yes:
