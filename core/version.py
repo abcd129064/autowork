@@ -18,7 +18,7 @@ import sys
 from core.app_paths import get_app_dir
 
 # 主.次版本：手工维护（新增功能集 → 次版本 +1）
-BASE_VERSION = "3.11"
+BASE_VERSION = "3.13"
 
 # 视为"主分支"的名称：主分支版本号不带分支后缀
 _MAIN_BRANCHES = {"main", "master"}
