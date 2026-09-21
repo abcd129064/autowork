@@ -12,8 +12,8 @@
   per_pixel       垂直滚动模式改 ScrollPerPixel
 
 用法：
-    <venv>/Scripts/python.exe tools/scroll_profile.py [--rows 60] [--steps 40]
-                                                     [--profile]
+    <venv>/Scripts/python.exe tools/perf/scroll_profile.py [--rows 60] [--steps 40]
+                                                           [--profile]
 """
 import argparse
 import os
@@ -22,7 +22,7 @@ import statistics
 import sys
 import time
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """xqzg.newbv.cn API 端点探测（只读：GET/OPTIONS；仅 login 为 POST）
 
-用法：python tools/probe_xqzg_api.py
+用法：python tools/probe/probe_xqzg_api.py
 输出：登录状态 → DRF 根路由/schema → 已知端点 OPTIONS → 前端 JS 提取的
 全部 /api/ 路径 → 逐个验证 → snooker_om 字典兜底探测。
 """
@@ -12,7 +12,7 @@ import sys
 
 import requests
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 

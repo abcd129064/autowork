@@ -11,7 +11,7 @@
 |---|---|---|
 | 版本号 | `core/version.py`：`BASE_VERSION(3.11)` + git 提交数；**打包环境无 .git → 恒为 `3.11.0`** | ⚠️ 致命缺口：打包版无法区分版本，必须先修「构建期写入 version.json」 |
 | 打包 | PyInstaller：`dist/AutoWork/`（onedir，**567MB**）+ `dist/aftersale.exe`（onefile，158MB）；`build_exe.py` 统一构建 | onedir 整目录替换；onefile 单 exe 替换更简单 |
-| 分发通道 | 自有服务器 49.235.34.253（nginx + aftersale-web）；已有 `tools/upload_aftersale_dist.py`（paramiko SFTP + 远端备份范式）；设置里有 `upload_host/upload_remote_dir`（SFTP 上传视频） | 更新包放 nginx 静态目录即可，上传工具照抄范式 |
+| 分发通道 | 自有服务器 49.235.34.253（nginx + aftersale-web）；已有 `tools/deploy/upload_aftersale_dist.py`（paramiko SFTP + 远端备份范式）；设置里有 `upload_host/upload_remote_dir`（SFTP 上传视频） | 更新包放 nginx 静态目录即可，上传工具照抄范式 |
 | HTTP 库 | `requests>=2.28` 已在依赖 | 检查/下载直接用 |
 | 现有更新功能 | 无（grep「检查更新」无相关实现） | 从零做 |
 | 关于页 | `main_window/hub_pages.py::AboutPage` + `ui_mixin` 关于弹窗（显示 APP_VERSION） | 「检查更新」按钮落点 |
@@ -55,7 +55,7 @@
   - `latest.json`：`{version, url, sha256, size, notes, min_version, released_at}`
   - `AutoWork-<version>.zip`（整包，排除 config/logs/database 用户数据）
   - 保留最近 2 个版本 zip 供回退下载
-- 发布工具 `tools/publish_update.py`（照抄 `upload_aftersale_dist.py` 范式）：
+- 发布工具 `tools/deploy/publish_update.py`（照抄 `upload_aftersale_dist.py` 范式）：
   paramiko SFTP 上传 zip + **先传 zip 后原子 mv latest.json**（避免客户端读到
   半截 manifest）；远端备份旧包。
 
@@ -125,7 +125,7 @@
 ## 6. 实施拆分（建议顺序）
 
 1. S1 版本号落盘：`build_exe.py` 写 version.json + `core/version.py` 读取（半天内，独立可验）；
-2. S2 服务器侧：nginx 静态目录 + `tools/publish_update.py` + latest.json 范式；
+2. S2 服务器侧：nginx 静态目录 + `tools/deploy/publish_update.py` + latest.json 范式；
 3. S3 客户端检查+下载：关于页按钮、更新对话框、QThread 下载/校验（offscreen 可测：mock latest.json 本地 http）；
 4. S4 updater：update.bat 生成 + 退出/重启/回执/清理；真机回归（锁场景必须真机）；
 5. S5 二期：文件级增量 manifest、updater.exe 化（去 bat 黑窗）、tufup 签名评估。
@@ -147,7 +147,7 @@
 | 编排 | `main_window/update_mixin.py` | `UpdateMixin`：起 worker / 弹对话框 / InfoBar / 安装拉起 / 退出 / 回执消费 / 启动自检 |
 | 入口 | `main.py` | 窗口 show 后 `singleShot(0)` 消费回执 + 按配置静默自检 |
 | 配置 | `core/app_settings.py` | misc 域新增 `update_base_url`、`update_auto_check` |
-| **发布** | `tools/publish_update.py` | 打包 zip + sha256 + manifest → SFTP 上传 → **先包后 latest.json 原子切换** → 保留最近 3 版 |
+| **发布** | `tools/deploy/publish_update.py` | 打包 zip + sha256 + manifest → SFTP 上传 → **先包后 latest.json 原子切换** → 保留最近 3 版 |
 | 验证 | `logs/sim_updater_e2e.py` | bat 端到端真机仿真（full/incremental/失败路径） |
 | 验证 | `logs/sim_updater_hardening.py` | 等待循环真实性 + 含空格路径 + System32 绝对路径静态扫描 |
 | 验证 | `logs/sim_publish_and_client.py` | 发布 → 本地 http 源 → 客户端全链路集成（含 sha256 篡改/取消） |
@@ -229,12 +229,12 @@ python build_exe.py
 # 并删掉挪开的备份：rm -rf dist/_AutoWork_stale_*
 
 # ============ 第 3 步：本地自查（可选但推荐，只打包不上传） ============
-python tools/publish_update.py --pack-only \
+python tools/deploy/publish_update.py --pack-only \
     --source dist/AutoWork --version <新版本号> --notes "修复xxx"
 # 检查 out/ 下 zip 大小、manifest 文件数是否符合预期（config/logs/database 已自动排除）
 
 # ============ 第 4 步：正式发布 ============
-AFT_SSH_PASS='<SSH密码>' python tools/publish_update.py \
+AFT_SSH_PASS='<SSH密码>' python tools/deploy/publish_update.py \
     --source dist/AutoWork --version <新版本号> \
     --notes "本次更新说明（客户端弹窗展示）"
 # 默认 --mode full（整包）；脚本自动完成：
@@ -244,7 +244,7 @@ AFT_SSH_PASS='<SSH密码>' python tools/publish_update.py \
 # ============ 第 4b 步（变体）：增量热修 ============
 # 只发变更文件，需要上一版 manifest 作基线（out/ 下每次发布都留了一份）；
 # --min-version 让跨多版的旧客户端自动降级为全量：
-AFT_SSH_PASS='<SSH密码>' python tools/publish_update.py \
+AFT_SSH_PASS='<SSH密码>' python tools/deploy/publish_update.py \
     --source dist/AutoWork --version <新版本号> --mode incremental \
     --base-manifest out/update_manifest_<上一版>.json \
     --min-version <上一版> --notes "热修 xxx"

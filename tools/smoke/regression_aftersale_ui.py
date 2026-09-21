@@ -4,7 +4,7 @@
 → _populate / 翻页 / 关键词筛选 / 统计弹窗数据），offscreen 渲染。
 """
 import os, sys, time
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import importlib.util as _iu
 _spec = _iu.find_spec('PySide6')

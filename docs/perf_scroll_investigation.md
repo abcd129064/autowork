@@ -1,7 +1,7 @@
 # 滚动性能系统性调研（2026-09-07）
 
 调研范围：全项目表格与上下滚动列表，重点为售后面板（`windows/aftersale/records.py`）。
-结论全部基于实测，测量脚本 `tools/scroll_profile.py`（可复跑）。
+结论全部基于实测，测量脚本 `tools/perf/scroll_profile.py`（可复跑）。
 
 ## 一、测量方法
 
@@ -124,7 +124,7 @@ MySQL 为**远程**（49.235.34.253:3306），`SELECT 1` RTT 6.0ms。
 - 减少每页行数 60→更少（0% 收益，只增加翻页次数）
 - 预加载更多行 / 提前建 item（0% 收益）
 
-## 六之二、P0-2 列合并实测（tools/column_merge_probe.py）
+## 六之二、P0-2 列合并实测（tools/perf/column_merge_probe.py）
 
 列数减少 → 每帧绘制的单元格数减少，但合并后每格文本变长，而文本绘制成本与字符数
 正相关（长文本实测 +44.5%），两者部分抵消。用真实数据实测各方案净收益（配对对照）：
@@ -148,7 +148,7 @@ MySQL 为**远程**（49.235.34.253:3306），`SELECT 1` RTT 6.0ms。
   性能只用来在等价方案间取舍。
 - 设计稿（列结构、示例行、取舍、实现影响面）：`design/aftersale_columns_v2.html`。
 
-## 七、P0-1 视觉影响专项验证（tools/delegate_visual_check.py）
+## 七、P0-1 视觉影响专项验证（tools/perf/delegate_visual_check.py）
 
 三种 delegate 对同一份真实数据、同一状态（第 4 行选中 / 第 5 行勾选 / 第 2 行 hover / 滚动 3 行）
 抓取表格视口位图，白底合成后做像素级差异统计：

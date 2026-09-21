@@ -3,14 +3,14 @@
 
 用法（bash，密码不落盘）：
   # 1) 只打包生成本地产物（不上传），用于自查
-  python tools/publish_update.py --pack-only --source dist/AutoWork --version 3.11.280
+  python tools/deploy/publish_update.py --pack-only --source dist/AutoWork --version 3.11.280
 
   # 2) 打包 + 上传 + 原子切换 latest.json（正式发布）
-  AFT_SSH_PASS='***' python tools/publish_update.py \
+  AFT_SSH_PASS='***' python tools/deploy/publish_update.py \
       --source dist/AutoWork --version 3.11.280 --notes "修复xxx；新增yyy"
 
   # 3) 发增量（只发变更文件；需要先有上一版的 manifest 作为基线）
-  AFT_SSH_PASS='***' python tools/publish_update.py \
+  AFT_SSH_PASS='***' python tools/deploy/publish_update.py \
       --source dist/AutoWork --version 3.11.281 --mode incremental \
       --base-manifest out/update_manifest_3.11.280.json --notes "热修"
 
@@ -35,7 +35,7 @@ import sys
 import time
 import zipfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 HOST = "49.235.34.253"
 USER = "root"
@@ -288,7 +288,7 @@ def main():
     if not os.path.isdir(source):
         print(f"ERROR: 产物目录不存在: {source}")
         return 2
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     out_dir = os.path.abspath(args.out_dir) if args.out_dir else \
         os.path.join(root, "out")
     os.makedirs(out_dir, exist_ok=True)

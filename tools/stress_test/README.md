@@ -136,11 +136,11 @@ Python 侧周期过滤 + 切片。实测 10k→100k p50 线性 31.8→338.9ms、
   返回结构 + 基本指标 + 护栏未触发；`get_cycle_options` 速度与口径抽查；
   **P0 改造 SQL 的双后端兼容性检查**（参数占位符统一 `?`、无 SQLite/MySQL
   专属语法）——4 用例 <1s，CI 可直接跑。
-- **真机回归工具**（`tools/regression_aftersale_ui.py`）：offscreen 渲染真实
+- **真机回归工具**（`tools/smoke/regression_aftersale_ui.py`）：offscreen 渲染真实
   `RecordsPage`，注入 10 万行内存库，走真实异步 worker 链路测端到端耗时
   （首次加载/翻页/关键词筛选/统计弹窗/周期下拉）。实测全部毫秒级：
   首次加载 117ms、翻页 152ms、筛选 130ms、统计弹窗 139ms、周期下拉 50ms。
-- **查询口径等价性工具**（`tools/verify_aftersale_paging.py`）：612 项对照
+- **查询口径等价性工具**（`tools/smoke/verify_aftersale_paging.py`）：612 项对照
   （4 种周期模式 × 周期 × 筛选 × 列表/统计/详情/周期选项），SQL 分页化
   与旧 Python 实现完全等价，防回归。
 - **MySQL 后端对照**：无真实 MySQL 环境时由 `test_paging_sql_mysql_compatible`

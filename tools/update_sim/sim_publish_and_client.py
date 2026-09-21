@@ -3,7 +3,7 @@
 
 完整复刻生产链路（唯一差别：服务器换成本地 http.server，上传换成文件拷贝）：
 
-  1. tools/publish_update.py --pack-only  打包 v1 全量（验证排除 config/logs/database）
+  1. tools/deploy/publish_update.py --pack-only  打包 v1 全量（验证排除 config/logs/database）
   2. 改产物 → 打包 v2 增量（验证 diff 只挑变更文件）
   3. 组装本地更新源目录（latest.json + packages/ + files/）并起 http.server
   4. 客户端 core.updater.check_update：版本比较、URL 解析

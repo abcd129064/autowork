@@ -69,7 +69,7 @@
 - **后端**（`web/aftersale_api/app.py`，FastAPI + pymysql）：只读接口默认开放（记录分页+同口径统计、周期下拉、图表聚合、通用维度聚合）；写入接口（新增/编辑/删除/批量解决/批量删除）受 `WRITE_ENABLED` 环境开关控制，编辑带 `updated_at` 乐观锁（409 冲突）；认证（JWT + bcrypt）受 `AUTH_ENABLED` 控制
 - **v1 前端**（`web/aftersale_front`，Vue3 + Vite 轻量版）：售后记录列表/筛选/统计图表/自定义图表
 - **v2 前端**（`web/vue-pure-admin`，vue-pure-admin 7.0 全功能版）：售后列表 / 录入表单 / 统计页，demo 菜单保留、策略为「先不裁剪，只加售后页」
-- **生产部署**：`http://49.235.34.253/` 入口选择页 → `/v1/` 老系统、`/v2/` 新系统并行；nginx 零改动（既有 `try_files $uri $uri/ /index.html` 直接服务子目录 SPA），前端产物根 `/opt/aftersale-web/dist`，后端 `aftersale-web.service`（uvicorn + `.env`）；部署脚本 `tools/deploy_parallel_v1v2.py`（v1/v2 并行整包）/ `tools/upload_aftersale_dist.py`（v1 产物）/ `tools/deploy_aftersale_api.py`（后端），SSH 统一走 `tools/prod_ssh.py`（密码只从 `AFT_SSH_PASS` 环境变量读取，不落盘）
+- **生产部署**：`http://49.235.34.253/` 入口选择页 → `/v1/` 老系统、`/v2/` 新系统并行；nginx 零改动（既有 `try_files $uri $uri/ /index.html` 直接服务子目录 SPA），前端产物根 `/opt/aftersale-web/dist`，后端 `aftersale-web.service`（uvicorn + `.env`）；部署脚本 `tools/deploy/deploy_parallel_v1v2.py`（v1/v2 并行整包）/ `tools/deploy/upload_aftersale_dist.py`（v1 产物）/ `tools/deploy/deploy_aftersale_api.py`（后端），SSH 统一走 `tools/deploy/prod_ssh.py`（密码只从 `AFT_SSH_PASS` 环境变量读取，不落盘）
 - **本地预览**：桌面程序内置 `core.local_web_server`（默认 `http://localhost:8787`），托管 v1 构建产物 + 反代云端 API，与线上站点同一数据源；另可用 `web/aftersale_front/tools/serve_dist_v2.mjs` 本地仿真 v2 产物
 
 ### 界面与交互
@@ -209,12 +209,17 @@ autowork/
 │   ├── remote_mixin.py        #   远程连接（frpc/SSH/SFTP/RDP）
 │   └── ui_mixin.py            #   状态栏/菜单栏/右键菜单/主题
 │
-├── tools/                     # 开发/运维辅助脚本（部署、探针、回归、压测，不参与运行时）
-│   ├── prod_ssh.py            #   生产机 SSH 执行器（AFT_SSH_PASS 环境变量取密）
-│   ├── deploy_parallel_v1v2.py#   Web v1/v2 并行部署脚本
-│   ├── upload_aftersale_dist.py / deploy_aftersale_api.py  # 前端产物 / 后端部署
-│   ├── shot_fluent_mainwindow.py  # GUI 真机截图
-│   └── ...                    #   性能压测、探针、回归脚本等
+├── tools/                     # 开发/运维脚本（一律不参与运行时，规范见 AGENTS.md）
+│   ├── inventory.py           #   只读目录盘点
+│   ├── api_doc_audit.py       #   docs/API.md 与代码 AST 一致性审计
+│   ├── check_refs.py          #   全仓路径引用断链检查（提交前必跑，rc=0 才算通过）
+│   ├── deploy/                #   会改动生产环境：prod_ssh / deploy_* / upload_* / publish_update
+│   ├── smoke/                 #   真机 / GUI / offscreen 冒烟与等价性验证
+│   ├── perf/                  #   性能压测、视觉回归、渲染对比、真机截图
+│   ├── probe/                 #   线上接口只读探测与字段抓取（probe_xqzg_*）
+│   ├── stress_test/           #   压测套件（见 tools/stress_test/README.md）
+│   ├── update_sim/            #   自动更新链路本地仿真（sim_*）
+│   └── _scratch/              #   【gitignore】一切临时产物：探针脚本/截图/抓取物
 │
 ├── web/                       # 售后面板 Web 端
 │   ├── aftersale_api/app.py   #   FastAPI 后端（只读默认开放；写/认证受开关控制）
@@ -226,15 +231,21 @@ autowork/
 │   ├── dark.qss               #   深色主题
 │   └── light.qss              #   浅色主题
 │
-├── docs/                      # 文档
-│   ├── API.md                 #   接口文档（含 Web 端 API 契约）
-│   ├── MySQL兜底降级设计.md    #   双后端降级/合并设计
-│   ├── PERF_REVIEW.md         #   性能评审
-│   └── ...                    #   调查报告、方案与审计文档
+├── docs/                      # 文档（分类索引见 docs/README.md）
+│   ├── API.md                 #   接口契约（桌面端各层 + Web API + 配置键路由）
+│   ├── Qt内联引导说明.md       #   conda base 下 import PySide6 前的引导写法（规范）
+│   ├── MySQL兜底降级设计.md    #   双后端降级/合并设计（已落地）
+│   ├── auto_update_research.md#   程序内自动更新方案（已落地 core/updater.py）
+│   └── ...                    #   架构方案、性能调查、外部接口清单、mermaid 图表
 │
-├── tests/                     # pytest 测试（基线 270 passed）
+├── tests/                     # pytest 离线单测（31 个 test_*.py，采集基线 404）
 ├── resource/                  # 随包资源（比分条模板/字体/头像）
-├── design/                    # 界面设计稿（HTML/PNG）
+├── design/                    # 只读设计资产（索引见 design/README.md）
+│   ├── *.html                 #   界面设计稿（售后/远程页/工具页，多版本并存）
+│   ├── generator/             #   设计稿生成脚本 + 数据源 + 模板
+│   ├── logo/                  #   logo 定稿 v4 + spec.md + 生成脚本（_archive/ 为落选稿）
+│   └── shots/                 #   入库截图
+├── AGENTS.md                  # ★ Agent / 开发者作业规范（目录边界、命名、禁改清单、验证基线）
 ├── videos/                    # 视频/日志文件目录
 ├── logs/                      # 运行日志目录
 ├── build/                     # 构建临时输出
@@ -305,10 +316,10 @@ cd web/vue-pure-admin && pnpm install && pnpm dev
 
 ```bash
 # 前端产物（v1 整包 / v1+v2 并行布局）
-AFT_SSH_PASS='...' python tools/upload_aftersale_dist.py
-AFT_SSH_PASS='...' python tools/deploy_parallel_v1v2.py
+AFT_SSH_PASS='...' python tools/deploy/upload_aftersale_dist.py
+AFT_SSH_PASS='...' python tools/deploy/deploy_parallel_v1v2.py
 # 后端 app.py + 重启服务
-AFT_SSH_PASS='...' python tools/deploy_aftersale_api.py
+AFT_SSH_PASS='...' python tools/deploy/deploy_aftersale_api.py
 ```
 
 桌面程序运行时也会自动启动本地 Web 服务（`core.local_web_server`，默认 `http://localhost:8787`），托管 v1 构建产物并反代云端 API。
@@ -469,7 +480,20 @@ frp 服务器配置（设置 → 远程连接）：
 
 ## 开发约定
 
-- **测试**：`pytest tests/ -q`（基线 270 passed）；GUI 冒烟 `python windows/tools/smoke_fluent_mainwindow.py`（offscreen，118 断言）；真机截图 `tools/shot_fluent_mainwindow.py`
+> **完整作业规范见 [AGENTS.md](AGENTS.md)**（目录职责边界、脚本命名与落盘规则、
+> 禁改文件清单、提交前检查清单、解释器与测试基线）。以下为高频条目摘要。
+
+- **目录边界**：`tests/` 只放能被 pytest 离线收集的 `test_*.py`；真机/GUI 冒烟放
+  `tools/smoke/`，性能与视觉对比放 `tools/perf/`，接口探测放 `tools/probe/`，
+  生产部署放 `tools/deploy/`；一切临时产物落 `tools/_scratch/`（已 gitignore）
+- **测试**：`pytest tests/ -q`（采集基线 **404 collected / 4 errors**，4 个错误均为
+  环境缺依赖的既有状态，见 AGENTS.md §5）；GUI 冒烟
+  `python windows/tools/smoke_fluent_mainwindow.py`（offscreen，118 断言）；
+  真机截图 `python tools/perf/shot_fluent_mainwindow.py`
+- **解释器**：PATH 上的 `python` 是 3.8-32bit 不可用，必须显式写全路径
+  （GUI/采集用 `E:\ANACONDA\python.exe`，业务依赖最全的是 miniconda，见 AGENTS.md §5.1）
+- **提交前**：`python tools/check_refs.py --all` 必须 rc=0；新增文档要挂进
+  `docs/README.md`；改了目录结构要同步本节「项目结构」
 - **Web 端验证**：`web/aftersale_front/tools/verify_*.mjs` 系列脚本（产物预检 `verify_prod_layout.mjs`、本地仿真 `serve_dist_v2.mjs`、线上巡检 `verify_prod_deployed.mjs`）
 - **部署脚本密码**：一律从环境变量 `AFT_SSH_PASS` 读取，不落盘、不写命令行历史可见位置
 

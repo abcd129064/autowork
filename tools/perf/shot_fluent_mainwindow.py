@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """FluentWindow 重构视觉验证（offscreen 截图）
 
-生成两张 PNG 到 design/ 目录：
+生成 PNG 到 tools/_scratch/shots/（验证产物，已 gitignore，不入库）：
   - shot_home.png   工作台页
   - shot_mgmt.png   球桌管理页（迁入的运维子页）
 
 用法：
-  QT_QPA_PLATFORM=offscreen <venv>/python.exe tools/shot_fluent_mainwindow.py
+  QT_QPA_PLATFORM=offscreen <venv>/python.exe tools/perf/shot_fluent_mainwindow.py
 """
 import os
 import sys
@@ -16,7 +16,7 @@ _parts = [p for p in os.environ.get("PATH", "").split(os.pathsep)
 os.environ["PATH"] = os.pathsep.join(_parts)
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -39,7 +39,7 @@ w.navigationInterface.setFixedWidth(200)
 for _ in range(10):
     app.processEvents()
 
-out_dir = os.path.join(ROOT, "design")
+out_dir = os.path.join(ROOT, "tools", "_scratch", "shots")
 os.makedirs(out_dir, exist_ok=True)
 
 

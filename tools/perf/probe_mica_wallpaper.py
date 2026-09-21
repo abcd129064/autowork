@@ -15,7 +15,7 @@
      M-工作台页 与 M-运维管理Hub页（透明页面，关键观察点）
 
 用法（真机）：
-  <venv>/python.exe tools/probe_mica_wallpaper.py
+  <venv>/python.exe tools/perf/probe_mica_wallpaper.py
 """
 import os
 import sys
@@ -46,7 +46,7 @@ except Exception:
 if "QT_QPA_PLATFORM" in os.environ:
     del os.environ["QT_QPA_PLATFORM"]
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from PySide6.QtWidgets import QApplication, QWidget, QLabel  # noqa: E402
 from PySide6.QtCore import Qt, QTimer  # noqa: E402
@@ -82,9 +82,10 @@ ORIG_WALLPAPER = _buf.value if _ok else ""
 print(f"[壁纸] 原壁纸 = {ORIG_WALLPAPER or '(空——可能是纯色壁纸)'}")
 flush()
 
-MAGENTA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "_mica_captures", "_magenta.bmp")
-os.makedirs(os.path.dirname(MAGENTA), exist_ok=True)
+CAPTURES = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "tools", "_scratch", "mica_captures")
+MAGENTA = os.path.join(CAPTURES, "_magenta.bmp")
+os.makedirs(CAPTURES, exist_ok=True)
 img = QImage(64, 64, QImage.Format_RGB32)
 img.fill(0xFF00FF)  # 纯洋红
 img.save(MAGENTA)
@@ -99,8 +100,7 @@ def set_wallpaper(path):
 # ==================== 抓屏工具 ====================
 screen = app.primaryScreen()
 DPR = screen.devicePixelRatio()
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "_mica_captures")
+OUT_DIR = CAPTURES
 
 
 def region_rgb(win, y0f, y1f, xf0, xf1, screen_img, tag):

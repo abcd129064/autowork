@@ -33,6 +33,7 @@ NESTED_SENSITIVE_PATHS = (
     ("api_credentials", "api1", "password"),
     ("api_credentials", "api2", "password"),
     ("mysql_sync", "password"),
+    ("frps_admin", "password"),
 )
 
 # 敏感字典：顶层 key -> 字典内全部字符串值逐一加解密（子键动态，如厂商 id）

@@ -2,9 +2,11 @@
 """P0 等价性验证：SQL 分页(query_page/query_with_stats) == 旧 Python 实现
 覆盖 tue/mon/custom/month 四种周期模式 + 筛选组合 + 空 occurred_at 回退。
 """
+import os
 import sys, sqlite3, random
 from datetime import datetime, timedelta
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 from database import aftersale_db as adb
 
 

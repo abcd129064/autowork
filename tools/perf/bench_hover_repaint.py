@@ -7,14 +7,14 @@
 模拟 60 行 × 15 列（含操作列 cellWidget）页面，连续 40 次非相邻 hover 行
 跳变 + processEvents 触发真实重绘，统计耗时与重绘面积。
 
-用法：<venv>/Scripts/python.exe tools/bench_hover_repaint.py
+用法：<venv>/Scripts/python.exe tools/perf/bench_hover_repaint.py
 结果解读：patched 行的 ms 应显著低于 unpatched（2K 下面积约 1/23）。
 """
 import os
 import sys
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from PySide6.QtCore import QElapsedTimer
 from PySide6.QtWidgets import QApplication, QPushButton, QTableWidgetItem

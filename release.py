@@ -26,7 +26,7 @@
      跑 build_exe.py，校验 7 项产物；成功后清理挪开的备份
   3. 版本：读 dist/AutoWork/version.json，与线上 latest.json 比较，
      新版本必须更大（--force 可跳过，用于重发同号）
-  4. 发布：调 tools/publish_update.py（远端 sha256 复核 + latest.json 原子切换）
+  4. 发布：调 tools/deploy/publish_update.py（远端 sha256 复核 + latest.json 原子切换）
   5. 验证：公网 fetch_latest 解析 + 版本比较 + 包体 HEAD 可达性/大小一致
  命令：$env:AFT_SSH_PASS='Password'; python release.py; Remove-Item Env:AFT_SSH_PASS
  例如：$env:AFT_SSH_PASS='Password';

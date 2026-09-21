@@ -4,8 +4,8 @@
 密码不落盘：从环境变量 AFT_SSH_PASS 读取。
 
 用法（bash，注意密码含 `!`，必须单引号）：
-  AFT_SSH_PASS='***' python tools/prod_ssh.py "systemctl is-active nginx"
-  AFT_SSH_PASS='***' python tools/prod_ssh.py --file tools/_recon.sh
+  AFT_SSH_PASS='***' python tools/deploy/prod_ssh.py "systemctl is-active nginx"
+  AFT_SSH_PASS='***' python tools/deploy/prod_ssh.py --file tools/_recon.sh
 
 --file 会先上传脚本到 /tmp 再执行，避免多行/引号在 exec_command 里被拆坏。
 """

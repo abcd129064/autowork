@@ -13,8 +13,8 @@
 本身就能服务上述结构（`$uri/` 让 /v1/ 与 /v2/ 命中各自目录下的 index.html）。
 
 用法：
-    AFT_SSH_PASS='***' python tools/deploy_parallel_v1v2.py --dry-run
-    AFT_SSH_PASS='***' python tools/deploy_parallel_v1v2.py
+    AFT_SSH_PASS='***' python tools/deploy/deploy_parallel_v1v2.py --dry-run
+    AFT_SSH_PASS='***' python tools/deploy/deploy_parallel_v1v2.py
 
 回滚（服务器上执行）：
     cd /opt/aftersale-web && tar xzf dist_backup_pre-v2_<时间戳>.tar.gz
@@ -33,7 +33,7 @@ HOST, USER, PORT = "49.235.34.253", "root", 22
 BASE = "/opt/aftersale-web"
 DIST = posixpath.join(BASE, "dist")
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOCAL_V2 = os.path.join(ROOT, "web", "vue-pure-admin", "dist-v2")
 LOCAL_CHOOSER = os.path.join(ROOT, "web", "aftersale_chooser", "index.html")
 

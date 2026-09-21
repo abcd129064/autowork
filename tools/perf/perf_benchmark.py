@@ -8,10 +8,10 @@
 4. widget_count   —— 表格内 cellWidget 数量（滚动开销的直接指标）
 
 用法（需 venv 环境，offscreen 自动开启）：
-    python tools/perf_benchmark.py [--rows N] [--scroll-steps M] [--rounds K]
+    python tools/perf/perf_benchmark.py [--rows N] [--scroll-steps M] [--rounds K]
 
 基线示例：
-    <venv>/Scripts/python.exe tools/perf_benchmark.py
+    <venv>/Scripts/python.exe tools/perf/perf_benchmark.py
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ import statistics
 import sys
 import time
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

@@ -9,14 +9,13 @@ develop-eggs/
 /dist/
 *.egg-info/
 *.egg
-# 更新发布打包产物（tools/publish_update.py 输出，含大 zip，不入库）
+# 更新发布打包产物（tools/deploy/publish_update.py 输出，含大 zip，不入库）
 /out/
 
 # Virtual Environment
 venv/
 env/
 ENV/
-_uic_venv/
 
 # IDE
 /.idea/
@@ -53,18 +52,10 @@ frpc_xtcp_panel.toml
 frpc_xtcp_meta.json
 frpc.exe
 
-# 打包体积优化回滚备份资产（方案 D 临时保险，验证后删除）
-_cv2_backup/
-AutoWork.spec.bak
 *.whl
-frp-source-integration.md
 
 .workbuddy
 .qoder
-docs/MySQL双后端边界分析.md
-docs/测试规划.md
-docs/项目理解报告.md
-.git_broken_backup
 
 # 前端依赖（原文件曾被工具追加 1.4 万行逐文件条目，2026-09-07 压缩重建，
 # 备份见 /tmp/gitignore_backup_1MB）
@@ -73,30 +64,23 @@ node_modules/
 # 整目录忽略（含本地凭据）
 /config
 
-# 文档本地化（不入库）
-docs/hidden_performance_optimizations.md
-docs/代码审查标准与流程.md
-docs/售后面板Web化部署.md
-docs/售后面板Web二期方案.md
-docs/二期自定义图表调研.md
-
 # 压测结果快照（运行产物）
 tools/stress_test/results/
 
-# 测试运行截图产物（perf/探针脚本生成，不随仓库分发）
+# 测试运行截图产物（历史遗留规则；现在验证截图统一落 tools/_scratch/）
 tests/*.png
 
-# 环境异常目录与临时探针（2026-09-07 项目清理）
-%SystemDrive*/
-.git_backup_20260901/
-_qss_qa_tmp/
-_perf_probe/
-
 # 一次性设计/验证产物（2026-09-20 版本管理盘点）
-tools/_pa_shots/
 web/aftersale_front/tools/*.png
 # 前端构建产物（/dist/ 已锚定为仓库根，这里补子目录）
 web/**/dist/
 .pytest_cache/
 # 业务数据表（含客户库存，不入库）
 总部仓库库存明细.xlsx
+
+# Agent / 开发临时产物统一落点（探针脚本、截图、抓取物、中间输出）
+# 规则见根目录 AGENTS.md；目录本身保留，内容全部不入库
+tools/_scratch/*
+!tools/_scratch/.gitkeep
+
+/frp-dev

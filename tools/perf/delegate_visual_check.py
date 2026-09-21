@@ -5,13 +5,13 @@ P0-1 的核心风险是「换 delegate 会不会改变 UI 呈现」。本脚本�
 同一滚动位置分别抓取表格视口位图，做像素级差异统计，并各自落盘 PNG 供肉眼比对。
 
 用法：
-    <venv>/Scripts/python.exe tools/delegate_visual_check.py
+    <venv>/Scripts/python.exe tools/perf/delegate_visual_check.py
 """
 import os
 import sqlite3
 import sys
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -27,7 +27,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 app = QApplication.instance()
 from core.lean_table_delegate import LeanTableDelegate as _LeanDelegate  # noqa: E402
 
-OUT_DIR = os.path.join(PROJECT_ROOT, "tests")
+OUT_DIR = os.path.join(PROJECT_ROOT, "tools", "_scratch")
+os.makedirs(OUT_DIR, exist_ok=True)
 
 
 def load_rows(n=60):

@@ -3,7 +3,7 @@
 
 密码不落盘：从环境变量 AFT_SSH_PASS 读取。
 用法（bash）：
-  AFT_SSH_PASS='***' python tools/upload_aftersale_dist.py
+  AFT_SSH_PASS='***' python tools/deploy/upload_aftersale_dist.py
 """
 import os
 import sys
@@ -14,7 +14,7 @@ import paramiko
 
 HOST = "49.235.34.253"
 USER = "root"
-LOCAL_DIST = os.path.join(os.path.dirname(__file__), "..", "web", "aftersale_front", "dist")
+LOCAL_DIST = os.path.join(os.path.dirname(__file__), "..", "..", "web", "aftersale_front", "dist")
 REMOTE_DIR = "/opt/aftersale-web/dist"
 
 

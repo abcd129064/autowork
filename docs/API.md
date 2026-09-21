@@ -1659,7 +1659,7 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | 静态站根 | `/opt/aftersale-web/dist`：`index.html` 入口页｜`v1/index.html` 老系统（v1 资产留根 `assets/`）｜`v2/**` 新系统（base=`/v2/`） |
 | 访问入口 | `http://49.235.34.253/`、`/v1/`、`/v2/`（80 端口与 newball.cloud 共端口 default_server 分流；8080 外部不可达）。**零 nginx 改动**：既有 `location / { try_files $uri $uri/ /index.html; }` 直接服务子目录 SPA |
 | 认证前提 | `users.json`（bcrypt `pw_hash`）目前不存在——开 `AUTH_ENABLED` 前必须先补用户文件 |
-| 部署脚本 | `tools/deploy_parallel_v1v2.py`（v1/v2 并行整包，幂等防覆盖 v1）、`tools/upload_aftersale_dist.py`（v1 产物）、`tools/deploy_aftersale_api.py`（后端+重启）；SSH 统一走 `tools/prod_ssh.py`，密码只从环境变量 `AFT_SSH_PASS` 读取 |
+| 部署脚本 | `tools/deploy/deploy_parallel_v1v2.py`（v1/v2 并行整包，幂等防覆盖 v1）、`tools/deploy/upload_aftersale_dist.py`（v1 产物）、`tools/deploy/deploy_aftersale_api.py`（后端+重启）；SSH 统一走 `tools/deploy/prod_ssh.py`，密码只从环境变量 `AFT_SSH_PASS` 读取 |
 | v2 子路径三件套 | `VITE_PUBLIC_PATH=/v2/`、`useNav.getLogo()` 用 `import.meta.env.BASE_URL`、`public/platform-config.json` 的 Title |
 | 验证脚本 | `web/aftersale_front/tools/verify_prod_layout.mjs`（产物预检）、`serve_dist_v2.mjs`（本地仿真）、`verify_prod_deployed.mjs` / `verify_prod_write.mjs`（线上巡检） |
 

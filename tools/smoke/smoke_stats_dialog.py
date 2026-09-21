@@ -2,7 +2,7 @@
 """售后统计弹窗 offscreen 冒烟：临时库造数 → 构建弹窗 → 等异步加载 → 截图
 
 运行（miniconda3 python 带 PySide6）：
-    QT_QPA_PLATFORM=offscreen python tools/smoke_stats_dialog.py
+    QT_QPA_PLATFORM=offscreen python tools/smoke/smoke_stats_dialog.py
 """
 import os
 import sqlite3
@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -116,7 +116,7 @@ for _ in range(120):
     time.sleep(0.05)
 assert dlg._chart._data, "set_filters 后趋势未重新加载"
 
-out = os.path.join(PROJECT_ROOT, "tools", "stats_dialog_smoke.png")
+out = os.path.join(PROJECT_ROOT, "tools", "_scratch", "stats_dialog_smoke.png")
 dlg.grab().save(out)
 print("SMOKE_OK",
       "total=%s" % dlg._kpis["total"][1].text(),

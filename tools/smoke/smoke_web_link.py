@@ -10,7 +10,7 @@ import json
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", "")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 TMP = tempfile.mkdtemp(prefix="aftersale_smoke_")
 

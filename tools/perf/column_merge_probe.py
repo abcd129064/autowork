@@ -13,7 +13,7 @@
   plan_d   c + 类型并入位置                → 8 列
 
 用法：
-    <venv>/Scripts/python.exe tools/column_merge_probe.py [--rows 60]
+    <venv>/Scripts/python.exe tools/perf/column_merge_probe.py [--rows 60]
 """
 import argparse
 import os
@@ -22,7 +22,7 @@ import statistics
 import sys
 import time
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

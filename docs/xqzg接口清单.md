@@ -171,9 +171,9 @@ Headers:
 
 ```bash
 # 全量探测（只读，约 1 分钟）
-python tools/probe_xqzg_api.py        # 登录 + 根路由 + OPTIONS + 前端 JS 提取 + 字典探测
-python tools/probe_xqzg_schema.py     # OpenAPI schema 全量 136 路径 + 命名空间根
-python tools/probe_xqzg_detail.py     # snooker_om 参数详情 + GET 端点采样
+python tools/probe/probe_xqzg_api.py        # 登录 + 根路由 + OPTIONS + 前端 JS 提取 + 字典探测
+python tools/probe/probe_xqzg_schema.py     # OpenAPI schema 全量 136 路径 + 命名空间根
+python tools/probe/probe_xqzg_detail.py     # snooker_om 参数详情 + GET 端点采样
 ```
 
 凭据来自 `config/credentials.json` → `api_credentials.api1`（DPAPI 自动解密）。原始探测结果存于 `logs/xqzg_api_probe_result.json`。
