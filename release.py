@@ -248,7 +248,7 @@ def publish(version, notes, mode, base_manifest, min_version,
         if ans not in ("y", "yes"):
             fail("已取消发布（线上未做任何改动）", code=0)
 
-    cmd = [PY, os.path.join("tools", "publish_update.py"),
+    cmd = [PY, os.path.join("tools", "deploy", "publish_update.py"),
            "--source", os.path.join("dist", "AutoWork"),
            "--version", version, "--mode", mode]
     if notes:
