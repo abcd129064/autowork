@@ -375,6 +375,23 @@ class RemoteMixin:
         if not server_name:
             self._append_log("[远程] 请填写 serverName")
             return
+        # 同名防护：列表已有同 serverName 时仅选中该行——否则同名两条，
+        # 注册表按 name 键控会互相顶掉，frpc diff 出现不可预期行为
+        dup_idx = next(
+            (i for i, v in enumerate(self._p2p_visitors)
+             if v.get("serverName", "").strip() == server_name), -1)
+        if dup_idx >= 0 and dup_idx != self._p2p_current_index:
+            self._p2p_current_index = dup_idx
+            self.ui.p2p_visitor_list.setCurrentRow(dup_idx)
+            self._show_info_bar(f"{server_name} 已在列表中", "info")
+            return
+        # 端口框与选中行取值同步（行值可原样写回），无法区分「沿用选中行端口」
+        # 与「无新端口」：此时用户只是改了 serverName 想加新隧道，自动换到
+        # 空闲端口，而不是弹「端口已被占用」把添加流程卡死
+        if 0 <= self._p2p_current_index < len(self._p2p_visitors) \
+                and self.ui.p2p_form_port.value() == \
+                self._p2p_visitors[self._p2p_current_index].get("bindPort"):
+            self.ui.p2p_form_port.setValue(self._get_new_random_port())
         port = self.ui.p2p_form_port.value()
         taken = set(self._session_mgr.used_ports())
         taken |= {v["bindPort"] for v in self._p2p_visitors}
@@ -399,12 +416,25 @@ class RemoteMixin:
         self.ui.p2p_visitor_list.setCurrentRow(self._p2p_current_index)
         self.ui.p2p_form_port.setValue(self._get_new_random_port())
         # 添加即注册进会话中心（不启动 frpc）：「当前隧道」面板立即可见该 snk，
-        # 注册表与持久化文件同步对齐；隧道生效仍需断开重连（apply 重启 frpc）
+        # 注册表与持久化文件同步对齐；frpc 运行中直接热重载生效
         self._register_visitor_to_manager(visitor)
         if self._session_mgr.is_running():
-            self._show_info_bar(
-                f"隧道「{server_name}」已添加，请断开后重新连接以生效",
-                "warning", title="提示", duration=4000)
+            try:
+                result = self._session_mgr.apply()
+            except (OSError, RuntimeError, ValueError) as e:
+                self._append_log(f"[远程] 新隧道应用失败: {e}")
+                self._show_info_bar(
+                    f"隧道「{server_name}」已添加但暂未生效，请断开后重新连接",
+                    "warning", title="提示", duration=5000)
+                return
+            if result == "reloaded":
+                self._show_info_bar(
+                    f"隧道「{server_name}」已添加并生效（热重载，现有隧道不中断）",
+                    "success", duration=4000)
+            else:
+                self._show_info_bar(
+                    f"隧道「{server_name}」已添加并生效（frpc 已重启）",
+                    "success", duration=4000)
 
     def _on_p2p_delete(self):
         """删除按钮：XTCP 模式删除 visitor，TCP 模式删除选中的服务器"""
@@ -790,7 +820,7 @@ class RemoteMixin:
 
         添加即注册：「当前隧道」面板读注册表，注册后球桌库/手工添加的
         snk 无需连接即可见；persist() 落盘即时对齐（重启后不丢不复活）。
-        连接时 _on_xtcp_connect 全量重建注册表，口径一致。
+        连接时 _on_xtcp_connect 差量同步同名保留端口，两处注册口径一致。
         """
         name = str(visitor.get("serverName") or "").strip()
         if not name:
@@ -939,10 +969,11 @@ class RemoteMixin:
             return
         mgr = self._session_mgr
         try:
-            # 先清除旧的面板注册（手工 + 球桌库），再按表单逐项注册（同名 serverName 复用隧道）
-            # 不清干净会残留：表单里删掉/改过端口的旧 visitor 会继续占着注册表和端口
-            for src in (SOURCE_MANUAL, SOURCE_TABLE):
-                mgr.remove_visitors_by_source(src)
+            # 差量同步（不再全清重注册）：全清会让 frpc 把「端口未变」的
+            # 既有隧道也当成删除重建，热重载下旧 SSH 窗口立即持死端口。
+            # 现按表单逐项注册（同名保留原端口），最后仅移除表单里已删除的项。
+            existing_ports = {r["serverName"]: r["bindPort"] for r in mgr.records()}
+            form_names = set()
             for v in self._p2p_visitors:
                 server_name = v.get("serverName", "")
                 # 关联球桌：球桌库选择时已带 tableId，手工添加的按 snk 反查补全
@@ -950,12 +981,22 @@ class RemoteMixin:
                     or self._lookup_table_name_by_snk(server_name)
                 if table_id:
                     v["tableId"] = table_id
-                mgr.register_visitor(
+                # 端口稳定：表单未带端口时回填注册表现有端口，避免随机换端口
+                bind_port = v.get("bindPort") or existing_ports.get(server_name)
+                port, _changed = mgr.register_visitor(
                     server_name,
-                    bind_port=v.get("bindPort"),
+                    bind_port=bind_port,
                     secret_key=v.get("secretKey") or "abc123",
                     source=v.get("source") or SOURCE_MANUAL,
                     table_id=table_id)
+                # 回填解析后的端口到表单数据，保证列表与注册表口径一致
+                v["bindPort"] = port
+                form_names.add(server_name)
+            # 差量清理：移除表单里已删除的面板来源 visitor（保留 snk 快捷连接来源）
+            for r in mgr.records():
+                if r["source"] in (SOURCE_MANUAL, SOURCE_TABLE) \
+                        and r["serverName"] not in form_names:
+                    mgr.remove_visitor(r["serverName"])
             result = mgr.apply()
             # 连接即使用：刷新最近使用时间，隧道面板立即显示数据
             for v in self._p2p_visitors:

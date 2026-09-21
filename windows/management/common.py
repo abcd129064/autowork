@@ -155,6 +155,9 @@ TABLE_COLUMNS = [
     ("code", "设备编码", 200),
     # 设备版本（wechat listext deviceVersion，如 200070-20061-100836）
     ("deviceVersion", "版本号", 170),
+    # frps 在线感知（二期 P1，2026-09-21）：core/frps_admin xtcp proxy 名单
+    # 实时查询渲染，不落库；放末位避免既有列索引/隐藏集合漂移
+    ("frps_online", "frps在线", 100),
 ]
 
 _STATUS_COLORS = {

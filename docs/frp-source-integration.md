@@ -508,8 +508,38 @@ bindPort = 47511
 2. **apply() 三分支**：frpc 在跑且 server/auth 签名未变 → 重写 TOML + `GET /api/reload`（frpc 内 `UpdateAllConfigurer→VisitorManager.UpdateAll` 按 name+DeepEqual diff，未变化 visitor 零触碰）；签名变化（reload 不重读 common）或 admin 不可达（含 2×0.5s 重试防冷启动竞态）→ 回退停旧起新；reload 返回 4xx（配置非法）→ 保留原进程并抛错，绝不拿坏配置重启。
 3. **frps 0.65 兼容性**：reload 为 frpc 进程内行为，不触碰控制连接；XTCP visitor 注册本身惰性（首个本地连接才发 NatHoleVisitor），服务端无感知。
 4. **ensure_visitor 冷启动标志**按 apply 结果计算：热重载成功 → 本地 bindPort 监听器已随 reload 返回绑定完成，走 300ms 复用延时。
-5. **验证**：`tests/test_frp_hot_reload.py` 15 例 + 真机冒烟 `tests/smoke_frp_admin_reload.py`（真实 frpc.exe 0.66.0）11/11 + 全量 394 passed。
-6. **生产 frps 端到端回归（2026-09-21 已补，14/14）**：`tools/test_frp_live_frps.py` 连 49.235.34.253:7900，日志实证：`login to server success` 后 reload → `visitor added: [新visitor]` 且既有 visitor 无 removed、全程 PID 与 runID 不变（控制连接零重建，frps 会话零中断）；幂等 reload 无 diff；移除 visitor → `visitor removed` 精确只删目标。token 经配置门面解密读取，临时文件跑完即删。
+5. **验证**：`tests/test_frp_hot_reload.py` 15 例 + 真机冒烟 `tools/smoke/smoke_frp_admin_reload.py`（真实 frpc.exe 0.66.0）11/11 + 全量 394 passed。
+6. **生产 frps 端到端回归（2026-09-21 已补，14/14）**：`tools/smoke/smoke_frp_live_frps.py` 连 49.235.34.253:7900，日志实证：`login to server success` 后 reload → `visitor added: [新visitor]` 且既有 visitor 无 removed、全程 PID 与 runID 不变（控制连接零重建，frps 会话零中断）；幂等 reload 无 diff；移除 visitor → `visitor removed` 精确只删目标。token 经配置门面解密读取，临时文件跑完即删。
 
 本条记录即 §5 步骤 5 / §4.2 路径 A 的实施确认；`auth.token` 模板化（§4.3 其余项）与 store API（路径 B）仍待后续。
 
+---
+
+## 附录 E：重连端口漂移修复（2026-09-21，真机问题闭环）
+
+真机反馈：开启状态下添加 snk_4005/4001 后仅 snk_4008 可访问，SSH 窗口报 `Unable to connect to port 49883/21631`。诊断结论：**热重载本身毫秒级完成（日志 545→547ms），慢的是 XTCP 首次打洞（~1.8s，网络决定）；根因是 `remote_mixin._on_xtcp_connect` 每次「连接」全清面板注册再重注册**——表单行缺端口时 `register_visitor` 随机换新端口（snk_4005 实测 49883→37988→37991 三连漂移），热重载 diff 把同名 visitor 拆旧建新，旧 SSH 窗口全部持死端口。旧版 kill+重启世界对此无感（所有端口都会重建），热重载引入 diff 语义后该既有缺陷被暴露放大。
+
+修复（`main_window/remote_mixin.py`）：
+
+1. **`_on_xtcp_connect` 改差量同步**：按表单逐项 `register_visitor`（同名保留注册表原端口，表单缺端口时从 `records()` 回填并同步回表单数据），最后仅移除表单中已删除的面板来源 visitor（`SOURCE_SNK` 快捷连接不受牵连）。既有隧道在 frpc diff 中零变化，端口不再漂移。
+2. **`_on_p2p_add` 运行中直接 apply**：添加即热重载生效（成功提示改「已生效（热重载，现有隧道不中断）」；apply 抛错降级 warning「已添加但暂未生效」）。旧「请断开重连以生效」文案废除。
+3. **同名重复添加去重**：列表已有同 serverName 时仅选中提示（防自弹端口逻辑放行第二条同名隧道）。
+4. **端口框残留处理**：改 serverName 未动端口（端口值==选中行端口）时自动 `_get_new_random_port()` 换空闲端口，不再被端口占用校验拒绝；显式输入他人端口仍拒绝。
+
+回归：`tests/test_remote_connect_port_stable.py` 8 例（重连端口恒定+禁随机分配、差量清理保留 SNK 来源、添加即热重载、失败降级、去重、残留端口自弹、显式冲突拒绝）+ 全量 **402 passed**。真机佐证：现役 snk_11601:14687 / snk_4008:12547 / snk_4005:37991 全部 LISTEN，历史漂移端口（49883/21631/53461/44452）已无监听；修复后需断开重连一次让现役注册表与新逻辑对齐。
+
+## 附录 F：二期 P0/P1 落地（2026-09-22，感知/预检/优雅停止/质量探测）
+
+按 `design/remote_page_v3_065.html` 设计稿实施，全部功能锁定 frps/frpc **0.65 能力**内（版本墙见附录前的勘误记录）。
+
+**生产前提自动满足**：49.235.34.253 frps.toml 早已开 `webServer.addr=0.0.0.0 port=7400 user=admin password=abc123`（本会话核实）。⚠️ 弱口令 + auth.token=123 + 面板全网开放为已知风险，改密需重启 frps（578 台在线设备瞬断重连），留待维护窗口处理。
+
+**新增模块**：
+- `core/frps_admin.py`——`FrpsAdminClient`（单例，只读 GET `/api/proxy/xtcp`）：四态 `online/offline/unregistered/None`（None=感知不可用，调用方必须回退一期行为绝不阻塞）；熔断 3 败静默 60s（不清缓存）；缓存 TTL 90s 超期 `online()` 返回 None（**绝不拿旧数据误判在线**）；`request_refresh()` 后台线程化——周期/联动/按钮全部走它，GUI 线程零同步 GET。配置走 `frps_admin`（credentials 域，DPAPI，口令在 `NESTED_SENSITIVE_PATHS`）。
+- `core/visitor_probe.py`——`VisitorProber`：本地 bindPort TCP connect 计时（XTCP 直连下 ≈ 用户 SSH 回连体感；frps admin 对 visitor 侧流量不可见，任何版本都拿不到，本地探测是唯一正解）。30s 串行轮 / 800ms 超时 / 连 3 超时判 bad / 环形 120 点 / 隧道消失清样本。评级 good≤60 / nice≤150 / fair≤300 / poor / bad。配置走 `frp_quality`（misc 域）。
+- `frp_remote`：`_stop_frpc` 两段式优雅停止（POST `/api/stop` → quit → 2.5s QTimer 回检兜底 kill，全异步不阻塞）；公开 `admin_port` / `ping_admin()` / `stop_frpc()`；`open_session` P0 预检——**仅 offline 拦截秒提示**，unregistered（visitor 先注册是正常时序）/None 一律放行，缓存过期但已配置时当场刷一次再判定。
+- ⚠️ **环境坑（教训级）**：开发机 `HTTP(S)_PROXY` 调试代理会让 urllib 对本机回环 admin API 返回 502「假可达」→ `_request_admin_api`/`_http_get` 全部 `ProxyHandler({})` 强制直连。打本机或自建服务端的一切 HTTP 代码都要防这手（生产端到端也实证了代理对 7400 不可达）。
+
+**UI（RemoteHub 3→4 视图）**：会话总览 9 列+5 统计卡（新增 frps 在线、RTT/质量、今日流量列；offline 行禁用 SSH/SFTP/RDP；「立即感知」按钮）；新「连接质量」视图（4 卡+8 列 sparkline 明细+立即探测+双击开 SSH）；隧道配置新增「管理通道」卡（感知 URL/凭据编辑、测试连接、frpc 通道自检 healthz+/api/status、探测暂停、优雅停止按钮——废除旧「清注册表→apply→还原」绕行）；球桌管理页 TABLE_COLUMNS 末位 +`frps在线`（第 11 列，派生列不落库不进 CSV 导出，proxies_changed 仅重绘该列不重查库）。
+
+**验证三段**：单测 `tests/test_frps_phase2.py` 35 例；全量 pytest **437 passed**；生产冒烟 `tools/smoke/smoke_frps_perception_prod.py` **22/22**（0.06s 拉 767 条名单、四态全对、6 条面板 snk 全在名单、真 frpc.exe `/api/stop` 5s 内自退且端口释放）。

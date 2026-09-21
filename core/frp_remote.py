@@ -304,10 +304,19 @@ class RemoteSessionManager(QObject):
         if not snk:
             raise ValueError("snk 不能为空")
         info = self._visitors.get(snk)
-        # 已注册且 frpc 在运行：直接复用现有隧道（不重启），只刷新使用时间
+        # 已注册且 frpc 在运行：直接复用现有隧道（不重启），只刷新使用时间。
+        # 自愈（2026-09-22 真机）：注册表有但本地端口没监听 = 该 visitor 从未
+        # 进过进程（旧版「添加并注册」不 apply 的遗留），复用必被拒——补一次
+        # apply（运行中即热重载）把端口真正拉起来再返回。
         if info is not None and self.is_running():
+            from p2p import is_port_in_use
+            if not is_port_in_use(info["bindPort"]):
+                self.log_message.emit(
+                    f"[远程会话] {snk} 端口 {info['bindPort']} 未监听，"
+                    "热重载补齐")
+                self.apply()
             self.mark_used(snk, table_id)
-            return info["bindPort"], False
+            return self._visitors[snk]["bindPort"], False
         # 否则注册并应用新配置：frpc 运行中走热重载（其余隧道不中断），
         # 未运行则冷启动 frpc（新隧道或 frpc 已退出）
         self.register_visitor(snk, source=source, table_id=table_id)
@@ -429,6 +438,23 @@ class RemoteSessionManager(QObject):
 
     def is_running(self) -> bool:
         return self._frpc_process is not None
+
+    @property
+    def admin_port(self) -> int:
+        """本机 frpc admin API 端口（webServer.port，启动时随机分配）"""
+        return self._admin_port
+
+    def ping_admin(self, path: str = "/healthz") -> tuple:
+        """管理通道健康检查（UI 展示用）：返回 (状态码或0=不可达, 响应体)"""
+        return self._request_admin_api(path)
+
+    def stop_frpc(self):
+        """停止 frpc 进程（注册表保留，TOML 不删）——二期 P1 优雅停止入口
+
+        内部走 _stop_frpc 两段式：POST /api/stop 让 frpc 自行收尾，
+        2.5s 未退出才兜底强杀；区别于旧「清空注册表→apply→还原」绕行。
+        """
+        self._stop_frpc()
 
     def _pick_admin_port(self) -> int:
         """随机选一个本机空闲端口作为 frpc admin API 端口（仅回环监听）"""
@@ -552,15 +578,20 @@ class RemoteSessionManager(QObject):
         """请求本机 frpc admin API，返回 (HTTP状态码或0=不可达, 响应体前200字)
 
         不可达（未启动/端口未监听/超时）返回 (0, "")，调用方据此决定回退路径。
+        强制直连：机器上设了 HTTP(S)_PROXY 时 urllib 默认走代理，对本机
+        回环管理接口必然失败（代理回 502），热重载/优雅停止会静默降级——
+        ProxyHandler({}) 绕过一切代理。
         """
         url = f"http://127.0.0.1:{self._admin_port}{path}"
         req = urllib.request.Request(url, method=method)
         token = base64.b64encode(
             f"{self._admin_user}:{self._admin_password}".encode()).decode()
         req.add_header("Authorization", f"Basic {token}")
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
         try:
-            with urllib.request.urlopen(req,
-                                        timeout=_ADMIN_API_TIMEOUT_SEC) as resp:
+            with opener.open(req,
+                             timeout=_ADMIN_API_TIMEOUT_SEC) as resp:
                 body = resp.read(200).decode("utf-8", errors="replace")
                 return resp.status, body
         except urllib.error.HTTPError as e:
@@ -573,6 +604,14 @@ class RemoteSessionManager(QObject):
             return 0, ""
 
     def _stop_frpc(self):
+        """停止 frpc：两段式优雅停止（二期 P1）
+
+        先 POST /api/stop（frpc 0.65+ admin 原生端点）让 frpc 自行关闭
+        控制连接与监听端口——修复旧 kill 强杀的三类残留：本地隧道端口
+        TIME_WAIT 拖累下次启动、TOML 半写、窗口期竞态。2.5s 内未退出
+        （QTimer 回检，不阻塞调用线程）才兜底 kill()。admin 通道不可达
+        （status=0）时直接 kill，行为同日一期。
+        """
         proc = self._frpc_process
         self._frpc_process = None
         self._applied_signature = None
@@ -587,7 +626,22 @@ class RemoteSessionManager(QObject):
                 pass  # 信号未连接过时 disconnect 抛异常，忽略即可
             # 换成清理专用回调：进程真正结束后删除 QProcess 对象释放资源
             proc.finished.connect(self._on_stop_cleanup_done)
-            proc.kill()
+            status, _body = self._request_admin_api("/api/stop", method="POST")
+            if status == 0:
+                # admin 通道不可达：无从优雅停止，直接强杀（同日一期行为）
+                proc.kill()
+            else:
+                proc.quit()  # 尽力而为的退出信号（frpc 通常已由 /api/stop 收尾）
+                # 兜底：2.5s 后仍在运行才强杀（异步回检，绝不在主线程 waitFor）
+                def _force_kill(p=proc):
+                    try:
+                        if p.state() != QProcess.ProcessState.NotRunning:
+                            p.kill()
+                            self.log_message.emit(
+                                "[远程会话] frpc 优雅退出超时，已强制结束")
+                    except RuntimeError:
+                        pass  # 进程对象已被 Qt 销毁（正常退出清理完成）
+                QTimer.singleShot(2500, _force_kill)
             self.frpc_state_changed.emit(False)
 
     def _on_stop_cleanup_done(self, *_args):
@@ -673,6 +727,27 @@ class RemoteSessionManager(QObject):
             return
         if kind == "rdp" and sys.platform != "win32":
             self._notify("无法远程", "远程桌面仅支持 Windows", error=True, notifier=notifier)
+            return
+
+        # ---- 二期 P0 连接预检：frps 权威离线 → 秒提示，不盲等打洞超时 ----
+        # 感知不可用（未配置/不可达/缓存过期）一律放行回退一期路径；
+        # unregistered 也放行——visitor 注册先于设备上线是正常时序，
+        # 只有确认 offline（设备注册过又掉线）才拦截，避免误伤。
+        try:
+            from core.frps_admin import get_frps_client
+            state = get_frps_client().online(snk)
+            if state is None and get_frps_client().configured():
+                # 缓存不可信时当场刷一次（2.5s 超时上限），仍失败则放行
+                get_frps_client().refresh()
+                state = get_frps_client().online(snk)
+        except Exception:
+            state = None
+        if state == "offline":
+            self._notify("设备未在线",
+                         f"{snk} 在 frps 上状态为 offline（设备断电/断网/现场 "
+                         f"frpc 掉线），已跳过打洞等待。可稍后重试，或到"
+                         f"球桌管理页核对现场状态。", error=True, notifier=notifier)
+            self.log_message.emit(f"[远程会话] 预检拦截: {snk} frps offline，未发起打洞")
             return
 
         try:

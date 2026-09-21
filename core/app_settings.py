@@ -109,6 +109,8 @@ KEY_DOMAIN = {
     "forensic_ai_analysis": "credentials",
     "deepseek_api_key": "credentials",
     "xtcp_secret_key": "credentials",
+    # frps 感知通道（2026-09-22 二期 P0）：base_url/user/password（password 走 DPAPI）
+    "frps_admin": "credentials",
     # ---- ui ----
     "startup_default_page": "ui",
     "panel_entry_popout": "ui",
@@ -145,6 +147,8 @@ KEY_DOMAIN = {
     # 工具页·单杆视频行为开关（2026-09-07 二期）
     "single_random_session_code": "misc",
     "single_auto_open_dir": "misc",
+    # 连接质量与 frps 感知调度（2026-09-22 二期）：interval_sec/enabled 等
+    "frp_quality": "misc",
 }
 
 # ==================== 运行时状态 ====================

@@ -33,6 +33,7 @@ from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 from core.app_paths import get_app_dir
 from core.design_tokens import SEMANTIC
 from core.frp_remote import get_session_manager
+from core.frps_admin import get_frps_client
 from core.perf import (is_acrylic_enabled, is_animation_enabled,
                        apply_table_smooth_mode)
 from core.secrets import decrypt_settings, encrypt_settings
@@ -89,6 +90,12 @@ class TablePage(QWidget):
         self._search_timer.timeout.connect(self._do_search)
         self._init_ui()
         self._load_local()
+        # frps 在线感知（二期 P1）：球桌页进入即确保感知启动（幂等单例），
+        # 名单刷新只重绘 frps 列，不触发整表重查
+        self._frps_client = get_frps_client()
+        self._frps_client.start()
+        self._frps_client.proxies_changed.connect(
+            lambda _d: self.update_frps_column())
         # 异步获取元数据，判断是否需要首次同步
         self._meta_worker = _DBQueryWorker(table_db.get_meta)
         self._meta_worker.result_ready.connect(self._on_meta_finished)
@@ -352,6 +359,12 @@ class TablePage(QWidget):
                 # 球桌号（name）即提交台账的 table_id，用它匹配高频统计
                 hf = hf_map.get(str(item.get("name") or "").strip(), 0)
                 for c, (key, _, _) in enumerate(TABLE_COLUMNS):
+                    if key == "frps_online":
+                        # frps 在线感知列（二期 P1）：实时查 frps_admin 缓存，
+                        # 不落库；感知未启用/不可达显示「—」，绝不误导为离线
+                        cell = self._make_frps_cell(item)
+                        self._table.setItem(r, c, cell)
+                        continue
                     val = item.get(key) or ""
                     val = str(val).replace("\n", " ").strip()
                     cell = QTableWidgetItem(val)
@@ -388,6 +401,55 @@ class TablePage(QWidget):
             self._table.blockSignals(False)
             self._table.setUpdatesEnabled(True)
         _fit_table_rows(self._table)
+
+    # ---------- frps 在线感知列（二期 P1，实时不落库） ----------
+
+    _FRPS_CELL = {
+        "online": ("● online", "success"),
+        "offline": ("● offline", "danger"),
+        "unregistered": ("○ 未注册", "warning"),
+        None: ("—", "info"),
+    }
+
+    def _make_frps_cell(self, item):
+        """按 snk_code 生成 frps 在线单元格（四态；感知不可用→灰「—」）"""
+        snk = str(item.get("snk_code") or "").strip()
+        state = get_frps_client().online(snk) if snk else None
+        text, color_key = self._FRPS_CELL.get(state, self._FRPS_CELL[None])
+        cell = QTableWidgetItem(text if snk else "—")
+        cell.setToolTip(("感知未启用/不可达" if state is None and snk
+                         else ("该球桌无 SNK 标识" if not snk else
+                               f"frps xtcp proxy 状态：{state}")))
+        if snk and state is not None:
+            cell.setForeground(QColor(SEMANTIC[color_key]))
+        return cell
+
+    def _refresh_frps_column(self):
+        """frps 名单刷新后仅重绘该列（不重查库，保住当前页/滚动位置）"""
+        col = next((i for i, (k, _, _) in enumerate(TABLE_COLUMNS)
+                    if k == "frps_online"), -1)
+        if col < 0:
+            return
+        tbl = self._table
+        for r in range(tbl.rowCount()):
+            snk_item = tbl.item(r, next(
+                (i for i, (k, _, _) in enumerate(TABLE_COLUMNS)
+                 if k == "snk_code"), col))
+            snk = snk_item.text().strip() if snk_item else ""
+            state = get_frps_client().online(snk) if snk else None
+            text, color_key = self._FRPS_CELL.get(state, self._FRPS_CELL[None])
+            cell = tbl.item(r, col) or QTableWidgetItem()
+            cell.setText(text if snk else "—")
+            if snk and state is not None:
+                cell.setForeground(QColor(SEMANTIC[color_key]))
+            else:
+                cell.setForeground(QColor(SEMANTIC["info"]))
+            tbl.setItem(r, col, cell)
+
+    def update_frps_column(self):
+        """供 frps proxies_changed 信号驱动的实时刷新入口"""
+        if self.isVisible():
+            self._refresh_frps_column()
 
     def _update_pager(self, keyword=""):
         """按总数/页大小重算页码并同步分页控件与状态文本"""
@@ -621,8 +683,13 @@ class TablePage(QWidget):
     def _on_export_query(self, result, path):
         """导出查询完成：全量记录写 CSV（utf-8-sig），成功后提示并可定位文件"""
         _total, rows = result
-        header = [c[1] for c in TABLE_COLUMNS]
-        keys = [c[0] for c in TABLE_COLUMNS]
+        header = []
+        keys = []
+        for k, t, _w in TABLE_COLUMNS:
+            if k == "frps_online":
+                continue  # 派生列（frps 实时感知）无 DB 字段，不参与导出
+            header.append(t)
+            keys.append(k)
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
