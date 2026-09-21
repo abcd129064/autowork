@@ -239,6 +239,8 @@ class SessionWork(QWidget):
         self._frps = get_frps_client()
         self._frps.proxies_changed.connect(lambda _d: self.refresh())
         self._frps.channel_state_changed.connect(lambda _s: self.refresh())
+        self._frps.refresh_finished.connect(self._on_refresh_finished)
+        self._receipt_armed = False
         self._prober = get_prober()
         self._prober.changed.connect(self._on_probe_round)
 
@@ -248,9 +250,27 @@ class SessionWork(QWidget):
             self.refresh()
 
     def _on_probe_now(self):
-        # 异步感知（后台线程），结果经 channel_state_changed/proxies_changed 回流刷新
+        # 异步感知（后台线程）；完成回执由 _on_refresh_finished 统一处理——
+        # 成功/失败都明确告知（2026-09-22 反馈：只有"已发起"没有结果，
+        # 数据无变化时看起来像没反应）
+        self._receipt_armed = True
         self._frps.request_refresh()
-        self._win._show_info_bar("已发起 frps 感知请求", "info", duration=2500)
+        self._win._show_info_bar("已发起 frps 感知请求", "info", duration=2000)
+
+    def _on_refresh_finished(self, state):
+        # 周期刷新的完成信号也进这里：未挂接回执时静默（绝不弹窗刷屏）
+        if not getattr(self, "_receipt_armed", False):
+            return
+        self._receipt_armed = False
+        if not self.isVisible():
+            return
+        n = len(self._frps.snapshot()["proxies"])
+        self._win._show_info_bar(
+            _CHANNEL_TEXT.get(state, state)
+            + (f" · 名单 {n} 条，数据已刷新" if state == "ok" else ""),
+            "success" if state == "ok" else
+            ("warning" if state == "unconfigured" else "error"),
+            duration=4000)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1040,6 +1060,8 @@ class TunnelConfWork(QWidget):
         self._mgr.frpc_state_changed.connect(lambda _b: self._update_state())
         self._frps = get_frps_client()
         self._frps.channel_state_changed.connect(lambda _s: self._update_state())
+        self._frps.refresh_finished.connect(self._on_channel_finished)
+        self._test_armed = False
         self._prober = get_prober()
         self._update_state()
 
@@ -1151,8 +1173,17 @@ class TunnelConfWork(QWidget):
             "success")
 
     def _on_channel_test(self):
-        # 先临时保存再测（restart_timer 读配置）；未改配置时等效直接测
-        state = self._frps.refresh()
+        # 异步测试 + 完成回执（与「立即感知」同口径，GUI 零阻塞）
+        self._test_armed = True
+        self._frps.request_refresh()
+        self._win._show_info_bar("正在测试感知通道…", "info", duration=2000)
+
+    def _on_channel_finished(self, state):
+        if not getattr(self, "_test_armed", False):
+            return
+        self._test_armed = False
+        if not self.isVisible():
+            return
         snap = self._frps.snapshot()
         msg = _CHANNEL_TEXT.get(state, state)
         if state == "ok":

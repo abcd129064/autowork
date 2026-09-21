@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>远程页 · 二期设计稿（RemoteHub v3 · 锁定 frps 0.65）</title>
+<style>
+  :root{
+    --accent:#2fd4de; --accent-press:#19b4be; --accent-soft:rgba(47,212,222,.14);
+    --bg:#1f2123; --surface:#282a2d; --surface2:#2e3134; --border:#3a3d41; --border2:#4a4e53;
+    --text:#e8eaed; --text2:#a3a9b3; --text3:#717883;
+    --success:#4ade80; --success-dim:rgba(74,222,128,.14);
+    --warning:#f5b04c; --warning-dim:rgba(245,176,76,.14);
+    --danger:#f2696f; --danger-dim:rgba(242,105,111,.14);
+    --info:#5ea3ff; --info-dim:rgba(94,163,255,.14);
+    --muted:#717883;
+    --radius:6px; --radius-lg:8px; --term-bg:#14161a;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#17181a;color:var(--text);padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1220px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header .meta{color:var(--text3);font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--accent-soft);color:var(--accent);margin-right:6px;}
+  .badge.p0{background:var(--danger-dim);color:var(--danger);}
+  .badge.p1{background:var(--warning-dim);color:var(--warning);}
+  .badge.g{background:var(--success-dim);color:var(--success);}
+  .badge.later{background:rgba(113,120,131,.16);color:var(--text2);}
+  .note{max-width:1220px;margin:0 auto 22px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;font-size:13px;color:var(--text2);line-height:1.85;}
+  .note b{color:var(--text);} .note code{font-family:var(--mono);background:var(--term-bg);padding:1px 6px;border-radius:4px;font-size:12px;color:var(--accent);}
+  .section-label{max-width:1220px;margin:36px auto 12px;font-size:16px;font-weight:700;}
+  .section-label span{font-weight:400;color:var(--text3);font-size:13px;margin-left:8px;}
+  .win{max-width:1220px;margin:0 auto;background:var(--bg);border-radius:10px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.55);border:1px solid #000;}
+  .titlebar{height:38px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 0 0 16px;gap:8px;}
+  .titlebar .app-ico{width:16px;height:16px;border-radius:3px;background:linear-gradient(135deg,var(--accent),#155e63);}
+  .titlebar .app-name{font-size:12px;color:var(--text2);}
+  .titlebar .tb-btns{margin-left:auto;display:flex;height:100%;}
+  .titlebar .tb-btns i{width:44px;height:100%;display:flex;align-items:center;justify-content:center;color:var(--text2);font-style:normal;font-size:13px;}
+  .app{display:flex;height:730px;}
+  .nav{width:176px;background:#242628;border-right:1px solid var(--border);padding:8px;flex-shrink:0;}
+  .nav-item{display:flex;align-items:center;gap:10px;height:36px;padding:0 12px;border-radius:var(--radius);color:var(--text2);font-size:13px;margin-bottom:2px;}
+  .nav-item.active{background:rgba(255,255,255,.06);color:var(--text);font-weight:600;position:relative;}
+  .nav-item.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:2px;background:var(--text);}
+  .nav-item.hot{color:var(--accent);}
+  .content{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+  .page-head{padding:18px 24px 2px;display:flex;align-items:flex-end;justify-content:space-between;}
+  .page-title{font-size:21px;font-weight:700;}
+  .pivot{display:flex;gap:4px;padding:10px 24px 0;border-bottom:1px solid var(--border);}
+  .pv{padding:8px 15px 10px;font-size:13.5px;color:var(--text2);border-radius:var(--radius) var(--radius) 0 0;position:relative;cursor:pointer;user-select:none;}
+  .pv:hover{color:var(--text);}
+  .pv.on{color:var(--text);font-weight:600;}
+  .pv.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:3px;border-radius:2px 2px 0 0;background:var(--accent);}
+  .pv .tag{font-size:9.5px;background:var(--danger-dim);color:var(--danger);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:1px;}
+  .view{flex:1;overflow:auto;padding:14px 24px 20px;display:none;}
+  .view.on{display:block;}
+  .row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
+  .btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 14px;border-radius:5px;font-size:13px;border:1px solid var(--border2);background:var(--surface2);color:var(--text);cursor:default;}
+  .btn.primary{background:var(--accent-press);border-color:var(--accent-press);color:#fff;font-weight:600;}
+  .btn.danger-o{border-color:var(--danger);color:var(--danger);background:transparent;}
+  .btn.sm{height:24px;padding:0 9px;font-size:12px;border-radius:4px;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;}
+  .card h4{font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text);}
+  .card h4 small{font-weight:400;color:var(--text3);margin-left:6px;}
+  .stat{flex:1;min-width:150px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:11px 15px;}
+  .stat .n{font-size:21px;font-weight:700;line-height:1.25;}
+  .stat .l{font-size:11.5px;color:var(--text2);}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0;}
+  .dot.g{background:var(--success);box-shadow:0 0 7px rgba(74,222,128,.55);}
+  .dot.y{background:var(--warning);}
+  .dot.r{background:var(--danger);}
+  .dot.gr{background:var(--muted);}
+  .pill{display:inline-block;font-size:11px;padding:1.5px 9px;border-radius:999px;font-weight:600;}
+  .pill.g{background:var(--success-dim);color:var(--success);}
+  .pill.y{background:var(--warning-dim);color:var(--warning);}
+  .pill.r{background:var(--danger-dim);color:var(--danger);}
+  .pill.i{background:var(--info-dim);color:var(--info);}
+  .pill.m{background:rgba(113,120,131,.16);color:var(--text2);}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{color:var(--text2);font-weight:600;text-align:left;padding:7px 10px;border-bottom:1px solid var(--border2);white-space:nowrap;}
+  td{padding:7px 10px;border-bottom:1px solid var(--border);white-space:nowrap;}
+  tr.alt td{background:rgba(255,255,255,.022);}
+  td .ops{display:flex;gap:5px;}
+  .mini{font-size:11px;color:var(--text3);}
+  code.k{font-family:var(--mono);font-size:11.5px;background:var(--term-bg);padding:1px 6px;border-radius:4px;color:var(--accent);}
+  .infobar{border-radius:var(--radius);padding:10px 14px;font-size:12.5px;margin:10px 0;border:1px solid;display:flex;gap:8px;align-items:center;}
+  .infobar.err{background:var(--danger-dim);border-color:rgba(242,105,111,.4);color:#ffbcc0;}
+  .infobar.ok{background:var(--success-dim);border-color:rgba(74,222,128,.35);color:#c2f5d2;}
+  svg.spark{display:block;}
+  .flow{display:flex;align-items:stretch;gap:0;max-width:1220px;margin:0 auto;}
+  .fbox{flex:1;background:var(--surface);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.65;}
+  .fbox b{font-size:12.5px;}
+  .fbox.hl{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-soft);}
+  .farrow{display:flex;align-items:center;padding:0 8px;color:var(--text3);font-size:16px;}
+  .fbranch{flex:1;display:flex;flex-direction:column;gap:8px;justify-content:center;}
+  pre.code{max-width:1220px;margin:12px auto;background:var(--term-bg);border:1px solid var(--border2);border-radius:8px;padding:14px 18px;font-family:var(--mono);font-size:12px;line-height:1.7;color:#d7dde5;overflow:auto;}
+  pre.code .cm{color:#5f6a75;} pre.code .st{color:#a5d6a7;} pre.code .key{color:var(--accent);} pre.code .num{color:#f5b04c;}
+  .kv{display:grid;grid-template-columns:180px 1fr;gap:0;font-size:12.5px;}
+  .kv>div{padding:5px 8px;border-bottom:1px solid var(--border);}
+  .kv>div:nth-child(odd){color:var(--text2);}
+  .cap{background:var(--surface);border:1px solid var(--border);border-radius:8px;max-width:1220px;margin:0 auto;border-collapse:separate;overflow:hidden;}
+  .cap td{white-space:normal;vertical-align:top;line-height:1.6;}
+  .cap .do{color:var(--success);font-weight:600;}
+  .cap .no{color:var(--danger);}
+  .lockchip{max-width:1220px;margin:0 auto 20px;display:flex;gap:8px;flex-wrap:wrap;}
+  .lockchip span{font-size:11.5px;background:var(--term-bg);border:1px solid var(--border2);border-radius:6px;padding:3px 9px;font-family:var(--mono);color:var(--text2);}
+  .lockchip span b{color:var(--accent);}
+</style>
+</head>
+<body>
+
+<div class="doc-header">
+  <h1>远程页 · 二期设计稿 <span style="color:var(--text3);font-weight:400;">RemoteHub v3「连接感知」· 数据面锁定 frps 0.65</span></h1>
+  <div class="meta">
+    <span class="badge g">一期已落地：visitor 热重载 + 端口漂移修复（2026-09-21）</span>
+    <span class="badge p0">P0 设备在线感知 / 连接预检</span><span class="badge p1">P1 优雅停止 / 连接质量 / 球桌页联动</span>
+    <span class="badge later">三期再议：升级 frp 解锁 clients / v2 / store</span><br>
+    本稿所有功能<b style="color:var(--success)">仅用 frps 0.65 现有 v1 API + 本机 frpc 0.66 admin</b>即可实现，<b>不依赖任何 0.66+ 新增端点</b>；升级 frp 整体推迟到三期。
+  </div>
+</div>
+
+<div class="note">
+  <b>为什么锁定 0.65 完全够用（源码逐行核对，非推测）：</b>
+  ① 设备在线判定的权威数据源是 frps <code>GET /api/proxy/xtcp</code> —— <b>0.65 起每条 proxy 就自带 <code>status:"online|offline"</code> + <code>curConns</code> + <code>lastStartTime</code> + <code>todayTrafficIn/Out</code></b>（v0.65.0 <code>server/dashboard_api.go</code> L204-207/L255/L260），无需 0.67 的 <code>/api/clients</code>。<br>
+  ② 优雅停止 <code>POST /api/stop</code> 在 frpc <b>0.65/0.66 均已提供</b>（本机实测 200），零版本依赖。<br>
+  ③ 连接质量（visitor RTT）<b>任何版本 admin 都取不到</b>（frpc <code>/api/status</code> 只列提供端 proxy，纯 visitor 端返回 <code>{}</code>；frps 也看不见 visitor 侧流量）——所以质量必须本地 TCP 探测 bindPort，与版本无关，0.65 反而是正确方案。<br>
+  <b>结论：把 P0/P1 全建在 0.65 能力上是零妥协的正解，而非降级。</b>被推迟到三期的只是"锦上添花"（见文末能力矩阵）。
+</div>
+
+<div class="lockchip">
+  <span>在线感知数据源 · <b>GET /api/proxy/xtcp</b>（0.65 ✓）</span>
+  <span>优雅停止 · <b>POST /api/stop</b>（frpc 0.65 ✓）</span>
+  <span>连接质量 · <b>本地 TCP 探测 bindPort</b>（与版本无关）</span>
+  <span>球桌页 · <b>复用同一 /api/proxy/xtcp 缓存</b></span>
+  <span style="color:var(--danger)">✗ /api/clients（0.67·三期）</span>
+  <span style="color:var(--danger)">✗ /api/v2/*（0.70·三期）</span>
+  <span style="color:var(--danger)">✗ /api/store/visitors（0.68·三期）</span>
+</div>
+
+<div class="section-label">① 主窗口交互稿 <span>Pivot 四视图：会话总览 │ P2P 访客 │ 连接质量 │ 隧道配置·管理通道</span></div>
+
+<div class="win">
+  <div class="titlebar"><div class="app-ico"></div><div class="app-name">AutoWork — 远程</div><div class="tb-btns"><i>─</i><i>□</i><i class="close">✕</i></div></div>
+  <div class="app">
+    <div class="nav">
+      <div class="nav-item">🖥 工作台</div>
+      <div class="nav-item">🎱 球桌管理 <span style="margin-left:auto;font-size:9.5px;color:var(--warning)">+frps在线列</span></div>
+      <div class="nav-item">📁 售后</div>
+      <div class="nav-item">🔧 工具</div>
+      <div class="nav-item active hot">🌐 远程</div>
+      <div class="nav-item">⚙ 设置 <span style="margin-left:auto;font-size:9.5px;color:var(--text3)">+感知凭据</span></div>
+    </div>
+    <div class="content">
+      <div class="page-head"><div class="page-title">远程</div>
+        <div class="row" style="margin:0"><span class="pill m">感知调度 30s · 上次刷新 00:35:12 · 数据源 frps 0.65</span></div>
+      </div>
+      <div class="pivot">
+        <div class="pv on" data-v="v1">会话总览<span class="tag">P0</span></div>
+        <div class="pv" data-v="v2">P2P 访客</div>
+        <div class="pv" data-v="v3">连接质量<span class="tag" style="background:var(--warning-dim);color:var(--warning)">P1</span></div>
+        <div class="pv" data-v="v4">隧道配置 · 管理通道<span class="tag" style="background:var(--warning-dim);color:var(--warning)">P1</span></div>
+      </div>
+
+      <!-- 视图1 会话总览 -->
+      <div class="view on" id="v1">
+        <div class="row" style="margin-top:6px">
+          <span style="font-size:13px"><span class="dot g"></span>frpc 运行中 <span class="mini">PID 14880 · admin ✓4ms</span></span>
+          <span style="font-size:13px"><span class="dot g"></span>frps 感知通道 <span class="mini">49.235.34.253:7500 · /api/proxy/xtcp · 在线 3/5 · 上次 11s 前</span></span>
+          <span style="margin-left:auto"></span>
+          <span class="btn">↻ 立即感知</span><span class="btn">会话窗口</span><span class="btn primary">＋ 新建隧道</span>
+        </div>
+        <div class="row">
+          <div class="stat"><div class="n" style="font-size:19px;color:var(--success)">运行中</div><div class="l">frpc 进程 · admin 健康</div></div>
+          <div class="stat"><div class="n" style="color:var(--accent)">5</div><div class="l">已注册隧道</div></div>
+          <div class="stat"><div class="n" style="color:var(--success)">3<span style="font-size:13px;color:var(--text3)">/5</span></div><div class="l">设备在线（frps 权威 status）</div></div>
+          <div class="stat"><div class="n" style="color:var(--warning)">3</div><div class="l">打开的会话 SSH/SFTP/RDP</div></div>
+          <div class="stat"><div class="n" style="color:var(--info)">41<span style="font-size:13px;color:var(--text3)">ms</span></div><div class="l">RTT 中位数（本地探测）</div></div>
+        </div>
+        <div class="card" style="padding:10px 14px">
+          <table>
+            <tr><th>frps 在线态<br><span class="mini" style="font-weight:400">status/curConns</span></th><th>serverName</th><th>关联球桌</th><th>本地端口</th><th>RTT / 探测</th><th>今日流量</th><th>来源</th><th>操作</th></tr>
+            <tr><td><span class="dot g"></span><b>online</b> <span class="mini">c2</span></td><td><b>snk_4008</b></td><td>40-08</td><td class="mini">12547</td>
+              <td><svg class="spark" width="64" height="16"><polyline points="0,11 10,10 20,12 30,8 40,9 50,7 60,8 64,7" fill="none" stroke="var(--success)" stroke-width="1.5"/></svg><b style="color:var(--success)">38ms</b> <span class="mini">20/20</span></td>
+              <td class="mini">↓41MB ↑9MB <span class="pill g">优</span></td><td class="mini">手工</td>
+              <td><div class="ops"><span class="btn sm">SSH</span><span class="btn sm">SFTP</span><span class="btn sm">RDP</span><span class="btn sm danger-o">断开</span></div></td></tr>
+            <tr class="alt"><td><span class="dot g"></span><b>online</b> <span class="mini">c1</span></td><td><b>snk_4005</b></td><td>40-05</td><td class="mini">37991</td>
+              <td><svg class="spark" width="64" height="16"><polyline points="0,8 10,10 20,7 30,12 40,9 50,13 60,11 64,12" fill="none" stroke="var(--info)" stroke-width="1.5"/></svg><b style="color:var(--info)">87ms</b> <span class="mini">19/20</span></td>
+              <td class="mini">↓12MB ↑3MB <span class="pill i">良</span></td><td class="mini">球桌库</td>
+              <td><div class="ops"><span class="btn sm">SSH</span><span class="btn sm">SFTP</span><span class="btn sm">RDP</span><span class="btn sm danger-o">断开</span></div></td></tr>
+            <tr><td><span class="dot g"></span><b>online</b> <span class="mini">c0</span></td><td><b>snk_11601</b></td><td>116-01</td><td class="mini">14687</td>
+              <td><svg class="spark" width="64" height="16"><polyline points="0,10 10,9 20,10 30,9 40,10 50,9 60,10 64,9" fill="none" stroke="var(--success)" stroke-width="1.5"/></svg><b style="color:var(--success)">31ms</b> <span class="mini">20/20</span></td>
+              <td class="mini">↓2MB ↑0 <span class="pill g">优</span></td><td class="mini">手工</td>
+              <td><div class="ops"><span class="btn sm">SSH</span><span class="btn sm">SFTP</span><span class="btn sm">RDP</span><span class="btn sm danger-o">断开</span></div></td></tr>
+            <tr class="alt"><td><span class="dot r"></span><b>offline</b> <span class="mini">曾 online</span></td><td><b style="color:var(--danger)">snk_4001</b></td><td>40-01</td><td class="mini">—（端口回收）</td>
+              <td class="mini">不探测</td><td class="mini">— <span class="pill r">离线</span></td><td class="mini">球桌库</td>
+              <td><div class="ops"><span class="btn sm" style="opacity:.45">SSH</span><span class="btn sm" style="opacity:.45">SFTP</span><span class="btn sm" style="opacity:.45">RDP</span><span class="btn sm danger-o">移除</span></div></td></tr>
+            <tr><td><span class="dot y"></span><b>online</b>·打洞失败×3</td><td><b style="color:var(--warning)">snk_4002</b></td><td>40-02</td><td class="mini">43385</td>
+              <td><svg class="spark" width="64" height="16"><line x1="0" y1="13" x2="64" y2="13" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="2 2"/></svg><b style="color:var(--danger)">超时</b></td>
+              <td class="mini">— <span class="pill y">异常</span></td><td class="mini">手工</td>
+              <td><div class="ops"><span class="btn sm">重试打洞</span><span class="btn sm danger-o">断开</span></div></td></tr>
+          </table>
+        </div>
+        <div class="infobar err"><b>⛔ snk_4001 设备离线</b> —— frps <code class="k">/api/proxy/xtcp</code> 中该 proxy <code class="k">status=offline</code>（设备断电/断网/现场 frpc 掉线），已跳过打洞等待，点击 SSH 会秒提示而非盲等 1.8s。<span class="btn sm" style="margin-left:auto">重试探知</span></div>
+        <div class="mini">0.65 三态感知：<span class="dot g" style="width:7px;height:7px"></span>online（frps 确认设备在线）· <span class="dot r" style="width:7px;height:7px"></span>offline（frps 有记录但当前掉线，含"曾上线现掉线"）· 名单无此项=设备从未注册该 proxy（新snk/待上线）· <span class="dot gr" style="width:7px;height:7px"></span>感知不可用（frps 未开 admin / 断网，回退一期纯本地，绝不阻塞）。</div>
+      </div>
+
+      <!-- 视图2 P2P 访客 -->
+      <div class="view" id="v2">
+        <div class="row" style="margin-top:6px">
+          <div class="card" style="flex:0 0 340px">
+            <h4>添加 visitor <small>一期已修正：运行中即热重载生效</small></h4>
+            <div class="kv">
+              <div>serverName(snk)</div><div><span class="btn" style="width:100%;justify-content:flex-start;font-family:var(--mono)">snk_4009&nbsp;</span></div>
+              <div>球桌库选择</div><div><span class="btn" style="width:100%;justify-content:flex-start">🔍 球桌/球房关键词…</span></div>
+              <div>本地端口</div><div><span class="btn" style="width:110px">38214</span></div>
+              <div>secretKey</div><div><span class="btn" style="width:100%;justify-content:flex-start;font-family:var(--mono)">abc123</span></div>
+            </div>
+            <div class="row" style="margin-top:10px"><span class="btn primary">＋ 添加（热重载）</span><span class="btn">编辑</span><span class="btn danger-o">删除</span></div>
+            <div class="infobar ok" style="margin:0"><b>✓ 已添加并生效</b>（热重载，现有隧道不中断）；预检 <code class="k">/api/proxy/xtcp</code>：snk_4009 当前 status=<b>offline/未注册</b> → 等设备上线自动打洞</div>
+          </div>
+          <div class="card" style="flex:1">
+            <h4>visitor 列表 <small>差量同步 · 端口恒定（一期修复）</small></h4>
+            <table>
+              <tr><th>frps 在线态</th><th>serverName</th><th>端口</th><th>关联球桌</th><th>来源</th><th>frps lastStartTime</th></tr>
+              <tr><td><span class="dot g"></span>online</td><td>snk_4008</td><td class="mini">12547</td><td>—</td><td class="mini">手工</td><td class="mini">09-22 00:02</td></tr>
+              <tr class="alt"><td><span class="dot g"></span>online</td><td>snk_4005</td><td class="mini">37991</td><td>40-05</td><td class="mini">球桌库</td><td class="mini">09-21 22:44</td></tr>
+              <tr><td><span class="dot m" style="background:var(--text3)"></span>未注册</td><td>snk_4009</td><td class="mini">38214</td><td>40-09</td><td class="mini">球桌库</td><td class="mini">等待设备上线</td></tr>
+            </table>
+            <div class="mini" style="margin-top:8px">lastStartTime 直接取 0.65 proxy 列表字段，无需额外端点。「未注册」= 本地 visitor 已建并监听 bindPort，现场设备恢复上线向 frps 注册后首连自动打洞——仅提示，不打断。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 视图3 连接质量 -->
+      <div class="view" id="v3">
+        <div class="row" style="margin-top:6px">
+          <span class="pill m">探测模型：TCP connect 本地 bindPort（XTCP 直连下 connect≈端到端体感）· frps 对 visitor 侧不可见，此路唯一正解</span>
+          <span class="pill m">30s 串行轮询 · 单超时 800ms · 连 3 败判异常</span>
+          <span style="margin-left:auto"></span><span class="btn">⏸ 暂停</span><span class="btn">导出 CSV</span>
+        </div>
+        <div class="row">
+          <div class="card" style="flex:1;min-width:260px"><h4>snk_4008 <span class="pill g">优</span></h4>
+            <svg class="spark" width="230" height="52"><polyline points="0,32 19,30 38,34 57,26 76,28 95,24 114,26 133,22 152,24 171,20 190,22 209,21 230,20" fill="none" stroke="var(--success)" stroke-width="1.8"/></svg>
+            <div class="kv" style="margin-top:6px"><div>avg / P95</div><div><b>38ms</b> / 51ms</div><div>成功率</div><div><b style="color:var(--success)">100%</b>（20/20）</div><div>frps curConns</div><div>2（在线活跃）</div></div></div>
+          <div class="card" style="flex:1;min-width:260px"><h4>snk_4005 <span class="pill i">良</span></h4>
+            <svg class="spark" width="230" height="52"><polyline points="0,24 19,30 38,22 57,34 76,28 95,38 114,30 133,40 152,32 171,28 190,30 209,36 230,32" fill="none" stroke="var(--info)" stroke-width="1.8"/></svg>
+            <div class="kv" style="margin-top:6px"><div>avg / P95</div><div><b>87ms</b> / 152ms</div><div>成功率</div><div>95%（19/20）</div><div>frps curConns</div><div>1</div></div></div>
+          <div class="card" style="flex:0 0 250px"><h4>评级阈值 <small>settings.frp_quality 可调</small></h4>
+            <div class="kv"><div>优</div><div><span class="pill g">≤60ms 且丢失&lt;5%</span></div><div>良</div><div><span class="pill i">≤150ms</span></div><div>一般</div><div><span class="pill y">≤300ms / 零星超时</span></div><div>异常</div><div><span class="pill r">连续 3 次超时</span></div></div>
+            <div class="mini" style="margin-top:6px">三期升级后可叠加 frpc /api/status（若有 visitor 计数）与 frps v2 流量历史；本期仅本地 RTT。</div></div>
+        </div>
+        <div class="card"><h4>探测明细 <small>环形缓冲 120 点/隧道（约 1h）；落 SQLite 趋势 → 三期</small></h4>
+          <table>
+            <tr><th>时间</th><th>隧道</th><th>结果</th><th>RTT</th><th>frps 侧</th></tr>
+            <tr><td class="mini">00:35:12</td><td>snk_4005</td><td><span class="pill g">成功</span></td><td>83ms</td><td class="mini">online · c1</td></tr>
+            <tr class="alt"><td class="mini">00:34:50</td><td>snk_4002</td><td><span class="pill r">超时</span></td><td>—</td><td class="mini">online 但打洞失败 → 判异常</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- 视图4 隧道配置·管理通道 -->
+      <div class="view" id="v4">
+        <div class="row" style="margin-top:6px">
+          <div class="card" style="flex:0 0 410px">
+            <h4>frps 服务器 <small>与 设置-远程连接 同键单点写</small></h4>
+            <div class="kv"><div>serverAddr : Port</div><div><code class="k">49.235.34.253 : 7900</code> <span class="pill g">登录正常</span></div><div>版本</div><div><code class="k">0.65.0</code>（本设计锁定基线）</div></div>
+            <h4 style="margin-top:14px">frps 感知通道 <span class="badge p0" style="font-size:10px">P0</span></h4>
+            <div class="kv"><div>admin URL</div><div><code class="k">http://49.235.34.253:7500</code></div>
+              <div>端点</div><div>仅 <code class="k">/api/proxy/xtcp</code>（0.65 ✓，只读）</div>
+              <div>凭据</div><div>BasicAuth（credentials 域 · DPAPI，不落明文）</div>
+              <div>连通</div><div><span class="dot g"></span>在线 · 6.2ms <span class="btn sm" style="margin-left:6px">测试</span></div>
+              <div>刷新</div><div>30s（页面隐藏暂停）· 失败熔断 60s</div></div>
+          </div>
+          <div class="card" style="flex:1">
+            <h4>本机 frpc 管理通道 <span class="badge p1" style="font-size:10px">P1</span> <small>127.0.0.1 回环 · 随机端口/口令（一期已建）</small></h4>
+            <div class="kv"><div>healthz</div><div><span class="dot g"></span>可达 · 4ms · 在线 1h45m（PID 14880）</div>
+              <div>/api/reload 热重载</div><div>✓ 一期已接 · 最近 5 次全 200，均 &lt;15ms</div>
+              <div>POST /api/stop 优雅停止</div><div><span class="dot gr"></span>未接 —— <b>本期 P1：先 /api/stop 等 2s，超时才 kill</b>（0.65 即可用，修强杀残留：端口 TIME_WAIT / TOML 半写 / 子进程孤儿）</div>
+              <div>GET /api/status</div><div class="mini">0.65 端点存在但纯 visitor 端返回 {}（无提供端 proxy）→ 本期不接，三期评估</div>
+              <div>操作</div><div><span class="btn">重启 frpc</span> <span class="btn danger-o">优雅停止</span></div></div>
+            <h4 style="margin-top:14px">运行日志 <small>frpc stderr/stdout 实时汇入</small></h4>
+            <div style="background:var(--term-bg);border-radius:6px;padding:10px 12px;font-family:var(--mono);font-size:11px;line-height:1.7;color:#c9d1d9;height:120px;overflow:auto">[00:34:50] <span style="color:var(--warning)">xtcp visitor [snk_4002] make hole failed: timeout</span><br>[00:34:12] <span style="color:var(--info)">probe snk_4008 → 38ms ok</span><br>[00:33:02] success reload conf (11ms)</div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:12px"><h4>与球桌管理页联动 <span class="badge p1" style="font-size:10px">P1</span></h4>
+          <div class="mini" style="line-height:1.9">球桌管理页新增「<b>frps 在线</b>」列（● online / ○ offline / — 未注册/感知不可用），数据即本页 <code class="k">/api/proxy/xtcp</code> 同一缓存按 snk 匹配（0.65 ✓，复用 <code class="k">core/frps_admin.py</code>，不重复拉取）——设备<b>开机+联网+现场 frpc 存活</b>三合一权威信号，替代不可信的 todesk 主动上报链路；与 <code class="k">todesk_action</code>（下发态）互补：出现「frps offline 但 ToDesk 显示开」= 设备失联，行内黄标（只读展示，不改写）。球桌页 60s 批刷一次。</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section-label">② 连接预检时序 <span>全部基于 0.65 端点</span></div>
+<div class="flow">
+  <div class="fbox"><b>用户点「SSH / 连接」</b><br><span class="mini">目标 snk</span></div>
+  <div class="farrow">→</div>
+  <div class="fbox hl"><b>① 预检感知缓存</b><br><span class="mini">缓存&lt;30s 直接用；否则 GET <b>/api/proxy/xtcp</b>（0.65）刷新，2s 超时。拿不到→unknown，跳过预检走一期路径</span></div>
+  <div class="farrow">→</div>
+  <div class="fbranch">
+    <div class="fbox" style="border-color:var(--danger)"><b>②a status=offline / 不在名单 → 离线</b><br><span class="mini">InfoBar 秒提示「设备未在线」，不发起打洞、不等 1.8s 超时；会话按钮置灰 + 「重试探知」</span></div>
+    <div class="fbox" style="border-color:var(--success)"><b>②b status=online → 放行</b><br><span class="mini">visitor 未注册按一期热重载补注册；bindPort LISTEN 即开 SSH</span></div>
+  </div>
+  <div class="farrow">→</div>
+  <div class="fbox"><b>③ 建会话 + 首探</b><br><span class="mini">connect 计时→RTT 入质量视图；连 3 超时判异常</span></div>
+  <div class="farrow">→</div>
+  <div class="fbox"><b>④ 停止</b><br><span class="mini">单隧道差量 reload（一期）；整机 <b>POST /api/stop</b>（0.65 frpc）优雅退出，2s 兜底 kill</span></div>
+</div>
+
+<div class="section-label">③ 模块与数据契约 <span>标注 0.65 依赖</span></div>
+<pre class="code"><span class="cm"># 新增 core/frps_admin.py —— frps 感知客户端（只读，仅用 0.65 端点，纯查询零风险）</span>
+<span class="key">class</span> FrpsAdminClient(QObject):
+    proxies_changed = Signal(dict)   <span class="cm"># {snk: {"status":"online|offline","curConns":int,"lastStartTime":str,"todayTrafficIn":n}}</span>
+    channel_state   = Signal(str)    <span class="cm"># ok|unreachable|unauthorized|unconfigured</span>
+    <span class="key">def</span> refresh(self):               <span class="cm"># GET {base}/api/proxy/xtcp  (0.65 ✓) → 归一 name→snk，取 status 三态</span>
+    <span class="key">def</span> online(self, snk)->str|None   <span class="cm"># "online"/"offline"/"unregistered"/None(感知不可用→调用方按未知处理)</span>
+    <span class="cm"># 熔断：连续 3 次失败→60s 静默；未配置/不可达一律回退一期本地行为，绝不抛错轰炸</span>
+
+<span class="cm"># 新增 core/visitor_probe.py —— RTT 质量调度（与 frps 版本无关）</span>
+<span class="key">class</span> VisitorProber(QObject):
+    sample = Signal(str, int|None)   <span class="cm"># connect 本地 bindPort；环形缓冲 120 点/隧道</span>
+    <span class="cm"># QTimer 30s 串行轮询；hideEvent 暂停 / showEvent 立即刷；单次超时 800ms</span>
+
+<span class="cm"># 配置门面 core/app_settings.py（credentials 域 DPAPI）</span>
+frps_admin  = { <span class="st">"base_url"</span>: <span class="st">"http://49.235.34.253:7500"</span>, <span class="st">"user"</span>: …, <span class="st">"password"</span>: … }
+frp_quality = { <span class="st">"interval_sec"</span>: <span class="num">30</span>, <span class="st">"timeout_ms"</span>: <span class="num">800</span>, <span class="st">"fail_bad"</span>: <span class="num">3</span> }
+
+<span class="cm"># 修改</span>
+core/frp_remote._stop_frpc()  <span class="cm"># P1: POST /api/stop (0.65 frpc ✓) → wait(2000) → 超时才 kill(3000)</span>
+main_window/remote_hub.py     <span class="cm"># Pivot 3→4；总览表 +在线态/RTT/流量列；+感知统计卡；frps_admin/prober 接入</span>
+windows/table_page（球桌管理） <span class="cm"># P1: +「frps 在线」列（只读、60s 批刷、TABLE_COLUMNS 动态定位口径不变）</span></pre>
+
+<div class="section-label">④ 0.65 能力矩阵 <span>本期做 vs 三期（升级 frp 后）</span></div>
+<table class="cap">
+  <tr><th style="width:230px">能力</th><th style="width:120px">本期(0.65)</th><th style="width:150px">依赖端点/版本</th><th>三期升级后才解锁</th></tr>
+  <tr><td>设备在线感知 / 连接预检</td><td class="do">✅ 本期做</td><td><code class="k">/api/proxy/xtcp</code> · frps 0.65 ✓</td><td class="mini">—（已完整）</td></tr>
+  <tr><td>优雅停止（替代 kill 强杀）</td><td class="do">✅ 本期做</td><td><code class="k">POST /api/stop</code> · frpc 0.65 ✓</td><td class="mini">—（已完整）</td></tr>
+  <tr><td>连接质量 RTT / 评级</td><td class="do">✅ 本期做</td><td>本地 TCP 探测（与版本无关）</td><td class="mini">三期可叠加服务端流量历史（v2）</td></tr>
+  <tr><td>球桌页 frps 在线列 + ToDesk 差异告警</td><td class="do">✅ 本期做</td><td>复用 <code class="k">/api/proxy/xtcp</code> 缓存</td><td class="mini">—（已完整）</td></tr>
+  <tr><td>visitor 增删改（热重载）</td><td class="do">✅ 一期已落地</td><td><code class="k">GET /api/reload</code> · frpc 0.65 ✓</td><td class="mini">三期升级后 store API 可免重写 TOML（0.68）</td></tr>
+  <tr><td>客户端连接明细 / 在线历史 / hostname / clientID</td><td class="no">❌ 三期</td><td><code class="k">/api/clients</code> · frps <b>0.67+</b></td><td class="mini">需要现场 frps 升到 0.67+；0.65 无等价端点，用 proxy.status 近似（在线/离线，非设备身份）</td></tr>
+  <tr><td>visitor 侧服务端流量 / 连接计数</td><td class="no">❌ 做不到（非版本问题）</td><td>frps 不记录 visitor 侧；frpc /api/status 纯 visitor 返回 {}</td><td class="mini">任何版本都需本地探测兜底，三期也难由 admin 补齐</td></tr>
+  <tr><td>HTTP 分页 / 搜索 / server 系统信息 / 离线统计清理</td><td class="no">❌ 三期</td><td><code class="k">/api/v2/*</code> · frps <b>0.70+</b></td><td class="mini">大规模 proxy 列表(数千)时才有价值，现约 550 台无需</td></tr>
+  <tr><td>store 直操 visitor（免写 TOML，纯 API 增删）</td><td class="no">❌ 三期</td><td><code class="k">/api/store/visitors*</code> · frpc <b>0.68+</b></td><td class="mini">一期「Python 写 TOML+reload」在 0.66 等价，升级后更优雅但非必需</td></tr>
+</table>
+
+<div class="note" style="border-left-color:var(--warning);margin-top:22px">
+  <b>⚠ P0 唯一前置（运维一次性，非版本问题）：</b>生产 frps <code>frps.toml</code> 需开启 admin —— <code>webServer.addr/port/user/password</code>（0.65 原生支持此配置，只是默认关）。防火墙仅放行办公出口 IP（只读通道，暴露公网仍需白名单收敛）；frps 重启一次，现场 frpc 自动重连（登录 1s 内恢复）。<b>未开启时软件灰点静默降级为一期行为，零报错。</b>
+  <br><b>三期升级预案（本稿不实施）：</b>升级 frps→0.70 / frpc exe→0.68+，届时 <code class="k">/api/clients</code>（0.67）补设备身份明细、<code class="k">/api/v2/*</code>（0.70）补分页与流量历史、<code class="k">/api/store</code>（0.68）替代 TOML 写入；三者的 admin 探测按 capability 隔离，新旧共存不破坏本期已建路径。
+</div>
+
+<div class="section-label">⑤ 实施与验收 <span>三段链路</span></div>
+<table class="cap">
+  <tr><th>期</th><th>内容</th><th>规模</th><th>验收（0.65 真机）</th></tr>
+  <tr><td><span class="badge p0">P0</span></td><td>frps_admin（/api/proxy/xtcp 三态感知）+ 配置域 + 总览「在线态」列/统计卡 + SSH 点击预检秒提示 + 生产 frps webServer 开启 SOP</td><td>~230 行 + 单测</td><td>offline snk 点 SSH &lt;100ms 提示（对比 1.8s 盲等）；unreachable/unconfigured 两态灰点降级；全量 pytest 绿；生产端到端脚本（复用 test_frp_live_frps 骨架，真连 0.65 frps 验 status 字段解析）</td></tr>
+  <tr><td><span class="badge p1">P1</span></td><td>① /api/stop 优雅停止 ② visitor_probe + 连接质量视图 ③ 球桌页 frps 在线列 + todesk_action 差异告警</td><td>~380 行</td><td>kill 路径冒烟不再端口占用失败；RTT 与手工计时 ±20ms；球桌页在线列与 frps status 一致率 100%（差异人工复核）；感知不可用时列表显示 — 不报错</td></tr>
+</table>
+
+<div class="meta" style="max-width:1220px;margin:14px auto 0;color:var(--text3);font-size:12px">
+  RemoteHub v3 设计稿（frps 0.65 锁定版）· 2026-09-22 · 升级 frp 全部推迟至三期。实施前请确认：① 生产 frps 7500 webServer 开启 + 防火墙白名单；② 感知凭据下发方式；③ 连接质量 30s 调度默认开关。确认「开始 P0」即动工。
+</div>
+
+<script>
+  document.querySelectorAll('.pv').forEach(p=>p.addEventListener('click',()=>{
+    document.querySelectorAll('.pv').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
+    p.classList.add('on');
+    document.getElementById(p.dataset.v).classList.add('on');
+  }));
+</script>
+</body>
+</html>

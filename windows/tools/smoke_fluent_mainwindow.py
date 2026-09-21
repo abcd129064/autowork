@@ -211,12 +211,12 @@ check("8b.5 设置-工具保留快捷键/诊断/前往",
       "_on_modify_shortcuts" in _gt_src and "_on_open_conn_diag" in _gt_src
       and "_on_open_tool_hub" in _gt_src)
 
-print("\n[8c] 远程页 RemoteHub（二期 2026-09-07 三视图 Pivot，design/remote_page_v2.html）")
+print("\n[8c] 远程页 RemoteHub（二期 2026-09-21 四视图 Pivot：+连接质量）")
 rh = getattr(w, "remote_hub", None)
-check("8c.1 RemoteHub 三视图工作区",
-      rh is not None and rh.stack.count() == 3)
-check("8c.2 Pivot 3 项", rh is not None
-      and len(rh.pivot.items) == 3)
+check("8c.1 RemoteHub 四视图工作区",
+      rh is not None and rh.stack.count() == 4)
+check("8c.2 Pivot 4 项", rh is not None
+      and len(rh.pivot.items) == 4)
 if rh is not None:
     check("8c.2b 连接诊断不内嵌（入口在设置-工具）",
           getattr(rh, "diag_work", None) is None)
@@ -227,7 +227,7 @@ if rh is not None:
         app.processEvents()
     check("8c.4 switchTo 联动 P2P 访客",
           rh.stack.currentWidget() is rh.visitor_work)
-    check("8c.5 会话总览表 7 列", rh.session_work.table.columnCount() == 7)
+    check("8c.5 会话总览表 9 列", rh.session_work.table.columnCount() == 9)
     check("8c.6 访客表 6 列+定宽控件",
           rh.visitor_work.table.columnCount() == 6
           and rh.visitor_work.edit_name.width() == 260)
@@ -577,6 +577,37 @@ try:
     check("16.6 _load_settings 代理返回 dict",
           isinstance(_t._load_settings(), dict))
     check("16.7 二次弹出复用同实例", w.open_hub_popout(w.tool_hub) is _t)
+    # 16.7b 远程面板弹出 = 左侧子导航形态（2026-09-21 需求：管理面板式）
+    _r = w.open_hub_popout(w.remote_hub)
+    for _ in range(6):
+        app.processEvents()
+    _rk = list(_r.navigationInterface.panel.items.keys())
+    check("16.7b 远程弹出为 HubPopoutWindow",
+          _r is not None and type(_r).__name__ == "HubPopoutWindow")
+    check("16.7c 左侧导航含四视图且无 Hub 壳",
+          set(["remoteSessionWork", "remoteVisitorWork",
+               "remoteQualityWork", "remoteTunnelConfWork"]) <= set(_rk)
+          and "remoteHub" not in _rk, str(_rk))
+    check("16.7d Hub 空壳已隐藏", _r.hub.isHidden())
+    check("16.7e 视图已从 hub.stack 摘出",
+          _r.hub.stack.count() == 0)
+    _r.switchTo(_r.hub.quality_work)
+    for _ in range(4):
+        app.processEvents()
+    check("16.7f 左侧切换生效（当前=连接质量）",
+          _r.stackedWidget.currentWidget() is _r.hub.quality_work)
+    # 16.7g 视图内 _hub.switchTo 重绑转发（P2P 访客跳转可用）
+    _r.hub.switchTo(_r.hub.visitor_work)
+    for _ in range(4):
+        app.processEvents()
+    check("16.7g hub.switchTo 重绑到弹出窗导航",
+          _r.stackedWidget.currentWidget() is _r.hub.visitor_work)
+    _r2 = w._hub_popouts.get("remoteHub")
+    if _r2 is not None:
+        _r2.close()
+        # close 不销毁 → 手动出登记，保证 16.9 计数口径不变
+        w._hub_popouts.pop("remoteHub", None)
+    _t.close()
     _a = w.open_hub_popout(w.aftersale_hub)  # 旧面板类原样复活
     for _ in range(6):
         app.processEvents()
