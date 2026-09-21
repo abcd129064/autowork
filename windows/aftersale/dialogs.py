@@ -33,41 +33,101 @@ from windows.aftersale.form import AftersaleForm
 # ==================== 编辑弹窗 ====================
 
 class EditRecordDialog(MessageBoxBase):
-    """编辑售后记录弹窗：复用共享表单，确认后由调用方异步落库"""
+    """编辑售后记录弹窗：复用共享表单，确认后由调用方异步落库
 
-    def __init__(self, record: dict, parent=None, title: str = "编辑售后记录"):
+    continuous=True（新增模式）= 连续录入（2026-09-22 对齐 Web 端）：
+    保存成功后**不关窗**，清空问题相关字段等待录入下一条，点「完成」才关窗；
+    每条成功通过 on_saved 回调通知调用方（刷新列表/记住发生日期由本弹窗处理）。
+    编辑模式保持原语义：保存即关窗。
+    """
+
+    def __init__(self, record: dict, parent=None, title: str = "编辑售后记录",
+                 continuous: bool = False, on_saved=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self._record = record
+        # 连续录入仅用于新增（编辑保持单条语义）
+        self._continuous = bool(continuous) and not (
+            record.get("id") or record.get("created_at"))
+        self._busy = False          # 异步落库在途，防重复提交
+        self._validated_ok = False  # 最近一次 validate() 结果（供 _on_yes 判定）
+        self._on_saved_cb = on_saved
+        self._save_worker = None
         self.form = AftersaleForm(self)
         self.form.set_values(record)
         self.viewLayout.addWidget(self.form)
         # MessageBoxBase 无系统标题栏，顶部自建 TitleLabel 标明用途（编辑/新增）
         ttl = TitleLabel(title, self)
         self.viewLayout.insertWidget(0, ttl)
-        self.yesButton.setText("保存")
+        self.yesButton.setText("保存并继续" if self._continuous else "保存")
+        self.cancelButton.setText("完成" if self._continuous else "取消")
         self.yesButton.clicked.connect(self._on_yes)
-        self.cancelButton.setText("取消")
         # 弹窗宽度：表单控件较宽
         self.widget.setMinimumWidth(560)
 
     def _on_yes(self):
-        """收集表单值。
+        """收集表单值 / 连续录入落库。
 
         必填拦截在 validate()（qfw 基类 accept 前调用）：
-        基类槽序为先跑 validate() → 通过才 accept → 再轮到本槽收集，
+        基类槽序为先跑 validate() → 通过才 accept → 再轮到本槽，
         因此走到这里时必填一定已填齐；未通过时弹窗保持打开、不丢输入。
+
+        连续录入模式：validate() 恒 False → 基类永不 accept（弹窗不关），
+        校验通过时由本槽异步落库，成功后清表单等待下一条。
         """
+        if not self._validated_ok:
+            return
+        if self._continuous:
+            self._submit_continue()
+            return
         self.collected = self.form.collect()
+
+    def _submit_continue(self):
+        """连续录入：异步落库当前表单（防重复提交，按钮在途禁用）"""
+        if self._busy:
+            return
+        self._busy = True
+        self.yesButton.setEnabled(False)
+        record = self.form.collect()
+        self._save_worker = AftersaleDBWorker(aftersale_db.insert_record, record)
+        self._save_worker.result_ready.connect(
+            lambda rid, occ=record.get("occurred_at"): self._on_saved(rid, occ))
+        self._save_worker.error.connect(self._on_save_error)
+        self._save_worker.start()
+
+    def _on_saved(self, rec_id, occurred_at=None):
+        """单条落库成功：记住发生日期 → 清表单（恢复判定默认/上次填写人）→
+        提示可继续录入 → 通知调用方刷新列表。弹窗保持打开。"""
+        self._busy = False
+        self.yesButton.setEnabled(True)
+        if occurred_at:
+            aftersale_db.save_last_occurred(str(occurred_at))
+        self.form.clear_form()
+        show_info_bar(f"已新增售后记录（编号 {rec_id}），可继续录入", "success",
+                      title="连续录入", parent=self, duration=2500)
+        if self._on_saved_cb is not None:
+            try:
+                self._on_saved_cb()
+            except Exception:
+                pass
+
+    def _on_save_error(self, msg):
+        self._busy = False
+        self.yesButton.setEnabled(True)
+        show_info_bar(msg, "error", title="保存失败", parent=self, duration=4000)
 
     def validate(self) -> bool:
         """必填校验：不通过返回 False → qfw 基类不 accept、弹窗不关闭
 
         （此前校验写在 _on_yes 里，但基类默认 validate() 恒 True、先 accept
         关窗才轮到 _on_yes，导致必填控制形同虚设、用户输入随弹窗关闭丢失。）
+
+        连续录入模式：校验通过也返回 False（基类不 accept、弹窗保持打开），
+        落库改由 _on_yes 异步执行；编辑模式保持原行为（通过→accept 关窗）。
         """
         missing = self.form.validate()
         if missing:
+            self._validated_ok = False
             show_info_bar(f"请先填写必填项: {'、'.join(missing)}", "warning",
                           title="无法保存", parent=self, duration=3000)
             # 聚焦首个缺失字段，与录入页「滚动聚焦」体验一致
@@ -75,10 +135,12 @@ class EditRecordDialog(MessageBoxBase):
             if first_error is not None:
                 first_error.setFocus()
             return False
-        return True
+        self._validated_ok = True
+        return not self._continuous
 
     def exec(self):
         self.collected = None
+        self._validated_ok = False
         return super().exec()
 
 

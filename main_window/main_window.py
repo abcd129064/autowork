@@ -368,13 +368,17 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 from qfluentwidgets import FluentIcon
                 title = {"toolHub": "工具面板",
                          "remoteHub": "远程面板"}.get(key, "面板")
-                # 远程面板（2026-09-21 需求）：弹出后四视图改管理面板式
-                # 左侧子导航；其余 Hub 维持内嵌 Pivot 形态
+                # 远程/工具面板（远程 2026-09-21、工具 2026-09-22 需求）：
+                # 弹出后各视图改管理面板式左侧子导航；其余 Hub 维持内嵌 Pivot
                 nav_icons = {
                     "remoteHub": {"会话总览": FluentIcon.HOME,
                                   "P2P 访客": FluentIcon.PEOPLE,
                                   "连接质量": FluentIcon.PIE_SINGLE,
                                   "隧道配置": FluentIcon.SETTING},
+                    "toolHub": {"单杆视频": FluentIcon.VIDEO,
+                                "端口占用": FluentIcon.CONNECT,
+                                "上传清单": FluentIcon.LIBRARY,
+                                "视频与日志批量整理": FluentIcon.FOLDER},
                 }.get(key)
                 win = HubPopoutWindow(type(hub), self, title,
                                       nav_icons=nav_icons)

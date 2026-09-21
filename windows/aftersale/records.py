@@ -1284,30 +1284,20 @@ class RecordsPage(QWidget):
                    aniType=_popup_ani_type())
 
     def _on_add(self):
-        """工具栏「+」：唤起填写面板（复用编辑弹窗的共享表单），填写后新增记录"""
-        # 空表单 = 新增模式：复用 EditRecordDialog 的 AftersaleForm（含必填校验/收集）
-        dlg = EditRecordDialog({}, self, title="新增售后记录")
+        """工具栏「+」：唤起填写面板（连续录入模式，对齐 Web 端 2026-09-22）"""
+        # 空表单 = 新增模式：复用 EditRecordDialog 的 AftersaleForm（含必填校验/收集）。
+        # continuous=True：保存成功不关窗、清空问题字段等待下一条，点「完成」才关窗；
+        # 每条成功经 on_saved 回调实时刷新列表（记住发生日期由弹窗内部处理）
+        dlg = EditRecordDialog({}, self, title="新增售后记录",
+                               continuous=True, on_saved=self._load)
         # 新增弹窗也需动态候选
         cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
         cand_worker.result_ready.connect(dlg.form.load_candidates)
         cand_worker.start()
         self._edit_cand_worker = cand_worker  # 保活引用
-        if dlg.exec() and getattr(dlg, "collected", None):
-            collected = dlg.collected
-            self._mutate_worker = AftersaleDBWorker(
-                aftersale_db.insert_record, collected)
-            # 新增成功 → 记住本次发生日期（「记住上次发生日期」开关控制，
-            # 下一条新增默认沿用而非回到当日，2026-09-16）
-            _occ = str(collected.get("occurred_at") or "")
-            self._mutate_worker.result_ready.connect(
-                lambda _rid: (aftersale_db.save_last_occurred(_occ),
-                              show_info_bar("记录已新增", "success",
-                                            title="新增成功", parent=self,
-                                            duration=2000), self._load()))
-            self._mutate_worker.error.connect(
-                lambda m: show_info_bar(m, "error", title="新增失败",
-                                        parent=self, duration=4000))
-            self._mutate_worker.start()
+        dlg.exec()
+        # 关窗后兜底刷新一次（连续录入期间每条已实时刷新）
+        self._load()
 
     def _on_duplicate(self, row: int = -1):
         """复制当前行：按原记录内容新增一条相同记录（填写时间/周期重算）"""

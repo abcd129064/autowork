@@ -44,8 +44,11 @@ class HubPopoutWindow(FluentWindow):
         self.setMinimumSize(900, 560)
 
         self.hub = hub_cls(self)
-        # 弹出窗口内不再提供二次弹出
+        # 弹出窗口内不再提供二次弹出；提示文本同刻显式隐藏——不能等
+        # PivotPage.showEvent 的 _sync_popout_hint（offscreen/未 realize
+        # 时事件不触发，文本残留「未显式隐藏」态，2026-09-22 冒烟 16.4b）
         self.hub.btn_popout.setVisible(False)
+        self.hub.lbl_popout_hint.setVisible(False)
 
         meta = getattr(self.hub, "_page_meta", None) or []
         entries = [(page, text, icon) for page, text, icon in meta

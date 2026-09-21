@@ -207,7 +207,7 @@ class EntryPage(QWidget):
             aftersale_db.save_last_occurred(str(occurred_at))
         self.form.clear_form()
         self._update_required_progress()
-        show_info_bar(f"售后记录已提交（编号 {rec_id}）", "success",
+        show_info_bar(f"售后记录已提交（编号 {rec_id}），可继续录入", "success",
                       title="提交成功", parent=self, duration=2500)
         # 通知窗口刷新记录页（若已构建）
         win = self.window()

@@ -33,6 +33,9 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 # frps 0.65 v1：xtcp proxy 列表端点（感知唯一数据源，批量一次拿全）
 _PROXY_ENDPOINT = "/api/proxy/xtcp"
+# frps 0.65 v1：服务端概览端点（版本/在线客户端/当前连接/今日总流量/
+# 各类型代理数）——v0.65.0 server/dashboard_api.go apiServerInfo
+_SERVERINFO_ENDPOINT = "/api/serverinfo"
 _DEFAULT_TIMEOUT_SEC = 2.5
 _CIRCUIT_FAILS = 3          # 连续失败 N 次进入熔断
 _CIRCUIT_COOLDOWN_SEC = 60  # 熔断静默时长
@@ -95,6 +98,37 @@ def _parse_proxies(body: str) -> dict | None:
     return result
 
 
+def _parse_serverinfo(body: str) -> dict | None:
+    """解析 /api/serverinfo 响应 → 概览 dict；结构异常返回 None
+
+    0.65 字段（v0.65.0 dashboard_api.go serverInfoResp）：version、
+    totalTrafficIn/Out、curConns、clientCounts、proxyTypeCounts 等。
+    """
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or "version" not in data:
+        return None
+
+    def _i(key):
+        try:
+            return int(data.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    counts = data.get("proxyTypeCounts")
+    return {
+        "version": str(data.get("version") or ""),
+        "bindPort": _i("bindPort"),
+        "curConns": _i("curConns"),
+        "clientCounts": _i("clientCounts"),
+        "totalTrafficIn": _i("totalTrafficIn"),
+        "totalTrafficOut": _i("totalTrafficOut"),
+        "proxyTypeCounts": counts if isinstance(counts, dict) else {},
+    }
+
+
 def _load_config() -> dict:
     """读 frps_admin 配置（credentials 域，门面已透明解密）"""
     try:
@@ -126,6 +160,7 @@ class FrpsAdminClient(QObject):
     """frps xtcp proxy 名单感知客户端（进程级单例，主线程 QTimer 刷新）"""
 
     proxies_changed = Signal(dict)       # {name: info} 刷新成功
+    serverinfo_changed = Signal(object)  # dict|None 概览（/api/serverinfo）
     channel_state_changed = Signal(str)  # ok|unreachable|unauthorized|error|unconfigured
     refresh_finished = Signal(str)       # request_refresh 完成回执（worker 线程
                                          # emit → queued 投递主线程，供 UI 一次性反馈）
@@ -134,6 +169,7 @@ class FrpsAdminClient(QObject):
         super().__init__(parent)
         self._lock = threading.Lock()    # 仅保护 _proxies/_ts 读写（HTTP 在锁外）
         self._proxies: dict = {}
+        self._serverinfo: dict | None = None  # /api/serverinfo 概览（best-effort）
         self._fetched_at: float = 0.0    # 最近一次成功拉取（time.monotonic）
         self._state = "unconfigured"
         self._fails = 0
@@ -173,6 +209,7 @@ class FrpsAdminClient(QObject):
         self._running = False
         with self._lock:
             self._proxies = {}
+            self._serverinfo = None
             self._fetched_at = 0.0
         self._fails = 0
         self._circuit_until = 0.0
@@ -239,6 +276,9 @@ class FrpsAdminClient(QObject):
                 self._fetched_at = time.monotonic()
             self._fails = 0
             self._set_state("ok")
+            # 概览数据 best-effort：失败只清 _serverinfo（概览卡显示—），
+            # 不计入熔断、不影响 proxies 权威判据与 ok 状态
+            self._refresh_serverinfo(cfg)
             self.proxies_changed.emit(dict(parsed))
             return self._state
         if status in (401, 403):
@@ -255,6 +295,31 @@ class FrpsAdminClient(QObject):
             self._fails = 0
             self._circuit_until = time.monotonic() + _CIRCUIT_COOLDOWN_SEC
         self._set_state(state)
+
+    def _refresh_serverinfo(self, cfg: dict):
+        """GET /api/serverinfo（与 proxies 同线程同凭据，best-effort）
+
+        概览卡数据源。任何失败（不可达/凭据/结构异常/非 200）只把
+        _serverinfo 置 None 并发 serverinfo_changed(None)——绝不改动
+        通道状态、不计熔断：在线感知权威判据是 /api/proxy/xtcp，
+        旧版 frps 未含该端点时页面也只是概览卡变「—」。
+        """
+        info = None
+        try:
+            base_url = str(cfg.get("base_url") or "").strip()
+            if base_url:
+                s, b = _http_get(
+                    base_url.rstrip("/") + _SERVERINFO_ENDPOINT,
+                    str(cfg.get("user") or ""),
+                    str(cfg.get("password") or ""),
+                    _DEFAULT_TIMEOUT_SEC)
+                if s == 200:
+                    info = _parse_serverinfo(b)
+        except Exception:
+            info = None
+        with self._lock:
+            self._serverinfo = info
+        self.serverinfo_changed.emit(info)
 
     def _set_state(self, state: str):
         if state != self._state:
@@ -301,16 +366,25 @@ class FrpsAdminClient(QObject):
             return None
         return self._lookup(snk)
 
+    def serverinfo(self) -> dict | None:
+        """frps 概览（/api/serverinfo）；未拉到/缓存过期返回 None"""
+        if self._state != "ok" or not self._fresh():
+            return None
+        with self._lock:
+            return self._serverinfo
+
     def snapshot(self) -> dict:
         """UI 一次性快照（总览表/球桌页富集用）"""
         with self._lock:
             proxies = dict(self._proxies)
+            serverinfo = self._serverinfo
         return {
             "state": self._state,
             "fresh": self._fresh(),
             "age_sec": (round(time.monotonic() - self._fetched_at, 1)
                         if self._fetched_at else None),
             "proxies": proxies,
+            "serverinfo": serverinfo,
         }
 
     def configured(self) -> bool:

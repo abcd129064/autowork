@@ -180,6 +180,9 @@ class SessionWork(QWidget):
         head.addWidget(btn_add)
         lay.addLayout(head)
 
+        # ---------- frps 概览卡（/api/serverinfo，随感知刷新） ----------
+        lay.addWidget(self._build_overview(body))
+
         # ---------- 统计条（5 卡整行铺满，等分） ----------
         strip = QHBoxLayout()
         strip.setSpacing(12)
@@ -239,6 +242,7 @@ class SessionWork(QWidget):
         self._frps = get_frps_client()
         self._frps.proxies_changed.connect(lambda _d: self.refresh())
         self._frps.channel_state_changed.connect(lambda _s: self.refresh())
+        self._frps.serverinfo_changed.connect(lambda _d: self._update_overview())
         self._frps.refresh_finished.connect(self._on_refresh_finished)
         self._receipt_armed = False
         self._prober = get_prober()
@@ -276,6 +280,86 @@ class SessionWork(QWidget):
         super().showEvent(event)
         self.refresh()
 
+    # ---------- frps 概览卡 ----------
+
+    def _build_overview(self, body):
+        """frps 概览卡：版本/在线客户端/当前连接/今日流量/xtcp 代理数
+
+        数据源 GET /api/serverinfo（core.frps_admin best-effort 拉取）。
+        感知不可用或未含该端点时全部显示「—」，绝不报错。
+        """
+        card = CardWidget(body)
+        card.setObjectName("frpsOverviewCard")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 10, 16, 10)
+        v.setSpacing(6)
+        head = QHBoxLayout()
+        t = StrongBodyLabel("frps 概览", card)
+        head.addWidget(t)
+        head.addStretch(1)
+        self.ov_src = CaptionLabel("GET /api/serverinfo", card)
+        self.ov_src.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 150))
+        head.addWidget(self.ov_src)
+        v.addLayout(head)
+        row = QHBoxLayout()
+        row.setSpacing(28)
+        self.ov_fields = {}
+        for key, label in (("version", "frps 版本"),
+                           ("clientCounts", "在线客户端"),
+                           ("curConns", "当前连接"),
+                           ("traffic", "今日流量↓/↑"),
+                           ("xtcp", "xtcp 代理 在线/总")):
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            num = StrongBodyLabel("—", card)
+            num.setStyleSheet("font-size: 17px; font-weight: 700;")
+            cap = CaptionLabel(label, card)
+            cap.setTextColor(QColor(0, 0, 0, 160), QColor(255, 255, 255, 160))
+            col.addWidget(num)
+            col.addWidget(cap)
+            row.addLayout(col)
+            self.ov_fields[key] = num
+        row.addStretch(1)
+        v.addLayout(row)
+        self._overview_card = card
+        return card
+
+    def _update_overview(self):
+        try:
+            info = self._frps.serverinfo()
+        except RuntimeError:
+            return
+        if not info:
+            for num in self.ov_fields.values():
+                num.setText("—")
+                num.setStyleSheet(
+                    f"color: {_C_MUTED.name()}; font-size: 17px; font-weight: 700;")
+            self.ov_src.setText("GET /api/serverinfo · 暂无数据")
+            return
+        counts = info.get("proxyTypeCounts") or {}
+        xtcp_total = int(counts.get("xtcp") or 0)
+        snap = self._frps.snapshot()
+        xtcp_online = sum(1 for it in snap["proxies"].values()
+                          if it.get("status") == "online")
+
+        def _set(key, text, color):
+            num = self.ov_fields[key]
+            num.setText(text)
+            num.setStyleSheet(
+                f"color: {color.name()}; font-size: 17px; font-weight: 700;")
+
+        _set("version", info.get("version") or "—", _C_ACCENT)
+        _set("clientCounts", str(info.get("clientCounts") or 0), _C_SUCCESS)
+        _set("curConns", str(info.get("curConns") or 0), _C_INFO)
+        _set("traffic",
+             f"{_fmt_traffic(info.get('totalTrafficIn', 0))} / "
+             f"{_fmt_traffic(info.get('totalTrafficOut', 0))}", _C_ACCENT)
+        _set("xtcp", f"{xtcp_online} / {xtcp_total}",
+             _C_SUCCESS if xtcp_online else _C_MUTED)
+        age = snap.get("age_sec")
+        self.ov_src.setText(f"GET /api/serverinfo"
+                            + (f" · {age}s 前" if age is not None else ""))
+
     # ---------- 刷新 ----------
 
     def refresh(self):
@@ -297,6 +381,7 @@ class SessionWork(QWidget):
         _scolor = {"ok": _C_SUCCESS, "unconfigured": _C_MUTED}.get(
             snap["state"], _C_WARNING)
         self.lbl_frps.setTextColor(_scolor, _scolor)
+        self._update_overview()
 
         sess_total = 0
         online_total = 0

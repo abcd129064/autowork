@@ -543,3 +543,13 @@ bindPort = 47511
 **UI（RemoteHub 3→4 视图）**：会话总览 9 列+5 统计卡（新增 frps 在线、RTT/质量、今日流量列；offline 行禁用 SSH/SFTP/RDP；「立即感知」按钮）；新「连接质量」视图（4 卡+8 列 sparkline 明细+立即探测+双击开 SSH）；隧道配置新增「管理通道」卡（感知 URL/凭据编辑、测试连接、frpc 通道自检 healthz+/api/status、探测暂停、优雅停止按钮——废除旧「清注册表→apply→还原」绕行）；球桌管理页 TABLE_COLUMNS 末位 +`frps在线`（第 11 列，派生列不落库不进 CSV 导出，proxies_changed 仅重绘该列不重查库）。
 
 **验证三段**：单测 `tests/test_frps_phase2.py` 35 例；全量 pytest **437 passed**；生产冒烟 `tools/smoke/smoke_frps_perception_prod.py` **22/22**（0.06s 拉 767 条名单、四态全对、6 条面板 snk 全在名单、真 frpc.exe `/api/stop` 5s 内自退且端口释放）。
+
+### F.5 frps 概览卡（2026-09-22，0.65 能力盘点的直接产出）
+
+0.65 端点盘点后选定 `GET /api/serverinfo`（v0.65.0 server/dashboard_api.go apiServerInfo）做服务端体检：版本、在线客户端数、当前连接数、今日总流量 in/out、各类型代理数（proxyTypeCounts）。
+
+实现（`core/frps_admin.py`）：proxies 拉取**成功**后，在同一后台线程 best-effort 追加一次 serverinfo GET，结果入 `_serverinfo`（受 `_fresh()` 门控，与名单同生命周期），变化经 `serverinfo_changed(dict|None)` 通知 UI。核心约束：**概览失败绝不降级感知**——不 `_on_fail`、不熔断、不改通道状态、不影响 `online()` 权威判据；旧版/未含端点时概览显示「—」，名单照常。`restart_timer()` 一并清 `_serverinfo`。
+
+UI（`main_window/remote_hub.py` SessionWork）：状态行与统计条之间新增「frps 概览卡」，5 字段 = frps 版本 / 在线客户端 / 当前连接 / 今日流量↓↑ / **xtcp 在线/总**（在线数取自 proxies 名单 status，总数取自 serverinfo.proxyTypeCounts.xtcp）；`refresh()` 与 `serverinfo_changed` 双路径刷卡；无数据统一「—」不报错。
+
+验证：`tests/test_frps_phase2.py` +6 例（解析矩阵 / 成功轮拉取 / **概览失败不降级 proxies** / 缓存过期降级 None / restart 清空），现共 47 例；serverinfo 的追加 GET 使 3 个按 `_http_get` 计数断言的旧测试改为 URL-aware（`"serverinfo" in url` 不计入 proxies 次数）。offscreen 冒烟 8c.5b–d 新增 + 16.4b 修复（见附录 G 事件时序脆弱断言），230 PASS 0 FAIL；全量 453 passed（1 failed 为并行会话售后在途改动，非本线）。

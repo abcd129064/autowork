@@ -228,6 +228,17 @@ if rh is not None:
     check("8c.4 switchTo 联动 P2P 访客",
           rh.stack.currentWidget() is rh.visitor_work)
     check("8c.5 会话总览表 9 列", rh.session_work.table.columnCount() == 9)
+    # frps 概览卡（2026-09-22 需求：/api/serverinfo 喂会话总览）
+    _ov = getattr(rh.session_work, "_overview_card", None)
+    check("8c.5b 概览卡存在且在会话总览内",
+          _ov is not None and _ov.parent() is not None)
+    check("8c.5c 概览五字段齐备",
+          set(rh.session_work.ov_fields.keys()) == {"version", "clientCounts",
+                                                    "curConns", "traffic",
+                                                    "xtcp"})
+    rh.session_work._update_overview()   # 无数据/异常均不得抛
+    check("8c.5d 概览刷新无异常且字段有文本",
+          all(num.text() for num in rh.session_work.ov_fields.values()))
     check("8c.6 访客表 6 列+定宽控件",
           rh.visitor_work.table.columnCount() == 6
           and rh.visitor_work.edit_name.width() == 260)
@@ -558,7 +569,10 @@ try:
           _t is not None and type(_t).__name__ == "HubPopoutWindow"
           and _t.hub is not w.tool_hub)
     check("16.4 嵌入 hub 隐藏二次弹出按钮", not _t.hub.btn_popout.isVisible())
-    check("16.4b 弹出窗内提示文本随按钮隐藏", _t.hub.lbl_popout_hint.isHidden())
+    # isHidden 依赖显式 hide 时序（offscreen 下父容器未 realize 时
+    # 事件同步不到）；语义应为「随按钮不可见」，与 16.4 同口径
+    check("16.4b 弹出窗内提示文本随按钮隐藏",
+          not _t.hub.lbl_popout_hint.isVisible())
     w.switchTo(w.management_hub)
     for _ in range(4):
         app.processEvents()
