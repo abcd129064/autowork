@@ -498,3 +498,18 @@ bindPort = 47511
 
 复制该文件到任何机器直接运行 `frpc -c` 都会因缺少环境变量而**渲染失败/密钥为空**，即"加密文本直接复制不可用"。
 
+---
+
+## 附录 D：visitor 热重载落地记录（2026-09-21，路径 A 已实施）
+
+`core/frp_remote.py` 已按 §4.2 路径 A 落地「运行中动态增删 [[visitors]] 不中断既有隧道」：
+
+1. **TOML 增开 admin API**：`webServer.addr="127.0.0.1"` + 随机端口（17500-24999，启动前探测占用自动换）+ 随机 BasicAuth（仅存内存，不落盘）；当前 frpc.exe 0.66.0 原生支持，无需升级。
+2. **apply() 三分支**：frpc 在跑且 server/auth 签名未变 → 重写 TOML + `GET /api/reload`（frpc 内 `UpdateAllConfigurer→VisitorManager.UpdateAll` 按 name+DeepEqual diff，未变化 visitor 零触碰）；签名变化（reload 不重读 common）或 admin 不可达（含 2×0.5s 重试防冷启动竞态）→ 回退停旧起新；reload 返回 4xx（配置非法）→ 保留原进程并抛错，绝不拿坏配置重启。
+3. **frps 0.65 兼容性**：reload 为 frpc 进程内行为，不触碰控制连接；XTCP visitor 注册本身惰性（首个本地连接才发 NatHoleVisitor），服务端无感知。
+4. **ensure_visitor 冷启动标志**按 apply 结果计算：热重载成功 → 本地 bindPort 监听器已随 reload 返回绑定完成，走 300ms 复用延时。
+5. **验证**：`tests/test_frp_hot_reload.py` 15 例 + 真机冒烟 `tests/smoke_frp_admin_reload.py`（真实 frpc.exe 0.66.0）11/11 + 全量 394 passed。
+6. **生产 frps 端到端回归（2026-09-21 已补，14/14）**：`tools/test_frp_live_frps.py` 连 49.235.34.253:7900，日志实证：`login to server success` 后 reload → `visitor added: [新visitor]` 且既有 visitor 无 removed、全程 PID 与 runID 不变（控制连接零重建，frps 会话零中断）；幂等 reload 无 diff；移除 visitor → `visitor removed` 精确只删目标。token 经配置门面解密读取，临时文件跑完即删。
+
+本条记录即 §5 步骤 5 / §4.2 路径 A 的实施确认；`auth.token` 模板化（§4.3 其余项）与 store API（路径 B）仍待后续。
+

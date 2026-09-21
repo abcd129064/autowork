@@ -8,7 +8,10 @@
 RemoteSessionManager 为模块级单例（get_session_manager()）：
 - 统一 visitor 注册表：手工 visitor 与 snk 快捷连接共享注册表，
   同一 serverName 已注册则复用现有隧道与本地端口，不重复建隧道
-- 单一 frpc_xtcp_panel.toml + 单一 frpc 进程；visitor 变化时增量重写并重启 frpc
+- 单一 frpc_xtcp_panel.toml + 单一 frpc 进程；visitor 变化优先走 frpc admin API
+  （GET /api/reload）热重载：frpc 按 name+配置 diff，只启停变化的 visitor，
+  既有隧道（含正在传输的 XTCP 会话）不打断；server/auth 配置变化或热重载
+  失败时才回退「停旧起新」重启路径
 - 持久化同样收敛到 frpc_xtcp_panel.toml：关联球桌/来源/最近使用等
   元数据以 # meta 注释内联在 visitor 块中；旧版 frpc_xtcp.toml /
   frpc_xtcp_meta.json 仅升级时回读，不再写入
@@ -23,10 +26,15 @@ SSH 凭据与 frpc 服务器配置复用 settings.json（ssh_user/ssh_pass/frpc_
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import secrets
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
@@ -60,6 +68,13 @@ _FRPC_SERVER_DEFAULTS = {
 # 首次启动 frpc 后等待隧道建立的延时（ms）；复用已运行隧道时仅留少量缓冲
 _FRESH_TUNNEL_DELAY_MS = 2500
 _REUSE_TUNNEL_DELAY_MS = 300
+
+# frpc admin API（热重载）：仅监听回环地址，端口/口令每次进程生成随机值。
+# 0.66.0 起 GET /api/reload 重读 TOML 并按 name+DeepEqual diff visitors，
+# 未变化的 visitor 完全不动（XTCP 会话不中断）；reload 不重读 common 配置
+# （serverAddr/auth.*），这些变化仍需重启 frpc。
+_ADMIN_PORT_RANGE = (17500, 24999)   # 避开 generate_random_port 的常用端口集
+_ADMIN_API_TIMEOUT_SEC = 3
 
 # visitor 注册来源标识（展示用，可透传自定义文案）
 SOURCE_MANUAL = "手工添加"
@@ -140,6 +155,14 @@ class RemoteSessionManager(QObject):
         #                "tableId", "source", "lastUsed"}
         self._visitors: dict = {}
         self._session_window = None
+        # frpc admin API（热重载通道）：随机端口 + 随机 BasicAuth 口令，
+        # 仅监听 127.0.0.1，随进程存活；口令不落任何持久化文件
+        self._admin_port = self._pick_admin_port()
+        self._admin_user = "autowork"
+        self._admin_password = secrets.token_urlsafe(24)
+        # 上次成功应用（启动或热重载）时的 server/auth 配置快照：
+        # reload 不重读 common 配置，快照变化必须走重启路径
+        self._applied_signature: str | None = None
         self._load_registry()
 
     # ---------- visitor 注册表 ----------
@@ -268,10 +291,14 @@ class RemoteSessionManager(QObject):
 
     def ensure_visitor(self, snk: str, table_id: str = "",
                        source: str = SOURCE_SNK) -> tuple:
-        """确保 snk 对应 visitor 已注册且 frpc 正在运行，返回 (bindPort, 是否新启动)
+        """确保 snk 对应 visitor 已注册且 frpc 正在运行，返回 (bindPort, 是否冷启动)
 
         复用/新建后统一经 mark_used 刷新最近使用时间并发 visitors_changed，
         保证隧道面板能立刻看到「最近使用/关联球桌」数据。
+
+        「冷启动」（second 返回值 True）指 frpc 进程新建/重启，需等登录与
+        端口就绪；热重载成功时 /api/reload 返回即代表新 visitor 的 bindPort
+        监听器已绑定（XTCP 打洞在首个本地连接时才触发），按复用短延时即可。
         """
         snk = str(snk or "").strip()
         if not snk:
@@ -281,11 +308,12 @@ class RemoteSessionManager(QObject):
         if info is not None and self.is_running():
             self.mark_used(snk, table_id)
             return info["bindPort"], False
-        # 否则注册并重启 frpc 应用新配置（新隧道或 frpc 已退出）
+        # 否则注册并应用新配置：frpc 运行中走热重载（其余隧道不中断），
+        # 未运行则冷启动 frpc（新隧道或 frpc 已退出）
         self.register_visitor(snk, source=source, table_id=table_id)
-        self.apply()
+        result = self.apply()
         self.mark_used(snk, table_id)
-        return self._visitors[snk]["bindPort"], True
+        return self._visitors[snk]["bindPort"], result in ("started", "restarted")
 
     def mark_used(self, server_name: str, table_id: str = ""):
         """刷新 visitor 最近使用时间（可顺带补关联球桌）并通知 UI 刷新"""
@@ -402,15 +430,97 @@ class RemoteSessionManager(QObject):
     def is_running(self) -> bool:
         return self._frpc_process is not None
 
+    def _pick_admin_port(self) -> int:
+        """随机选一个本机空闲端口作为 frpc admin API 端口（仅回环监听）"""
+        from p2p import is_port_in_use
+        candidates = secrets.token_bytes(16)
+        span = _ADMIN_PORT_RANGE[1] - _ADMIN_PORT_RANGE[0] + 1
+        for i in range(len(candidates)):
+            port = _ADMIN_PORT_RANGE[0] + candidates[i] % span
+            if not is_port_in_use(port):
+                return port
+        return secrets.choice(range(_ADMIN_PORT_RANGE[0], _ADMIN_PORT_RANGE[1] + 1))
+
+    def _common_config_lines(self, warn: bool = True) -> list:
+        """server/auth 公共配置行（_write_toml 与热重载签名共用，口径唯一）
+
+        warn=False 用于纯签名计算，避免同一次 apply 重复弹 token 缺失警告。
+        """
+        settings = _load_settings()
+        frpc_server = settings.get("frpc_server") or dict(_FRPC_SERVER_DEFAULTS)
+        server_addr = frpc_server.get("serverAddr", _FRPC_SERVER_DEFAULTS["serverAddr"])
+        server_port = frpc_server.get("serverPort", _FRPC_SERVER_DEFAULTS["serverPort"])
+        auth_method = frpc_server.get("auth_method", _FRPC_SERVER_DEFAULTS["auth_method"])
+        auth_token = frpc_server.get("auth_token", "")
+        if not auth_token and warn:
+            self.log_message.emit("[远程会话] 警告: frpc auth_token 未配置，"
+                                  "请在 设置 → 认证 Token 中填写")
+        return [
+            f'serverAddr = "{server_addr}"\n',
+            f'serverPort = {server_port}\n',
+            f'auth.method = "{auth_method}"\n',
+            f'auth.token = "{auth_token}"\n',
+        ]
+
     def apply(self):
-        """按当前注册表重写 TOML 并（重新）启动 frpc；注册表为空时停止 frpc"""
+        """按当前注册表应用配置；frpc 已在运行且公共配置未变时走热重载，
+        不打断既有隧道（XTCP 会话/已开 SSH 窗口不中断）
+
+        路径选择：
+        - 注册表为空 → 停止 frpc
+        - frpc 运行中 + server/auth 签名未变 → 重写 TOML + GET /api/reload
+          （frpc 内部按 name+配置 diff，只启停变化的 visitor）
+        - 热重载不可用（admin 端口连不上/5xx）或签名变化（serverAddr、
+          auth.token 等 reload 不重读的配置）→ 回退「停旧起新」重启
+        - 热重载返回 4xx（新配置本身非法）→ 保持原进程运行并抛错，
+          绝不重启（重启只会用同一份坏配置杀死现有隧道）
+
+        Returns:
+            "reloaded" 热重载成功（现有隧道零中断，新 visitor 端口已监听）
+            / "restarted" 停旧起新 / "started" 首次启动 / "stopped" 注册表为空
+        """
         # 先落盘唯一持久化文件（frpc_xtcp_panel.toml，含 server 配置），
         # 再处理 frpc 进程
         self._persist_registry()
+        was_running = self.is_running()
         if not self._visitors:
             # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
             self._stop_frpc()
-            return
+            return "stopped"
+        # 与 _persist_registry 写入 TOML 的公共段同源；warn=False 避免重复弹警告
+        signature = "".join(self._common_config_lines(warn=False))
+        if was_running and signature == self._applied_signature:
+            status, body = self._reload_with_retry()
+            if status == 200:
+                self.log_message.emit("[远程会话] 已热重载 visitor 配置"
+                                      "（现有隧道不中断）")
+                return "reloaded"
+            if 400 <= status < 500:
+                # 配置非法：现有 frpc 与隧道保持原状，向调用方报错
+                raise RuntimeError(f"frpc 热重载拒绝新配置: {body or status}")
+            # 连不上/5xx：admin 通道不可用，回退重启路径
+            self.log_message.emit("[远程会话] 热重载不可用"
+                                  f"（HTTP {status or 'unreachable'}），重启 frpc 应用配置")
+        self._restart_frpc(signature)
+        return "restarted" if was_running else "started"
+
+    def _reload_with_retry(self) -> tuple:
+        """GET /api/reload，不可达时做有界重试
+
+        冷启动刚完成的短窗口内 webServer 可能还没监听；连接被拒是瞬态，
+        重试 2 次（间隔 0.5s）仍失败才判定为 admin 通道不可用。
+        4xx 为确定性结果（配置非法），不重试。
+        """
+        status, body = self._request_admin_api("/api/reload")
+        for _ in range(2):
+            if status != 0:
+                break
+            time.sleep(0.5)
+            status, body = self._request_admin_api("/api/reload")
+        return status, body
+
+    def _restart_frpc(self, signature: str):
+        """停旧起新（原有路径）：进程级配置变化或热重载不可用时的兜底"""
         app_dir = get_app_dir()
         frpc_exe = os.path.join(app_dir, "frpc.exe")
         if not os.path.exists(frpc_exe):
@@ -418,6 +528,12 @@ class RemoteSessionManager(QObject):
         # 先停旧进程再启新进程：旧进程持有旧配置（端口/visitor 列表），
         # 直接复用会导致新配置不生效或端口冲突
         self._stop_frpc()
+        # admin 端口若已被其他进程占用（或被上次启动的自己占着未释放），
+        # 重新随机一个空闲端口——否则 frpc 会因 webServer 绑定失败直接退出
+        from p2p import is_port_in_use
+        if is_port_in_use(self._admin_port):
+            self._admin_port = self._pick_admin_port()
+            self._persist_registry()  # 重写 TOML 用新端口
         # _persist_registry 已按当前注册表写出最新 TOML，直接复用该文件
         toml_path = os.path.join(app_dir, _PANEL_TOML_NAME)
         proc = QProcess(self)
@@ -428,11 +544,38 @@ class RemoteSessionManager(QObject):
         proc.finished.connect(self._on_frpc_finished)
         proc.start(frpc_exe, ["-c", toml_path])
         self._frpc_process = proc
+        self._applied_signature = signature
         self.frpc_state_changed.emit(True)
+
+    def _request_admin_api(self, path: str,
+                           method: str = "GET") -> tuple:
+        """请求本机 frpc admin API，返回 (HTTP状态码或0=不可达, 响应体前200字)
+
+        不可达（未启动/端口未监听/超时）返回 (0, "")，调用方据此决定回退路径。
+        """
+        url = f"http://127.0.0.1:{self._admin_port}{path}"
+        req = urllib.request.Request(url, method=method)
+        token = base64.b64encode(
+            f"{self._admin_user}:{self._admin_password}".encode()).decode()
+        req.add_header("Authorization", f"Basic {token}")
+        try:
+            with urllib.request.urlopen(req,
+                                        timeout=_ADMIN_API_TIMEOUT_SEC) as resp:
+                body = resp.read(200).decode("utf-8", errors="replace")
+                return resp.status, body
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read(200).decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            return e.code, body
+        except (urllib.error.URLError, OSError, ValueError):
+            return 0, ""
 
     def _stop_frpc(self):
         proc = self._frpc_process
         self._frpc_process = None
+        self._applied_signature = None
         if proc is not None:
             try:
                 # 先摘掉常规回调：kill() 也会触发 finished 信号，
@@ -457,6 +600,7 @@ class RemoteSessionManager(QObject):
         """frpc 意外退出：清空进程引用（下次连接会自动重启）"""
         proc = self._frpc_process
         self._frpc_process = None
+        self._applied_signature = None  # 进程已亡，热重载对比基线随之失效
         if proc is not None:
             proc.deleteLater()
             self.frpc_state_changed.emit(False)
@@ -477,21 +621,20 @@ class RemoteSessionManager(QObject):
                 self.log_message.emit(f"[frpc] {error.strip()}")
 
     def _write_toml(self, path: str):
-        """生成统一 frpc xtcp 配置（所有 visitor）"""
-        settings = _load_settings()
-        frpc_server = settings.get("frpc_server") or dict(_FRPC_SERVER_DEFAULTS)
-        server_addr = frpc_server.get("serverAddr", _FRPC_SERVER_DEFAULTS["serverAddr"])
-        server_port = frpc_server.get("serverPort", _FRPC_SERVER_DEFAULTS["serverPort"])
-        auth_method = frpc_server.get("auth_method", _FRPC_SERVER_DEFAULTS["auth_method"])
-        auth_token = frpc_server.get("auth_token", "")
-        if not auth_token:
-            self.log_message.emit("[远程会话] 警告: frpc auth_token 未配置，"
-                                  "请在 设置 → 认证 Token 中填写")
+        """生成统一 frpc xtcp 配置（所有 visitor）
+
+        webServer 段开启本机 admin API（GET /api/reload 热重载通道）：
+        仅监听 127.0.0.1 + 随机 BasicAuth，供 autowork 进程内使用。
+        reload 只重读 proxies/visitors，webServer 自身变更不生效（需重启，
+        与 serverAddr/auth 同口径，由 _applied_signature 统一管理）。
+        """
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f'serverAddr = "{server_addr}"\n')
-            f.write(f'serverPort = {server_port}\n')
-            f.write(f'auth.method = "{auth_method}"\n')
-            f.write(f'auth.token = "{auth_token}"\n')
+            f.writelines(self._common_config_lines())
+            f.write('\n')
+            f.write('webServer.addr = "127.0.0.1"\n')
+            f.write(f'webServer.port = {self._admin_port}\n')
+            f.write(f'webServer.user = "{self._admin_user}"\n')
+            f.write(f'webServer.password = "{self._admin_password}"\n')
             f.write('\n')
             self._write_visitor_blocks(f)
 

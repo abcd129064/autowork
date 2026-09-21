@@ -956,7 +956,7 @@ class RemoteMixin:
                     secret_key=v.get("secretKey") or "abc123",
                     source=v.get("source") or SOURCE_MANUAL,
                     table_id=table_id)
-            mgr.apply()
+            result = mgr.apply()
             # 连接即使用：刷新最近使用时间，隧道面板立即显示数据
             for v in self._p2p_visitors:
                 mgr.mark_used(v.get("serverName", ""), str(v.get("tableId") or ""))
@@ -964,7 +964,11 @@ class RemoteMixin:
             self._append_log(f"[远程] 启动失败: {e}")
             return
         total = len(mgr.records())
-        self._append_log(f"[远程] frpc 已启动，共 {total} 条隧道（含 snk 快捷连接）")
+        if result == "reloaded":
+            self._append_log(f"[远程] 已热重载配置（现有隧道不中断），"
+                             f"共 {total} 条隧道（含 snk 快捷连接）")
+        else:
+            self._append_log(f"[远程] frpc 已启动，共 {total} 条隧道（含 snk 快捷连接）")
         self._update_p2p_buttons()
 
     @staticmethod
