@@ -26,14 +26,15 @@ from urllib.parse import urljoin, urlparse
 
 from PySide6.QtCore import QPoint, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont,
-                           QKeySequence, QPainter, QPen, QPolygon,
-                           QShortcut)
+                           QIntValidator, QKeySequence, QPainter, QPen,
+                           QPolygon, QShortcut)
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout,
                                QListWidget, QListWidgetItem, QSizePolicy,
                                QStackedWidget, QTextBrowser, QVBoxLayout,
                                QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon,
-                            LineEdit, PlainTextEdit, PushButton, ToolButton)
+                            LineEdit, MessageBoxBase, PlainTextEdit,
+                            PushButton, TitleLabel, ToolButton)
 
 from core.app_paths import get_app_dir
 from core.utils import show_info_bar
@@ -109,6 +110,16 @@ def _saved_level(key: str, levels: dict, default: str) -> str:
     """读上次选择的难度；值已不在配置表里时回退默认档"""
     saved = str(load_moyu_state().get(key) or "")
     return saved if saved in levels else default
+
+
+def _load_custom_mines() -> tuple:
+    """读上次自定义规格 (列, 行, 雷数)；缺省/损坏回退默认值"""
+    raw = load_moyu_state().get("mines_custom")
+    try:
+        cols, rows, mines = (int(v) for v in raw)
+    except (TypeError, ValueError):
+        return _MINES_LEVELS["custom"][1:]
+    return (cols, rows, mines)
 
 
 def _grid_geom(avail_w, avail_h, cols, rows, cell_min, cell_max, margin=6):
@@ -790,15 +801,21 @@ class SnakeWidget(QWidget):
 
 # ==================== 扫雷 ====================
 
-# 难度 → (中文名, 列, 行, 雷数)：最大档 16x12 仍能在摸鱼面板内完整显示
+# 难度 → (中文名, 列, 行, 雷数)：终极档 22x16 压到最小格 18px 也只需 396x288，
+# 摸鱼面板内放得下；custom 档规格以弹窗输入为准，这里仅是首次默认值
 _MINES_LEVELS = {
     "easy": ("初级", 9, 9, 10),
     "normal": ("中级", 12, 12, 26),
     "hard": ("高级", 16, 12, 45),
+    "extreme": ("终极", 22, 16, 99),
+    "custom": ("自定义", 12, 12, 30),
 }
+# 自定义棋盘的合法范围：雷数留出至少 10 个安全格，保证首点有展开空间
+_MINES_CUSTOM_BOUNDS = ((5, 40), (5, 30))   # (列数区间, 行数区间)
+_MINES_CUSTOM_SAFE = 10
 _MINES_DEFAULT_LEVEL = "easy"
 # 格子边长区间：小面板压到下限仍可点，大屏放大到上限即止
-_MINES_CELL_MIN, _MINES_CELL_MAX = 16, 34
+_MINES_CELL_MIN, _MINES_CELL_MAX = 18, 42
 
 # 单元格状态
 _HIDDEN, _OPEN, _FLAG = 0, 1, 2
@@ -840,15 +857,20 @@ class _MinesBoard(QWidget):
 
     # ---------- 状态机 ----------
 
-    def _reset(self):
-        """重开一局：清雷清旗，回到等待首点的态"""
+    def _reset(self, keep_layout=False):
+        """重开一局：清雷清旗，回到等待首点的态
+
+        keep_layout=True（T 同图重试）保留已布的雷与提示数，只清
+        翻开/旗标/计时，首点不再重新布雷，雷位与上一局完全一致。
+        """
         self._timer.stop()
         self._state = "idle"
         self._seconds = 0
         self._grid = [[_HIDDEN] * self._cols for _ in range(self._rows)]
-        self._numbers = [[0] * self._cols for _ in range(self._rows)]
-        self._mineset = set()
-        self._planted = False
+        if not keep_layout:
+            self._numbers = [[0] * self._cols for _ in range(self._rows)]
+            self._mineset = set()
+            self._planted = False
         self._flags = 0
         self._opened = 0
         self._boom = None
@@ -858,15 +880,25 @@ class _MinesBoard(QWidget):
         self.update()
 
     def restart(self):
-        """重开（按钮 / R 键）"""
+        """重开（按钮 / R 键）：换一份新雷图"""
         self._reset()
+
+    def retry(self):
+        """同图重试（T 键）：仅踩雷后有效，雷位与提示数不变
+
+        与 R 重开的区别：R 换新局（重新随机布雷），T 保留刚才那份
+        雷图再打一遍，适合差一步就通关想验证同一思路的场景。
+        """
+        if self._state != "over":
+            return
+        self._reset(keep_layout=True)
 
     def state(self):
         """当前状态机状态（idle/running/paused/over/win）"""
         return self._state
 
     def level(self):
-        """当前难度 key（easy/normal/hard）"""
+        """当前难度 key（easy/normal/hard/extreme/custom）"""
         return self._level
 
     def seconds(self):
@@ -879,6 +911,21 @@ class _MinesBoard(QWidget):
             return
         self._level = level
         _, self._cols, self._rows, self._mines = _MINES_LEVELS[level]
+        self.setMinimumSize(self._cols * _MINES_CELL_MIN + 2,
+                            self._rows * _MINES_CELL_MIN + 2)
+        self._reset()
+
+    def set_custom(self, cols, rows, mines):
+        """自定义规格：夹取合法范围后换盘重开（自定义局不计最快纪录）
+
+        夹取兜底在棋盘侧做一份，调用侧弹窗校验只拦明显非法输入。
+        """
+        (c_lo, c_hi), (r_lo, r_hi) = _MINES_CUSTOM_BOUNDS
+        cols = min(max(int(cols), c_lo), c_hi)
+        rows = min(max(int(rows), r_lo), r_hi)
+        mines = min(max(int(mines), 1), cols * rows - _MINES_CUSTOM_SAFE)
+        self._level = "custom"
+        self._cols, self._rows, self._mines = cols, rows, mines
         self.setMinimumSize(self._cols * _MINES_CELL_MIN + 2,
                             self._rows * _MINES_CELL_MIN + 2)
         self._reset()
@@ -1006,6 +1053,40 @@ class _MinesBoard(QWidget):
         self._check_win()
         self.update()
 
+    def auto_flag(self):
+        """自动标雷（按钮 / A 键）：单格推理标出必然是雷的格子
+
+        规则：已翻开数字格的「未翻开邻格数」恰好等于「剩余雷数提示」
+        （数字 - 周围旗数）时，这些邻格必然全是雷，逐一插旗。
+        只做一轮全盘扫描（无链式/矩阵推理），标完顺手检查是否收尾胜利；
+        已标对的旗不会重复计，返回本轮新插旗数（无可标为 0）。
+        """
+        if self._state not in ("running", "paused"):
+            return 0
+        added = 0
+        for y in range(self._rows):
+            for x in range(self._cols):
+                if self._grid[y][x] != _OPEN:
+                    continue
+                n = self._numbers[y][x]
+                if not n:
+                    continue
+                around = self._neighbors(x, y)
+                hidden = [(nx, ny) for nx, ny in around
+                          if self._grid[ny][nx] == _HIDDEN]
+                flags = sum(1 for nx, ny in around
+                            if self._grid[ny][nx] == _FLAG)
+                if hidden and n - flags == len(hidden):
+                    for nx, ny in hidden:
+                        self._grid[ny][nx] = _FLAG
+                        added += 1
+        if added:
+            self._flags += added
+            self.left_changed.emit(self._mines - self._flags)
+            self._check_win()
+            self.update()
+        return added
+
     def _lose(self):
         """踩雷：停表并摊开全盘雷与错旗"""
         self._state = "over"
@@ -1047,6 +1128,12 @@ class _MinesBoard(QWidget):
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_R:
             self._reset()
+            return
+        if e.key() == Qt.Key.Key_T:
+            self.retry()
+            return
+        if e.key() == Qt.Key.Key_A:
+            self.auto_flag()
             return
         super().keyPressEvent(e)
 
@@ -1098,7 +1185,7 @@ class _MinesBoard(QWidget):
         overlay = {
             "idle": ("扫雷", "左键翻开 · 右键插旗 · 首点必定安全"),
             "paused": ("已暂停", "点击棋盘或「继续」恢复计时"),
-            "over": ("踩雷了", "按 R 或点「重开」再来一局"),
+            "over": ("踩雷了", "按 R 换新局 · 按 T 同图重试"),
             "win": ("排雷成功", f"用时 {self._seconds} 秒 · 按 R 重开"),
         }.get(self._state)
         if overlay:
@@ -1174,6 +1261,60 @@ class _MinesBoard(QWidget):
         p.drawEllipse(cx - ball // 2, cy - ball // 2, ball, ball)
 
 
+class _CustomMinesDialog(MessageBoxBase):
+    """自定义棋盘规格弹窗：宽（列）/ 高（行）/ 雷数三栏输入
+
+    确认时经 validate() 收敛为合法整数三元组存入 self.values，
+    取消或校验不过时保持 None，调用方据此决定应用或回退原难度。
+    """
+
+    def __init__(self, current, parent=None):
+        super().__init__(parent)
+        self.values = None
+        self.widget.setMinimumWidth(380)
+        ttl = TitleLabel("自定义棋盘", self)
+        self.viewLayout.addWidget(ttl)
+        (c_lo, c_hi), (r_lo, r_hi) = _MINES_CUSTOM_BOUNDS
+        tip = CaptionLabel(
+            f"宽 {c_lo}~{c_hi} 列，高 {r_lo}~{r_hi} 行，"
+            f"雷数不超过「列 × 行 - {_MINES_CUSTOM_SAFE}」", self)
+        self.viewLayout.addWidget(tip)
+        self._edits = []
+        for label, val in zip(("宽（列）", "高（行）", "雷数"), current):
+            row = QHBoxLayout()
+            cap = CaptionLabel(label, self)
+            cap.setFixedWidth(64)
+            row.addWidget(cap)
+            edit = LineEdit(self)
+            edit.setText(str(int(val)))
+            edit.setValidator(QIntValidator(0, 9999, edit))
+            row.addWidget(edit, 1)
+            self.viewLayout.addLayout(row)
+            self._edits.append(edit)
+        self.yesButton.setText("开始")
+        self.cancelButton.setText("取消")
+
+    def validate(self) -> bool:
+        """范围校验：不过则弹窗保持打开、不丢输入（同 EditRecordDialog 套路）"""
+        try:
+            cols, rows, mines = (int(e.text()) for e in self._edits)
+        except ValueError:
+            show_info_bar("请把宽、高、雷数都填成整数", "warning",
+                          title="自定义棋盘", parent=self, duration=2500)
+            return False
+        (c_lo, c_hi), (r_lo, r_hi) = _MINES_CUSTOM_BOUNDS
+        max_mines = cols * rows - _MINES_CUSTOM_SAFE
+        if not (c_lo <= cols <= c_hi and r_lo <= rows <= r_hi
+                and 1 <= mines <= max_mines):
+            show_info_bar(
+                f"宽需在 {c_lo}~{c_hi}、高需在 {r_lo}~{r_hi}，"
+                f"当前规格下雷数需在 1~{max_mines} 之间", "warning",
+                title="自定义棋盘", parent=self, duration=3500)
+            return False
+        self.values = (cols, rows, mines)
+        return True
+
+
 class MinesweeperWidget(QWidget):
     """扫雷：信息栏（雷数/用时/最快纪录/难度/控制）+ 棋盘
 
@@ -1184,6 +1325,7 @@ class MinesweeperWidget(QWidget):
         super().__init__(parent)
         self._level = _saved_level("mines_level", _MINES_LEVELS,
                                    _MINES_DEFAULT_LEVEL)
+        self._custom = _load_custom_mines()   # 自定义档 (列, 行, 雷数)
         self._best = _level_bests("best_mines", _MINES_DEFAULT_LEVEL).get(
             self._level)   # None = 该档暂无纪录（0 秒也是真纪录）
 
@@ -1192,7 +1334,7 @@ class MinesweeperWidget(QWidget):
         layout.setSpacing(8)
 
         bar = QHBoxLayout()
-        self._lbl_left = BodyLabel(f"剩余雷数：{_MINES_LEVELS[self._level][3]}",
+        self._lbl_left = BodyLabel(f"剩余雷数：{self._mines_of(self._level)}",
                                    self)
         self._lbl_time = BodyLabel("用时：0 秒", self)
         self._lbl_best = BodyLabel(self._best_text(), self)
@@ -1214,7 +1356,7 @@ class MinesweeperWidget(QWidget):
         self._combo_level.currentIndexChanged.connect(self._on_level)
         bar.addWidget(self._combo_level)
         bar.addStretch(1)
-        hint = CaptionLabel("左键翻开 · 右键插旗 · 双击数字展开邻域 · R 重开", self)
+        hint = CaptionLabel("左键翻开 · 右键插旗 · 双击数字展开邻域 · R 重开 · T 同图重试 · A 自动标雷", self)
         hint.setStyleSheet("color: #8a8f98;")
         bar.addWidget(hint)
         bar.addSpacing(12)
@@ -1223,7 +1365,11 @@ class MinesweeperWidget(QWidget):
         self._btn_toggle.clicked.connect(self._toggle)
         self._btn_restart = PushButton("重开", self)
         self._btn_restart.clicked.connect(self._restart)
+        self._btn_auto = PushButton("自动标雷", self)
+        self._btn_auto.setToolTip("单格推理插旗：数字格的未开邻格数恰等于剩余雷数提示时全标（也可按 A）")
+        self._btn_auto.clicked.connect(self._auto_flag)
         bar.addWidget(self._btn_toggle)
+        bar.addWidget(self._btn_auto)
         bar.addWidget(self._btn_restart)
         layout.addLayout(bar)
 
@@ -1231,6 +1377,9 @@ class MinesweeperWidget(QWidget):
         self._board.time_changed.connect(self._on_time)
         self._board.left_changed.connect(self._on_left)
         self._board.state_changed.connect(self._on_state)
+        if self._level == "custom":
+            # 应用上次的自定义规格（_reset 会经 left_changed 刷新剩余雷数）
+            self._board.set_custom(*self._custom)
         # 同贪吃蛇：棋盘自适配格边长，给满 stretch 把页高交给盘面
         layout.addWidget(self._board, 1)
 
@@ -1239,21 +1388,46 @@ class MinesweeperWidget(QWidget):
         super().setFocus(reason)
         self._board.setFocus(reason)
 
+    def _mines_of(self, level):
+        """档位对应雷数（自定义档用上次输入的规格）"""
+        return self._custom[2] if level == "custom" else _MINES_LEVELS[level][3]
+
     def _best_text(self):
+        if self._level == "custom":
+            return "最快：自定义不计纪录"
         return ("最快：暂无纪录" if self._best is None
                 else f"最快：{self._best} 秒")
 
     def _on_level(self, _index):
-        """难度切换：换棋盘重开，刷新该档纪录并记住选择"""
+        """难度切换：换棋盘重开，刷新该档纪录并记住选择
+
+        自定义档先弹规格弹窗（预填上次输入），取消则把下拉框拨回原难度；
+        自定义局不参与最快纪录（不同规格没有可比性）。
+        """
         level = self._combo_level.currentData()
         if not level:
             return
-        self._level = level
-        self._board.set_level(level)
+        if level == "custom":
+            dlg = _CustomMinesDialog(self._custom, self.window())
+            dlg.exec()
+            if dlg.values is None:
+                idx = list(_MINES_LEVELS).index(self._level)
+                self._combo_level.blockSignals(True)
+                self._combo_level.setCurrentIndex(idx)
+                self._combo_level.blockSignals(False)
+                return
+            self._custom = dlg.values
+            self._level = "custom"
+            self._board.set_custom(*self._custom)
+            save_moyu_state({"mines_level": "custom",
+                             "mines_custom": list(self._custom)})
+        else:
+            self._level = level
+            self._board.set_level(level)
+            save_moyu_state({"mines_level": level})
         self._best = _level_bests("best_mines",
-                                  _MINES_DEFAULT_LEVEL).get(level)
+                                  _MINES_DEFAULT_LEVEL).get(self._level)
         self._lbl_best.setText(self._best_text())
-        save_moyu_state({"mines_level": level})
         self._board.setFocus()
 
     def _toggle(self):
@@ -1268,6 +1442,11 @@ class MinesweeperWidget(QWidget):
         self._board.restart()
         self._board.setFocus()
 
+    def _auto_flag(self):
+        """自动标雷按钮：推理插旗后焦点还给棋盘（保证 R/T/A 继续可用）"""
+        self._board.auto_flag()
+        self._board.setFocus()
+
     def _on_time(self, seconds):
         self._lbl_time.setText(f"用时：{seconds} 秒")
 
@@ -1275,10 +1454,10 @@ class MinesweeperWidget(QWidget):
         self._lbl_left.setText(f"剩余雷数：{left}")
 
     def _on_state(self, state):
-        """状态机变化：按钮联动 + 胜利时按难度刷新最快纪录"""
+        """状态机变化：按钮联动 + 胜利时按难度刷新最快纪录（自定义局不计）"""
         self._btn_toggle.setText("继续" if state == "paused" else "暂停")
         self._btn_toggle.setEnabled(state in ("running", "paused"))
-        if state == "win":
+        if state == "win" and self._level != "custom":
             used = self._board.seconds()
             if _submit_level_best("best_mines", self._level, used,
                                   minimize=True,
