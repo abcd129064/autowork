@@ -20,6 +20,20 @@ import shutil
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
+# ---- 构建解释器守卫：conda 环境禁止打包（2026-09-21 产物启动崩溃教训）----
+# conda-forge 的 PySide6 把 Qt 插件目录指向 conda qtbase（<conda>\Library\lib\
+# qt6\plugins），PyInstaller 会收集 conda 编译的 qwindows.dll 等插件，与 pip
+# PySide6 的 Qt6Core/Qt6Gui 混装进产物 → 启动报 "no Qt platform plugin could
+# be initialized"。运行端 conda 没问题（有内联引导），构建端必须用 venv。
+# 确要在 conda 构建时设环境变量 AUTOWORK_ALLOW_CONDA_BUILD=1 放行。
+if (os.path.isdir(os.path.join(sys.prefix, 'conda-meta'))
+        and not os.environ.get("AUTOWORK_ALLOW_CONDA_BUILD")):
+    print("[build_exe] ERROR: 检测到 conda 解释器（%s）。" % sys.executable)
+    print("[build_exe] conda 的 PySide6 插件来自 conda qtbase，打包会与 pip Qt DLL")
+    print("[build_exe] 混装导致产物启动失败（no Qt platform plugin）。请改用 venv：")
+    print("[build_exe]   C:\\Users\\...\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe build_exe.py")
+    sys.exit(1)
+
 # ---- Qt 运行时引导（conda base 下 import core.version 经 conn_logger 拉起
 # PySide6.QtCore，PATH 注入的 conda 自带 Qt DLL 与 PySide6 冲突 → DLL load
 # failed；见 docs/Qt内联引导说明.md）。必须在任何项目模块 import 之前执行。----

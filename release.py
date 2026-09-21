@@ -28,7 +28,9 @@
      新版本必须更大（--force 可跳过，用于重发同号）
   4. 发布：调 tools/publish_update.py（远端 sha256 复核 + latest.json 原子切换）
   5. 验证：公网 fetch_latest 解析 + 版本比较 + 包体 HEAD 可达性/大小一致
- $env:AFT_SSH_PASS='Kaidao!2'; python release.py; Remove-Item Env:AFT_SSH_PASS
+ 命令：$env:AFT_SSH_PASS='Password'; python release.py; Remove-Item Env:AFT_SSH_PASS
+ 例如：$env:AFT_SSH_PASS='Password';
+ python release.py --notes "修复运维面板搜索/翻页10秒卡死；导航更新状态图标；售后操作列UI对齐"
 """
 import argparse
 import glob
@@ -101,15 +103,17 @@ def preflight(need_pass):
              "         cmd: set AFT_SSH_PASS=*** 后再运行")
     if not os.path.isfile(os.path.join(ROOT, "build_exe.py")):
         fail("build_exe.py 不存在，请在项目根目录运行")
-    # 解释器秒级自检：构建收尾会 import core.version（经 core/__init__ 拉起
-    # PySide6.QtCore）。2026-09-21 事故：裸 conda python 缺 Qt 引导，跑满
-    # 6 分钟构建后在最后一行 import 崩掉，且旧 dist 已被改名挪走。引导已
-    # 内置于 build_exe.py，此预检兜底任何解释器/引导失效的组合。
+    # 解释器秒级自检：① build_exe.py 内置 conda 守卫（conda 的 PySide6 插件
+    # 来自 conda qtbase，打包会与 pip Qt DLL 混装 → 产物启动即崩，2026-09-21
+    # 教训）② 构建收尾 import core.version 经 conn_logger 拉起 QtCore。
+    # 两者都要在烧 6 分钟构建前拦住。
     chk = subprocess.run([PY, "build_exe.py", "--qt-check"], cwd=ROOT,
                          capture_output=True, text=True, timeout=60)
     if chk.returncode != 0 or "qt-ok" not in (chk.stdout or ""):
-        tail = ((chk.stderr or "").strip().splitlines() or ["无输出"])[-1]
-        fail(f"当前解释器无法加载 Qt（{PY}）：{tail}\n"
+        detail = ((chk.stdout or "").strip().splitlines()
+                  + (chk.stderr or "").strip().splitlines())
+        detail = " | ".join(detail[-4:]) if detail else "无输出"
+        fail(f"当前解释器不可用于构建（{PY}）：{detail}\n"
              f"  请用项目标准环境重试（见 docs/Qt内联引导说明.md）：\n"
              f"  C:\\Users\\...\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe release.py ...")
     else:
