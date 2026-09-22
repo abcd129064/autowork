@@ -68,9 +68,28 @@ _FRPC_SERVER_DEFAULTS = {
     "auth_token": "",
 }
 
-# 首次启动 frpc 后等待隧道建立的延时（ms）；复用已运行隧道时仅留少量缓冲
-_FRESH_TUNNEL_DELAY_MS = 2500
-_REUSE_TUNNEL_DELAY_MS = 300
+# 预热打洞 connect 超时：首次 XTCP 打洞普遍 1~3s，RTT 探测口径（800ms）
+# 会把它误记为超时；预热只图打通，用长超时
+_PREWARM_TIMEOUT_MS = 3000
+
+# 隧道本地端口就绪轮询（2026-09-23 P2-4）：frpc 冷启动/热重载后 bindPort
+# 何时开始监听取决于登录 frps + visitor 注册速度（实测 0.5~5s+），固定
+# 2.5s 延时慢网赌输、快网白等。改为 200ms 间隔轮询，全部就绪立即回调，
+# 超过上限（8s）也回调（调用方照常尝试，行为不劣于旧固定延时）。
+_PORT_READY_INTERVAL_MS = 200
+_PORT_READY_DEADLINE_MS = 8000
+
+# frpc 意外退出自愈（2026-09-23 P1-1）：崩溃/被系统回收后注册表仍有启用
+# 隧道时按退避自动重启（5s → 30s → 2min，最多 3 档）；到顶才放弃，回到
+# 「用户点 SSH 再拉起」的一期行为。上次进程健康运行 ≥60s 即清零失败计数，
+# 长跑一晚崩一次仍能从第一档秒级恢复。
+_RECOVER_DELAYS_MS = (5000, 30000, 120000)
+_RECOVER_RESET_UPTIME_SEC = 60
+
+# 静默预连瞬态失败有界重试（2026-09-23 P1-2）：开机 6s 恰逢网络未就绪/
+# frps 重启属瞬态，60s/120s 各重试一次；仍失败放弃到手动路径（点 SSH 会
+# 再拉）。只重试 autostart 一条链路，总开关/手动 apply 失败不自动重试。
+_AUTOSTART_RETRY_DELAYS_MS = (60000, 120000)
 
 # frpc admin API（热重载）：仅监听回环地址，端口/口令每次进程生成随机值。
 # 0.66.0 起 GET /api/reload 重读 TOML 并按 name+DeepEqual diff visitors，
@@ -150,6 +169,8 @@ class RemoteSessionManager(QObject):
     frpc_state_changed = Signal(bool)  # frpc 运行状态变化（True=运行中）
     log_message = Signal(str)          # 运行日志（主窗口接入日志区）
     visitor_removed = Signal(str)      # visitor 被「删除 snk」彻底移除（主窗口列表同步清理用）
+    tunnel_issue_changed = Signal(str, str)  # (snk, "lost"/"ok") 隧道失联/恢复
+    prewarmed = Signal(list)           # 预热成功的 snk 列表（预热线程 → 主线程标记）
 
     def __init__(self):
         super().__init__()
@@ -166,6 +187,17 @@ class RemoteSessionManager(QObject):
         # 上次成功应用（启动或热重载）时的 server/auth 配置快照：
         # reload 不重读 common 配置，快照变化必须走重启路径
         self._applied_signature: str | None = None
+        # 自愈状态（P1-1）：意外退出退避计数 + 本次进程启动时刻（健康运行
+        # 够久即清零计数，防长跑一晚崩一次也走到「放弃」档）
+        self._recover_fails = 0
+        self._frpc_started_at = 0.0
+        # 隧道失联告警中的 snk 集合（tunnel_issue_changed "ok" 时移除）
+        self._tunnel_issues: set = set()
+        # 静默预连有界重试（P1-2）：autostart 瞬态失败的已重试次数
+        self._autostart_retries = 0
+        # P2-6/P2-5 信号回接：预热标记 / 失联告警联动会话面板
+        self.prewarmed.connect(self._mark_prewarmed)
+        self.tunnel_issue_changed.connect(self.notify_tunnel_issue)
         self._load_registry()
 
     # ---------- visitor 注册表 ----------
@@ -508,6 +540,180 @@ class RemoteSessionManager(QObject):
         """
         self._stop_frpc()
 
+    def active_count(self) -> int:
+        """启用中（非 disabled）的隧道数——静默预连的必要性判定"""
+        return sum(1 for v in self._visitors.values() if not v.get("disabled"))
+
+    def autostart(self) -> str:
+        """开机静默预连：后台自动拉起 frpc 并恢复启用中的全部隧道，
+        让「点 SSH/SFTP 秒连」（ensure_visitor 走复用路径，省 2.5s 冷启动）
+
+        静默纪律：绝不弹窗、绝不抛错——无启用隧道/已在运行直接跳过，
+        失败只写日志（frpc.exe 缺失、auth_token 未配、进程起不来等）。
+        启动成功不代表隧道已就绪：XTCP 打洞在首个本地连接才触发，
+        预热由质量探测轮（tcp connect 各 bindPort）顺带完成。
+
+        Returns:
+            "started"/"reloaded" 已应用；"skipped_running" frpc 已在跑；
+            "skipped_no_tunnel" 无启用隧道；"failed" 应用异常（详见日志）。
+        """
+        if self.is_running():
+            self._autostart_retries = 0
+            return "skipped_running"
+        if self.active_count() == 0:
+            return "skipped_no_tunnel"
+        try:
+            result = self.apply()
+        except (OSError, RuntimeError, ValueError) as e:
+            # 现场无网/frps 不可达等瞬态失败静默：不打扰开机流程，
+            # 有界重试（P1-2，60s/120s 各一次）后仍失败则放弃——
+            # 用户手动点 SSH 时仍会走原冷启动路径重试
+            self.log_message.emit(f"[远程会话] 静默预连失败（将自动重试）: {e}")
+            self._schedule_autostart_retry()
+            return "failed"
+        self._autostart_retries = 0
+        self.log_message.emit(
+            f"[远程会话] 静默预连：frpc 已按注册表启动"
+            f"（{self.active_count()} 条启用隧道）")
+        return result
+
+    def _schedule_autostart_retry(self):
+        """autostart 瞬态失败的有界重试（P1-2）：60s/120s 各补一枪"""
+        if self._autostart_retries >= len(_AUTOSTART_RETRY_DELAYS_MS):
+            self.log_message.emit(
+                "[远程会话] 静默预连重试用尽，放弃（手动连接会重试）")
+            return
+        delay = _AUTOSTART_RETRY_DELAYS_MS[self._autostart_retries]
+        self._autostart_retries += 1
+        self.log_message.emit(
+            f"[远程会话] {delay // 1000}s 后自动重试静默预连"
+            f"（第 {self._autostart_retries}/{len(_AUTOSTART_RETRY_DELAYS_MS)} 次）")
+        QTimer.singleShot(delay, self._autostart_retry)
+
+    def _autostart_retry(self):
+        """延迟重试回调：仍走 autostart 全套前置判定（运行中/无隧道自动跳过）"""
+        result = self.autostart()
+        if result in ("started", "reloaded", "restarted"):
+            self.prewarm_async()  # 重试成功也补预热打洞
+
+    def prewarm_async(self):
+        """预热打洞：后台线程对全部启用隧道的本地 bindPort 串行发起一次
+        TCP connect。XTCP 语义下 connect = NAT 打洞 + 端到端握手全部完成，
+        打洞路由成果由 frpc 保留复用——首条真实 SSH 不再承担打洞延时。
+
+        为什么不走质量探测器（VisitorProber.run_once）：探测器超时是 RTT
+        测量口径（默认 800ms），**首次打洞普遍 1~3s**，会被整轮误记为超时
+        样本污染质量页统计（连 3 败即判"异常"）；预热用 3s 长超时只图打通，
+        不发 sample 信号、不留统计。串行探（绝不并发）：并发打洞互抢 UDP
+        通道反而拖慢。daemon 线程 + 全异常吞，绝不阻塞主线程。
+        """
+        import threading
+
+        def _run():
+            from core.visitor_probe import tcp_connect_rtt_ms
+            recs = [r for r in self.records()
+                    if not r.get("disabled") and r.get("bindPort")]
+            if not recs:
+                return
+            ok = 0
+            ok_snks = []
+            for r in recs:
+                try:
+                    if tcp_connect_rtt_ms("127.0.0.1", int(r["bindPort"]),
+                                          _PREWARM_TIMEOUT_MS) is not None:
+                        ok += 1
+                        ok_snks.append(r.get("serverName", ""))
+                except Exception:
+                    pass  # 单条失败不影响其余隧道预热
+            self.log_message.emit(
+                f"[远程会话] 预热打洞完成：{ok}/{len(recs)} 条隧道已可秒连")
+            if ok_snks:
+                self.prewarmed.emit(ok_snks)  # queued 回主线程标记
+        if self.active_count() == 0:
+            return
+        threading.Thread(target=_run, daemon=True,
+                         name="frp-prewarm").start()
+
+    def _mark_prewarmed(self, snks: list):
+        """P2-6：预热成功标记进注册表（仅内存，不持久化——洞随 frpc
+        重启失效，落盘会在重启后展示假「已预热」）"""
+        changed = False
+        now = time.strftime("%H:%M")
+        for snk in snks:
+            v = self._visitors.get(snk)
+            if v is not None and v.get("prewarmedAt") != now:
+                v["prewarmedAt"] = now
+                changed = True
+        if changed:
+            self.visitors_changed.emit()
+
+    def report_tunnel_issue(self, snk: str, lost: bool):
+        """P2-5：感知端（remote_hub）上报隧道失联/恢复，翻转时发信号"""
+        if lost:
+            if snk in self._tunnel_issues:
+                return
+            self._tunnel_issues.add(snk)
+            self.tunnel_issue_changed.emit(snk, "lost")
+        else:
+            if snk not in self._tunnel_issues:
+                return
+            self._tunnel_issues.remove(snk)
+            self.tunnel_issue_changed.emit(snk, "ok")
+
+    def notify_tunnel_issue(self, snk: str, state: str):
+        """P2-5：隧道失联/恢复时，对该端口上已打开的会话面板展示/
+        撤除提示条（SSH/SFTP/RDP 面板顶部）"""
+        port = None
+        for v in self._visitors.values():
+            if v.get("serverName") == snk:
+                port = v.get("bindPort")
+                break
+        if port is None:
+            return
+        from windows.remote_session.tunnel_notice import clear, show
+        for p in self.sessions_on_port(port):
+            try:
+                (show if state == "lost" else clear)(p, snk)
+            except RuntimeError:
+                pass  # 面板已销毁（C++ 对象不在），跳过
+
+    def wait_ports_ready(self, ports, on_ready, on_deadline=None):
+        """轮询本地隧道端口监听就绪（P2-4）：全部就绪立即回调，不空等
+
+        frpc 冷启动/热重载后 bindPort 何时开始监听取决于登录 frps +
+        visitor 注册速度（实测 0.5~5s+），固定 2.5s 延时慢网赌输、快网
+        白等。200ms 间隔轮询，上限 8s——超时也回调（on_deadline 缺省
+        落到 on_ready），调用方照常尝试，行为不劣于旧固定延时。
+        """
+        from p2p import is_port_in_use
+        ports = [int(p) for p in ports if p]
+        if not ports:
+            on_ready()
+            return
+        deadline = time.monotonic() + _PORT_READY_DEADLINE_MS / 1000.0
+
+        def _poll():
+            try:
+                ready = all(is_port_in_use(p) for p in ports)
+            except Exception:
+                ready = False
+            if ready:
+                on_ready()
+                return
+            if time.monotonic() >= deadline:
+                (on_deadline or on_ready)()
+                return
+            QTimer.singleShot(_PORT_READY_INTERVAL_MS, _poll)
+
+        _poll()
+
+    def prewarm_when_ready(self):
+        """frpc 启动后用：等全部启用隧道 bindPort 监听就绪再预热打洞
+        （替代固定 3s 等待——快网早预热、慢网不赌输），超时照常预热"""
+        ports = [r.get("bindPort") for r in self.records()
+                 if not r.get("disabled") and r.get("bindPort")]
+        self.wait_ports_ready(ports, self.prewarm_async)
+
     def _pick_admin_port(self) -> int:
         """随机选一个本机空闲端口作为 frpc admin API 端口（仅回环监听）"""
         from p2p import is_port_in_use
@@ -624,6 +830,7 @@ class RemoteSessionManager(QObject):
         proc.start(frpc_exe, ["-c", toml_path])
         self._frpc_process = proc
         self._applied_signature = signature
+        self._frpc_started_at = time.monotonic()  # P1-1 健康运行计时起点
         self.frpc_state_changed.emit(True)
 
     def _request_admin_api(self, path: str,
@@ -704,7 +911,8 @@ class RemoteSessionManager(QObject):
             proc.deleteLater()
 
     def _on_frpc_finished(self, exit_code, _exit_status):
-        """frpc 意外退出：清空进程引用（下次连接会自动重启）"""
+        """frpc 意外退出：清空进程引用；注册表仍有启用隧道时按退避自愈重启
+        （P1-1：5s → 30s → 2min 三档，健康运行 ≥60s 清零计数）"""
         proc = self._frpc_process
         self._frpc_process = None
         self._applied_signature = None  # 进程已亡，热重载对比基线随之失效
@@ -712,6 +920,48 @@ class RemoteSessionManager(QObject):
             proc.deleteLater()
             self.frpc_state_changed.emit(False)
             self.log_message.emit(f"[远程会话] frpc 已退出，退出码: {exit_code}")
+        # ---- P1-1 自愈判定 ----
+        if self.active_count() == 0:
+            return  # 无启用隧道：本就是正常停机路径，无需恢复
+        # 健康运行够久（非刚拉起就崩）→ 计数清零，下次仍从第一档秒级恢复
+        if (self._frpc_started_at > 0
+                and time.monotonic() - self._frpc_started_at
+                >= _RECOVER_RESET_UPTIME_SEC):
+            self._recover_fails = 0
+        self._schedule_recover()
+
+    def _schedule_recover(self):
+        """按退避档位调度一次自愈重启（计数用尽则放弃并写日志）"""
+        if self._recover_fails >= len(_RECOVER_DELAYS_MS):
+            self.log_message.emit(
+                "[远程会话] frpc 连续异常退出且自愈退避已用尽，放弃自动恢复"
+                "（手动连接时会重新拉起）")
+            return
+        delay = _RECOVER_DELAYS_MS[self._recover_fails]
+        self._recover_fails += 1
+        self.log_message.emit(
+            f"[远程会话] frpc 意外退出，{delay // 1000}s 后自动恢复"
+            f"（第 {self._recover_fails}/{len(_RECOVER_DELAYS_MS)} 次重试）")
+        QTimer.singleShot(delay, self._recover_frpc)
+
+    def _recover_frpc(self):
+        """P1-1 延迟自愈回调：拉起 frpc 恢复全部启用隧道"""
+        if self.is_running():
+            return  # 期间用户已手动拉起，无需恢复
+        if self.active_count() == 0:
+            return  # 期间隧道已全部断开/删除
+        try:
+            result = self.apply()
+        except (OSError, RuntimeError, ValueError) as e:
+            # 网络未恢复等瞬态原因：继续用剩余退避档重试（不经过退出回调，
+            # 避免崩溃前进程的健康时长误清零计数）
+            self.log_message.emit(f"[远程会话] 自动恢复失败: {e}")
+            self._schedule_recover()
+            return
+        self._recover_fails = 0
+        self._frpc_started_at = time.monotonic()
+        self.log_message.emit(f"[远程会话] 自动恢复完成（{result}）")
+        self.prewarm_async()  # 恢复后补预热打洞
 
     def _on_frpc_output(self):
         proc = self._frpc_process
@@ -808,11 +1058,10 @@ class RemoteSessionManager(QObject):
             return
 
         try:
-            port, fresh = self.ensure_visitor(snk, table_id=table_id, source=source)
+            port, _fresh = self.ensure_visitor(snk, table_id=table_id, source=source)
         except (OSError, RuntimeError, ValueError) as e:
             self._notify("远程准备失败", str(e), error=True, notifier=notifier)
             return
-        delay = _FRESH_TUNNEL_DELAY_MS if fresh else _REUSE_TUNNEL_DELAY_MS
         msg = f"{table_id or snk} → {snk}（本地端口 {port}）"
         # SFTP 会话按球桌号在 videos_dir 下自动建本地目录，下载直接落位
         if kind == "sftp" and table_id:
@@ -820,7 +1069,11 @@ class RemoteSessionManager(QObject):
             if videos_dir and os.path.isdir(videos_dir):
                 msg += f"，本地目录 videos{os.sep}{table_id}"
         self._notify("正在建立远程连接", msg, notifier=notifier)
-        QTimer.singleShot(delay, lambda: self._do_open(kind, snk, table_id, port, notifier))
+        # P2-4：轮询隧道端口监听就绪（200ms 间隔、8s 上限）替代固定延时——
+        # 复用路径端口已在听首轮即中，冷启动快网早开、慢网不再赌输
+        self.wait_ports_ready(
+            [port],
+            lambda: self._do_open(kind, snk, table_id, port, notifier))
 
     def _do_open(self, kind: str, snk: str, table_id: str, port: int, notifier=None):
         """隧道就绪后实际打开会话面板（隧道在本地 127.0.0.1:port）"""

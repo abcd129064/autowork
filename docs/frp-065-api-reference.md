@@ -9,7 +9,7 @@
 autowork 集成位置：
 - frps 感知：`core/frps_admin.py`
 - frpc 控制：`core/frp_remote.py`
-- UI：`main_window/remote_hub.py`
+- UI：`windows/remote_session/remote_hub.py`
 
 ---
 

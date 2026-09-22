@@ -7,6 +7,15 @@ v0.65.0 server/dashboard_api.go），每条 xtcp proxy 自带
 现场设备 frpc 注册 xtcp proxy 且控制连接存活 ⇔ status=online，这是
 「设备是否在线」的权威判据（替代不可信的设备侧主动上报链路）。
 
+frps 网页面板（Proxies 页 TCP/UDP/HTTP/…清单）同源 API（2026-09-23 源码
+核验 frp-dev/server/api_router.go，v1 端点 0.65 即有）：
+``GET /api/proxy/{type}``（type ∈ tcp/udp/http/https/tcpmux/stcp/sudp/xtcp）
+→ {"proxies":[{name,conf,user,clientID,todayTrafficIn/Out,curConns,
+lastStartTime,lastCloseTime,status}]}；网页「Traffic」按钮走
+``GET /api/traffic/{name}``；客户端版本走 ``GET /api/clients``
+（clientID → version，proxy.clientID 关联）。本模块经 all_proxies() 暴露
+全类型清单（best-effort，失败不影响 xtcp 权威判据）。
+
 状态口径（online() / preflight 共用）：
   "online"        —— 名单内且 status=online：放行建会话
   "offline"       —— 名单内但 status=offline：设备掉线
@@ -36,6 +45,10 @@ _PROXY_ENDPOINT = "/api/proxy/xtcp"
 # frps 0.65 v1：服务端概览端点（版本/在线客户端/当前连接/今日总流量/
 # 各类型代理数）——v0.65.0 server/dashboard_api.go apiServerInfo
 _SERVERINFO_ENDPOINT = "/api/serverinfo"
+# frps 网页面板 Proxies 页同源端点（v1，0.65 即有，server/api_router.go）：
+# 全类型代理清单 / 客户端清单（clientID → frpc 版本，面板 ClientVersion 列）
+_PROXY_TYPES = ("tcp", "udp", "http", "https", "tcpmux", "stcp", "sudp", "xtcp")
+_CLIENTS_ENDPOINT = "/api/clients"
 _DEFAULT_TIMEOUT_SEC = 2.5
 _CIRCUIT_FAILS = 3          # 连续失败 N 次进入熔断
 _CIRCUIT_COOLDOWN_SEC = 60  # 熔断静默时长
@@ -88,12 +101,19 @@ def _parse_proxies(body: str) -> dict | None:
         name = str(it.get("name") or "").strip()
         if not name:
             continue
+        conf = it.get("conf") if isinstance(it.get("conf"), dict) else {}
         result[name] = {
             "status": str(it.get("status") or "").lower(),
             "curConns": int(it.get("curConns") or 0),
             "lastStartTime": str(it.get("lastStartTime") or ""),
             "todayTrafficIn": int(it.get("todayTrafficIn") or 0),
             "todayTrafficOut": int(it.get("todayTrafficOut") or 0),
+            # 2026-09-23 全类型清单复用：v1 响应本含 conf/clientID/user
+            # （model/types.go ProxyStatsInfo），一并保留供「frps 代理」
+            # 视图 xtcp 页签展示端口/版本列（不额外发 GET）
+            "user": str(it.get("user") or ""),
+            "clientID": str(it.get("clientID") or ""),
+            "conf": conf,
         }
     return result
 
@@ -129,6 +149,67 @@ def _parse_serverinfo(body: str) -> dict | None:
     }
 
 
+def _parse_proxy_list(body: str) -> list | None:
+    """解析 GET /api/proxy/{type} 响应 → list[dict]；结构异常返回 None
+
+    0.65 响应：{"proxies":[{name,conf,user,clientID,todayTrafficIn,
+    todayTrafficOut,curConns,lastStartTime,lastCloseTime,status}]}
+    （model/types.go ProxyStatsInfo）。conf 为完整代理配置（含 remotePort/
+    localPort 等），原样保留供 UI 展示端口列。
+    """
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    items = data.get("proxies") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
+    result = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        if not name:
+            continue
+        conf = it.get("conf") if isinstance(it.get("conf"), dict) else {}
+        result.append({
+            "name": name,
+            "user": str(it.get("user") or ""),
+            "clientID": str(it.get("clientID") or ""),
+            "status": str(it.get("status") or "").lower(),
+            "curConns": int(it.get("curConns") or 0),
+            "lastStartTime": str(it.get("lastStartTime") or ""),
+            "todayTrafficIn": int(it.get("todayTrafficIn") or 0),
+            "todayTrafficOut": int(it.get("todayTrafficOut") or 0),
+            "conf": conf,
+        })
+    return result
+
+
+def _parse_clients(body: str) -> dict | None:
+    """解析 GET /api/clients 响应 → {clientID: version}；结构异常返回 None
+
+    0.65 响应：{"clients":[{key,user,clientID,runID,version,hostname,
+    online,…}]}（model/types.go ClientInfoResp）。网页面板 proxy 行的
+    ClientVersion 列即由此经 clientID 关联而来。
+    """
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    items = data.get("clients") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
+    result = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        cid = str(it.get("clientID") or "").strip()
+        if cid:
+            result[cid] = str(it.get("version") or "")
+    return result
+
+
 def _load_config() -> dict:
     """读 frps_admin 配置（credentials 域，门面已透明解密）"""
     try:
@@ -161,6 +242,7 @@ class FrpsAdminClient(QObject):
 
     proxies_changed = Signal(dict)       # {name: info} 刷新成功
     serverinfo_changed = Signal(object)  # dict|None 概览（/api/serverinfo）
+    all_proxies_changed = Signal(dict)   # {type: [proxy,…]} 全类型清单（网页面板同源）
     channel_state_changed = Signal(str)  # ok|unreachable|unauthorized|error|unconfigured
     refresh_finished = Signal(str)       # request_refresh 完成回执（worker 线程
                                          # emit → queued 投递主线程，供 UI 一次性反馈）
@@ -170,6 +252,8 @@ class FrpsAdminClient(QObject):
         self._lock = threading.Lock()    # 仅保护 _proxies/_ts 读写（HTTP 在锁外）
         self._proxies: dict = {}
         self._serverinfo: dict | None = None  # /api/serverinfo 概览（best-effort）
+        self._all_proxies: dict = {}     # {type: [proxy,…]} 网页面板同源清单
+        self._clients: dict = {}         # {clientID: version}（ClientVersion 列）
         self._fetched_at: float = 0.0    # 最近一次成功拉取（time.monotonic）
         self._state = "unconfigured"
         self._fails = 0
@@ -210,6 +294,8 @@ class FrpsAdminClient(QObject):
         with self._lock:
             self._proxies = {}
             self._serverinfo = None
+            self._all_proxies = {}
+            self._clients = {}
             self._fetched_at = 0.0
         self._fails = 0
         self._circuit_until = 0.0
@@ -279,6 +365,9 @@ class FrpsAdminClient(QObject):
             # 概览数据 best-effort：失败只清 _serverinfo（概览卡显示—），
             # 不计入熔断、不影响 proxies 权威判据与 ok 状态
             self._refresh_serverinfo(cfg)
+            # 全类型代理清单（frps 网页面板 Proxies 页同源）best-effort：
+            # 失败只清 _all_proxies（面板视图显示空表），同概览纪律不降级感知
+            self._refresh_all_proxies(cfg, parsed)
             self.proxies_changed.emit(dict(parsed))
             return self._state
         if status in (401, 403):
@@ -320,6 +409,50 @@ class FrpsAdminClient(QObject):
         with self._lock:
             self._serverinfo = info
         self.serverinfo_changed.emit(info)
+
+    def _refresh_all_proxies(self, cfg: dict, xtcp_parsed: dict):
+        """GET /api/proxy/{type} ×7 + /api/clients（网页面板 Proxies 页同源）
+
+        xtcp 不重复请求：权威名单（/api/proxy/xtcp）本轮已拉，直接复用其
+        解析结果填入 result["xtcp"]（无 conf/clientID，端口/版本列显「—」）。
+        best-effort：任一类型失败即跳过该类型（空列表），clients 失败则
+        版本列显示「—」；全程不改通道状态、不计熔断——与概览同纪律。
+        7 次串行 GET 各 2.5s 超时上限，最坏 ~18s，但只在后台线程执行。
+        """
+        user = str(cfg.get("user") or "")
+        password = str(cfg.get("password") or "")
+        base_url = str(cfg.get("base_url") or "").strip().rstrip("/")
+        result: dict = {}
+        if base_url:
+            for ptype in _PROXY_TYPES:
+                if ptype == "xtcp":
+                    continue  # 权威名单已含，复用不重拉
+                try:
+                    s, b = _http_get(
+                        f"{base_url}/api/proxy/{ptype}", user, password,
+                        _DEFAULT_TIMEOUT_SEC)
+                    if s == 200:
+                        parsed = _parse_proxy_list(b)
+                        if parsed is not None:
+                            result[ptype] = parsed
+                except Exception:
+                    continue
+        # _parse_proxies 已保留 conf/clientID/user，直接复用为清单行
+        result["xtcp"] = [
+            dict(i, name=n) for n, i in (xtcp_parsed or {}).items()]
+        clients: dict = {}
+        if base_url and result:
+            try:
+                s, b = _http_get(base_url + _CLIENTS_ENDPOINT, user, password,
+                                 _DEFAULT_TIMEOUT_SEC)
+                if s == 200:
+                    clients = _parse_clients(b) or {}
+            except Exception:
+                clients = {}
+        with self._lock:
+            self._all_proxies = result
+            self._clients = clients
+        self.all_proxies_changed.emit(dict(result))
 
     def _set_state(self, state: str):
         if state != self._state:
@@ -372,6 +505,25 @@ class FrpsAdminClient(QObject):
             return None
         with self._lock:
             return self._serverinfo
+
+    def all_proxies(self) -> dict:
+        """全类型代理清单 {type: [proxy,…]}（frps 网页面板 Proxies 页同源）
+
+        proxy 字段：name/user/clientID/status/curConns/lastStartTime/
+        todayTrafficIn/Out/conf。未拉到/缓存过期返回空 dict（UI 显空表）。
+        """
+        if self._state != "ok" or not self._fresh():
+            return {}
+        with self._lock:
+            return {k: list(v) for k, v in self._all_proxies.items()}
+
+    def client_version(self, client_id: str) -> str:
+        """proxy.clientID → frpc 版本（网页面板 ClientVersion 列同源）"""
+        cid = str(client_id or "").strip()
+        if not cid or self._state != "ok" or not self._fresh():
+            return ""
+        with self._lock:
+            return self._clients.get(cid, "")
 
     def snapshot(self) -> dict:
         """UI 一次性快照（总览表/球桌页富集用）"""

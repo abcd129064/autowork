@@ -38,10 +38,10 @@ autowork 的 XTCP 远程隧道能力目前依赖项目目录下的 `frpc.exe` �
 | 13 | `core/frp_remote.py` | L358-390 | `open_session()`：注册 visitor + 启动 frpc 后 **延时等待隧道就绪**（新隧道 2500ms / 复用 300ms）再打开会话 |
 | 14 | `core/frp_remote.py` | L459-468 | `shutdown()`：主窗口 closeEvent 统一停止 frpc + 关闭会话窗口 |
 | 15 | `core/frp_remote.py` | L502-520 | `FrpRemoteBridge`：兼容薄包装（委托 manager） |
-| 16 | `main_window/remote_mixin.py` | L72-76 | 订阅 `log_message`（→ 日志区）与 `frpc_state_changed`（→ 按钮状态刷新） |
-| 17 | `main_window/remote_mixin.py` | L161-166 | 从 manager 恢复手工 visitor 列表 |
-| 18 | `main_window/remote_mixin.py` | L630-652 | `_on_xtcp_connect()`：注册手工 visitor → `mgr.apply()` 启动 frpc；日志文案（L651） |
-| 19 | `main_window/remote_mixin.py` | L654-677 | `_on_xtcp_disconnect()`：注销手工 visitor → `mgr.apply()`（剩余隧道为空时 frpc 停止）；日志文案（L663/673/675） |
+| 16 | `windows/remote_session/remote_mixin.py` | L72-76 | 订阅 `log_message`（→ 日志区）与 `frpc_state_changed`（→ 按钮状态刷新） |
+| 17 | `windows/remote_session/remote_mixin.py` | L161-166 | 从 manager 恢复手工 visitor 列表 |
+| 18 | `windows/remote_session/remote_mixin.py` | L630-652 | `_on_xtcp_connect()`：注册手工 visitor → `mgr.apply()` 启动 frpc；日志文案（L651） |
+| 19 | `windows/remote_session/remote_mixin.py` | L654-677 | `_on_xtcp_disconnect()`：注销手工 visitor → `mgr.apply()`（剩余隧道为空时 frpc 停止）；日志文案（L663/673/675） |
 | 20 | `windows/tunnel_panel.py` | L42-52 | 「当前隧道」面板：frpc 状态标签（L45）+ 全停按钮（L48-51） |
 | 21 | `windows/tunnel_panel.py` | L79-93 | 订阅 `visitors_changed` / `frpc_state_changed`（closeEvent 显式断开） |
 | 22 | `windows/tunnel_panel.py` | L101-138 | 表格展示 records + 每行「断开」按钮（→ `disconnect_visitor`） |
@@ -519,7 +519,7 @@ bindPort = 47511
 
 真机反馈：开启状态下添加 snk_4005/4001 后仅 snk_4008 可访问，SSH 窗口报 `Unable to connect to port 49883/21631`。诊断结论：**热重载本身毫秒级完成（日志 545→547ms），慢的是 XTCP 首次打洞（~1.8s，网络决定）；根因是 `remote_mixin._on_xtcp_connect` 每次「连接」全清面板注册再重注册**——表单行缺端口时 `register_visitor` 随机换新端口（snk_4005 实测 49883→37988→37991 三连漂移），热重载 diff 把同名 visitor 拆旧建新，旧 SSH 窗口全部持死端口。旧版 kill+重启世界对此无感（所有端口都会重建），热重载引入 diff 语义后该既有缺陷被暴露放大。
 
-修复（`main_window/remote_mixin.py`）：
+修复（`windows/remote_session/remote_mixin.py`）：
 
 1. **`_on_xtcp_connect` 改差量同步**：按表单逐项 `register_visitor`（同名保留注册表原端口，表单缺端口时从 `records()` 回填并同步回表单数据），最后仅移除表单中已删除的面板来源 visitor（`SOURCE_SNK` 快捷连接不受牵连）。既有隧道在 frpc diff 中零变化，端口不再漂移。
 2. **`_on_p2p_add` 运行中直接 apply**：添加即热重载生效（成功提示改「已生效（热重载，现有隧道不中断）」；apply 抛错降级 warning「已添加但暂未生效」）。旧「请断开重连以生效」文案废除。
@@ -550,6 +550,46 @@ bindPort = 47511
 
 实现（`core/frps_admin.py`）：proxies 拉取**成功**后，在同一后台线程 best-effort 追加一次 serverinfo GET，结果入 `_serverinfo`（受 `_fresh()` 门控，与名单同生命周期），变化经 `serverinfo_changed(dict|None)` 通知 UI。核心约束：**概览失败绝不降级感知**——不 `_on_fail`、不熔断、不改通道状态、不影响 `online()` 权威判据；旧版/未含端点时概览显示「—」，名单照常。`restart_timer()` 一并清 `_serverinfo`。
 
-UI（`main_window/remote_hub.py` SessionWork）：状态行与统计条之间新增「frps 概览卡」，5 字段 = frps 版本 / 在线客户端 / 当前连接 / 今日流量↓↑ / **xtcp 在线/总**（在线数取自 proxies 名单 status，总数取自 serverinfo.proxyTypeCounts.xtcp）；`refresh()` 与 `serverinfo_changed` 双路径刷卡；无数据统一「—」不报错。
+UI（`windows/remote_session/remote_hub.py` SessionWork）：状态行与统计条之间新增「frps 概览卡」，5 字段 = frps 版本 / 在线客户端 / 当前连接 / 今日流量↓↑ / **xtcp 在线/总**（在线数取自 proxies 名单 status，总数取自 serverinfo.proxyTypeCounts.xtcp）；`refresh()` 与 `serverinfo_changed` 双路径刷卡；无数据统一「—」不报错。
 
 验证：`tests/test_frps_phase2.py` +6 例（解析矩阵 / 成功轮拉取 / **概览失败不降级 proxies** / 缓存过期降级 None / restart 清空），现共 47 例；serverinfo 的追加 GET 使 3 个按 `_http_get` 计数断言的旧测试改为 URL-aware（`"serverinfo" in url` 不计入 proxies 次数）。offscreen 冒烟 8c.5b–d 新增 + 16.4b 修复（见附录 G 事件时序脆弱断言），230 PASS 0 FAIL；全量 453 passed（1 failed 为并行会话售后在途改动，非本线）。
+
+### F.6 frps 代理视图：网页面板 Proxies 页同源清单（2026-09-23）
+
+需求：frps 网页面板（截图 2026-09-23）Proxies 页有 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/SUDP 各类型代理清单（Name/Port/Connections/Traffic In/Out/ClientVersion/Status），桌面端远程页要同源呈现。
+
+**API 盘点（frp-dev/server/api_router.go 源码核验，v1 端点 0.65 即有）**：
+- `GET /api/proxy/{type}`（type ∈ tcp/udp/http/https/tcpmux/stcp/sudp/xtcp）→ `{"proxies":[ProxyStatsInfo]}`：name/conf/user/clientID/todayTrafficIn/Out/curConns/lastStartTime/lastCloseTime/status。网页面板即此端点（web/frps/src/api/proxy.ts）。
+- `GET /api/clients` → `{"clients":[ClientInfoResp]}`：clientID → version（网页面板 ClientVersion 列的关联来源；proxy 响应本身不含版本）。
+- `GET /api/traffic/{name}`：网页「Traffic」按钮的历史流量曲线（本视图未接，只读清单优先）。
+- v2 端点（/api/v2/proxies 带分页/过滤）为新版网页所用，0.65 v1 已够，不引 v2 降低版本墙风险。
+
+**实现**：
+- `core/frps_admin.py`：`_parse_proxy_list` / `_parse_clients` 解析器；`FrpsAdminClient._refresh_all_proxies(cfg, xtcp_parsed)` 在 xtcp 权威名单拉取**成功**后同后台线程 best-effort 追加 7 次 GET（**xtcp 不重拉**，直接复用权威名单解析结果——`_parse_proxies` 同步保留 conf/clientID/user 字段）+ 1 次 clients；`all_proxies()` / `client_version()` 查询接口受 `_fresh()` 门控；`all_proxies_changed` 信号。纪律同概览卡：失败只清缓存、**不计熔断、不改通道状态、不降级 online() 权威判据**。
+- `windows/remote_session/remote_hub.py` 视图 5 `FrpsProxiesWork`：SegmentedWidget 八页签（顺序同网页面板）+ 7 列表（Name/Port 域名/Connections/Traffic In/Out/ClientVersion/Status）+ 代理名搜索 + 「刷新感知」按钮；`_proxy_port_text` 从 conf 取 remotePort（tcp/udp）或 customDomains/subdomain（http 系），stcp/sudp/xtcp 显「—」；`_fmt_traffic_bytes` 保留 bytes 级（网页口径 "362 bytes"）。视图零额外请求——数据全来自周期感知缓存。
+- RemoteHub 4→5 视图（「frps 代理」插在连接质量与隧道配置之间）；弹出窗口 nav_icons 补 `FluentIcon.GLOBE`（main_window.py，HubPopoutWindow 要求 nav_icons 覆盖全部注册页否则退回 Pivot 形态）。
+
+**验证**：`tests/test_frps_phase2.py` +11 例（解析矩阵/版本关联/失败不降级/缓存过期降级/纯函数端口与流量格式），共 58 例；2 个按 `_http_get` 计数的旧测试改 URL-aware（只数 `/api/proxy/xtcp`，与 serverinfo 先例同法）；offscreen 探针（tools/_scratch/_probes/）断言行内容/页签切换/搜索过滤；全量 pytest 486 passed。
+
+---
+
+## 附录 G：开机静默预连 + 预热打洞（2026-09-23）
+
+需求：开启程序后 frp 静默恢复列表中的隧道，点 SSH/SFTP 直接秒连。
+
+**链路**：MainWindow 初始化（remote_mixin._init_p2p_panel）挂 `QTimer.singleShot(6000, _frp_autostart)` → 配置键 `frp_autostart`（misc 域，默认开）→ `mgr.autostart()`（is_running/active_count==0 即跳过；apply 拉起仅启用隧道，disabled 的绝不复活；失败**有界重试** 60s/120s 各一次——2026-09-23 P1-2）→ 成功后 `mgr.prewarm_when_ready()`（P2-4：轮询 bindPort 监听就绪 200ms 间隔/8s 上限，就绪即预热，替代旧固定 3s）。
+
+**为什么两级**：apply 成功仅代表本地 bindPort 监听就绪；XTCP 打洞在**首个本地 connect** 才触发（frpc 0.65 visitor 语义）。冷路径下这 1~3s 打洞延时全由用户首击承担。prewarm_async 用 daemon 线程对启用隧道**串行** connect（`_PREWARM_TIMEOUT_MS=3000`），把洞提前打穿——打洞路由成果由 frpc 保留，真实 SSH 走复用路径；成功 snk 经 `prewarmed` 信号回主线程标记 `prewarmedAt`（**仅内存**：洞随 frpc 重启失效，落盘会展示假「已预热」，2026-09-23 P2-6；总览状态列显示「已预热」）。
+
+**为什么不复用 VisitorProber.run_once**：探测器 800ms 超时是 RTT 测量口径，首洞 1~3s 会被整轮记成超时样本污染质量页（连 3 败即判「异常」）；预热只图打通，独立 connect、不发 sample 信号。串行防并发互抢 UDP 通道。探测器侧对应兜底（2026-09-23 P1-3）：无样本隧道**冷洞首拍**用 3s 长超时且结果不进样本、不计连续失败（`warmed` 标记只此一次）。
+
+**可靠性三件套（2026-09-23 P1/P2）**：
+- **P1-1 意外退出自愈**：`_on_frpc_finished` 发现注册表仍有启用隧道 → 5s/30s/2min 退避自动重启（`_schedule_recover`/`_recover_frpc`）；上次进程健康运行 ≥60s 清零计数，三档用尽放弃到手动路径；恢复成功自动补预热。
+- **P2-4 就绪轮询替代固定延时**：`open_session` 的 2.5s 固定等待改 `wait_ports_ready(ports, on_ready)`（200ms 间隔、8s 上限、超时兜底回调）——快网早开、慢网不赌输。
+- **P2-5 失联会话提示**：总览刷新时按「frpc 未运行 / frps offline / 探测判 bad」上报 `report_tunnel_issue`（翻转去重），`notify_tunnel_issue` 对该端口已打开的 SSH/SFTP/RDP 面板顶部插/撤提示条（`windows/remote_session/tunnel_notice.py`，懒创建不强制关会话——SFTP 传输中不能杀）。
+
+**UI**：隧道配置页 frpc 服务器卡新增 CheckBox「开启时静默预连」——勾选即写配置并当场执行一次 autostart+prewarm（InfoBar 回执四态），取消只影响下次启动（不主动停正在跑的 frpc，停止有专属按钮）。
+
+**已知边界**：① 静默预连会在后台常驻 frpc 进程与 frps 控制连接（开关可关，tooltip 已注明）；② 现场无网/frps 不可达时启动 6s 后有一次静默失败，60s/120s 后各自动补一枪（P1-2），无用户感知；③ 全部隧道「已断开（disabled）」时不预连（尊重断开语义），点 SSH 行即重连并顺带拉起 frpc。
+
+验证：tests/test_frp_hot_reload.py +4 例（autostart 四态矩阵 / 失败吞异常进日志 / active_count 口径 / 预热只探启用隧道+串行+3s 超时，emit 为 queued 信号故断言走 hits 共享列表）+ tests/test_frp_resilience.py 12 例（P1-1 退避/健康清零/用尽放弃/无隧道不恢复、P1-2 有界重试、P2-4 就绪即回调/超时兜底、P2-6 prewarmedAt 内存态、P2-5 上报去重）；P1-3 冷首拍测试并入 test_frps_phase2.py（连败判 bad 改 4 轮口径）；全量 **523 passed**（2026-09-24 复核）；tunnel_notice offscreen 冒烟（显示/复用/撤除）通过；check_refs --all PASS。
