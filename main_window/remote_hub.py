@@ -166,12 +166,19 @@ class SessionWork(QWidget):
         self.lbl_frps = CaptionLabel("", body)
         head.addWidget(self.lbl_frps)
         head.addStretch(1)
+        # frp 总开关（2026-09-22 需求，置于「立即感知」左侧）：随 frpc
+        # 运行态翻转文案/动作——未运行=启动（按注册表 apply），运行中=
+        # 优雅停止（两段式 /api/stop，与隧道配置页停止按钮同口径，带确认）
+        self.btn_frp_toggle = PushButton(FluentIcon.PLAY, "启动 frp", body)
+        self.btn_frp_toggle.setToolTip("一键启动/停止 frpc")
+        self.btn_frp_toggle.clicked.connect(self._on_frp_toggle)
+        head.addWidget(self.btn_frp_toggle)
         btn_probe = PushButton(FluentIcon.SYNC, "立即感知", body)
-        btn_probe.setToolTip("立即拉取 frps xtcp proxy 名单（在线感知）")
+        btn_probe.setToolTip("立即拉取 frps xtcp proxy 名单")
         btn_probe.clicked.connect(self._on_probe_now)
         head.addWidget(btn_probe)
         btn_session_win = PushButton(FluentIcon.DOCUMENT, "会话窗口", body)
-        btn_session_win.setToolTip("打开/置顶远程会话标签窗口（SSH/SFTP/RDP）")
+        btn_session_win.setToolTip("打开/置顶远程会话标签窗口")
         btn_session_win.clicked.connect(lambda: self._mgr.ensure_session_window())
         head.addWidget(btn_session_win)
         btn_add = PrimaryPushButton(FluentIcon.ADD, "新建隧道", body)
@@ -280,6 +287,43 @@ class SessionWork(QWidget):
         super().showEvent(event)
         self.refresh()
 
+    # ---------- frp 总开关 ----------
+
+    def _on_frp_toggle(self):
+        if self._mgr.is_running():
+            # 停止会断所有会话，与隧道配置页停止口径一致，必须确认
+            dlg = MessageBox("停止 frp",
+                             "停止后所有隧道失效，已打开的 SSH/SFTP/RDP 会话将断开。\n"
+                             "经 /api/stop 优雅收尾（端口干净释放），注册表保留。\n"
+                             "确定停止吗？", self)
+            dlg.yesButton.setText("停止")
+            dlg.cancelButton.setText("取消")
+            if not dlg.exec():
+                return
+            self._mgr.close_all_sessions("总开关停止 frpc")
+            self._mgr.stop_frpc()
+            self._win._append_log("[远程] 总开关停止 frpc")
+            return
+        if not self._mgr.records():
+            self._win._show_info_bar("无已注册隧道，请先在「P2P 访客」添加隧道",
+                                     "warning")
+            self._hub.switchTo(self._hub.visitor_work)
+            return
+        try:
+            self._mgr.apply()
+        except (OSError, RuntimeError) as e:
+            self._win._show_info_bar(f"frpc 启动失败：{e}", "error",
+                                     duration=6000)
+            return
+        self._win._show_info_bar("frpc 已启动（按注册表应用配置）", "success")
+        self._win._append_log("[远程] 总开关启动 frpc")
+
+    def _update_frp_toggle(self):
+        running = self._mgr.is_running()
+        self.btn_frp_toggle.setText("停止 frp" if running else "启动 frp")
+        self.btn_frp_toggle.setIcon(
+            FluentIcon.POWER_BUTTON if running else FluentIcon.PLAY)
+
     # ---------- frps 概览卡 ----------
 
     def _build_overview(self, body):
@@ -371,6 +415,7 @@ class SessionWork(QWidget):
         running = mgr.is_running()
         self.lbl_frpc.setText(
             f"frpc {'运行中' if running else '未启动'} · {len(records)} 条隧道")
+        self._update_frp_toggle()
         self.lbl_frpc.setTextColor(
             _C_SUCCESS if running else _C_MUTED,
             _C_SUCCESS if running else _C_MUTED)

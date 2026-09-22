@@ -228,6 +228,13 @@ if rh is not None:
     check("8c.4 switchTo 联动 P2P 访客",
           rh.stack.currentWidget() is rh.visitor_work)
     check("8c.5 会话总览表 9 列", rh.session_work.table.columnCount() == 9)
+    # frp 总开关（2026-09-22 需求：立即感知左侧，随 frpc 态翻转）
+    _sw = rh.session_work
+    check("8c.5e frp 开关存在且文案随 frpc 态",
+          _sw.btn_frp_toggle.text() ==
+          ("停止 frp" if _sw._mgr.is_running() else "启动 frp"))
+    _sw._update_frp_toggle()   # 幂等刷新不抛
+    check("8c.5f 开关刷新无异常", True)
     # frps 概览卡（2026-09-22 需求：/api/serverinfo 喂会话总览）
     _ov = getattr(rh.session_work, "_overview_card", None)
     check("8c.5b 概览卡存在且在会话总览内",
