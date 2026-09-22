@@ -310,10 +310,17 @@ class SessionWork(QWidget):
             self._hub.switchTo(self._hub.visitor_work)
             return
         try:
-            self._mgr.apply()
+            result = self._mgr.apply()
         except (OSError, RuntimeError) as e:
             self._win._show_info_bar(f"frpc 启动失败：{e}", "error",
                                      duration=6000)
+            return
+        if result == "stopped":
+            # 注册表只剩「已断开」隧道：没有启用项，frpc 无从启动
+            # （断开保留注册的新口径），提示用户重连即恢复
+            self._win._show_info_bar(
+                "全部隧道处于「已断开」状态：点该行的 SSH/SFTP/RDP 重连，"
+                "frpc 会自动随首条重连隧道启动", "warning", duration=5000)
             return
         self._win._show_info_bar("frpc 已启动（按注册表应用配置）", "success")
         self._win._append_log("[远程] 总开关启动 frpc")
@@ -413,8 +420,11 @@ class SessionWork(QWidget):
         except RuntimeError:
             return
         running = mgr.is_running()
+        active_n = sum(1 for r in records if not r.get("disabled"))
         self.lbl_frpc.setText(
-            f"frpc {'运行中' if running else '未启动'} · {len(records)} 条隧道")
+            f"frpc {'运行中' if running else '未启动'} · {active_n} 条启用"
+            + (f" / {len(records) - active_n} 条已断开"
+               if len(records) > active_n else ""))
         self._update_frp_toggle()
         self.lbl_frpc.setTextColor(
             _C_SUCCESS if running else _C_MUTED,
@@ -478,7 +488,8 @@ class SessionWork(QWidget):
         else:
             self.lbl_hint.setText(
                 "「连接」复用球桌一键直连（SSH/SFTP/RDP 标签窗口）；"
-                "断开仅关该隧道会话并释放端口，删除则彻底移除注册与持久化配置")
+                "断开=关会话并释放端口（保留注册，点 SSH/SFTP/RDP 即重连），"
+                "删除=彻底移除注册与持久化配置（需确认、不可恢复）")
 
     def _add_row(self, rec, running):
         mgr = self._mgr
@@ -488,7 +499,11 @@ class SessionWork(QWidget):
         table = self.table
         r = table.rowCount()
         table.insertRow(r)
-        if not running:
+        if rec.get("disabled"):
+            # 已断开（保留注册）：隧道已从 frpc 摘除、端口已释放，
+            # 与「删除」不同——注册还在，SSH/SFTP/RDP 点击即重连
+            status, color = "已断开", _C_WARNING
+        elif not running:
             status, color = "未启动", _C_MUTED
         elif sessions:
             status, color = "会话中", _C_SUCCESS
@@ -539,17 +554,24 @@ class SessionWork(QWidget):
             table.setItem(r, col, item)
 
         # 设备确认离线（frps 权威）时禁用打开类按钮——点击只会盲等超时；
-        # 无感知（None）/未注册（visitor 可先于设备上线注册）不禁用
-        confirmed_offline = self._frps.online(sn) == "offline"
+        # 无感知（None）/未注册（visitor 可先于设备上线注册）不禁用；
+        # 已断开行的打开类按钮不禁用——点击即经 ensure_visitor 重新启用并重连
+        confirmed_offline = (self._frps.online(sn) == "offline"
+                             and not rec.get("disabled"))
+        disabled_row = bool(rec.get("disabled"))
         table.setCellWidget(r, 8, _row_buttons(table, [
             ("SSH", lambda _=False, s=sn, t=rec: self._open("ssh", s, t),
-             "通过该隧道打开 SSH 终端", not confirmed_offline),
+             (f"重新启用并重连 {sn}（SSH）" if disabled_row
+              else "通过该隧道打开 SSH 终端"), not confirmed_offline),
             ("SFTP", lambda _=False, s=sn, t=rec: self._open("sftp", s, t),
-             "通过该隧道打开 SFTP 文件传输", not confirmed_offline),
+             (f"重新启用并重连 {sn}（SFTP）" if disabled_row
+              else "通过该隧道打开 SFTP 文件传输"), not confirmed_offline),
             ("RDP", lambda _=False, s=sn, t=rec: self._open("rdp", s, t),
-             "通过该隧道打开远程桌面", not confirmed_offline),
+             (f"重新启用并重连 {sn}（远程桌面）" if disabled_row
+              else "通过该隧道打开远程桌面"), not confirmed_offline),
             ("断开", lambda _=False, s=sn: self._disconnect(s),
-             f"断开隧道 {sn}：关闭相关会话并释放本地端口"),
+             f"断开隧道 {sn}：关闭相关会话并释放本地端口（保留注册，可重连）",
+             not disabled_row),
             ("删除", lambda _=False, s=sn: self._delete(s),
              f"删除隧道 {sn}：移除注册与持久化配置"),
         ]))
@@ -579,13 +601,16 @@ class SessionWork(QWidget):
     def _disconnect(self, sn):
         mgr = self._mgr
         if not mgr.is_running():
+            # frpc 未运行：隧道本就未建立，无需断开（新口径下注册仍保留，
+            # 与「删除」不再是唯一选项——重新启动 frp 即可恢复全部隧道）
             self._info("当前 frpc 未启动，隧道未建立，无需断开", "warning")
             return
         if not self._confirm_transfer(sn):
             return
         result = mgr.disconnect_visitor(sn)
         if result == "ok":
-            self._info(f"已断开隧道 {sn}，相关会话已关闭、端口已释放", "success")
+            self._info(f"已断开隧道 {sn}：会话已关闭、端口已释放，"
+                       "注册保留，点 SSH/SFTP/RDP 可重连", "success")
         elif result == "not_running":
             self._info("当前 frpc 未启动", "warning")
         else:
@@ -740,16 +765,21 @@ class VisitorWork(QWidget):
         for rec in self._mgr.records():
             r = self.table.rowCount()
             self.table.insertRow(r)
-            values = (str(rec.get("serverName", "")), "xtcp",
+            disabled = bool(rec.get("disabled"))
+            values = (str(rec.get("serverName", ""))
+                      + ("（已断开）" if disabled else ""), "xtcp",
                       str(rec.get("bindPort", "")),
                       rec.get("tableId", "") or "—",
                       rec.get("source", "") or "—",
                       rec.get("lastUsed", "") or "—")
             for col, text in enumerate(values):
                 item = QTableWidgetItem(text)
-                item.setToolTip(text)
+                item.setToolTip("已断开：注册保留，重新连接即恢复"
+                                if disabled and col == 0 else text)
                 if col == 1:
                     item.setForeground(_C_ACCENT)
+                if disabled and col == 0:
+                    item.setForeground(_C_WARNING)
                 self.table.setItem(r, col, item)
 
     # ---------- 操作 ----------
@@ -1206,7 +1236,10 @@ class TunnelConfWork(QWidget):
             _C_SUCCESS if running else _C_MUTED,
             _C_SUCCESS if running else _C_MUTED)
         self.btn_stop.setEnabled(running)
-        self.btn_restart.setEnabled(running or bool(self._mgr.records()))
+        # 「启用隧道」判定：仅剩已断开（disabled）时 apply 只会 stopped，
+        # 按钮置灰避免无效点击
+        _active = any(not r.get("disabled") for r in self._mgr.records())
+        self.btn_restart.setEnabled(running or _active)
         snap = self._frps.snapshot()
         ch_text = _CHANNEL_TEXT.get(snap["state"], snap["state"])
         if snap["state"] == "ok" and snap["age_sec"] is not None:

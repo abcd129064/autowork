@@ -53,6 +53,9 @@ from p2p import generate_random_port
 # 统一 TOML（唯一持久化文件：server 配置 + 全部 visitor + 元数据注释），
 # frpc 实际加载该文件，启动恢复也只回读该文件
 _PANEL_TOML_NAME = "frpc_xtcp_panel.toml"
+# disabled（已断开）visitor 侧车文件：断开保留注册的 visitor 不进 TOML
+# （TOML 即 frpc 运行配置），完整记录落此处，启动时合并回注册表
+_DISABLED_NAME = "frpc_xtcp_disabled.json"
 # 旧版持久化文件（已停止写入，仅旧版本升级时回读迁移一次）
 _MAIN_TOML_NAME = "frpc_xtcp.toml"
 _META_NAME = "frpc_xtcp_meta.json"
@@ -181,6 +184,17 @@ class RemoteSessionManager(QObject):
         if os.path.exists(panel_path):
             for v in _parse_visitors_toml(panel_path):
                 self._visitors[v["serverName"]] = v
+            # 合并「已断开（保留注册）」侧车：disabled visitor 不在 TOML 里
+            # （TOML 即 frpc 运行配置），断开口径重启后不复活隧道但保注册
+            try:
+                with open(os.path.join(app_dir, _DISABLED_NAME), "r",
+                          encoding="utf-8") as f:
+                    data = json.load(f)
+                for v in (data or []):
+                    if isinstance(v, dict) and v.get("serverName"):
+                        self._visitors[v["serverName"]] = v
+            except (OSError, ValueError):
+                pass  # 侧车损坏：丢断开态注册可接受，绝不阻塞启动恢复
             return
         # ---- 旧版本升级迁移（以下文件已停止写入） ----
         try:
@@ -220,8 +234,25 @@ class RemoteSessionManager(QObject):
             self._visitors[v["serverName"]] = v
 
     def _persist_registry(self):
-        """落盘唯一持久化文件 frpc_xtcp_panel.toml（不触碰 frpc 进程）"""
-        self._write_toml(os.path.join(get_app_dir(), _PANEL_TOML_NAME))
+        """落盘持久化文件（不触碰 frpc 进程）
+
+        拆两份：启用中的 visitor 写 frpc_xtcp_panel.toml（frpc 实际加载的
+        运行配置）；「已断开（保留注册）」的 disabled visitor 不写 TOML
+        （写进去会被 frpc 直接拉起），落到 _DISABLED_NAME 侧车 JSON，
+        启动时由 _load_registry 合并回注册表。
+        """
+        app_dir = get_app_dir()
+        self._write_toml(os.path.join(app_dir, _PANEL_TOML_NAME))
+        disabled = [v for v in self._visitors.values() if v.get("disabled")]
+        try:
+            if disabled:
+                with open(os.path.join(app_dir, _DISABLED_NAME), "w",
+                          encoding="utf-8") as f:
+                    json.dump(disabled, f, ensure_ascii=False, indent=1)
+            elif os.path.exists(os.path.join(app_dir, _DISABLED_NAME)):
+                os.remove(os.path.join(app_dir, _DISABLED_NAME))
+        except OSError:
+            pass  # 侧车写失败不影响主配置：重连后该隧道会自然回到 TOML
 
     def persist(self):
         """落盘持久化文件（不触碰 frpc 进程），供面板添加/删除 visitor 后
@@ -258,6 +289,7 @@ class RemoteSessionManager(QObject):
                 "tableId": str(table_id or ""),
                 "source": str(source or SOURCE_MANUAL),
                 "lastUsed": "",
+                "disabled": False,
             }
             changed = True
         else:
@@ -283,6 +315,11 @@ class RemoteSessionManager(QObject):
             if table_id:
                 info["tableId"] = str(table_id)
             info["source"] = str(source or info["source"])
+            # 重新注册已断开的隧道视为「重新启用」：调用方（ensure_visitor
+            # 重连、主面板差量同步）语义都是要让这条隧道活起来
+            if info.get("disabled"):
+                info["disabled"] = False
+                changed = True
         # changed 标志：仅注册表有实质变化时才发信号，
         # 让 UI（隧道面板）避免无谓刷新
         if changed:
@@ -308,7 +345,9 @@ class RemoteSessionManager(QObject):
         # 自愈（2026-09-22 真机）：注册表有但本地端口没监听 = 该 visitor 从未
         # 进过进程（旧版「添加并注册」不 apply 的遗留），复用必被拒——补一次
         # apply（运行中即热重载）把端口真正拉起来再返回。
-        if info is not None and self.is_running():
+        # disabled（已断开保留注册）不走复用：落下方注册+apply 路径，
+        # register_visitor 会把 disabled 清掉，等效「重新启用并连接」。
+        if info is not None and not info.get("disabled") and self.is_running():
             from p2p import is_port_in_use
             if not is_port_in_use(info["bindPort"]):
                 self.log_message.emit(
@@ -354,9 +393,12 @@ class RemoteSessionManager(QObject):
     def disconnect_visitor(self, server_name: str) -> str:
         """隧道面板「断开连接」：仅在 frpc 运行中生效，绝不自动启动 frpc
 
-        完整断开流程：先优雅关闭该隧道端口上的 SSH/SFTP/RDP 会话
-        （panel.shutdown()，避免隧道丢失后窗口假死），再移除 visitor 并
-        apply（frpc 按新配置重启释放端口，注册表清空则停止 frpc）。
+        与「删除」的本质区别（2026-09-22 修复：此前两按钮行为等价）：
+        断开只把 visitor 置为 disabled 态——先优雅关闭该隧道端口上的
+        SSH/SFTP/RDP 会话（避免隧道丢失后窗口假死），再 apply 让 frpc 热
+        重载摘除该隧道、释放本地端口；注册与持久化配置**保留**，下次
+        启动仍恢复，重新连接（一键直连/SSH 入口）自动回到启用态。
+        全部隧道断开（仅剩 disabled）时 apply 会停掉 frpc，注册表照旧保留。
 
         Returns:
             "ok" 断开成功；"not_running" frpc 未启动（未做任何改动）；
@@ -366,15 +408,25 @@ class RemoteSessionManager(QObject):
         info = self._visitors.get(name)
         if info is None:
             return "not_found"
+        if info.get("disabled"):
+            # 已是断开态：幂等，不重复关会话/apply（即便 frpc 因全部断开
+            # 已停止，"已断开"仍是本次操作的正确答案）
+            return "ok"
         if not self.is_running():
             # frpc 未启动时隧道本未建立，无断开可做；
             # 千万不能在此 apply()，否则会带着剩余 visitor 自动拉起 frpc
             return "not_running"
         self.close_sessions_on_port(info["bindPort"], reason=name)
-        self.remove_visitor(name)
+        info["disabled"] = True
+        self.visitors_changed.emit()
         try:
             self.apply()
         except (OSError, RuntimeError) as e:
+            # 回滚断开标记，避免「UI 显示已断开但 frpc 仍在跑该隧道」的裂脑；
+            # apply 失败前已按 disabled 落过盘，回滚后立即重写对齐
+            info["disabled"] = False
+            self._persist_registry()
+            self.visitors_changed.emit()
             self.log_message.emit(f"[远程会话] 应用变更失败: {e}")
             return "error"
         return "ok"
@@ -402,7 +454,7 @@ class RemoteSessionManager(QObject):
                 self.log_message.emit(f"[远程会话] 应用变更失败: {e}")
                 return "error"
             return "ok"
-        # frpc 未启动：仅移除并重写持久化文件（下次启动不再恢复），不启动 frpc
+        # frpc 未启动：仅移除并重写持久化文件，不启动 frpc
         self._persist_registry()
         return "ok"
 
@@ -505,12 +557,13 @@ class RemoteSessionManager(QObject):
             "reloaded" 热重载成功（现有隧道零中断，新 visitor 端口已监听）
             / "restarted" 停旧起新 / "started" 首次启动 / "stopped" 注册表为空
         """
-        # 先落盘唯一持久化文件（frpc_xtcp_panel.toml，含 server 配置），
-        # 再处理 frpc 进程
+        # 先落盘持久化文件（frpc_xtcp_panel.toml + disabled 侧车，含 server
+        # 配置），再处理 frpc 进程
         self._persist_registry()
         was_running = self.is_running()
-        if not self._visitors:
-            # 注册表为空说明没有隧道需要维护，停掉 frpc 避免空转
+        if not any(not v.get("disabled") for v in self._visitors.values()):
+            # 没有启用中的隧道（注册表为空，或全部处于「已断开」态）：
+            # 停掉 frpc 避免空转；disabled 注册保留，重连时再拉起
             self._stop_frpc()
             return "stopped"
         # 与 _persist_registry 写入 TOML 的公共段同源；warn=False 避免重复弹警告
@@ -693,9 +746,13 @@ class RemoteSessionManager(QObject):
             self._write_visitor_blocks(f)
 
     def _write_visitor_blocks(self, f):
-        """写全部 visitor 块；块尾 # meta 注释内联注册表元数据（回读见
-        _parse_visitors_toml）"""
+        """写全部**启用** visitor 块；块尾 # meta 注释内联注册表元数据
+        （回读见 _parse_visitors_toml）。disabled（已断开保留注册）跳过——
+        TOML 即 frpc 运行配置，写进去会被拉起；其记录由 _persist_registry
+        落 _DISABLED_NAME 侧车"""
         for sn, v in self._visitors.items():
+            if v.get("disabled"):
+                continue
             f.write("[[visitors]]\n")
             f.write(f'name = "{sn}"\n')
             f.write('type = "xtcp"\n')

@@ -262,6 +262,24 @@ if rh is not None:
         rh.visitor_work.refresh()
         check("8c.8 访客表非空表行渲染无异常",
               rh.visitor_work.table.rowCount() == _base_rows + 1)
+        # 回归（2026-09-22 真机 bug「断开和删除操作一样」）：断开=disabled
+        # 态渲染——状态列「已断开」、断开按钮置灰、SSH 按钮仍可用（重连入口）
+        _mgr._visitors[_tmp_sn]["disabled"] = True
+        rh.session_work.refresh()
+        _row_sn = next(i for i in range(rh.session_work.table.rowCount())
+                       if (rh.session_work.table.item(i, 2)
+                           and rh.session_work.table.item(i, 2).text() == _tmp_sn))
+        check("8c.7b disabled 行状态列显示已断开",
+              rh.session_work.table.item(_row_sn, 0).text() == "已断开")
+        from qfluentwidgets import PushButton as _PB
+        _btns = rh.session_work.table.cellWidget(_row_sn, 8).findChildren(_PB)
+        _by_text = {b.text(): b for b in _btns}
+        check("8c.7c 断开按钮置灰/SSH 可用（两按钮语义分离）",
+              _by_text.get("断开") is not None
+              and not _by_text["断开"].isEnabled()
+              and _by_text.get("SSH") is not None
+              and _by_text["SSH"].isEnabled())
+        _mgr._visitors[_tmp_sn]["disabled"] = False
     finally:
         _mgr.remove_visitor(_tmp_sn)
         rh.session_work.refresh()

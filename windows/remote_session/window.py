@@ -124,9 +124,12 @@ class TunnelPanelWindow(FramelessWindow):
                 rec.get("source", ""),
                 rec.get("lastUsed", "") or "—",
             ]
+            disabled = bool(rec.get("disabled"))
             for col, text in enumerate(values):
-                item = QTableWidgetItem(text)
-                item.setToolTip(text)
+                item = QTableWidgetItem(
+                    f"{text}（已断开）" if disabled and col == 0 else text)
+                item.setToolTip(text if not disabled or col != 0
+                                else "已断开：注册保留，重新连接即恢复")
                 if col == 2:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(row, col, item)
@@ -139,7 +142,9 @@ class TunnelPanelWindow(FramelessWindow):
             disc_btn = FluentPushButton("断开", disc_holder)
             disc_btn.setFixedSize(60, 26)
             disc_btn.setToolTip(
-                f"断开隧道 {sn}：关闭相关 SSH/SFTP 会话并释放本地端口")
+                f"断开隧道 {sn}：关闭相关 SSH/SFTP 会话并释放本地端口"
+                "（保留注册，可重新连接）")
+            disc_btn.setEnabled(not disabled)  # 已断开的行幂等无意义
             disc_btn.clicked.connect(
                 lambda _=False, s=sn: self._on_disconnect(s))
             dl.addWidget(disc_btn)
@@ -197,7 +202,9 @@ class TunnelPanelWindow(FramelessWindow):
         """断开单条隧道：仅 frpc 运行中生效，绝不自动启动 frpc
 
         流程：frpc 未启动 → 仅提示；SFTP 传输中 → 二次确认；
-        确认后由 manager 关闭相关会话、移除 visitor 并重启/停止 frpc 释放端口。
+        确认后由 manager 关闭相关会话、把 visitor 置为「已断开」态并
+        apply 释放端口——注册与持久化保留（与「删除」不同），
+        重新连接（SSH/SFTP/RDP/一键直连）自动恢复启用。
         """
         if not server_name:
             return
@@ -222,7 +229,8 @@ class TunnelPanelWindow(FramelessWindow):
         result = mgr.disconnect_visitor(server_name)
         if result == "ok":
             self.refresh()  # 显式即时刷新兜底（信号刷新外的双保险）
-            show_info_bar(f"已断开隧道 {server_name}，相关会话已关闭、本地端口已释放",
+            show_info_bar(f"已断开隧道 {server_name}，相关会话已关闭、本地端口已释放；"
+                          "注册保留，可重新连接",
                           "success", title="断开成功", parent=self, duration=3000)
         elif result == "not_running":
             show_info_bar("当前 frpc 未启动", "warning",
@@ -265,9 +273,14 @@ class TunnelPanelWindow(FramelessWindow):
                           title="删除失败", parent=self, duration=4000)
 
     def _on_stop_all(self):
-        """全部断开：关闭全部会话、清空注册表并停止 frpc（仅 frpc 运行中生效）"""
+        """全部断开：关闭全部会话、全部隧道置「已断开」并停止 frpc
+
+        与单条断开同口径（2026-09-22 修复）：注册与持久化**保留**，
+        下次启动仍恢复、重新连接即恢复启用——彻底移除请用行内「删除」。
+        （仅 frpc 运行中生效）
+        """
         mgr = get_session_manager()
-        records = list(mgr.records())
+        records = [r for r in mgr.records() if not r.get("disabled")]
         if not records:
             return
         if not mgr.is_running():
@@ -278,18 +291,25 @@ class TunnelPanelWindow(FramelessWindow):
                for r in records) \
                 and not self._confirm_interrupt_transfer("全部隧道"):
             return
-        # 顺序固定：先趁端口还活着关掉全部会话，再清空注册表，最后 apply——
-        # 注册表空了 apply 会自动停掉 frpc，一次性释放全部端口
+        # 顺序固定：先趁端口还活着关掉全部会话，再整体置 disabled 并一次
+        # apply（无启用隧道，apply 自动停掉 frpc 释放全部端口）；注册表
+        # 保留，disabled 记录落 TOML 之外的侧车。apply 失败回滚标记，
+        # 避免「列表全显示已断开但 frpc 仍在跑」裂脑。
         mgr.close_all_sessions("全部隧道")
+        marked = []
         for rec in records:
-            mgr.remove_visitor(rec.get("serverName", ""))
+            info = mgr._visitors.get(str(rec.get("serverName", "")))
+            if info is not None and not info.get("disabled"):
+                info["disabled"] = True
+                marked.append(info)
         try:
             mgr.apply()
         except (OSError, RuntimeError):
-            pass
+            for info in marked:
+                info["disabled"] = False
         self.refresh()  # 显式即时刷新兜底
-        show_info_bar("已断开全部隧道", "success", title="全部断开",
-                      parent=self, duration=3000)
+        show_info_bar("已断开全部隧道（注册保留，可重新连接）", "success",
+                      title="全部断开", parent=self, duration=3000)
 
 
 if __name__ == "__main__":

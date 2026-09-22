@@ -184,6 +184,105 @@ def test_apply_stops_when_registry_empty(mgr):
     assert mgr._applied_signature is None
 
 
+# ==================== 断开=置 disabled 保留注册（2026-09-22 修复：
+# 断开与删除行为等价的真机 bug）====================
+
+def test_disconnect_keeps_registry_and_drops_block_from_toml(mgr, tmp_path):
+    _add_visitor(mgr, "snk_1")
+    _add_visitor(mgr, "snk_2", 40002)
+    mgr.apply()
+    mgr._reload_result = (200, "")
+    assert mgr.disconnect_visitor("snk_1") == "ok"
+    # 注册保留（与 delete 的本质区别）
+    assert "snk_1" in mgr._visitors and mgr._visitors["snk_1"]["disabled"]
+    assert "snk_1" in {r["serverName"] for r in mgr.records()}
+    # frpc 配置摘除：TOML 不含 snk_1 块、仍含 snk_2 块
+    toml = _read_panel_toml(mgr, tmp_path)
+    assert 'serverName = "snk_1"' not in toml
+    assert 'serverName = "snk_2"' in toml
+    # disabled 记录进侧车，重启后可恢复
+    import json
+    side = json.loads((tmp_path / fr._DISABLED_NAME).read_text(encoding="utf-8"))
+    assert [v["serverName"] for v in side] == ["snk_1"]
+    # frpc 仍在运行（还有启用隧道）
+    assert mgr.is_running()
+
+
+def test_disconnect_idempotent_and_not_running_guard(mgr):
+    _add_visitor(mgr, "snk_1")
+    assert mgr.disconnect_visitor("snk_1") == "not_running"
+    assert not mgr._visitors["snk_1"].get("disabled")  # 未运行绝不动标记
+    mgr.apply()
+    mgr._reload_result = (200, "")
+    assert mgr.disconnect_visitor("snk_1") == "ok"
+    assert mgr.disconnect_visitor("snk_1") == "ok"     # 幂等：已断开再点
+
+
+def test_disconnect_apply_failure_rolls_back_flag(mgr):
+    _add_visitor(mgr, "snk_1")
+    _add_visitor(mgr, "snk_2", 40002)
+    mgr.apply()
+    mgr._reload_result = (400, "bad config")   # 热重载拒绝 → apply 抛错
+    assert mgr.disconnect_visitor("snk_1") == "error"
+    assert not mgr._visitors["snk_1"].get("disabled")  # 回滚，UI 不裂脑
+
+
+def test_all_disconnect_stops_frpc_but_keeps_registry(mgr):
+    _add_visitor(mgr, "snk_1")
+    _add_visitor(mgr, "snk_2", 40002)
+    mgr.apply()
+    mgr._reload_result = (200, "")
+    assert mgr.disconnect_visitor("snk_1") == "ok"
+    assert mgr.disconnect_visitor("snk_2") == "ok"   # 末条：无启用项
+    assert not mgr.is_running()                      # apply 自动停 frpc
+    assert len(mgr.records()) == 2                   # 注册全部保留
+
+
+def test_disabled_survives_reload_and_reconnect_reenables(mgr, tmp_path):
+    _add_visitor(mgr, "snk_1")
+    mgr.apply()
+    mgr._reload_result = (200, "")
+    assert mgr.disconnect_visitor("snk_1") == "ok"
+    assert not mgr.is_running()
+    # 模拟重启：新 manager 从 TOML + 侧车合并恢复（disabled 态不复活隧道）
+    m2 = fr.RemoteSessionManager()
+    # 与 fixture 同口径打桩（真实实例不能起真实 frpc.exe）
+    m2._admin_port = 18888
+    m2._admin_password = "test-pass"
+    m2.restarts = []
+
+    def fake_restart(signature):
+        m2.restarts.append(signature)
+        m2._frpc_process = MagicMock()
+        m2._applied_signature = signature
+    m2._restart_frpc = fake_restart
+    m2._reload_result = (200, "")
+    m2._request_admin_api = lambda path, method="GET": m2._reload_result
+    assert "snk_1" in m2._visitors
+    assert m2._visitors["snk_1"]["disabled"]
+    assert not m2.is_running()
+    # 重连（ensure_visitor）自动重新启用并拉起 frpc
+    port, _cold = m2.ensure_visitor("snk_1")
+    assert not m2._visitors["snk_1"].get("disabled")
+    assert m2.is_running()
+    toml = _read_panel_toml(m2, tmp_path)
+    assert 'serverName = "snk_1"' in toml
+    # 侧车随之清空（无 disabled 记录时删除文件）
+    import os
+    assert not os.path.exists(os.path.join(str(tmp_path), fr._DISABLED_NAME))
+
+
+def test_delete_removes_even_disabled_and_cleans_sidecar(mgr, tmp_path):
+    _add_visitor(mgr, "snk_1")
+    mgr.apply()
+    mgr._reload_result = (200, "")
+    assert mgr.disconnect_visitor("snk_1") == "ok"
+    assert mgr.delete_visitor("snk_1") == "ok"
+    assert "snk_1" not in mgr._visitors
+    import os
+    assert not os.path.exists(os.path.join(str(tmp_path), fr._DISABLED_NAME))
+
+
 # ==================== ensure_visitor 冷启动标志口径 ====================
 
 def test_ensure_visitor_hot_reload_not_cold(mgr):

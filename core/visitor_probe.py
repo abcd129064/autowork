@@ -150,8 +150,11 @@ class VisitorProber(QObject):
             m = get_session_manager()
             if not m.is_running():
                 return {}
+            # 跳过 disabled（已断开保留注册）：隧道已摘除、端口未监听，
+            # 探测只会制造无意义的超时样本
             return {r["serverName"]: int(r.get("bindPort") or 0)
-                    for r in m.records() if r.get("bindPort")}
+                    for r in m.records()
+                    if r.get("bindPort") and not r.get("disabled")}
         except Exception:
             return {}
 
