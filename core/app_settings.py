@@ -123,6 +123,7 @@ KEY_DOMAIN = {
     "dpi_scale": "ui",
     "highlight_color": "ui",
     "log_highlight_rules": "ui",
+    "home_log_exclude_frp": "ui",
     # ---- paths ----
     "exe_dir": "paths",
     "videos_dir": "paths",

@@ -893,6 +893,14 @@ class SettingsHubPage(QWidget):
         win = self._win
         settings = win._load_settings()
         g = SettingGroup("日志高亮", parent)
+        # 2026-09-21 需求：首页日志工作台可排除 frp 日志（frpc 进程噪音量大）
+        g.addRow(SettingRow(
+            FluentIcon.REMOVE, "排除 frp 日志",
+            "首页日志工作台不再显示 [frpc] 进程输出与 [远程会话] 操作日志"
+            "（仅影响首页展示，不影响远程页状态与日志文件）",
+            make_switch(bool(settings.get("home_log_exclude_frp", False)),
+                        lambda v: win._save_settings(
+                            {"home_log_exclude_frp": bool(v)}))))
 
         tip = CaptionLabel(
             "规则按序匹配，命中行整行着色；开启「命中通知」后弹提示"

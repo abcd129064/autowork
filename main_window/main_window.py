@@ -787,8 +787,22 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         sb = self.ui.show_log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    # frp 相关日志前缀（core/frp_remote.log_message 发出）：
+    # [frpc] = frpc 进程 stdout/stderr 持续噪音；[远程会话] = frpc 启停/热重载等操作日志
+    _FRP_LOG_PREFIXES = ("[frpc]", "[远程会话]")
+
     def _append_log(self, text):
         """向日志控件追加文本，带批量合并 + 智能自动滚动 + 行数上限"""
+        # 设置开启「排除 frp 日志」时在批量缓冲入口直接丢弃（零渲染开销）；
+        # 读 _settings_cache 而非另存标志位：_save_settings 重建缓存后即时生效
+        if text.startswith(self._FRP_LOG_PREFIXES):
+            exclude = getattr(self, "_settings_cache", {}).get(
+                "home_log_exclude_frp")
+            if exclude is None:
+                # 缓存尚未建立（构造早期即有日志）：走门面兜底读一次
+                exclude = self._load_settings().get("home_log_exclude_frp")
+            if exclude:
+                return
         self._log_batch_buf.append(text)
         if not self._log_batch_timer.isActive():
             self._log_batch_timer.start()
