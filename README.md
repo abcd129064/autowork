@@ -4,6 +4,26 @@
 
 桌面主窗口为 FluentWindow 单窗口结构（2026-09 重构）：左侧导航 **工作台 / 运维管理 / 售后 / 跑视频 / 远程 / 工具**，底部 **设置 / 关于**。工作台为四列并列布局（会话列表 / 设备 / 日志文件 / 日志输出，列间可拖动）；运维/售后/跑视频/远程/工具均为「Pivot 二级导航 + 工作区」容器页，原独立面板窗口降层嵌入主窗口。
 
+## 文档导航
+
+```
+AGENTS.md              作业规范（硬约束：目录边界/命名/禁改清单/验证基线）
+README.md              ← 你在这里：项目门面、功能、配置、快速开始
+docs/README.md         文档索引 + 导读（「先读哪篇」）
+docs/ARCHITECTURE.md   架构、目录结构、数据组织（分层依赖/9 张表/双后端/配置域）
+docs/DEVELOPMENT.md    开发、测试与发布流程（解释器矩阵/测试矩阵/提交前检查）
+docs/DEPLOYMENT.md     构建、分发与生产部署（桌面端/Web v1+v2/自动更新/回滚）
+docs/DESIGN.md         设计指南、组件与视觉规范（设计令牌/QSS/组件选型/UI 陷阱）
+docs/API.md            接口契约（桌面端各层类/函数/信号 + Web API + 配置键路由）
+docs/CHANGELOG.md      版本演进记录（按阶段，newest 在上）
+docs/TODO.md           待办与未来计划（P0/P1/P2）
+design/README.md       设计资产索引（HTML 设计稿/logo v4 定稿/生成器/入库截图）
+tools/stress_test/README.md   压测套件说明
+```
+
+推荐阅读路径：新人 `docs/ARCHITECTURE.md` → `docs/DEVELOPMENT.md` → `docs/API.md`；
+改界面加读 `docs/DESIGN.md`；发版加读 `docs/DEPLOYMENT.md` + `docs/CHANGELOG.md`。
+
 ## 功能特性
 
 ### 核心业务
@@ -52,10 +72,12 @@
 - **多后端存储**：本地 SQLite / 远程 MySQL 双后端，跟随数据库设置开关切换；MySQL 模式下多人各自提交即落库，刷新可见
 - **数据库设置**：MySQL 连接配置、测试连接；启用后直接读写远程库，不可用时自动降级本地 SQLite
 
-### 远程页（左侧导航「远程」，Pivot 三视图）
-- **会话总览**：统计卡 + 隧道表（行内一键 SSH / SFTP / RDP / 断开 / 删除；SFTP 传输中删除有二次确认）
-- **P2P 访客**：XTCP visitor 注册管理（基于 frp 的 P2P 内网穿透；注册只持久化不自动拉起 frpc）
-- **隧道配置**：frpc 服务器配置与进程控制 + 实时日志终端
+### 远程页（左侧导航「远程」，Pivot 五视图）
+- **会话总览**：frps 概览卡 + 统计卡 + 隧道表（行内一键 SSH / SFTP / RDP / 断开 / 删除；SFTP 传输中删除有二次确认；断开保留注册）
+- **P2P 访客**：XTCP visitor 注册管理（基于 frp 的 P2P 内网穿透；注册只持久化不自动拉起 frpc；visitor 热重载；球桌号搜索带出 serverName）
+- **连接质量**：frps 在线感知 + visitor 打洞质量探测（每 30s 一轮）
+- **frps 代理**：frps 网页面板 Proxies 页同源清单（TCP/UDP/HTTP/… 八页签 + 端口/连接/流量/客户端版本/状态，只读）
+- **隧道配置**：frpc 服务器配置与进程控制 + frp 总开关 + 实时日志终端
 - **TCP 模式**：直连服务器，保存服务器列表
 - **SFTP 文件管理**：双面板文件浏览器，上传/下载/删除/重命名/创建，整目录递归传输，传输队列（暂停/恢复/取消）
 - **SSH 终端**：交互式 PTY + ANSI 彩色渲染，Tab 补全，命令历史，Windows Terminal 风格
@@ -139,15 +161,19 @@ autowork/
 │   ├── design_tokens.py       #   设计令牌（语义色/间距/字号单一来源）
 │   ├── flow_widgets.py        #   流式工具栏共享组件（FlowToolbarScrollArea）
 │   ├── frp_remote.py          #   frpc 管理、统一远程会话中心（RemoteSessionManager）
+│   ├── frps_admin.py          #   frps 管理 API 客户端（在线感知/概览/连接质量）
 │   ├── lean_table_delegate.py #   表格轻量委托（渲染性能）
 │   ├── local_web_server.py    #   本地售后面板 Web 服务（静态页 + 云端 API 反代）
 │   ├── log_rules.py           #   日志高亮规则引擎（原设置对话框迁入）
+│   ├── ops_link_delegate.py   #   运维表格链接/操作列委托
 │   ├── perf.py                #   性能开关中心（亚克力/动画/表格平滑滚动 + 中央补丁）
 │   ├── secrets.py             #   配置加解密（DPAPI，SSH/upload/AI 凭据）
 │   ├── switch_cn_patch.py     #   SwitchButton 中文「开/关」文本补丁
 │   ├── theme_qss.py           #   窗口级 QSS 应用（apply_window_qss/current_accent_hex）
+│   ├── updater.py             #   程序内自动更新（检查/下载/校验/staging/移交 updater）
 │   ├── utils.py               #   错误分类、自然排序、统一提示 show_info_bar
-│   └── version.py             #   版本号自动计算（主.次.git提交数）
+│   ├── version.py             #   版本号自动计算（主.次.git提交数，BASE=3.13）
+│   └── visitor_probe.py       #   XTCP visitor 打洞质量探测
 │
 ├── win_api/                   # Windows API 层（ctypes 声明）
 │   └── windows_api.py         #   显示设置/窗口嵌入/进程挂起恢复
@@ -232,13 +258,17 @@ autowork/
 │   └── light.qss              #   浅色主题
 │
 ├── docs/                      # 文档（分类索引见 docs/README.md）
-│   ├── API.md                 #   接口契约（桌面端各层 + Web API + 配置键路由）
-│   ├── Qt内联引导说明.md       #   conda base 下 import PySide6 前的引导写法（规范）
-│   ├── MySQL兜底降级设计.md    #   双后端降级/合并设计（已落地）
-│   ├── auto_update_research.md#   程序内自动更新方案（已落地 core/updater.py）
-│   └── ...                    #   架构方案、性能调查、外部接口清单、mermaid 图表
+│   ├── README.md              #   ★ 文档索引 + 导读（先读哪篇）
+│   ├── ARCHITECTURE.md        #   ★ 架构/目录/数据组织
+│   ├── DEVELOPMENT.md         #   ★ 开发/测试/提交流程
+│   ├── DEPLOYMENT.md          #   ★ 构建/发布/生产部署
+│   ├── DESIGN.md              #   ★ 设计指南/令牌/UI 陷阱
+│   ├── API.md                 #   ★ 接口契约（桌面端各层 + Web API + 配置键路由）
+│   ├── CHANGELOG.md           #   ★ 版本演进记录
+│   ├── TODO.md                #   ★ 待办与未来计划（P0/P1/P2）
+│   └── ...                    #   设计方案、性能调查、外部接口清单、mermaid 图表
 │
-├── tests/                     # pytest 离线单测（31 个 test_*.py，采集基线 404）
+├── tests/                     # pytest 离线单测（32 个 test_*.py，基线见 AGENTS.md §5.2）
 ├── resource/                  # 随包资源（比分条模板/字体/头像）
 ├── design/                    # 只读设计资产（索引见 design/README.md）
 │   ├── *.html                 #   界面设计稿（售后/远程页/工具页，多版本并存）
@@ -486,15 +516,18 @@ frp 服务器配置（设置 → 远程连接）：
 - **目录边界**：`tests/` 只放能被 pytest 离线收集的 `test_*.py`；真机/GUI 冒烟放
   `tools/smoke/`，性能与视觉对比放 `tools/perf/`，接口探测放 `tools/probe/`，
   生产部署放 `tools/deploy/`；一切临时产物落 `tools/_scratch/`（已 gitignore）
-- **测试**：`pytest tests/ -q`（采集基线 **404 collected / 4 errors**，4 个错误均为
-  环境缺依赖的既有状态，见 AGENTS.md §5）；GUI 冒烟
-  `python windows/tools/smoke_fluent_mainwindow.py`（offscreen，118 断言）；
+- **测试**：`pytest tests/ -q`（基线 **393 passed / 11 failed / 4 errors**，15 个
+  非通过项均为环境缺依赖的既有状态，见 AGENTS.md §5.2）；GUI 冒烟
+  `python windows/tools/smoke_fluent_mainwindow.py`（offscreen）；
   真机截图 `python tools/perf/shot_fluent_mainwindow.py`
 - **解释器**：PATH 上的 `python` 是 3.8-32bit 不可用，必须显式写全路径
   （GUI/采集用 `E:\ANACONDA\python.exe`，业务依赖最全的是 miniconda，见 AGENTS.md §5.1）
 - **提交前**：`python tools/check_refs.py --all` 必须 rc=0；新增文档要挂进
-  `docs/README.md`；改了目录结构要同步本节「项目结构」
-- **Web 端验证**：`web/aftersale_front/tools/verify_*.mjs` 系列脚本（产物预检 `verify_prod_layout.mjs`、本地仿真 `serve_dist_v2.mjs`、线上巡检 `verify_prod_deployed.mjs`）
+  `docs/README.md`；改了目录结构要同步本节「项目结构」；完整清单见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §4
+- **Web 端验证**：`web/aftersale_front/tools/verify_*.mjs` 系列 Playwright 脚本
+  （站点巡检 `verify_site.mjs`、图表 `verify_charts.mjs` / `verify_chart_click.mjs` /
+  `verify_rank_charts.mjs`、批量功能 `verify_batch_features.mjs` 等；本地仿真 v2 产物
+  `serve_dist_v2.mjs`；v2 专用 `web/vue-pure-admin/tools/verify_pure_admin.mjs`）
 - **部署脚本密码**：一律从环境变量 `AFT_SSH_PASS` 读取，不落盘、不写命令行历史可见位置
 
 ## 注意事项
@@ -507,9 +540,9 @@ frp 服务器配置（设置 → 远程连接）：
 - 主题样式文件位于 `styles/`，打包时通过 `AutoWork.spec` 的 `datas` 包含；FluentWindow 禁止窗口级 `setStyleSheet`（破坏 Mica）
 - 新增模块请遵循单向依赖链，避免循环导入
 - 连接日志自动落盘到 `logs/autowork_conn.log`（2MB 轮转）
-- 版本号由 `core/version.py` 自动计算（`BASE_VERSION.git提交数`，当前 BASE=3.11），无 git 环境时回退 `3.11.0`
+- 版本号由 `core/version.py` 自动计算（`BASE_VERSION.git提交数`，当前 BASE=3.13），无 git 环境时回退 `3.13.0`
 - 敏感配置（`ssh_pass` / `upload_pass` / `ai_api_keys` 等）经 DPAPI 加密后落盘，换机器或系统用户后需重新填写
-- 数据库表结构变更只改 `database/schema.py`（唯一 DDL 来源）：SQLite 自动迁移补列，MySQL 需手动执行生成的 `ALTER TABLE`
+- 数据库表结构变更只改 `database/schema.py`（唯一 DDL 来源）：SQLite 与 MySQL 两侧均自动迁移补列
 
 ## 许可证
 

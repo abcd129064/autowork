@@ -5,6 +5,10 @@
 > 评审范围：AutoWork（PySide6 + Fluent-Widgets 桌面应用），重点：代码拆分/合并需求、SQL 代码专项
 > 依据：真实源码静态分析（文件路径/行数/函数名为证），测试基线：`tests/` 全量 **84 passed**（`pytest.ini` + venv 实测）
 > 约束：本次仅调研+出方案，**未修改任何源码**，未运行任何改动数据库的命令
+>
+> **状态（2026-09-23 核对）：T01-T05 全部落地并通过 QA（见第 10 节交付摘要）**，
+> 本文转为历史评审记录。遗留 3 项非阻断建议（`get_latest_kd_status` tie-break、
+> `tests/_tmp_diag.py` 清理、UI 改动分次提交）已并入 [TODO.md](TODO.md) 或已处理。
 
 ---
 

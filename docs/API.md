@@ -49,13 +49,11 @@ SSH/SFTP 连接统一文件日志 + Qt 消息处理器。
 
 **模块级单例**：`conn_logger = ConnLogger()`
 
-#### 函数 `qt_message_handler`
+#### 模块级函数
 
-```python
-def qt_message_handler(msg_type, context, message) -> None
-```
-
-Qt 消息处理器，将 Warning/Critical/Fatal 级别消息落盘。通过 `qInstallMessageHandler()` 注册。
+| 函数 | 说明 |
+|------|------|
+| `qt_message_handler(msg_type, context, message)` | Qt 消息处理器：将 Warning/Critical/Fatal 级别消息落盘；经 `qInstallMessageHandler` 注册 |
 
 ---
 
@@ -130,6 +128,15 @@ import core.acrylic_patch  # noqa: F401
 | `patch_dialog_animation()` | 拦截 MaskDialogBase 弹窗淡入/淡出：动画关闭时直接显示（规避整窗离屏渲染卡顿） |
 | `patch_table_hover_repaint()` | 拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代库默认整视口重绘，≈1/23 面积） |
 
+#### 轻量表格委托（LeanTableDelegate 开关，配 `core.lean_table_delegate`）
+
+| 函数 | 说明 |
+|------|------|
+| `is_lean_delegate_enabled()` | 是否启用轻量表格委托（**默认开启**；关闭即回退 qfluentwidgets 自带委托） |
+| `set_lean_delegate_enabled(enabled)` | 设置轻量委托开关并持久化；已打开的表格一并切换（即时生效） |
+| `patch_lean_table_delegate()` | 新建的 qfluentwidgets 表格自动挂轻量委托（幂等，启动时调用一次） |
+| `apply_lean_delegate_globally()` | 按当前开关刷新所有已存在表格的委托（设置页切换后立即生效） |
+
 ---
 
 ### core.app_settings
@@ -178,6 +185,149 @@ import core.acrylic_patch  # noqa: F401
 | `start_local_web_server(settings)` | `(dict) -> dict` | 按 `settings['local_web']`（缺省 enabled=True, port=8787）启动，幂等；返回 `{started, url, ...}` |
 | `stop_local_web_server()` | `()` | 停止服务（程序退出时由 atexit 自动调用） |
 
+---
+
+### core.frps_admin
+
+frps admin API 感知客户端（frps 0.65 v1 端点，**只读**，二期 P0）。权威数据源 `GET /api/proxy/xtcp`：现场 frpc 注册 xtcp proxy 且控制连接存活 ⇔ status=online。另经 `GET /api/serverinfo`（概览）与 `GET /api/proxy/{type}` ×8 + `GET /api/clients`（frps 网页面板 Proxies 页同源清单，best-effort）扩展展示。
+
+**状态口径**（`online()` 返回值）：`online`（名单内且在线，放行建会话）/ `offline`（名单内但掉线）/ `unregistered`（名单内无此 snk）；感知不可用返回 `None`——调用方必须按「未知」回退纯本地行为，绝不阻塞连接。
+
+**设计约束**：纯 GET 零写端点；连续 3 次失败熔断静默 60s（只停请求不清缓存，缓存超 TTL 90s 后查询自动降级为未知）；凭据走 credentials 域（DPAPI），仅内存持有；HTTP 强制空 `ProxyHandler` 直连（绕本机调试代理）。
+
+#### 类 `FrpsAdminClient`
+
+frps 感知客户端（进程级单例，主线程 QTimer 周期刷新；感知 HTTP 一律在后台线程执行，绝不阻塞 GUI）。
+
+**信号**：`proxies_changed` dict（xtcp 名单刷新成功）、`serverinfo_changed` object（概览，失败发 None）、`all_proxies_changed` dict（全类型清单）、`channel_state_changed` str（ok/unreachable/unauthorized/error/unconfigured）、`refresh_finished` str（request_refresh 完成回执，queued 投递主线程供 UI 一次性反馈）。
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `start()` | `()` | 启动周期感知（配置缺失/关闭时状态 unconfigured，不报错） |
+| `stop()` | `()` | 停止周期感知 |
+| `restart_timer()` | `()` | 配置面板改 URL/凭据/间隔后热生效（清缓存重读配置并立即感知一次） |
+| `request_refresh()` | `()` | 后台线程执行 refresh（定时器周期与「立即感知/测试连接」统一入口；完成经 refresh_finished 回执） |
+| `refresh()` | `() -> str` | 同步拉取 xtcp 名单并返回通道状态（熔断静默期内直接返回当前状态不发请求） |
+| `online(snk)` | `(str) -> str?` | 感知 snk 在线态 online/offline/unregistered；不可用返回 None |
+| `info(snk)` | `(str) -> dict?` | proxy 明细（curConns/lastStartTime/流量），未感知到返回 None |
+| `serverinfo()` | `() -> dict?` | frps 概览（version/bindPort/curConns/clientCounts/流量/proxyTypeCounts） |
+| `all_proxies()` | `() -> dict` | 全类型代理清单 {type: [proxy,…]}（proxy 字段含 name/user/clientID/status/conf 等）；过期返回空 dict |
+| `client_version(client_id)` | `(str) -> str` | proxy.clientID → frpc 版本（网页面板 ClientVersion 列同源） |
+| `snapshot()` | `() -> dict` | UI 一次性快照（state/fresh/age_sec/proxies/serverinfo，总览表与球桌页富集用） |
+| `configured()` | `() -> bool` | 是否已配置 base_url |
+
+**模块级单例**：`get_frps_client()`（懒建；首次获取不自动 start，由 UI 初始化显式启动）。
+
+---
+
+### core.visitor_probe
+
+XTCP visitor 连接质量探测（二期 P1）：向 visitor 本地 bindPort 发起 TCP connect 计时，直连场景下该 RTT 就是 SSH 建连体感的忠实指标（frps 对 visitor 侧流量不可见）。后台守护线程串行轮询（默认 30s 一轮 / 单次 connect 超时 800ms，`frp_quality` 配置可调）；连续 N 次超时（默认 3）判「bad」（在线但不可达，区分于 frps 离线）；**冷洞首拍例外**（2026-09-23 P1-3）：无样本隧道首轮用 3s 长超时给首次打洞留时间，其结果不进样本、不计连续失败（`warmed` 标记保证只此一次）；环形缓冲每隧道 120 点（约 1 小时），仅内存不落库。评级阈值：≤60ms 优 / ≤150ms 良 / ≤300ms 一般。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `tcp_connect_rtt_ms(host, port, timeout_ms)` | `(str, int, int) -> float?` | TCP connect 计时 ms；失败/超时返回 None（模块级：单测 monkeypatch 注入，不碰真实网络） |
+
+#### 类 `VisitorProber`
+
+visitor RTT 探测调度器（进程级单例）。targets provider 约定：可调用 → {snk: bindPort}（默认接 `RemoteSessionManager`：仅 frpc 运行中且已注册未禁用的 visitor）。
+
+**信号**：`sample` (snk, rtt_ms 或 None=超时)、`changed`（一轮探测完成，UI 刷新触发）、`verdict_changed` snk（判定翻转 ok↔bad 时告警刷新）。
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `start()` / `stop()` | `()` | 启停后台探测线程（stop join 最多 2s） |
+| `run_once()` | `()` | 串行探完一轮（探测线程定时调用；UI「立即探测」可直接调，与调度线程启停无关；隧道消失自动清理其样本） |
+| `stats(snk)` | `(str) -> dict` | 单隧道质量快照：verdict/grade/avg_ms/p95_ms/samples/ok/recent |
+| `verdict(snk)` | `(str) -> str` | 当前判定 ok/bad/unknown |
+
+**模块级单例**：`get_prober()`。
+
+> 坑：探测调度线程只 emit Qt 信号（queued 到主线程），不触碰任何控件；prewarm（开机预热打洞）**不复用**本模块 `run_once`——探测 800ms 超时是 RTT 口径，首洞 1~3s 会整轮误记超时污染质量页。
+
+---
+
+### core.updater
+
+自动更新核心逻辑（纯逻辑层，无 Qt 依赖，可单测；线程与信号适配在 `workers/update_worker.py`，UI 编排在 `main_window/update_mixin.py`）。链路：检查 → 下载 → 校验 → 解压 staging → 拉起外部 updater → 主程序退出 → updater 三向原子换位 → 重启 → 回执消费（`update_result.log` 防死循环绝不重试）。SOP 见 docs/auto_update_research.md §7.4。
+
+**关键常量**：`DEFAULT_UPDATE_BASE_URL`（生产更新源）、`CHANNEL_AUTOWORK` / `CHANNEL_AFTERSALE`（渠道名）、`PENDING_FLAG`（`.update-pending` 安装发起标记）、`RESULT_LOG`（updater 回执）、`STAGING_DIRNAME`（`_update_staging`）、`EXCLUDE_DIRS`（更新覆盖时排除的用户数据目录 config/logs/database）。
+
+| 函数 | 说明 |
+|------|------|
+| `parse_version(v)` | 解析 `3.11.273-branch` → (3,11,273)；用 search 容忍 `v` 前缀（match 会解析成 (0,0,0) 致**永不更新**）；失败返回 (0,0,0) |
+| `is_newer(remote, local)` | 远端版本是否新于本地 |
+| `fetch_latest(base_url, channel, timeout=8.0)` | 拉 latest.json 抽取 channel 条目（兼容 channels/扁平两形态）；⚠️ 校验响应确实是 JSON——nginx SPA try_files 回退会以 200+text/html 返回首页 |
+| `check_update(base_url, local_version, channel)` | 有新版本返回 latest 条目（附加 `_resolved_url` / `_remote_version`），否则 None |
+| `sha256_of_file(path, chunk=256KB)` | 分块计算文件 sha256 |
+| `download_file(url, dest, expect_sha256="", timeout=20.0, progress_cb=None, should_stop=None)` | 流式下载到 `.part` → 校验 sha256 → 原子改名；`should_stop` 回调返回 True 时中止（删 .part 抛 InterruptedError）；⚠️ Content-Type 含 HTML 即抛错（拦截 SPA 回退假包） |
+| `verify_and_extract_zip(zip_path, dest_dir)` | zip 完整性校验 + 防 zip-slip 越界路径 + 解压；坏包抛 ValueError |
+| `flatten_extract_root(dest_dir, main_exe="")` | onedir zip 常带一层顶级目录，返回真正含主 exe 的安装根 |
+| `manifest_diff(files, local_root)` | 增量清单与本地 sha256 对比，返回需下载条目 |
+| `download_incremental(base_url, files, staging_dir, progress_cb=None, should_stop=None)` | 逐文件下载到 staging（保持相对路径），进度为跨文件全局累计 |
+| `build_bat(install_dir, staging_dir, main_exe, wait_pid, mode, result_log="", new_dir="", bak_dir="")` | 渲染 updater bat（所有路径生成期内联，运行期零参数零引号风险；外部命令全部 System32 绝对路径防 PATH 污染；vbs 引号用 Chr(34) 拼） |
+| `write_updater_scripts(work_dir, install_dir, staging_dir, main_exe, wait_pid, mode)` | 写 update.bat + launcher.vbs（GBK 落盘；bat 放 %TEMP% 不进安装目录——整目录 rename 不能把 updater 卷进去） |
+| `mark_update_pending(app_dir, info)` | 写 `.update-pending` 安装发起标记（重启后消费） |
+| `consume_update_receipt(app_dir)` | 启动时消费回执；无 pending 返回 None；有 pending 无回执（updater 没跑完）返回失败并清理——**绝不重试安装**，防「每次启动重试失败」死循环 |
+| `launch_updater(app_dir, staging_dir, main_exe, mode="full", pending_info=None, pid=None, work_dir="")` | 写标记 → 生成脚本 → vbs 隐藏拉起（失败回退直跑 bat 闪黑窗）；调用方成功后应尽快退出主程序 |
+| `launch_updater_and_exit(...)` | `launch_updater` 兼容封装（拉起后返回 True） |
+| `resolve_mode(entry, local_version)` | full/incremental 决策：本地低于 `min_version` 时增量强制降级全量 |
+| `resolve_package_url(base_url, entry)` | package.url → 绝对下载地址 |
+| `prepare_update(base_url, entry, app_dir, main_exe="", progress_cb=None, should_stop=None, local_version="")` | 下载 + 校验 + 解压 staging（full/incremental）；staging 放安装目录同级（同卷 move 才瞬时）；失败清理脏 staging，zip 保留复用 |
+| `get_install_info()` | {app_dir, main_exe, frozen, local_version} |
+| `get_update_base_url(settings_get=None)` | 更新源地址（`update_base_url` 配置优先，默认生产地址） |
+
+---
+
+### core.log_rules
+
+日志高亮规则：默认值与编译函数。自原 settings_dialog 迁移（2026-09-07 项目清理）。
+
+**常量**：`DEFAULT_LOG_RULES` —— 默认规则列表 `[{name, pattern, color, notify}]`：「错误」（红，通知）/「警告」（橙，静默）/「返回」「加分」「add」（旧版硬编码关键词迁移，橙，静默）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `compile_log_rules(raw_rules)` | `(list) -> list` | 把规则配置编译为可匹配对象列表（非法正则跳过不抛错） |
+
+---
+
+### core.lean_table_delegate
+
+轻量表格委托 LeanTableDelegate（滚动性能优化 P0-1）：保留 qfluentwidgets 表格全部视觉，仅替换文本绘制路径（去掉逐 cell 控件级绘制开销），大表格滚动帧率显著提升。开关与全局挂载见 `core.perf` 轻量委托组（`patch_lean_table_delegate` 启动时幂等挂载，设置页可即时切换回退）。
+
+#### 类 `LeanTableDelegate`
+
+继承 qfluentwidgets `TableItemDelegate`，仅覆写 `paint`：文本走原生 QStyle 绘制路径，勾选列/富文本语义不变；配合 `core/ops_link_delegate.py` 的 OpsLeanDelegate 提供操作列链接形态。
+
+---
+
+### core.ops_link_delegate
+
+表格「操作列」文字链接委托：单元格内自绘多段可点击文本（零子控件，rebuild 无 cellWidget 卡顿问题）。**常量**：`LINKS_ROLE`（UserRole+2，链接定义存 item data）。
+
+#### 类 `OpsLeanDelegate(_OpsLinkMixin, LeanTableDelegate)` / `OpsPlainDelegate(_OpsLinkMixin, TableItemDelegate)`
+
+- `OpsLeanDelegate`：轻量文本绘制 + 操作列文字链接（**默认形态**）
+- `OpsPlainDelegate`：库委托绘制 + 操作列文字链接（轻量委托关闭时的回退形态）
+- `_OpsLinkMixin`（内部混入）：`init_ops_links` 绑定点击回调、`eventFilter` 悬停反馈与吞双击、`editorEvent` 命中判定、`teardown_ops_links` 委托被取代时摘过滤器防残留实例响应
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `install_ops_links(table, handler)` | `(TableWidget, callable) -> delegate` | 把表格当前委托换成带操作链接的同族委托，返回新委托 |
+| `rebuild_ops_delegate(table)` | `(TableWidget)` | `core.perf` 全局刷新委托时调用（保持链接能力不丢） |
+
+---
+
+### core.switch_cn_patch
+
+SwitchButton 状态文本中文化补丁：qfluentwidgets SwitchButton 默认状态文本为英文 "On"/"Off"，本补丁统一改为中文「开/关」。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `patch_switch_cn_text()` | `()` | 状态文本中文化（幂等，重复调用无害；main.py 启动时调用） |
+
+---
+
 ### core.frp_remote
 
 frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话协调）。
@@ -193,15 +343,26 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 |------|------|------|
 | `log_message` | `Signal(str)` | frpc 日志转发（主窗口日志区订阅） |
 | `frpc_state_changed` | `Signal(bool)` | frpc 运行状态变化 |
+| `tunnel_issue_changed` | `Signal(str, str)` | (snk, "lost"/"ok") 隧道失联/恢复翻转（P2-5，`report_tunnel_issue` 上报去重后发出，联动已开会话面板提示条） |
+| `prewarmed` | `Signal(list)` | 预热成功的 snk 列表（预热线程 queued 回主线程，标记 `prewarmedAt` 仅内存态） |
 
 | 方法 | 说明 |
 |------|------|
-| `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪 |
+| `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪；就绪等待为**端口监听轮询**（P2-4：200ms 间隔、8s 上限，就绪即开，不再固定延时） |
 | `disconnect_visitor(server_name)` | 隧道面板「断开连接」：仅 frpc 运行中生效（返回 ok/not_running/not_found/error），先关相关会话再把 visitor 置 `disabled` 态并 apply 摘除隧道、释放端口；**注册与持久化保留**（记录落 `frpc_xtcp_disabled.json` 侧车，不进 frpc TOML），重新连接自动恢复启用，绝不自动启动 frpc |
 | `delete_visitor(server_name)` | 隧道面板「删除 snk」：从注册表与持久化文件（含 disabled 侧车）彻底移除，frpc 未运行时也可执行且不启动 frpc |
+| `active_count()` | 启用中（非 disabled）隧道数——静默预连必要性判定 |
+| `autostart()` | 开机静默预连：自动拉起 frpc 恢复启用隧道（返回 started/restarted/reloaded/skipped_running/skipped_no_tunnel/failed），绝不弹窗抛错；失败自动**有界重试**（P1-2：60s/120s 各一次，成功清零并补预热）；配置键 `frp_autostart`（misc 域，默认开） |
+| `prewarm_async()` | 预热打洞：daemon 线程对全部启用隧道 bindPort 串行 TCP connect（3s 长超时，与 RTT 探测 800ms 口径分离，不污染质量样本）；成功经 `prewarmed` 信号回主线程标记 `prewarmedAt`（仅内存，frpc 重启即失效）；XTCP 下 connect=打洞+握手完成，首条真实 SSH 不再承担打洞延时 |
+| `prewarm_when_ready()` | frpc 启动后用：轮询全部 bindPort 监听就绪（200ms 间隔、8s 上限）后立即预热，替代固定 3s 等待 |
+| `wait_ports_ready(ports, on_ready, on_deadline=None)` | 轮询本地端口监听就绪：全部就绪立即回调，超上限走 `on_deadline`（缺省落 on_ready） |
+| `report_tunnel_issue(snk, lost)` | 感知端（remote_hub 总览刷新）上报失联/恢复，状态翻转才发 `tunnel_issue_changed` |
+| `notify_tunnel_issue(snk, state)` | 失联/恢复联动：对该端口上已打开的 SSH/SFTP/RDP 面板展示/撤除提示条（`windows/remote_session/tunnel_notice`） |
 | `sessions_on_port(port)` / `is_transferring_on_port(port)` | 查指定本地端口上的会话面板 / 是否有 SFTP 传输进行中 |
 | `close_sessions_on_port(port, reason)` / `close_all_sessions(reason)` | 优雅关闭指定端口/全部会话面板（panel.shutdown()），返回关闭数量 |
 | `shutdown()` | 停止 frpc 并关闭全局会话窗口（主窗口 closeEvent 调用） |
+
+**P1-1 意外退出自愈**：frpc 崩溃/被回收且注册表仍有启用隧道时，按 5s→30s→2min 退避自动重启（`_on_frpc_finished` → `_schedule_recover` → `_recover_frpc`）；上次进程健康运行 ≥60s 即清零失败计数（长跑偶崩仍秒级首档恢复），三档用尽放弃到手动路径。恢复成功自动补预热。
 
 #### 类 `FrpRemoteBridge(QObject)`
 
@@ -233,7 +394,7 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 
 | 常量/函数 | 签名 | 说明 |
 |-----------|------|------|
-| `BASE_VERSION` | `str = "3.11"` | 主.次版本（手工维护，新增功能集 → 次版本 +1） |
+| `BASE_VERSION` | `str = "3.13"` | 主.次版本（手工维护，新增功能集 → 次版本 +1） |
 | `APP_VERSION` | `str` | 模块级缓存完整版本号（导入时计算一次） |
 | `get_branch_name()` | `() -> str` | 当前分支名；detached HEAD / 非 git 环境返回空串 |
 | `get_commit_count()` | `() -> int` | 当前分支累计提交次数；失败返回 0 |
@@ -291,7 +452,11 @@ AI 厂商注册表：统一各厂商的 OpenAI 兼容接入参数（DeepSeek / �
 
 所有 Worker 均继承 `QThread`，通过 Qt 信号与 GUI 线程通信。
 
-### TCPWorker
+### workers.network_workers
+
+SSH/SFTP/TCP 底层异步连接 Worker 集（无 UI，供 ssh_terminal / SFTPWindow / 远程面板等调用）；连接类 Worker 继承内部基类 `_BaseConnectWorker`（可重试错误自动重试 `RETRY_MAX` 次、间隔递增）。
+
+#### 类 `TCPWorker`
 
 TCP/SSH 连接验证工作线程。
 
@@ -299,10 +464,7 @@ TCP/SSH 连接验证工作线程。
 TCPWorker(host: str, port: int, username: str, password: str)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result_ready` | `Signal(str)` | 连接成功，返回 `hostname && whoami` 输出 |
-| `error` | `Signal(str)` | 连接失败，返回中文错误描述 |
+**信号**：`result_ready` Signal(str)——连接成功，返回 `hostname && whoami` 输出；`error` Signal(str)——连接失败，返回中文错误描述。
 
 | 方法 | 说明 |
 |------|------|
@@ -311,7 +473,7 @@ TCPWorker(host: str, port: int, username: str, password: str)
 
 ---
 
-### SFTPConnectWorker
+#### 类 `SFTPConnectWorker`
 
 异步建立 paramiko.Transport 连接（含自动重试）。
 
@@ -319,10 +481,7 @@ TCPWorker(host: str, port: int, username: str, password: str)
 SFTPConnectWorker(host: str, port: int, username: str, password: str)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `connected` | `Signal(object)` | 成功，发射 `paramiko.Transport` 对象 |
-| `error` | `Signal(str)` | 最终失败，返回中文错误 |
+**信号**：`connected` Signal(object)——成功，发射 paramiko.Transport 对象；`error` Signal(str)——最终失败，返回中文错误。
 
 | 方法 | 说明 |
 |------|------|
@@ -330,7 +489,7 @@ SFTPConnectWorker(host: str, port: int, username: str, password: str)
 
 ---
 
-### SFTPListWorker
+#### 类 `SFTPListWorker`
 
 异步 SFTP 列目录（使用 `listdir_attr` 单次网络往返）。
 
@@ -338,14 +497,11 @@ SFTPConnectWorker(host: str, port: int, username: str, password: str)
 SFTPListWorker(transport: paramiko.Transport, remote_path: str)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result` | `Signal(str, list)` | (路径, 条目列表)。条目为 dict：`{name, is_dir, size, mtime, perm}` |
-| `error` | `Signal(str)` | 列目录失败 |
+**信号**：`result` Signal(str, list)——(路径, 条目列表)，条目为 dict：`{name, is_dir, size, mtime, perm}`；`error` Signal(str)——列目录失败。
 
 ---
 
-### SFTPOperationWorker
+#### 类 `SFTPOperationWorker`
 
 异步 SFTP 文件操作（上传/下载/删除/创建目录/重命名/创建文件），支持进度、暂停、取消。
 
@@ -356,11 +512,7 @@ SFTPOperationWorker(conn_params: tuple, operation: str,
 
 **operation 取值**：`'upload'` | `'download'` | `'delete'` | `'rmdir'` | `'mkdir'` | `'rename'` | `'create_file'`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `success` | `Signal(str)` | 操作成功消息 |
-| `error` | `Signal(str)` | 操作失败消息 |
-| `progress` | `Signal(int, int)` | (已传输字节, 总字节) |
+**信号**：`success` Signal(str)——操作成功消息；`error` Signal(str)——操作失败消息；`progress` Signal(int, int)——(已传输字节, 总字节)。
 
 | 方法 | 说明 |
 |------|------|
@@ -370,7 +522,7 @@ SFTPOperationWorker(conn_params: tuple, operation: str,
 
 ---
 
-### SFTPDirTransferWorker
+#### 类 `SFTPDirTransferWorker`
 
 异步 SFTP 目录递归传输（整目录上传/下载）。
 
@@ -381,11 +533,7 @@ SFTPDirTransferWorker(conn_params: tuple, operation: str,
 
 **operation 取值**：`'upload_dir'` | `'download_dir'`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `success` | `Signal(str)` | 传输完成（含文件数统计） |
-| `error` | `Signal(str)` | 传输失败/部分失败 |
-| `progress` | `Signal(int, int)` | (已传输字节, 总字节) |
+**信号**：`success` Signal(str)——传输完成（含文件数统计）；`error` Signal(str)——传输失败/部分失败；`progress` Signal(int, int)——(已传输字节, 总字节)。
 
 | 方法 | 说明 |
 |------|------|
@@ -393,7 +541,7 @@ SFTPDirTransferWorker(conn_params: tuple, operation: str,
 
 ---
 
-### SSHConnectWorker
+#### 类 `SSHConnectWorker`
 
 异步建立 SSH 连接（保持 client 存活，含自动重试）。
 
@@ -401,10 +549,7 @@ SFTPDirTransferWorker(conn_params: tuple, operation: str,
 SSHConnectWorker(host: str, port: int, username: str, password: str)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `connected` | `Signal(object)` | 成功，发射 `paramiko.SSHClient` 对象 |
-| `error` | `Signal(str)` | 最终失败 |
+**信号**：`connected` Signal(object)——成功，发射 paramiko.SSHClient 对象；`error` Signal(str)——最终失败。
 
 | 方法 | 说明 |
 |------|------|
@@ -412,7 +557,7 @@ SSHConnectWorker(host: str, port: int, username: str, password: str)
 
 ---
 
-### SSHExecWorker
+#### 类 `SSHExecWorker`
 
 异步执行 SSH 命令（exec_command 模式，无持久 shell）。
 
@@ -420,11 +565,7 @@ SSHConnectWorker(host: str, port: int, username: str, password: str)
 SSHExecWorker(client: paramiko.SSHClient, command: str)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `output` | `Signal(str)` | 标准输出内容 |
-| `error` | `Signal(str)` | 标准错误 / 异常信息 |
-| `done` | `Signal()` | 命令执行完毕 |
+**信号**：`output` Signal(str)——标准输出内容；`error` Signal(str)——标准错误 / 异常信息；`done` Signal()——命令执行完毕。
 
 ---
 
@@ -442,7 +583,7 @@ SSHExecWorker(client: paramiko.SSHClient, command: str)
 | `CATEGORY_DIRS` | `dict` | 中文分类 → 服务器目录名（正常=normal / 操作=except / 待处理=pending / 使用=operation / 精度=accuracy / 问题=already / 废弃=rubbish） |
 | `DIR_CATEGORIES` | `dict` | `CATEGORY_DIRS` 的反向映射 |
 
-### TableFetchWorker
+#### 类 `TableFetchWorker`
 
 拉取球桌列表（wechat2-billiard.newbv.cn，无认证，pageSize=1000 一次拉完写入本地库）。
 
@@ -450,12 +591,9 @@ SSHExecWorker(client: paramiko.SSHClient, command: str)
 TableFetchWorker()
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result_ready` | `Signal(list)` | 全量球桌数据列表 |
-| `error` | `Signal(str)` | 错误信息 |
+**信号**：`result_ready` Signal(list)——全量球桌数据列表；`error` Signal(str)——错误信息。
 
-### SnookerOmFetchWorker
+#### 类 `SnookerOmFetchWorker`
 
 拉取接口1（xqzg.newbv.cn）设备状态数据，Session + CSRF 认证，401/403 自动重登录重试一次。响应数据在 `results` 键。
 
@@ -464,12 +602,9 @@ SnookerOmFetchWorker(file_path="", page=1, pagesize=1000,
                      username=None, password=None)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result_ready` | `Signal(dict)` | 完整 JSON（含 total / results / summary_row） |
-| `error` | `Signal(str)` | 错误信息 |
+**信号**：`result_ready` Signal(dict)——完整 JSON（含 total / results / summary_row）；`error` Signal(str)——错误信息。
 
-### DevicesFetchWorker
+#### 类 `DevicesFetchWorker`
 
 拉取接口2（kd.newbv.cn:30005）设备状态数据，JWT Bearer Token 认证（登录端点 `/api/getAccessToken/`），401 自动重登录重试一次。响应数据在 `lists` 键，`file_path` 参数为日期分区（如 `2026/08/02`）。
 
@@ -478,12 +613,9 @@ DevicesFetchWorker(file_path="", page=1, pagesize=1200,
                    username=None, password=None)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result_ready` | `Signal(dict)` | 完整 JSON（含 lists） |
-| `error` | `Signal(str)` | 错误信息 |
+**信号**：`result_ready` Signal(dict)——完整 JSON（含 lists）；`error` Signal(str)——错误信息。
 
-### MigrateImageWorker
+#### 类 `MigrateImageWorker`
 
 异步执行图像分类迁移，按数据源分派端点与认证（2026-08-22 修复：此前误调 kd 端点导致 xqzg 假成功）：
 
@@ -502,13 +634,9 @@ MigrateImageWorker(file_path, device_code, file_names,
 - `src_category` / `dest_category`：中文分类名（见 `CATEGORY_DIRS`）
 - `source`：`"kd"`（默认）/ `"xqzg"`，决定端点与认证方式；面板调用时传 `self._active_source()`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `success` | `Signal(int)` | 成功迁移的图片数量 |
-| `error` | `Signal(str)` | 错误信息（含失败文件列表摘要） |
-| `progress` | `Signal(int, int)` | (当前进度, 总数) |
+**信号**：`success` Signal(int)——成功迁移的图片数量；`error` Signal(str)——错误信息（含失败文件列表摘要）；`progress` Signal(int, int)——(当前进度, 总数)。
 
-### LoginTestWorker
+#### 类 `LoginTestWorker`
 
 测试 API 登录是否可用（管理设置页「测试连接」按钮）。
 
@@ -517,12 +645,9 @@ LoginTestWorker(api_name, username=None, password=None)
 # api_name: "api1"（xqzg）或 "api2"（kd）
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `success` | `Signal(str)` | 成功提示 |
-| `error` | `Signal(str)` | 失败原因 |
+**信号**：`success` Signal(str)——成功提示；`error` Signal(str)——失败原因。
 
-### HealthUpdateWorker
+#### 类 `HealthUpdateWorker`
 
 异步重置设备健康度（健康度告警面板「一键归零」）：逐台 POST xqzg `/api/snooker_om/update_health/` 把服务端健康度写为 4000（接口默认值，等于清零告警）。Session + CSRF 认证，401/403 自动重登重试一次。**成功判定**：HTTP 200 且响应体 `code == 200`（只看状态码会假成功）。
 
@@ -531,12 +656,29 @@ HealthUpdateWorker(items, username=None, password=None)
 # items: [(球桌名, device_code), ...]
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result_ready` | `Signal(list, list)` | (成功球桌名列表, 失败列表 `[(球桌名, 失败描述), ...]`) |
-| `error` | `Signal(str)` | 账号未配置 / 登录失败等整体错误 |
+**信号**：`result_ready` Signal(list, list)——(成功球桌名列表, 失败列表 [(球桌名, 失败描述), …])；`error` Signal(str)——账号未配置 / 登录失败等整体错误。
 
-### SingleVideoWorker
+#### 类 `TodeskToggleWorker`
+
+ToDesk 远程开关 Worker（球桌管理 todesk 开关列数据源）：登录 → `csrftoken` → form POST `value/`（datacode=**设备编码**）→ 轮询 `status/?keyword=桌号` 确认。权威显示口径=服务端 value/ 收到即记录的 `todesk_action`（'20' 开 / '80' 关）；`todesk_status` 依赖设备上报不可信，仅作兜底。
+
+```python
+TodeskToggleWorker(device_code, table_id, turn_on, parent=None)
+# turn_on: True（开，datavalue=20）/ False（关，datavalue=80）；凭据自动从 api1 读取
+```
+
+**信号**：`sent_ok`——指令已被服务端受理；`confirmed` 桌号——轮询确认开关已生效；`unconfirmed` 桌号——指令已下发但轮询未确认（以 todesk_action 口径显示）；`error` str——登录失败/网络异常。
+
+> ⚠️ `value/` 三坑：必须 form 提交（JSON 返回 415）；errorcode 嵌在 data 里；datacode 传 todesk_id 会报「设备号没找到」。
+
+#### 模块级函数（todesk 辅助）
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `parse_value_response(data)` | `(dict) -> tuple` | 解析 value/ 响应，返回 (ok, errtext)——⚠️ errorcode 嵌在 data 里，只看顶层会假成功 |
+| `pick_todesk_status(rows, table_id, device_code)` | `(list, str, str) -> str?` | 从 status/ 返回行中挑出目标设备的 todesk_status 原始值（未命中 None） |
+
+#### 迁移说明：SingleVideoWorker → workers/single_video_worker.py
 
 > 2026-09 起迁移至独立模块 [workers/single_video_worker.py](#workerssingle_video_workerpy-单杆视频生成-worker)（信号签名不变）。
 
@@ -546,11 +688,7 @@ HealthUpdateWorker(items, username=None, password=None)
 SingleVideoWorker(params: dict)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `line` | `Signal(str)` | 处理进度日志（追加到对话框输出区） |
-| `finished_ok` | `Signal(str)` | 生成成功，返回视频路径 |
-| `error` | `Signal(str)` | 生成失败，返回错误首行 |
+**信号**：`line` Signal(str)——处理进度日志（追加到对话框输出区）；`finished_ok` Signal(str)——生成成功，返回视频路径；`error` Signal(str)——生成失败，返回错误首行。
 
 ---
 
@@ -568,7 +706,7 @@ SingleVideoWorker(params: dict)
 | `fuzzy_match_device_dir(videos_dir, candidates)` | `(str, list) -> tuple` | 模糊搜索本地设备目录（命名与球桌号不一致时兜底）：店号前缀相同 + 后缀归一化匹配 |
 | `resolve_device_dir(videos_dir, candidates)` | `(str, list) -> tuple` | 收集入口的设备目录三级解析（C4）：精确目录 → 球桌号变化匹配 → 模糊搜索 |
 
-### FileCopyWorker
+#### 类 `FileCopyWorker`
 
 异步文件拷贝（`shutil.copy2` 的线程替代）。
 
@@ -576,12 +714,9 @@ SingleVideoWorker(params: dict)
 FileCopyWorker(src, dst)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `copy_finished` | `Signal()` | 拷贝成功完成 |
-| `error` | `Signal(str)` | 拷贝失败 |
+**信号**：`copy_finished`——拷贝成功完成；`error` Signal(str)——拷贝失败。
 
-### CollectFilesWorker
+#### 类 `CollectFilesWorker`
 
 异步收集设备视频/日志/CPP 日志/detect.bin 到 `upload` 工作区。已存在的目标文件直接跳过（重复点击不重复复制）。
 
@@ -589,12 +724,9 @@ FileCopyWorker(src, dst)
 CollectFilesWorker(videos_dir, device_id, base_names)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `done` | `Signal(str, int, list)` | (设备目录名, 实际复制文件数, 缺失项说明列表) |
-| `error` | `Signal(str)` | 错误信息 |
+**信号**：`done` Signal(str, int, list)——(设备目录名, 实际复制文件数, 缺失项说明列表)；`error` Signal(str)——错误信息。
 
-### ZipUploadWorker
+#### 类 `ZipUploadWorker`
 
 打包 upload 目录为 zip → SFTP 上传 → 清空本地 upload 目录。凭据用上传专用字段（不复用 SSH 凭据），支持取消（取消后自动清理临时 zip）。
 
@@ -604,19 +736,13 @@ ZipUploadWorker(upload_root, host, port, username, password,
                 zip_prefix="upload", zip_dir=None, remove_zip_after_done=False)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `progress` | `Signal(str)` | 阶段提示（打包中/连接中/上传中） |
-| `percent` | `Signal(int)` | 上传字节进度 0-100 |
-| `done` | `Signal(str)` | 成功信息（zip 名与远端路径） |
-| `error` | `Signal(str)` | 错误信息 |
-| `cancelled` | `Signal()` | 用户取消完成（临时 zip 已清理） |
+**信号**：`progress` Signal(str)——阶段提示（打包中/连接中/上传中）；`percent` Signal(int)——上传字节进度 0-100；`done` Signal(str)——成功信息（zip 名与远端路径）；`error` Signal(str)——错误信息；`cancelled`——用户取消完成（临时 zip 已清理）。
 
 ---
 
 ## workers/newlog_worker.py 批量整理 Worker
 
-### NewLogWorker
+#### 类 `NewLogWorker`
 
 后台运行 NewLog 批量整理主流程（按 Excel 署名筛选，批量归类视频/日志/配置文件）。
 
@@ -624,17 +750,13 @@ ZipUploadWorker(upload_root, host, port, username, password,
 NewLogWorker(target_name)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `line` | `Signal(str)` | 逐行运行日志（临时 Handler 转发 NewLog 模块 logger 输出） |
-| `finished_ok` | `Signal(str)` | 整理完成，返回输出目录 |
-| `error` | `Signal(str)` | 运行失败 |
+**信号**：`line` Signal(str)——逐行运行日志（临时 Handler 转发 NewLog 模块 logger 输出）；`finished_ok` Signal(str)——整理完成，返回输出目录；`error` Signal(str)——运行失败。
 
 ---
 
 ## workers/aftersale_worker.py 售后数据 Worker
 
-### AftersaleDBWorker
+#### 类 `AftersaleDBWorker`
 
 通用后台 DB 操作 Worker：把任意同步 DB 函数（`aftersale_db` / `ledger_db` / `table_db` 等）移到工作线程，避免阻塞 GUI。类名带 aftersale 前缀是历史遗留，实际售后、跑视频、运维面板均在使用。
 
@@ -642,17 +764,14 @@ NewLogWorker(target_name)
 AftersaleDBWorker(func, *args, **kwargs)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `result_ready` | `Signal(object)` | 查询/保存结果（**不能命名为 finished，会遮蔽 Qt 原生 finished**） |
-| `error` | `Signal(str)` | 异常信息 `类型名: 描述` |
+**信号**：`result_ready` Signal(object)——查询/保存结果（**不能命名为 finished，会遮蔽 Qt 原生 finished**）；`error` Signal(str)——异常信息 `类型名: 描述`。
 
 **保活与清理机制**（防频繁刷新时旧 worker 被 GC 销毁导致 `QThread: Destroyed while thread is still running` 崩溃）：
 - 模块级 `_running` 集合强引用，线程退出前不被 GC
 - 用 Qt **原生** `finished` 信号挂 `_release`（run() 返回后由 Qt 发射，线程已标记结束，销毁安全）
-- `run()` 内用 `isInterruptionRequested()` 丢弃过期结果（新查询取代旧查询时不回调）
+- `run()` 内用 `isInterruptionRequested` 丢弃过期结果（新查询取代旧查询时不回调）
 
-> 坑：PySide6 中 `super().finished` 会被子类同名信号遮蔽，不能用于此目的；自定义信号必须避开 QThread 原生信号名（finished/started）。
+> 坑：PySide6 中 super().finished 会被子类同名信号遮蔽，不能用于此目的；自定义信号必须避开 QThread 原生信号名（finished/started）。
 
 ---
 
@@ -660,7 +779,7 @@ AftersaleDBWorker(func, *args, **kwargs)
 
 镜像推送 Worker（MysqlSyncWorker）已随机制 B 下线（2026-08-23），本模块只保留连接测试。
 
-### MysqlTestWorker
+#### 类 `MysqlTestWorker`
 
 异步测试 MySQL 连接。
 
@@ -668,76 +787,41 @@ AftersaleDBWorker(func, *args, **kwargs)
 MysqlTestWorker(cfg, parent=None)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `finished` | `Signal(bool, str)` | (是否成功, 描述) |
+**信号**：`finished` Signal(bool, str)——(是否成功, 描述)。
 
 ## workers/backup_worker.py 周备份 Worker
 
 异步执行 `fallback_backup.maybe_backup`（MySQL → SQLite 兜底基线刷新），避免阻塞 UI。
 
-### BackupWorker
+#### 类 `BackupWorker`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `progress` | `Signal(str)` | 阶段进度 |
-| `result` | `Signal(bool, str, int)` | 完成 (ok, message, count) |
+**信号**：`progress` Signal(str)——阶段进度；`result` Signal(bool, str, int)——完成 (ok, message, count)。
 
 ## workers/cleanup_worker.py 数据保留清理 Worker
 
 异步执行 `data_retention.run_cleanup`（过期分区删除 + 按大小清理），避免阻塞 UI。由主窗口 `_init_data_retention` 挂载：启动延迟 8s 首次检查 + 每 24h 周期执行，仅在确有删除时提示。
 
-### CleanupWorker
+#### 类 `CleanupWorker`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `progress` | `Signal(str)` | 阶段进度（各表删除行数） |
-| `result` | `Signal(bool, str, int)` | 完成 (ok, message, deleted_count) |
+**信号**：`progress` Signal(str)——阶段进度（各表删除行数）；`result` Signal(bool, str, int)——完成 (ok, message, deleted_count)。
 
 ## workers/merge_back_worker.py 合并回写 Worker
 
 异步执行 `merge_back.merge_back`（MySQL 恢复后 LWW 合并兜底增量），避免阻塞 `_get_conn` 调用方。
 
-### MergeBackWorker
+#### 类 `MergeBackWorker`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `progress` | `Signal(str)` | 阶段进度 |
-| `result` | `Signal(bool, str, int)` | 完成 (ok, message, count) |
+**信号**：`progress` Signal(str)——阶段进度；`result` Signal(bool, str, int)——完成 (ok, message, count)。
 
 worker 可能从非主线程的 `_trigger_merge_back` 创建：result 通过 `QApplication` 顶层窗口找 MainWindow 弹 InfoBar，找不到则降级 conn_logger 落盘。
 
 ## workers/network_workers.py 网络连接 Worker 集
 
-SSH/SFTP/TCP 底层异步连接 Worker（无 UI，供 ssh_terminal / SFTPWindow / 远程面板等调用）。
-
-### TCPWorker
-
-TCP 连通性测试（连接即断），`result(bool, str)` 返回是否可达与耗时描述。
-
-### SFTPConnectWorker / SSHConnectWorker
-
-异步建立 paramiko Transport / SSH client 连接（继承 `_BaseConnectWorker` 重试基类：可重试错误自动重试 RETRY_MAX 次、间隔递增），信号 `success(conn)` / `error(str)`。
-
-### SFTPListWorker
-
-异步列目录（含权限/大小/修改时间），信号 `result(list)` / `error(str)`。
-
-### SFTPOperationWorker
-
-异步 SFTP 单文件操作（上传/下载/删除/创建目录），支持传输进度：信号 `progress(cur, total)`、`result(ok, msg)`。
-
-### SFTPDirTransferWorker
-
-异步 SFTP 整目录递归传输（上传/下载，含子目录与队列进度），信号 `progress(cur, total, name)` / `result(ok, msg)`。
-
-### SSHExecWorker
-
-异步执行 SSH 命令（exec_command，无持久 shell），信号 `result(ok, output)`。
+SSH/SFTP/TCP 底层异步连接 Worker（无 UI，供 ssh_terminal / SFTPWindow / 远程面板等调用）。类清单与信号签名见上文 [workers.network_workers](#workersnetwork_workers) 一节，此处不再重复。
 
 ## workers/single_video_worker.py 单杆视频生成 Worker
 
-### SingleVideoWorker
+#### 类 `SingleVideoWorker`
 
 后台执行单杆视频生成（工具菜单「单杆视频」；单杆模块自 table_json 收编后由本模块承载）。日志解析（帧级计分提取）、视频水印合成均在子线程执行，模块级 logger（`SingleShotVideo`）经 `_LineSignalHandler` 逐行转发为信号回传。
 
@@ -745,11 +829,31 @@ TCP 连通性测试（连接即断），`result(bool, str)` 返回是否可达�
 SingleVideoWorker(params: dict, parent=None)
 ```
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `line` | `Signal(str)` | 处理进度日志（追加到对话框输出区） |
-| `finished_ok` | `Signal(str)` | 生成成功，返回视频路径 |
-| `error` | `Signal(str)` | 生成失败，返回错误首行 |
+**信号**：`line` Signal(str)——处理进度日志（追加到对话框输出区）；`finished_ok` Signal(str)——生成成功，返回视频路径；`error` Signal(str)——生成失败，返回错误首行。
+
+## workers/update_worker.py 自动更新 Worker
+
+自动更新的两段后台线程（检查 / 下载解压）；纯逻辑在 `core/updater.py`（无 Qt 依赖），本模块只做线程与信号适配，均不阻塞 UI。
+
+#### 类 `UpdateCheckWorker`
+
+检查更新：拉 latest.json 比对本地版本。
+
+```python
+UpdateCheckWorker(base_url, local_version, channel=CHANNEL_AUTOWORK)
+```
+
+**信号**：`found` dict——发现新版本（latest 条目，含 `_resolved_url`）；`up_to_date` str——已是最新（当前版本号）；`error` str——网络/解析错误。
+
+#### 类 `UpdateDownloadWorker`
+
+下载 + 校验 + 解压 staging（不执行安装；安装由主程序退出后外部 updater 完成）。
+
+```python
+UpdateDownloadWorker(base_url, entry, app_dir, main_exe, local_version)
+```
+
+**信号**：`stage` str——阶段切换（下载/解压）；`progress` (int, int)——(已完成字节, 总字节)；`ready` dict——staging 就绪（`prepare_update` 返回值：mode/staging_dir/zip_path/files_count）；`error` str——校验失败/网络错误；`cancelled`——用户取消完成。
 
 ---
 
@@ -794,6 +898,15 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 | `get_kd_dates()` / `get_xqzg_dates()` / `get_xqzg_synced_dates()` | 本地已有的日期分区列表（降序）/ xqzg 本地分区 / xqzg 已同步分区 |
 
 kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动清理过期分区；手动/配置化清理入口 `prune_kd_history(keep_days=60)`（数据保留清理 Worker 兜底执行），返回删除条数。
+
+#### ToDesk 开关状态（球桌管理 todesk 列）
+
+| 函数 | 说明 |
+|------|------|
+| `get_todesk_ids(codes)` | 按设备编码批量取最新非空 ToDesk 号与开关状态（球桌管理 todesk 列数据源） |
+| `parse_todesk_id(item)` | 从 xqzg status 行提取 ToDesk 号 |
+| `parse_sunflower_id(item)` | 从 remark 文本提取向日葵识别码（球桌管理「向日葵」列数据源） |
+| `update_todesk_status(device_code, todesk_status)` | 开关指令确认后回写该设备最新分区行（返回受影响行数） |
 
 #### 跨面板联动查询（球房 ↔ 球桌 ↔ 设备）
 
@@ -881,11 +994,29 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `escape_literal_percent(sql)` | `(str) -> str` | 字符串字面量内的单个 `%` → `%%`（pymysql 参数化执行所需） |
 | `MYSQL_DDL` | `dict` | 8 张表的 MySQL 建表语句（IF NOT EXISTS 幂等，与 SQLite DDL 一一对应） |
 
-**类 `MysqlConnectionAdapter`**：模拟 `sqlite3.Connection` 接口。`execute`/`executemany` 自动套用全部方言转换；`PRAGMA` 静默跳过；`executescript` 按分号拆条执行；附 `healthy()`（连接是否仍可复用，连接级错误后由 table_db 重建）、`begin()`（显式开启原子批量写事务）、`column_exists` / `table_exists`（替代 `PRAGMA table_info`）。
+#### 类 `MysqlConnectionAdapter`
 
-**类 `MysqlCursorAdapter`**：模拟 `sqlite3.Cursor` 接口（`fetchone`/`fetchall`/`description`/`rowcount`/`lastrowid`/可迭代）。
+模拟 `sqlite3.Connection` 接口。`execute` / `executemany` 自动套用全部方言转换；`PRAGMA` 静默跳过；`executescript` 按分号拆条执行。
 
-方言转换还涵盖：SQLite `date()` 函数 → `DATE_SUB/DATE_FORMAT`、去除 `COLLATE NOCASE`、`sync_meta.key/value` 保留字加反引号。
+| 方法 | 说明 |
+|------|------|
+| `healthy()` | 连接是否仍可复用；一次连接级错误后由 table_db 重建 |
+| `begin()` | 显式开启原子批量写事务（连接默认仍使用 autocommit） |
+| `column_exists(table, column)` / `table_exists(table)` | 检查列/表是否存在（替代 SQLite PRAGMA table_info） |
+| `commit()` / `rollback()` / `close()` | 事务与连接管理 |
+
+#### 类 `MysqlCursorAdapter`
+
+模拟 `sqlite3.Cursor` 接口（可迭代）。
+
+| 方法 | 说明 |
+|------|------|
+| `execute(sql, params)` / `executemany(sql, seq_params)` | 执行 SQL（方言转换经所属 ConnectionAdapter） |
+| `fetchone()` / `fetchall()` | 取结果行 |
+| `description` / `rowcount` / `lastrowid` | 游标元数据（属性语义） |
+| `close()` | 关闭游标 |
+
+方言转换还涵盖：SQLite `date` 函数 → `DATE_SUB/DATE_FORMAT`、去除 `COLLATE NOCASE`、`sync_meta.key/value` 保留字加反引号。
 
 ---
 
@@ -901,6 +1032,17 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `REGIONS_PRESET` | 地区预置（9 值，允许自由输入新地区） |
 | `RESPONSE_TIME_PRESET` | 响应时间预置档位（5 档，允许自由输入） |
 | `RECORD_FIELDS` | 记录字段元组（与建表 DDL 一致，不含 id） |
+
+#### 面板设置联动（记住日期 / 自动刷新，config/aftersale.json）
+
+| 函数 | 说明 |
+|------|------|
+| `remember_occurred_enabled()` | 「记住上次发生日期」开关（缺省开启） |
+| `load_last_occurred()` / `save_last_occurred(occurred)` | 上次新增记录的发生日期（yyyy-MM-dd）读取/记忆（开关关闭或空值时不写） |
+| `set_remember_occurred(enabled)` | 写「记住上次发生日期」开关（统一设置-面板设置-售后 联动入口） |
+| `auto_refresh_enabled()` / `set_auto_refresh(enabled)` | 「自动刷新记录」开关（缺省关闭；统一设置-面板设置-售后 联动入口） |
+| `auto_refresh_interval()` / `set_auto_refresh_interval(seconds)` | 自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数，防误配高频轮询） |
+| `change_fingerprint()` | 全表轻量指纹 (条数, 最大 updated_at, 最大 id)——记录页自动刷新判据，指纹不变跳过重查 |
 
 #### 周期计算（可配置模式 + 物化列）
 
@@ -939,6 +1081,7 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `query_stats_detail(keyword="", cycle_start="", issue_type="", trend_start="", trend_end="")` | `-> dict` | 售后统计弹窗详细统计（分类分布/解决率/按日趋势/按周期汇总），与四卡片/列表完全同口径 |
 | `get_cycle_options()` | `() -> list` | 周期下拉选项：`SELECT DISTINCT cycle_start`（物化列，走索引）去重降序。**仅返回确有数据的周期**；触发 `_ensure_cycle_materialized` 存量兜底 |
 | `get_field_candidates()` | `() -> dict` | 动态候选 `{problems, resolvers, regions, creators}`（按使用频次降序各取前 60），问题候选为空时合并预置常见项。**写后失效缓存**（insert/update/delete/导入后重建，命中 0.001ms） |
+| `query_rank(level='room', limit=10, sort='total', start='', end='', cycle_start='', resolved='', is_initiative='', is_our_problem='', region='', room_name='', keyword='')` | `-> dict` | 球房/球桌售后排行（**与 Web 端 /api/stats/rank 同口径**）：WHERE 复用 _build_where + 账期物化列，单组一次 SQL 算齐 总量/未解决/我方问题/主动发起/最近发生；summary 反映同 WHERE 全量口径（不受 TOP N 截断）；球桌级联合名「球房 · 桌号」Python 侧拼装（避开双后端方言差异）；sort 白名单校验，room_name/table_no 精确下钻 |
 
 #### 周期物化维护（S3 自愈机制）
 
@@ -982,7 +1125,7 @@ MySQL 连接工具。镜像推送（push_all/push_table/push_aftersale 及 `_DDL
 | 函数/常量 | 说明 |
 |------|------|
 | `TABLE_NAMES` | 8 张表名列表 |
-| `ColumnDef` / `IndexDef` | 列/索引定义（两方言类型、默认值、附加子句） |
+| `ColumnDef(name, sqlite_type, mysql_type, sqlite_default, mysql_default, sqlite_extra, mysql_extra)` / `IndexDef(sqlite_name, sqlite_cols, mysql_name, mysql_cols)` / `ColumnMigration(table, col, sqlite_type, sqlite_default, mysql_type, mysql_default)` | 列 / 索引 / 列级迁移定义 dataclass（两方言类型、默认值、附加子句；字段即括号内所列） |
 | `MIGRATIONS` | 列级迁移注册表（`ColumnMigration`），驱动 `table_db._migrate_sqlite_add_columns`（SQLite 自动补列）与 `_ensure_mysql_tables`（MySQL 幂等补列兜底） |
 | `sqlite_alter_sql(m)` / `mysql_alter_sql(m)` | 按注册条目生成两方言 `ALTER TABLE ADD COLUMN` |
 | `sqlite_alter_for(table, col)` / `mysql_alter_for(table, col)` | 按表+列名取 ALTER SQL（迁移函数内特殊补列用） |
@@ -998,10 +1141,21 @@ MySQL 连接工具。镜像推送（push_all/push_table/push_aftersale 及 `_DDL
 | `insert_record(record)` | `(dict) -> int` | 新增记录返回 id；`occurred_at` 缺省取当天，显式传入（看昨天的视频）则保留 |
 | `update_record(record_id, record)` | `(int, dict) -> bool` | 只更新传入字段 |
 | `delete_record(record_id)` | `(int) -> bool` | 按 id 删除 |
-| `query_page(page_no, page_size, keyword="", category="", kind="", signer="", date_from="", date_to="", repro="")` | `-> (total, rows)` | 分页查询；日期范围按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`，`substr(COALESCE(NULLIF(occurred_at,''), created_at),1,10)` 前缀比较）；`repro` 是/否精确过滤 |
+| `query_page(page_no, page_size, keyword="", category="", kind="", signer="", date_from="", date_to="", repro="")` | `-> (total, rows)` | 分页查询；日期范围按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`，COALESCE+substr 取日期前缀比较）；`repro` 是/否精确过滤 |
 | `get_kind_candidates(category)` | `(str) -> list` | 类别候选：模板预置 + 库中历史自由输入合并（去重保序） |
 | `stats_by_signer()` | `() -> list` | 按署名汇总四分类计数（模板「计数」sheet 口径） |
 | `export_xlsx(path, category="")` | `(str, str) -> int` | 按分类分 sheet 导出（表头与在线模板一致，首位附加「日期」），返回条数 |
+
+#### 面板设置联动（记住日期 / 自动刷新，misc 域）
+
+| 函数 | 说明 |
+|------|------|
+| `remember_occurred_enabled()` | 「记住上次视频日期」开关（misc 域，缺省开启） |
+| `load_last_occurred()` / `save_last_occurred(occurred)` | 上次新增记录的视频日期（yyyy-MM-dd）读取/记忆（开关关闭或空值时不写） |
+| `set_remember_occurred(enabled)` | 写「记住上次视频日期」开关（统一设置-面板设置-跑视频 联动入口） |
+| `auto_refresh_enabled()` / `set_auto_refresh(enabled)` | 「自动刷新记录」开关（misc 域，缺省关闭；统一设置联动入口） |
+| `auto_refresh_interval()` / `set_auto_refresh_interval(seconds)` | 自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数，防误配高频轮询） |
+| `change_fingerprint()` | 全表轻量指纹 (条数, 最大 updated_at, 最大 id)——记录页自动刷新判据，指纹不变跳过重查 |
 
 ### database.merge_back
 
@@ -1032,7 +1186,7 @@ MySQL → SQLite 周备份（兜底基线刷新）：ONLINE 期间每周拉全�
 - **A 按时间过期清理**：`xqzg_status` / `kd_status` 无独立时间列，日期编码在 `file_path`（`yyyy/MM/dd` 分区，字典序即时间序），按 `file_path < today-age_days` 删除过期分区；`file_path != ''` 防御空串整表误删。每日执行幂等。
 - **B 按大小清理**：范围 `aftersale_records` / `ledger_records` / `submission_log` / `health_alerts`（`device_mapping` 为设备→目录映射不纳入；`billiard_tables` / `sync_meta` 永不清理）。每 `check_interval_days` 天检查一次（`sync_meta.last_size_check` 记录），表大小超过 `max_size_gb` 时按日期桶从最早逐日删除直到低于 `min_size_gb`；最近 `min_keep_days` 天保护期内不删。
 - 表大小统计：MySQL 用 `information_schema.tables`（`data_length + index_length`）；SQLite 用 `dbstat` 虚表（不可用时跳过该表）。
-- 日期桶提取：`substr(COALESCE(NULLIF(occurred_at,''), created_at),1,10)`（与跑视频面板筛选同口径）；`submission_log` 用 `created_at`；`health_alerts` 用 `updated_at`。
+- 日期桶提取：按 `occurred_at`（空值回退 `created_at`）取前 10 位日期前缀（与跑视频面板筛选同口径）；`submission_log` 用 `created_at`；`health_alerts` 用 `updated_at`。
 
 配置读取 `config/database.json` 的 `data_retention` 节点（经 `backend._read_mysql_settings` 同款免 core 直读，规避 PySide6 依赖链；缺省回落模块内 `DEFAULT_CONFIG`；`tables` 白名单过滤未知表名）。
 
@@ -1062,7 +1216,9 @@ MysqlSyncCard 入口判定纯函数（无 PySide6 依赖，可单测）：根据
 
 ## windows/ 独立窗口层
 
-### SFTPWindow
+### windows.remote_session.sftp_window（SFTPWindow 双面板文件管理）
+
+#### 类 `SFTPWindow`
 
 SFTP 双面板文件管理窗口（QDialog）。
 
@@ -1083,9 +1239,15 @@ SFTPWindow(host, port, username, password,
 - 本地：文件名(220px) | 大小(80px) | 类型(60px) | 修改时间(100px)
 - 远程：文件名(220px) | 大小(80px) | 类型(60px) | 权限(80px) | 修改时间(130px)
 
+#### 类 `SFTPPanel`
+
+SFTP 文件管理面板形态（QWidget，可嵌入标签页容器，也可独立使用）；`SFTPWindow` 为其独立对话框包装。
+
 ---
 
-### SSHTerminalWindow
+### windows.remote_session.ssh_terminal（SSHTerminalWindow 交互式终端）
+
+#### 类 `SSHTerminalWindow`
 
 SSH 交互式终端窗口（invoke_shell PTY + ANSI 渲染）。
 
@@ -1108,9 +1270,13 @@ SSHTerminalWindow(host, port, username, password,
 - closeEvent 仅设 stop 标志并等待 reader 线程退出
 - reader 线程退出后再关闭 transport
 
+**其他**：`SSHTerminalPanel(QWidget)` 可嵌入面板形态；`SshCommandEditDialog(QDialog)` 常用命令管理（增删命令写入 `ssh_commands` 配置键）；模块级 `get_session_log_dir()` 返回 SSH 会话日志目录（logs/ssh_sessions，与 conn_logger 同级机制）。
+
 ---
 
-### RDPWindow
+### windows.remote_session.rdp_window（RDPWindow 远程桌面嵌入）
+
+#### 类 `RDPWindow`
 
 远程桌面嵌入窗口（mstsc.exe 窗口嵌入）。
 
@@ -1131,11 +1297,17 @@ RDPWindow(host, port, username, password,
 - 通道2：按所有 mstsc.exe 进程 PID（Win11 进程委托）
 - 通道3：全局类名兜底
 
+#### 类 `RDPPanel`
+
+远程桌面面板形态（QWidget，嵌入系统 mstsc.exe 窗口到应用内，可嵌入标签页容器）；`RDPWindow` 为其独立对话框包装。
+
 ---
 
-### SingleVideoDialog
+### windows.single_video_dialog（SingleVideoDialog 单杆视频参数对话框）
 
-单杆视频参数对话框（`windows/single_video_dialog.py`）。继承 `MessageBoxBase`（透明模态窗口）。工具页 `SingleVideoWork` 直接从本模块导入默认值常量（`_DEFAULT_SESSION_CODE/_DEFAULT_FORMAT/_DEFAULT_USER_x/_DEFAULT_AVATAR_x` 等）内嵌表单；独立对话框形态保留为回退兜底（`UiMixin._on_open_single_video` 旧入口）。
+#### 类 `SingleVideoDialog`
+
+单杆视频参数对话框。继承 `MessageBoxBase`（透明模态窗口）。工具页 `SingleVideoWork` 直接从本模块导入默认值常量（`_DEFAULT_SESSION_CODE/_DEFAULT_FORMAT/_DEFAULT_USER_x/_DEFAULT_AVATAR_x` 等）内嵌表单；独立对话框形态保留为回退兜底（`UiMixin._on_open_single_video` 旧入口）。
 
 ```python
 SingleVideoDialog(parent, settings=None)
@@ -1158,33 +1330,61 @@ SingleVideoDialog(parent, settings=None)
 
 ---
 
-### RemoteSessionWindow
+### windows.remote_session.remote_session_window（RemoteSessionWindow 远程会话）
+
+#### 类 `RemoteSessionWindow`
 
 远程会话窗口（`FramelessWindow`），展示 frpc 日志与隧道状态，由 `RemoteSessionManager` 统一管理。
 
 ---
 
-### TunnelPanelWindow
+### windows.remote_session.window（TunnelPanelWindow 当前隧道面板）
 
-「当前隧道」面板（`FramelessWindow`），主窗口远程面板入口打开，展示全局活跃隧道。
+#### 类 `TunnelPanelWindow`
 
----
-
-### ConnDiagPanel
-
-连接诊断面板（`QDialog`），网络连通性诊断。
+「当前隧道」面板（`FramelessWindow`），主窗口远程面板入口打开，展示全局活跃隧道；内置 SFTP 传输中断二次确认、frpc 状态联动与 `_apply_smooth_mode` 表格平滑滚动适配。
 
 ---
 
-### MoyuReaderWidget
+### windows.remote_session.conn_diag_panel（ConnDiagPanel 连接诊断）
+
+#### 类 `ConnDiagPanel` / `ConnDiagWidget`
+
+连接诊断面板（`QDialog`，设置-工具行入口独立弹窗）；`ConnDiagWidget(QWidget)` 为诊断主体（2026-09-07 自 QDialog 抽出，可嵌入 RemoteHub 等容器）。
+
+#### 模块级函数（连接日志解析与聚合）
+
+| 函数 | 说明 |
+|------|------|
+| `parse_log_text(text, source)` | 解析单个日志文件文本 → 记录列表（保持文件内时序） |
+| `load_all_records(log_dir)` | 按从旧到新顺序读取归档（.3→.2→.1）+ 当前日志，合并为全局时序列表 |
+| `is_success_record(r)` / `is_conn_fail_record(r)` | 单条记录成功/失败判定 |
+| `aggregate_stats(records)` | 对记录列表聚合连接质量统计（纯函数，便于脚本验证） |
+
+---
+
+### windows.management.moyu_widgets（MoyuReaderWidget 摸鱼阅读器）
+
+#### 类 `MoyuReaderWidget`
 
 摸鱼阅读器（`QWidget`），内置文本阅读（TXT/粘贴）、网页正文抓取；与 2048/贪吃蛇/扫雷 小游戏同属摸鱼中心（`GamePage`）。
 
+#### 类 `Game2048Widget(QWidget)` / `SnakeWidget(QWidget)` / `MinesweeperWidget(QWidget)`
+
+小游戏控件（信息栏 + 棋盘）：`Game2048Widget`（得分/最高分/重开）、`SnakeWidget`（得分/最高分/难度/控制按钮）、`MinesweeperWidget`（雷数/用时/最快纪录/难度/控制）；成绩按难度分档存 `moyu_state.json`。
+
+| 模块级函数 | 说明 |
+|------|------|
+| `load_moyu_state()` | 读摸鱼状态，文件缺失/损坏返回空字典 |
+| `save_moyu_state(patch)` | 读-改-写合并落盘，失败静默（摸鱼状态丢失不影响主业务） |
+
 ---
 
-### ManagementPanelWindow
+### windows.management.window（ManagementPanelWindow 运维管理面板）
 
-运维管理面板（`windows/management_panel.py`），qfluentwidgets `FluentWindow` + 左侧导航，六个功能页面。由主窗口「球桌管理」按钮打开（`UiMixin._on_open_table_panel`），支持 `python -m windows.management_panel` 独立调试。
+#### 类 `ManagementPanelWindow`
+
+运维管理面板宿主（qfluentwidgets `FluentWindow` + 左侧导航），六个功能页面。由主窗口「球桌管理」按钮打开（`UiMixin._on_open_table_panel`），支持 `python -m windows.management_panel` 独立调试；各页面类实现于 `windows/management/` 子包（table_page / device_page / health_page / admin_settings / widget_page / game_page / trend_page）。
 
 ```python
 ManagementPanelWindow(parent=None)
@@ -1195,32 +1395,34 @@ ManagementPanelWindow(parent=None)
 | 页面 | 类 | 说明 |
 |------|------|------|
 | 球桌管理 | `TablePage` | wechat2-billiard 球桌数据：表格/搜索/分页/列筛选/右键复制/手动添加记录；含 `code`（设备编码）列，默认隐藏可在「筛选」菜单勾选显示（`_hidden_cols = {在线状态, 设备编码}`） |
-| 设备状态 | `DevicePage` | kd / xqzg 数据源切换（`get_active_api_source()`），按日期分区查看；集成图片迁移 |
+| 设备状态 | `DevicePage` | kd / xqzg 数据源切换（`get_active_api_source`），按日期分区查看；集成图片迁移 |
 | 设备健康度管理 | `HealthPage` | 健康度异常告警：每 30 分钟全量拉取 health（`TableFetchWorker` → `sync_health_alerts` 落库），每 1 小时重载展示；阈值 4000/5000/40 万；支持标记已处理 |
 | 管理设置 | `AdminSettingsPage` | 数据源选择（kd/xqzg）、双接口账号密码、测试连接，合并写入 `settings.json` |
 | 控件测试 | `WidgetPage` | FluentIcon 图标库（175 个，搜索过滤、点击复制枚举名）+ qfluentwidgets 控件墙（按钮/输入/日期/弹窗等分组演示，可直接交互） |
 | 小游戏 | `GamePage` | 摸鱼中心（小说阅读 / 2048 / 贪吃蛇 / 扫雷）；后两者带难度选择，成绩按难度分档存 `moyu_state.json` |
 | （隐藏）健康趋势 | `TrendPage` | 健康度趋势看板（C3）：突增预警 + 单设备趋势折线 + TOP N 排行，仅 kd 数据源可用；导航入口已注释隐藏，恢复取消注释即可 |
 
-**图片迁移交互（DevicePage）**：
+**图片迁移交互（DevicePage，实现于 `windows/management/device_page.py`）**：
 
 - `总数`(pic_total) / `正常`(normal_count) / `操作`(except_count) 三列为链接色可点击单元格（`_FILE_VIEW_FIELDS`）
 - 点击后右侧滑出 `FileListPanel`（QPropertyAnimation，宽 360，需 `WA_StyledBackground` 才不透明）展示 [分类, 文件名]
-- 点击文件条目弹 RoundMenu 四选项（问题/精度/使用/废弃，`MIGRATE_DEST_OPTIONS`）→ `DevicePage.migrate_file()` → `MigrateImageWorker` 迁移单文件 → 成功后 `_silent_refresh()` 静默重拉刷新
+- 点击文件条目弹 RoundMenu 四选项（问题/精度/使用/废弃，`MIGRATE_DEST_OPTIONS`）→ `DevicePage.migrate_file` → `MigrateImageWorker` 迁移单文件 → 成功后 `_silent_refresh` 静默重拉刷新
 
-| 关键方法 | 说明 |
+| DevicePage 关键方法 | 说明 |
 |------|------|
-| `_on_cell_clicked(row, col)` | 单元格点击 → 打开文件面板 |
-| `migrate_file(fname, src_cat, dest_cat)` | 发起单文件迁移 |
-| `_silent_refresh()` | 迁移后静默重拉当前数据源 |
+| _on_cell_clicked(row, col) | 单元格点击 → 打开文件面板 |
+| migrate_file(fname, src_cat, dest_cat) | 发起单文件迁移 |
+| _silent_refresh() | 迁移后静默重拉当前数据源 |
 
-**模块级辅助**：`_load_settings()` / `_save_settings(data)`（settings.json 合并读写）、`_copy_table_selection(table)`（表格选中内容复制）、`FILE_FIELD_CATEGORIES`（文件字段 → 中文分类）。
+**模块级辅助**（`windows/management_panel.py` shim 提供）：_load_settings / _save_settings（settings.json 合并读写）、_copy_table_selection（表格选中内容复制）、FILE_FIELD_CATEGORIES（文件字段 → 中文分类）。
 
 ---
 
-### AftersalePanelWindow（售后面板）
+### windows.aftersale.window（AftersalePanelWindow 售后面板）
 
-`windows/aftersale_panel.py`：售后面板（qfluentwidgets `FluentWindow` + 左侧导航，风格仿运维管理面板）。由主窗口 `_on_open_aftersale`（单例复用，**内置窗口**，不拉起外部进程）或运维面板入口打开，支持 `python -m windows.aftersale_panel` 独立调试。数据层 `database/aftersale_db.py`，所有 DB 读写经 `AftersaleDBWorker` 后台线程，UI 零阻塞。
+#### 类 `AftersalePanelWindow`
+
+售后面板宿主（qfluentwidgets `FluentWindow` + 左侧导航，风格仿运维管理面板）。由主窗口 `_on_open_aftersale`（单例复用，**内置窗口**，不拉起外部进程）或运维面板入口打开，支持 `python -m windows.aftersale_panel` 独立调试。数据层 `database/aftersale_db.py`，所有 DB 读写经 `AftersaleDBWorker` 后台线程，UI 零阻塞。窗口类本身负责导航装配与联动：`_on_cycle_saved`（周期设置保存 → 记录页刷新）、`open_records_for_table(table_no)`（球桌右键跳转记录页预筛选）、`_on_rank_jump_records`（Web 排行页联动入口）、`_on_nav_changed`（页面切换联动）。
 
 **独立打包（单文件）**：`AfterSale.spec` 用 PyInstaller onefile 模式打包为 `dist/aftersale.exe`，内置全部依赖、独立分发。单文件模式下 `sys._MEIPASS` 为临时解压目录，入口文件顶部会把 `table_db` 的 DB 路径重定向到 exe 旁 `database/tables.db`（首启从 `_MEIPASS` 复制种子库），保证数据持久化；与完整版 AutoWork 的数据相互独立、互不关联。
 
@@ -1236,31 +1438,33 @@ AftersalePanelWindow(parent=None)
 | 记录与统计 | `RecordsPage` | 筛选（周期/类型/状态/是否我们发起/是否我方问题/关键词）+ 分页 + 统计 + 编辑/删除 + 批量操作（勾选标记已解决/批量删除）+ 导出 xlsx/导入 Excel |
 | 设置 | `SettingsPage` | 统计周期设置（`CycleSettingsPage`）+ 数据库设置（`MysqlSyncCard` sync_scope="aftersale"） |
 
-**共享表单 `AftersaleForm`**（录入页与编辑弹窗复用）：字段与售后汇总 Excel 对齐 + 系统附加字段。球房输入防抖搜索球桌库，候选点选/唯一命中自动带出桌号/SNK/城市；发生时间步进按钮补录历史日期；「是否我们发起售后」（`is_initiative`，默认否）与「是否我方问题」（`is_our_problem`，默认是）两个判定用 `YesNoSegment` 分段开关，参与筛选与统计口径。
+**共享表单 `AftersaleForm`**（录入页与编辑弹窗复用，实现于 `windows/aftersale/form.py`）：字段与售后汇总 Excel 对齐 + 系统附加字段。球房输入防抖搜索球桌库，候选点选/唯一命中自动带出桌号/SNK/城市；发生时间步进按钮补录历史日期；「是否我们发起售后」（`is_initiative`，默认否）与「是否我方问题」（`is_our_problem`，默认是）两个判定用 `YesNoSegment` 分段开关，参与筛选与统计口径。
 
-| 方法 | 说明 |
+| AftersaleForm 方法 | 说明 |
 |------|------|
-| `load_candidates(cands)` | 填充动态候选（问题/解决人/地区），保留已输入文本 |
-| `set_values(rec)` / `collect()` / `validate()` / `clear_form()` | 编辑回填 / 收集值 / 必填校验 / 清空 |
+| load_candidates(cands) | 填充动态候选（问题/解决人/地区），保留已输入文本 |
+| set_values(rec) / collect() / validate() / clear_form() | 编辑回填 / 收集值 / 必填校验 / 清空 |
 
-**周期筛选**（`RecordsPage`）：周期下拉选项来自 `get_cycle_options()`（库中记录实际归属周期）；当前周期仅在库中有数据时出现。切换周期后列表与统计按同一套归属规则重查，一一对应。
+**周期筛选**（`RecordsPage`，实现于 `windows/aftersale/records.py`）：周期下拉选项来自 aftersale_db 的 `get_cycle_options`（库中记录实际归属周期）；当前周期仅在库中有数据时出现。切换周期后列表与统计按同一套归属规则重查，一一对应。
 
-| 关键方法 | 说明 |
+| RecordsPage 关键方法 | 说明 |
 |------|------|
-| `_load_cycles_then_data()` | 先异步拉周期选项填充下拉，再加载数据 |
-| `_on_cycles_loaded(cycle_starts)` | 填充周期下拉（当前周期仅有数据时显示），默认选中当前周期否则全部周期 |
-| `_load()` | 按当前筛选异步查询（分页 + 统计一次返回） |
-| `set_keyword(kw)` | 球桌管理右键跳转：按桌号预筛选，周期放宽为全部 |
+| _load_cycles_then_data() | 先异步拉周期选项填充下拉，再加载数据 |
+| _on_cycles_loaded(cycle_starts) | 填充周期下拉（当前周期仅有数据时显示），默认选中当前周期否则全部周期 |
+| _load() | 按当前筛选异步查询（分页 + 统计一次返回） |
+| set_keyword(kw) | 球桌管理右键跳转：按桌号预筛选，周期放宽为全部 |
 
-**弹窗**：`EditRecordDialog(MessageBoxBase)` 编辑记录（复用共享表单）；`ImportPreviewDialog(QDialog)` 导入预览（字段要求提示 + 前 20 行解析效果 + 确认导入）。下拉组件统一 qfluentwidgets：`ComboBox`（周期/非可编辑筛选）、`EditableComboBox`（类型等可编辑下拉）、`YesNoSegment`（是/否判定）、`ZhDatePicker`（日期）。
+**弹窗**：`EditRecordDialog`（MessageBoxBase）编辑记录（复用共享表单）；`ImportPreviewDialog`（QDialog）导入预览（字段要求提示 + 前 20 行解析效果 + 确认导入）。下拉组件统一 qfluentwidgets：`ComboBox`（周期/非可编辑筛选）、`EditableComboBox`（类型等可编辑下拉）、`YesNoSegment`（是/否判定）、`ZhDatePicker`（日期）。
 
 **周期设置 `CycleSettingsPage`**：统计周期模式单选（周二起默认/自然周/自定义起始日+天数），保存写 settings.json 并 `saved` 信号通知记录页刷新周期下拉与统计。
 
 ---
 
-### LedgerPanelWindow（跑视频面板）
+### windows.run_video.window（LedgerPanelWindow 跑视频面板）
 
-`windows/ledger_panel.py`：跑视频面板（qfluentwidgets `FluentWindow` + 左侧导航），字段与在线模板.xlsx 数据 sheet 对齐。由主窗口 `_on_open_ledger`（单例复用，预填当前球桌会话）打开，支持 `python -m windows.ledger_panel` 独立调试。数据层 `database/ledger_db.py`，DB 读写经 `AftersaleDBWorker` 后台线程。
+#### 类 `LedgerPanelWindow`
+
+跑视频面板宿主（qfluentwidgets `FluentWindow` + 左侧导航），字段与在线模板.xlsx 数据 sheet 对齐。由主窗口 `_on_open_ledger`（单例复用，预填当前球桌会话）打开，支持 `python -m windows.ledger_panel` 独立调试。数据层 `database/ledger_db.py`，DB 读写经 `AftersaleDBWorker` 后台线程。窗口类公开方法：`open_entry_with_context(ctx)`（主界面「跑视频」入口：切到填写录入页并预填会话上下文）。
 
 ```python
 LedgerPanelWindow(parent=None)
@@ -1274,23 +1478,25 @@ LedgerPanelWindow(parent=None)
 | 记录与统计 | `RecordsPage` | 指标卡 + 日期/分类/类别/署名/复现筛选 + 分页 + 编辑/删除 + 署名统计 + 按分类分 sheet 导出 xlsx |
 | 设置 | `SettingsPage` | 默认署名 + 数据库设置（`MysqlSyncCard` sync_scope="ledger"） |
 
-**共享表单 `LedgerForm`**：分类（问题/未复现/精度/使用）→ 类别 → 球房 → 视频名 → 帧数 → 日期 → 描述/备注 → 复现 → 新程序 → 署名。分类必填，切换联动类别候选（模板预置 + 库中历史自由输入）；类别为可编辑下拉（`EditableComboBox`，支持手输新类别）；日期为视频日期（`ZhDatePicker`，默认当天可翻历史日期）；复现/新程序用 `YesNoSegment` 是/否开关（默认「否」）；描述与备注并排（70/30）。
+**共享表单 `LedgerForm`**（实现于 `windows/run_video/form.py`）：分类（问题/未复现/精度/使用）→ 类别 → 球房 → 视频名 → 帧数 → 日期 → 描述/备注 → 复现 → 新程序 → 署名。分类必填，切换联动类别候选（模板预置 + 库中历史自由输入）；类别为可编辑下拉（`EditableComboBox`，支持手输新类别）；日期为视频日期（`ZhDatePicker`，默认当天可翻历史日期）；复现/新程序用 `YesNoSegment` 是/否开关（默认「否」）；描述与备注并排（70/30）。
 
-| 方法 | 说明 |
+| LedgerForm 方法 | 说明 |
 |------|------|
-| `prefill(ctx)` | 按主界面会话上下文预填球房/视频名/帧数/署名/分类（只填空值） |
-| `set_values(rec)` / `collect()` / `validate(show_errors=True)` / `clear_form()` | 编辑回填 / 收集值 / 必填校验（`show_errors=False` 时静默校验不显示红框，供必填进度用）/ 清空 |
-| `_on_category_changed(category)` | 分类切换：类别候选异步联动 + 重建补全器 |
+| prefill(ctx) | 按主界面会话上下文预填球房/视频名/帧数/署名/分类（只填空值） |
+| set_values(rec) / collect() / validate(show_errors=True) / clear_form() | 编辑回填 / 收集值 / 必填校验（show_errors=False 时静默校验不显示红框，供必填进度用）/ 清空 |
+| _on_category_changed(category) | 分类切换：类别候选异步联动 + 重建补全器 |
 
-**记录与统计**：指标卡（总记录/问题/未复现/精度/使用）与列表同口径，随日期范围联动。日期筛选模式：全部日期/今天/一周/一个月/自定义（默认今天，基准日期可翻历史）；`_date_range()` 计算区间（一周=基准前推 6 天、一月=自然月、自定义起止倒置自动交换），按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`）。首次显示自动加载（`showEvent` + `_loaded_once`）。
+**记录与统计**（实现于 `windows/run_video/records.py`）：指标卡（总记录/问题/未复现/精度/使用）与列表同口径，随日期范围联动。日期筛选模式：全部日期/今天/近7天/近30天/本月/自定义（默认今天，基准日期可翻历史，结束日历仅自定义显示）；`_date_range` 按档计算区间（近7天=基准前推 6 天、近30天=前推 29 天、本月=自然月、自定义起止倒置自动交换），按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`）。首次显示自动加载（showEvent + `_loaded_once`）；自动刷新定时器按指纹比对（`ledger_db.change_fingerprint`）跳过无变化重查。
 
-**弹窗**：`EditLedgerDialog(MessageBoxBase)` 编辑记录（复用共享表单）；`SignerStatsDialog(MessageBoxBase)` 署名统计（问题/未复现/精度/使用/总和）。
+**弹窗**：`EditLedgerDialog`（MessageBoxBase）新增/编辑记录（复用共享表单，`continuous=True` 连续录入模式：保存并继续不关窗）；`SignerStatsDialog`（MessageBoxBase）署名统计（问题/未复现/精度/使用/总和）。
 
 ---
 
-### MysqlSyncCard（MySQL 连接配置卡片）
+### windows.mysql_sync_card（MysqlSyncCard MySQL 连接配置卡片）
 
-`windows/mysql_sync_card.py`：可复用 MySQL 连接配置卡片（运维面板 / 售后面板 / 跑视频面板共用）。连接表单 + 启用开关 + 测试连接/保存按钮。自动同步与「立即同步」已随镜像推送机制 B 下线，启用开关只控制直连路由；配置读写 DPAPI 加密落盘，以磁盘最新内容为 base 合并写（防双缓存覆盖）。
+#### 类 `MysqlSyncCard`
+
+可复用 MySQL 连接配置卡片（运维面板 / 售后面板 / 跑视频面板共用）。连接表单 + 启用开关 + 测试连接/保存按钮。自动同步与「立即同步」已随镜像推送机制 B 下线，启用开关只控制直连路由；配置读写 DPAPI 加密落盘，以磁盘最新内容为 base 合并写（防双缓存覆盖）。
 
 ```python
 MysqlSyncCard(parent=None, sync_scope="ops")
@@ -1309,9 +1515,9 @@ MysqlSyncCard(parent=None, sync_scope="ops")
 
 ---
 
-### ForensicReportPanel（SSH 故障取证包）
+### windows.remote_session.forensic_report（SSH 故障取证包）
 
-`windows/remote_session/forensic_report.py`：SSH 连接失败时一键生成诊断取证包（模块级函数 + `ForensicWorker` 后台线程）。
+SSH 连接失败时一键生成诊断取证包（模块级函数 + `ForensicWorker` 后台线程）。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
@@ -1324,19 +1530,19 @@ MysqlSyncCard(parent=None, sync_scope="ops")
 | `analyze_with_ai(evidence)` | `(str) -> str` | 调用所选 AI 厂商 OpenAI 兼容接口分析证据，返回 Markdown 文本 |
 | `build_forensic_report(meta, cmd_results, table_info, kd_info, session_tail, conn_log, ai_analysis="", ai_error="", ai_label="")` | `(...) -> str` | 组装完整 Markdown 报告 |
 
-**类 `ForensicWorker(QThread)`**：后台逐条执行诊断命令组并生成报告（exec_command 独立 channel，不阻塞交互）。
+#### 类 `ForensicWorker`
 
-| 信号 | 类型 | 说明 |
-|------|------|------|
-| `line` | `Signal(str)` | 逐条命令执行进度 |
-| `done` | `Signal(str)` | 报告文件路径 |
-| `error` | `Signal(str)` | 失败信息 |
+后台逐条执行诊断命令组并生成报告（exec_command 独立 channel，不阻塞交互）。
+
+**信号**：`line` Signal(str)——逐条命令执行进度；`done` Signal(str)——报告文件路径；`error` Signal(str)——失败信息。
 
 ---
 
-### ImageViewerDialog
+### windows.management.image_viewer（ImageViewerDialog 图片查看）
 
-`windows/management/image_viewer.py`：设备状态图片查看卡片对话框（左右键翻页，支持分类迁移）。
+#### 类 `ImageViewerDialog`
+
+设备状态图片查看卡片对话框（左右键翻页，支持分类迁移）。
 
 ```python
 ImageViewerDialog(entries, index, file_path, device_code, device_page,
@@ -1344,14 +1550,16 @@ ImageViewerDialog(entries, index, file_path, device_code, device_page,
 ```
 
 - `_ImageFetchWorker`：后台下载图片字节流（静态资源无需认证头，可 cancel）
-- `_image_urls(fname, src_cat)`：候选 URL 展开——分类目录优先、`pic/` 目录兜底，文件名按变体展开（原名优先，去 Django 去重后缀的原图兜底，`_name_variants`）
-- `is_image_file(fname)`：按扩展名判断是否图片文件
+- `_image_urls(fname, src_cat)`：候选 URL 展开——分类目录优先、`pic/` 目录兜底，文件名按变体展开（原名优先，去 Django 去重后缀的原图兜底）
+- 模块级 `is_image_file(fname)`：按扩展名判断是否图片文件
 
 ---
 
-### PortFakeWidget
+### windows.tools.port_fake（PortFakeWidget 虚假端口占用）
 
-`windows/tools/port_fake.py`：虚假端口占用工具（工具菜单「端口占用」）——真实 `bind + listen` 模拟服务占用，`netstat -ano` 可见 `LISTENING`。
+#### 类 `PortFakeWidget`
+
+虚假端口占用工具（工具菜单「端口占用」）——真实 `bind + listen` 模拟服务占用，`netstat -ano` 可见 `LISTENING`。
 
 ```python
 PortFakeWidget(parent=None)
@@ -1364,7 +1572,7 @@ PortFakeWidget(parent=None)
 
 ---
 
-### windows/stat_charts
+### windows.stat_charts
 
 统计图表自助分析窗口（pygwalker Graphic Walker）：售后/跑视频记录页「统计图表」按钮触发，独立窗口内拖拽式自助分析与预置图表。
 
@@ -1374,45 +1582,80 @@ PortFakeWidget(parent=None)
 
 | 方法 | 说明 |
 |------|------|
-| `open_aftersale(filters)` / `open_ledger(filters)` | 按当前筛选取数（复用 `aftersale_db` / `ledger_db` 同口径查询）→ 列名中文化 → pygwalker HTML 渲染到独立窗口 |
-| `_build_default_spec(kind)` | 预置图表 spec（打开即有默认图表，无需手动拖拽；`_gw_*` 辅助函数构造 Graphic Walker 字段/度量/图表模型） |
+| `open_analysis(filters=None)` | 后台按当前筛选聚合 DataFrame → pygwalker HTML 渲染到独立窗口。构造时注入 `builder`（记录页的取数回调，复用 `aftersale_db` / `ledger_db` 同口径查询）与 `kind`（售后/跑视频） |
+
+**信号**：`finished` Signal(bool, str)——(是否成功, 描述/输出路径)。
 
 > pygwalker 首次 import 在主线程执行（约 1-2s，已知权衡，后续打开走 import 缓存）；数据导出走 DataFrame（记录量大时取数受分页查询同口径约束）。
 
 ---
 
+### windows.aftersale_panel
+
+售后面板 **re-export shim**：原 2275 行单体文件已按页面/职责拆分为 `windows/aftersale/` 包（window / entry / records / form / dialogs / settings 等），本模块仅做向后兼容的 re-export（`AftersalePanelWindow` 实现于 windows/aftersale/window.py），`python -m windows.aftersale_panel` 独立调试入口保留。
+
+### windows.ledger_panel
+
+跑视频面板 **re-export shim**：功能实现于 `windows/run_video/` 包（window / entry / records / form / edit_dialog 等），本模块仅 re-export（`LedgerPanelWindow` 实现于 windows/run_video/window.py）。
+
+### windows.management_panel
+
+运维管理面板 **re-export shim**：原 4483 行单体文件已按页面/职责拆分为 `windows/management/` 包（window / table_page / device_page / health_page / admin_settings / widget_page / game_page / device_common / image_viewer / moyu_widgets 等），本模块仅 re-export（`ManagementPanelWindow` 实现于 windows/management/window.py）。
+
+### windows.update_dialog
+
+#### 类 `UpdateDialog`
+
+更新对话框：新版本详情 → 下载进度 → 安装重启（`MessageBoxBase` 状态机，与 SingleVideoDialog 同模式：对话框持有 Worker，yesButton 按 phase 分发动作）。phase 状态：found（发现新版，确认下载）→ downloading（下载中，进度条 + 可取消）→ ready（下载完成，确认安装重启）→ error（失败，可返回 found 重试）。
+
+| 方法 | 说明 |
+|------|------|
+| `reject()` | 取消当前动作（下载中先停 Worker 再关窗，需用户确认） |
+| `closeEvent(e)` | 下载中拦截关闭（防误触丢包） |
+
+---
+
 ## main_window/ 主窗口层
 
-### MainWindow
+### main_window.main_window
 
-主窗口类，组合所有 Mixin：
+#### 类 `MainWindow`
+
+主窗口类，组合所有 Mixin（进程管理 / 设置 / 远程 / UI / 自动更新）：
 
 ```python
-class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindowBase):
-    ...
+class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin, FluentWindow)
 ```
+
+内部还有 `_DbSettingsDialog`（MessageBoxBase，内嵌 `MysqlSyncCard` 的数据库设置弹窗）、`_LogLoadWorker`（后台读日志 + 高亮匹配）、`_KdStatusQueryWorker`（后台反查 kd 记录分类）三个私有类。
 
 #### 核心公开方法
 
 | 方法 | 说明 |
 |------|------|
+| `switch_to_page(page)` | 统一页面路由：Hub 子页 → 切一级 Hub 再容器内切换；其余走 stackedWidget |
+| `open_aftersale_records_for(table_no)` | 球桌右键「查看售后记录」→ 售后 Hub 记录页按桌号预筛选 |
+| `open_hub_popout(hub)` | Hub 右上「弹出面板」入口：把该面板复刻为独立窗口打开 |
+| `table_page()` / `device_page()` / `health_page()` / `records_page()` | Hub 子页访问器（ManagementHub / AftersaleHub 供跨页联动刷新） |
 | `on_flush_clicked()` | 刷新设备列表和程序列表 |
-| `on_start_clicked()` | 启动 SnookerTracking 程序 |
-| `on_end_clicked()` | 终止运行中的程序 |
-| `on_start_three_clicked()` | 启动/关闭三端（识别端+后端+前端） |
 | `on_open_daily_clicked()` | 打开 CPP 日志文件 |
 | `on_open_dir_clicked()` | 打开当前设备目录 |
-| `on_open_config_clicked()` | 打开配置文件对话框 |
-| `apply_dpi_scale(settings_path)` | [静态] 应用 DPI 缩放 |
+| `focus_log_file(device_dir, date_str, log_fname)` | C6 反向跳转入口：切换到指定设备+日期并选中日志文件 |
+| `on_id_selected(item)` / `on_video_selected(item)` | ID 列表 / 日志目录列表选中事件（加载对应目录/日志内容） |
+| `on_log_selected(item)` / `on_log_double_clicked(item)` | 日志选中 / 双击（解析日志、更新 cfg.json，双击额外启动程序） |
 | `_apply_startup_default_page()` | 启动时按配置 `startup_default_page` 切换默认展示界面（`_build_hub_pages` 末尾 singleShot(0) 调用；非法值回退工作台，2026-09-19） |
-| `_effective_is_dark(settings)` | [静态] 判断是否深色主题 |
 | `_show_info_bar(message, message_type="info", title=None, duration=2500)` | 统一 InfoBar 提示（兼容入口，内部转调 `core.utils.show_info_bar`，位置 BOTTOM_RIGHT、标题自动映射） |
+| `closeEvent(event)` | 主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程 |
+
+> 进程管理方法（启动/结束/三端）见 [ProcessMixin](#main_windowprocess_mixin)，设置方法见 [SettingsMixin](#main_windowsettings_mixin)，UI/主题方法见 [UiMixin](#main_windowui_mixin)，远程方法见 RemoteMixin，更新方法见 [UpdateMixin](#main_windowupdate_mixin)——各自实现于对应 Mixin 模块。
 
 ---
 
-### SettingsMixin
+### main_window.settings_mixin
 
-配置管理（settings.json 读写、路径加载、快捷键）。
+#### 类 `SettingsMixin`
+
+配置管理（配置门面读写、路径加载、快捷键）。
 
 | 方法 | 说明 |
 |------|------|
@@ -1443,7 +1686,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
 ---
 
-### ProcessMixin
+### main_window.process_mixin
+
+#### 类 `ProcessMixin`
 
 进程管理（QProcess、三端启动、分辨率切换、暂停/恢复）。
 
@@ -1460,9 +1705,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 
 ---
 
-### RemoteMixin
+### windows.remote_session.remote_mixin
 
-远程连接管理（P2P 面板、XTCP/TCP 双模式、frpc 管理、窗口启动）。
+#### 类 `RemoteMixin`
+
+远程连接管理（P2P 面板、XTCP/TCP 双模式、frpc 管理、窗口启动；实现于 `windows/remote_session/remote_mixin.py`）。
 
 | 方法 | 说明 |
 |------|------|
@@ -1476,36 +1723,50 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, FluentWindow
 | `_on_ssh_terminal_btn_clicked()` | 打开 SSH 终端窗口 |
 | `_on_rdp_btn_clicked()` | 打开远程桌面窗口 |
 
+#### 类 `TablePickerMenu` / `TablePickerComboBox`
+
+球桌库选择组件（P2P 访客球桌搜索联动用）：`TablePickerComboBox(EditableComboBox)` 输入防抖搜球桌库 + 候选带出 serverName；`TablePickerMenu(CompleterMenu)` 球桌候选弹层（已展示时原位刷新，不重跑淡入动画）。
+
 ---
 
-### UiMixin
+### main_window.ui_mixin
 
-UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切换、布局切换）。
+#### 类 `UIMixin`
+
+UI 辅助（状态栏、菜单栏、右键菜单、主题切换、布局切换）。模块内另有 `AboutDialog`（关于弹窗）、`VisibleAcrylicMenu`（增强可见度亚克力菜单）、`_ShortcutKeyEdit`（Fluent 风格快捷键录入框）、`NewLogDialog`（视频/日志批量整理对话框）等辅助类。
 
 | 方法 | 说明 |
 |------|------|
 | `_init_statusbar()` | 初始化底部状态栏 |
 | `_init_context_menus()` | 初始化右键菜单 |
-| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 / 端口占用 / 视频/日志批量整理 / 上传清单——各入口统一经 `_on_open_tool_hub(work)` 跳转工具页对应工作区） |
+| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 / 端口占用 / 视频/日志批量整理 / 上传清单——各入口统一经 `_on_open_tool_hub` 跳转工具页对应工作区） |
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_parse_theme_color(settings)` | [静态] 解析主题强调色：优先 `theme_color`（HEX），兼容旧 `highlight_color`（RGB 列表） |
-| `_apply_theme_color()` | 从 settings.json 加载主题强调色到内存（`_apply_theme` 时应用） |
+| `_apply_theme_color()` | 从配置加载主题强调色到内存（`_apply_theme` 时应用） |
 | `_on_theme_color()` | 弹出主题强调色选择对话框（功能菜单「主题颜色设置」），选色后经 `_apply_theme_color_set` 生效 |
 | `_on_theme_color_reset()` | 还原默认主题强调色（功能菜单「还原默认主题色」），已是默认色时提示不重复执行 |
 | `_apply_theme_color_set(color)` | 应用主题强调色：持久化 `theme_color` + `setThemeColor` 全局即时生效 + 日志/InfoBar |
-| `_apply_font_size()` | 应用字号设置 |
-| `_apply_font_family()` | 应用字体设置 |
+| `_apply_font_size()` / `_apply_font_family()` | 应用字号 / 字体设置 |
+| `apply_dpi_scale(settings)` | [静态] 在 QApplication 创建后应用 DPI 缩放（settings 为合并配置 dict） |
+| `_effective_is_dark(settings)` | [静态] 判断是否深色主题 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
 | `_on_open_single_video()` | 工具菜单「单杆视频」回退兜底（正常路径为 `_on_open_tool_hub("single_video_work")` 跳工具页）：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调 |
 | `_on_open_tool_hub(work=None)` | 工具类入口统一跳转二期独立工具页（`main_window.tool_hub`）；`work` 为工作区 objectName（single_video_work / port_fake_work / upload_list_work / newlog_work） |
 | `_on_open_port_fake()` | 工具菜单「端口占用」：弹窗真实监听指定端口模拟服务占用（`PortFakeWidget`） |
 | `_on_newlog_organize()` | 工具菜单「视频/日志批量整理」：按 Excel 署名筛选批量归类（`NewLogDialog` + `NewLogWorker`），支持一键打包上传 |
 
+#### 类 `AboutDialog` / `NewLogDialog` / `VisibleAcrylicMenu`
+
+- `AboutDialog(MessageBoxBase)`：关于弹窗——应用名/版本号 + GitHub 链接 + 开源依赖库清单
+- `NewLogDialog(MessageBoxBase)`：视频/日志批量整理对话框——`append_line` 输出、enter_running/enter_organized/enter_uploading/enter_failed 状态机、上传字节进度 `set_upload_percent`、运行中拦截 closeEvent
+- `VisibleAcrylicMenu(AcrylicMenu)`：增强可见度亚克力菜单（深色/浅色主题均有明显磨砂玻璃效果；`_VisibleAcrylicView` 亚克力关时改绘纯色背景）
+- `_ShortcutKeyEdit(LineEdit)`：Fluent 风格快捷键录入框——点击聚焦后按下目标组合键即记录，`keySequence()` 取当前序列
+
 ---
 
-### SettingsHubPage（统一设置页，原 SettingsDialog 已下线）
+### main_window.hub_pages（SettingsHubPage 统一设置页，原 SettingsDialog 已下线）
 
-`main_window/hub_pages.py`：Watt Toolkit 式统一设置页（左标题 + 右 SegmentedWidget 分页），收编原菜单栏全部设置 Action 与三个面板的设置项。**原 `main_window/settings_dialog.py` 已删除**（2026-09-06），日志规则迁 `core/log_rules.py`，控件组件在 `main_window/setting_cards.py`（SettingGroup 组标题 + SettingRow 逐项独立圆角卡片：图标+标题+副标题 | 右侧操作控件）。
+统一设置页（Watt Toolkit 式：左标题 + 右 SegmentedWidget 分页），收编原菜单栏全部设置 Action 与三个面板的设置项。**原 `main_window/settings_dialog.py` 已删除**（2026-09-06），日志规则迁 `core/log_rules.py`，控件组件在 `main_window/setting_cards.py`（SettingGroup 组标题 + SettingRow 逐项独立圆角卡片：图标+标题+副标题 | 右侧操作控件）。
 
 **七个分段**（键归属）：
 
@@ -1529,18 +1790,60 @@ UI 辅助（状态栏、菜单栏、右键菜单、设置对话框、主题切�
 
 ## main_window/ Hub 页面（二级界面，2026-09）
 
-FluentWindow 单窗口重构后，原独立面板降层为「Pivot 二级导航 + 工作区」容器页。主窗口导航顺序：**工作台 / 运维管理 / 售后 / 跑视频 / 远程 / 工具**，底部 **设置 / 关于**。
+### main_window.pivot_page（Hub 基建：PivotPage / CardPage）
 
-### 基建
+FluentWindow 单窗口重构后，原独立面板降层为「Pivot 二级导航 + 工作区」容器页的基建。主窗口导航顺序：**工作台 / 运维管理 / 售后 / 跑视频 / 远程 / 工具**，底部 **设置 / 关于**。
 
-| 类 | 模块 | 说明 |
-|------|------|------|
-| `PivotPage` | `main_window/pivot_page.py` | Pivot 二级导航容器页基类（顶部横排 SegmentedWidget + 下方 QStackedWidget 工作区切换；实测嵌套 FluentWindow 会渲染异常，故用 Pivot 容器） |
-| `CardPage` | `main_window/pivot_page.py` | 卡片页辅助容器 |
-| `HubPopoutWindow(FluentWindow)` | `main_window/hub_popout.py` | 通用「弹出面板」独立窗口：把无旧版独立窗口对应的 Hub（工具/远程）重新以独立 FluentWindow 打开，Hub 内 `self._win` 指向本窗口，故须代理宿主接口（`_show_info_bar` 等） |
-| `SettingGroup` / `SettingRow` | `main_window/setting_cards.py` | 统一设置页卡片组件：组标题 + 逐项独立圆角卡片（左图标+标题+副标题，右操作控件） |
+#### 类 `PivotPage`
 
-### 业务 Hub（`main_window/hub_pages.py`）
+Pivot 二级导航容器页基类（顶部横排 SegmentedWidget + 下方 QStackedWidget 工作区切换；实测嵌套 FluentWindow 会渲染异常，故用 Pivot 容器）。
+
+| 方法 | 说明 |
+|------|------|
+| `addPage(page, text, icon)` | 注册子页面并生成 Pivot 项（objectName 同时作为 routeKey） |
+| `switchTo(page)` | 容器内切换子页（与 FluentWindow.switchTo 同名兼容） |
+| `pages()` | 已注册子页列表 |
+| `lock_pivot_width()` | 按内容锁定切换条宽度（所有页面注册完成后调用一次） |
+| `detach_workers()` | 请求停止所有子页后台线程（只 interrupt 不 wait，等待由主窗口统一做） |
+
+#### 类 `CardPage`
+
+卡片动作页：标题 + 说明 + 竖排动作按钮卡（远程会话/统计/设置/关于共用骨架）。
+
+| 方法 | 说明 |
+|------|------|
+| `set_callbacks(callbacks)` | 绑定动作回调 |
+
+### main_window.hub_popout（HubPopoutWindow 弹出面板窗口）
+
+#### 类 `HubPopoutWindow`
+
+通用「弹出面板」独立窗口（FluentWindow）：把无旧版独立窗口对应的 Hub（工具/远程）重新以独立 FluentWindow 打开，Hub 内 `self._win` 指向本窗口，故须代理宿主接口（`_show_info_bar` 等）；`videos_dir()` 代理视频目录、`closeEvent` 关闭时停后台 Worker。
+
+### main_window.setting_cards（统一设置页卡片组件）
+
+统一设置页的卡片式设置组件（2026-09-07 重构；视觉规格对齐售后运维面板成熟卡片样式 + Watt Toolkit 内联控件）。
+
+#### 类 `SettingGroup(CardWidget)` / `SettingRow(CardWidget)` / `SubRow(QWidget)`
+
+- `SettingGroup`：一组设置——组标题 + 逐项独立卡片；`addRow(row)` 追加设置卡、`addWidget(w)` 嵌入整卡组件（如 AdminSettingsPage / 周期设置卡 / 署名卡）
+- `SettingRow`：单张设置卡片——图标 + 标题/描述 + 右侧内联控件区；`add_stretch_hint()` 允许长描述换行拉宽
+- `SubRow`：折叠卡（ExpandSettingCard）内部的轻量行（标题 + 右侧控件）
+
+#### 模块级工厂函数
+
+| 函数 | 说明 |
+|------|------|
+| `make_switch(checked, on_change, text)` | Watt 式开关：左侧带「开/关」文字的 SwitchButton |
+| `make_combo(items, index, on_change, width)` | 下拉选择：items=[(文本, data)]，on_change(data) |
+| `make_spinbox(value, lo, hi, suffix, on_change, width)` | 内联数字调节（字号等）：先 setValue 再 connect，回显不误触发 |
+| `make_button(text, on_click, icon, width, primary)` | 普通/主按钮 |
+| `make_line_edit(value, on_change, placeholder, width, password)` | 内联文本/密码输入（弹窗配置域迁入统一设置页） |
+| `make_path_row(key, title, value, mode, win, desc)` | 路径配置卡片行：LineEdit + 浏览按钮，编辑即存（config/paths.json） |
+
+### main_window.hub_pages（业务 Hub）
+
+业务域容器页（Hub）——把原独立 FluentWindow 面板降层嵌入主窗口：
 
 | 类 | 导航 | 说明 |
 |------|------|------|
@@ -1550,7 +1853,7 @@ FluentWindow 单窗口重构后，原独立面板降层为「Pivot 二级导航 
 | `SettingsHubPage(QWidget)` | 底部「设置」 | 七分段统一设置页（见上文 SettingsHubPage 节） |
 | `AboutPage(QWidget)` | 底部「关于」 | 版本信息与说明 |
 
-### ToolHub 工具页（`main_window/tool_hub.py`）
+### main_window.tool_hub（工具页 ToolHub）
 
 `ToolHub(PivotPage)`：横排 Pivot 四项无图标（与运维/售后/跑视频同风格），四个工作区类：
 
@@ -1558,14 +1861,42 @@ FluentWindow 单窗口重构后，原独立面板降层为「Pivot 二级导航 
 |------|------|------|
 | 单杆视频 | `SingleVideoWork` | 参数卡（整行铺满，定宽下沉到控件）+ 右侧**日志预览面板**（只读终端、大小·行数、悬停完整路径、刷新按钮、256KB 截断、随选择联动）；参数区与「运行输出」终端间竖直 `QSplitter`（`_make_vsplitter`：handleWidth=2、无自定义 qss，外观对齐主界面工作台列间隔）；生成走 `workers/single_video_worker.SingleVideoWorker` |
 | 端口占用 | `PortFakeWork` | 自写表格：TCP listen→LISTENING、UDP bind→BOUND；绑定地址用 `EditableComboBox` |
-| 上传清单 | `UploadListWork` | 复选框文件表（表头浮 CheckBox 全选，`clicked` 接管三态；「删除所选」二次确认 + `_safe_upload_path` 越界拒绝）；勾选上传走 `ZipUploadWorker(files=白名单)` |
+| 上传清单 | `UploadListWork` | 复选框文件表（表头浮 CheckBox 全选，`clicked` 接管三态；「删除所选」二次确认 + `_safe_upload_path` 越界拒绝）；勾选上传走 `ZipUploadWorker`（files=白名单） |
 | 批量整理 | `NewLogWork` | NewLog 整理 + 打包上传，与 SingleVideoWork 同构（splitter/终端） |
+
+工作区类：`SingleVideoWork(QWidget)`、`PortFakeWork(QWidget)`、`UploadListWork(QWidget)`、`NewLogWork(QWidget)`（上表左列即其实例挂载的 Pivot 项）。
 
 busy 守卫共享 `_single_video_worker/_newlog_worker/_newlog_upload_worker`（任一在跑拒绝再启动）。配置键 `single_random_session_code`（默 True）/ `single_auto_open_dir`（默 False）位于 misc 域。辅助工厂 `_transparent()`（消工作区直角底色块）、`_make_terminal(parent, None)`（Expanding 终端，不设固定高）。
 
-### RemoteHub 远程页（`main_window/remote_hub.py`）
+### windows.remote_session.remote_hub（RemoteHub 远程页）
 
-`RemoteHub(PivotPage)`：三视图——`SessionWork`（会话总览：统计卡 + 7 列隧道表，行内 SSH/SFTP/RDP/断开/删除，SFTP 传输中二次确认）、`VisitorWork`（P2P 访客：注册只 persist 不拉 frpc）、`TunnelConfWork`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
+#### 类 `RemoteHub`
+
+`RemoteHub(PivotPage)`：Pivot 多视图——工作区类 `SessionWork(QWidget)`（会话总览：统计卡 + 7 列隧道表，行内 SSH/SFTP/RDP/断开/删除，SFTP 传输中二次确认）、`VisitorWork(QWidget)`（P2P 访客：注册只 persist 不拉 frpc，球桌号搜索联动带出 serverName）、`QualityWork(QWidget)`（连接质量：visitor RTT 探测样本）、`FrpsProxiesWork(QWidget)`（frps 代理清单：全类型代理表，xtcp 页签展示端口/版本列）、`TunnelConfWork(QWidget)`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例与 `core.frps_admin` 感知客户端；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
+
+### main_window.update_mixin
+
+#### 类 `UpdateMixin`
+
+自动更新客户端编排层（S3）：纯逻辑在 `core/updater.py`（无 Qt），线程适配在 `workers/update_worker.py`，交互弹窗在 `windows/update_dialog.py`，导航按钮在 `main_window/update_nav.py`——本 Mixin 只做编排与 UI 反馈。
+
+| 方法 | 说明 |
+|------|------|
+| `check_for_update(silent)` | 检查更新入口（关于页按钮 / 启动自动检查共用；silent=True 静默无 InfoBar） |
+| `init_update_nav()` | 导航栏「设置」上方插入更新状态按钮（main_window 导航构建后调用） |
+| `consume_update_receipt_on_startup()` | 启动后消费上次更新的回执（成功/失败都要给用户交代） |
+| `auto_check_update_on_startup()` | 按配置 `update_auto_check` 决定启动是否静默自检 |
+
+### main_window.update_nav
+
+#### 类 `UpdateNavButton`
+
+导航栏更新状态按钮（NavigationPushButton，不可选中路由，纯动作按钮；2026-09-20 需求：设置图标上方显示下载状态）。状态机由 UpdateMixin 驱动：hidden（隐藏）/ idle（可检查更新）/ checking（检查中转圈）/ downloading（下载中进度）。
+
+| 方法 | 说明 |
+|------|------|
+| `state()` | 当前状态 |
+| `set_state(state, tooltip)` | 切状态；state=hidden 时隐藏按钮 |
 
 ---
 

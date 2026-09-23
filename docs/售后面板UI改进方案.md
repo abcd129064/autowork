@@ -3,6 +3,18 @@
 > 生成时间：2026-08-23 · 基于 `windows/aftersale_panel.py`（1534 行）全量调研
 > 前置依赖：`core/design_tokens.py` / `core/theme_qss.py`（P0 已落地）
 
+> **落地核对（2026-09-23）**：本文写作时售后面板还是单体 `aftersale_panel.py`，
+> 09 月已拆为 `windows/aftersale/`（form / entry / records / dialogs / settings / stats_dialog），
+> 方案 A/B/C 的绝大多数条目已随重构落地，本文转为**历史设计参考**：
+> - ✅ 指标卡（records.py 四张周期概览卡）、批量操作条（批量标记已解决/批量删除）、
+>   行内操作列（core.ops_link_delegate 文字链接）、一键「标记已解决」（最小化更新）
+> - ✅ 字段级校验红框 + 聚焦首个缺失（form.py `validate()`、dialogs.py）、QCompleter
+>   候选浮层（form.py）、空状态占位（stats_dialog「暂无记录」）、查询 loading（SYNC 刷新按钮）
+> - ✅ 连续录入、自动刷新（2026-09）；表头列宽与列合并方案（见 `design/aftersale_columns_v2.html`）
+> 未落地/部分落地：状态词汇仍有「是/否徽章」（records.py 双行信息整合列保留徽章形态，
+> 与方案 C.2「全面板仅已解决/未解决一套词汇」不完全一致）；存量对话框尺寸收敛、
+> QSS 排版刻度替换 `TYPE_SCALE_PX`、三页间距走 `SPACE` 令牌均为 P2 视觉微调，随各自改版做。
+
 ---
 
 ## 一、P1 / P2 修复进展与待办

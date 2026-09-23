@@ -3,6 +3,7 @@
 > 本目录是**只读设计资产**：HTML 设计稿、logo、生成器、入库截图。
 > 不放运行时资源（运行时资源在 `resource/`、`styles/`），
 > 也不放脚本产物（产物落 `tools/_scratch/`，需长期留档的图落 `design/shots/`）。
+> **视觉规范/设计令牌/组件选型/UI 陷阱**的正典在 [docs/DESIGN.md](../docs/DESIGN.md)；
 > 作业规范见根目录 [AGENTS.md](../AGENTS.md)。
 
 ```
@@ -23,9 +24,9 @@ design/
 | [aftersale_columns_v2.html](aftersale_columns_v2.html) | 售后记录表 · 列合并设计稿 v2（P0-2） | `windows/aftersale/records.py`（列合并方案实测见 `tools/perf/column_merge_probe.py`） |
 | [aftersale_dashboard_design.html](aftersale_dashboard_design.html) | 售后总览 · 图表设计稿（**由脚本生成**，内嵌真实生产数据） | `design/generator/gen_design.py` |
 | [tools_page_v2.html](tools_page_v2.html) | 工具页 · 二期设计稿（ToolHub v2 · qfluentwidgets 控件还原） | `main_window/tool_hub.py` |
-| [remote_page_v2.html](remote_page_v2.html) | 远程页 · 二期设计稿（RemoteHub v2 · 控件还原） | `main_window/remote_hub.py`（已被 v3 取代） |
-| [remote_page_v3.html](remote_page_v3.html) | 远程页 · 二期设计稿（RemoteHub v3 · 连接感知） | `main_window/remote_hub.py` |
-| [remote_page_v3_065.html](remote_page_v3_065.html) | 远程页 v3 变体 · 锁定 frps 0.65 口径 | `main_window/remote_hub.py`（**当前生效版本**） |
+| [remote_page_v2.html](remote_page_v2.html) | 远程页 · 二期设计稿（RemoteHub v2 · 控件还原） | `windows/remote_session/remote_hub.py`（已被 v3 取代） |
+| [remote_page_v3.html](remote_page_v3.html) | 远程页 · 二期设计稿（RemoteHub v3 · 连接感知） | `windows/remote_session/remote_hub.py` |
+| [remote_page_v3_065.html](remote_page_v3_065.html) | 远程页 v3 变体 · 锁定 frps 0.65 口径 | `windows/remote_session/remote_hub.py`（**当前生效版本**） |
 | [remote_session_v2.html](remote_session_v2.html) | 远程会话页 · 二期设计稿（Remote Session v2） | `windows/remote_session/` |
 
 同一页面的多个版本**全部保留**，用于回溯设计演进；判断当前生效版本看上表最后一列。
