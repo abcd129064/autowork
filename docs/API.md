@@ -350,6 +350,8 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 | 方法 | 说明 |
 |------|------|
 | `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪；就绪等待为**端口监听轮询**（P2-4：200ms 间隔、8s 上限，就绪即开，不再固定延时） |
+| `open_direct_session(kind, host, port, name="", notifier=None)` | **TCP 直连会话**（2026-09-24，不经 frpc）：对任意 host:port 开 SSH/SFTP 面板（远程页「连接」TCP 模式与 frps 代理 tcp 页签「直连」用）；凭据取 `settings.ssh_user/ssh_pass`，进全局会话窗口；host/port 校验失败与 paramiko 缺失走 `_notify` 拒绝 |
+| `frps_server_addr()` | frps 服务器地址（`frpc_server.serverAddr`，缺省回退默认值）——frps 代理视图 tcp 页签直连的目标主机 |
 | `disconnect_visitor(server_name)` | 隧道面板「断开连接」：仅 frpc 运行中生效（返回 ok/not_running/not_found/error），先关相关会话再把 visitor 置 `disabled` 态并 apply 摘除隧道、释放端口；**注册与持久化保留**（记录落 `frpc_xtcp_disabled.json` 侧车，不进 frpc TOML），重新连接自动恢复启用，绝不自动启动 frpc |
 | `delete_visitor(server_name)` | 隧道面板「删除 snk」：从注册表与持久化文件（含 disabled 侧车）彻底移除，frpc 未运行时也可执行且不启动 frpc |
 | `active_count()` | 启用中（非 disabled）隧道数——静默预连必要性判定 |
@@ -1726,7 +1728,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
 #### 类 `TablePickerMenu` / `TablePickerComboBox`
 
-球桌库选择组件（P2P 访客球桌搜索联动用）：`TablePickerComboBox(EditableComboBox)` 输入防抖搜球桌库 + 候选带出 serverName；`TablePickerMenu(CompleterMenu)` 球桌候选弹层（已展示时原位刷新，不重跑淡入动画）。
+球桌库选择组件（连接视图 XTCP 模式球桌搜索联动用）：`TablePickerComboBox(EditableComboBox)` 输入防抖搜球桌库 + 候选带出 serverName；`TablePickerMenu(CompleterMenu)` 球桌候选弹层（已展示时原位刷新，不重跑淡入动画）。
 
 ---
 
@@ -1873,7 +1875,9 @@ busy 守卫共享 `_single_video_worker/_newlog_worker/_newlog_upload_worker`（
 
 #### 类 `RemoteHub`
 
-`RemoteHub(PivotPage)`：Pivot 多视图——工作区类 `SessionWork(QWidget)`（会话总览：统计卡 + 7 列隧道表，行内 SSH/SFTP/RDP/断开/删除，SFTP 传输中二次确认）、`VisitorWork(QWidget)`（P2P 访客：注册只 persist 不拉 frpc，球桌号搜索联动带出 serverName）、`QualityWork(QWidget)`（连接质量：visitor RTT 探测样本）、`FrpsProxiesWork(QWidget)`（frps 代理清单：全类型代理表，xtcp 页签展示端口/版本列）、`TunnelConfWork(QWidget)`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例与 `core.frps_admin` 感知客户端；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
+`RemoteHub(PivotPage)`：Pivot 多视图——工作区类 `SessionWork(QWidget)`（会话总览：统计卡 + 7 列隧道表，行内 SSH/SFTP/RDP/断开/删除，SFTP 传输中二次确认）、`VisitorWork(QWidget)`（**连接**（2026-09-24 双模化，原「P2P 访客」）：顶部 XTCP│TCP Segmented 切换 + 模式记忆（`remote_conn_mode`）；XTCP 模式 = 访客注册卡（注册只 persist 不拉 frpc，球桌号搜索联动带出 serverName）+ 注册表；TCP 模式 = 直连表单（host/port/凭据预填 `ssh_user/ssh_pass`）→ `open_direct_session` + 保存服务器表（`settings.tcp_servers` 与主面板远程菜单同键同源））、`QualityWork(QWidget)`（连接质量：visitor RTT 探测样本）、`FrpsProxiesWork(QWidget)`（frps 代理清单：全类型代理表 9 列；xtcp 页签「本地」列联动注册表三态（已注册/已断开/未注册）+ 行内动作（SSH/SFTP、重连/删注册、＋注册并连）；tcp 页签行内 SSH/SFTP 直连（目标 frps serverAddr:remotePort）+ ⊕存服务器）、`TunnelConfWork(QWidget)`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例与 `core.frps_admin` 感知客户端；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
+
+模块级辅助（联动复用）：`load_tcp_servers()` / `save_tcp_server(entry)` / `delete_tcp_server(entry)`（tcp_servers 读写，非法项过滤、去重持久化）、`local_tunnel_state(mgr, name) -> (state, rec)`（state ∈ registered/disabled/none）。
 
 ### main_window.update_mixin
 

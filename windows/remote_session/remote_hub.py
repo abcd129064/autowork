@@ -3,13 +3,14 @@
 
 设计稿：design/remote_page_v3_065.html（frps 0.65 能力锁定版）
 形态：与工具页同风格——横排 Pivot 二级切换（无图标），五视图堆叠：
-    会话总览 │ P2P 访客 │ 连接质量 │ frps 代理 │ 隧道配置
+    会话总览 │ 连接 │ 连接质量 │ frps 代理 │ 隧道配置
 （连接诊断不属本页，2026-09-07 用户定稿：入口保留在 设置-工具）
 
 数据源：
   - 会话总览 = mgr.records() + sessions_on_port() 活跃会话联动
              + frps 在线感知（core/frps_admin，P0：proxy status=online/offline）
-  - P2P 访客 = visitor 注册表增删（register_visitor/persist/delete_visitor）
+  - 连接 = visitor 注册表增删（register_visitor/persist/delete_visitor）
+           + TCP 直连（2026-09-24 P1 双模化：XTCP|TCP Segmented）
   - 连接质量 = core/visitor_probe（P1：本地 bindPort TCP connect RTT，
                30s 一轮串行；sparkline 趋势 + 评级）
   - frps 代理 = frps 网页面板 Proxies 页同源 API（GET /api/proxy/{type}
@@ -38,7 +39,7 @@ from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, StrongBodyLabel
 from main_window.pivot_page import PivotPage
 from main_window.tool_hub import _transparent, _make_terminal
 from core.frp_remote import (get_session_manager, SOURCE_MANUAL,
-                             _FRPC_SERVER_DEFAULTS)
+                             SOURCE_SNK, _FRPC_SERVER_DEFAULTS)
 from core.frps_admin import get_frps_client
 from core.visitor_probe import get_prober
 from database import table_db
@@ -67,6 +68,71 @@ _GRADE_CELL = {
     "fair": ("一般", _C_WARNING), "poor": ("差", _C_WARNING),
     "bad": ("异常", _C_DANGER), "unknown": ("—", _C_MUTED),
 }
+
+
+# ==================== TCP 直连共享工具（与主面板 remote_mixin 同源） ====================
+
+def _app_settings_merged() -> dict:
+    """配置门面合并视图（失败空 dict——联动动作绝不因配置异常崩溃）"""
+    try:
+        from core import app_settings
+        return app_settings.get_merged()
+    except Exception:
+        return {}
+
+
+def load_tcp_servers() -> list:
+    """保存的 TCP 服务器列表（settings 键 tcp_servers，"host:port" 字符串；
+    与主面板 remote_mixin._load_tcp_servers 同键同格式，双端天然同步）"""
+    servers = _app_settings_merged().get("tcp_servers", [])
+    if not isinstance(servers, list):
+        return []
+    return [s for s in servers if isinstance(s, str) and s.strip()]
+
+
+def save_tcp_server(entry: str) -> bool:
+    """追加一条服务器（去重）并持久化；已存在返回 False"""
+    entry = str(entry or "").strip()
+    if not entry:
+        return False
+    servers = load_tcp_servers()
+    if entry in servers:
+        return False
+    servers.append(entry)
+    try:
+        from core import app_settings
+        app_settings.set("tcp_servers", servers)
+    except Exception:
+        return False
+    return True
+
+
+def delete_tcp_server(entry: str) -> bool:
+    """删除一条服务器并持久化；不存在返回 False"""
+    servers = load_tcp_servers()
+    if entry not in servers:
+        return False
+    servers.remove(entry)
+    try:
+        from core import app_settings
+        app_settings.set("tcp_servers", servers)
+    except Exception:
+        return False
+    return True
+
+
+def local_tunnel_state(mgr, name: str) -> tuple:
+    """frps 代理名 → 本地注册表关联三态
+
+    Returns:
+        (state, rec)：state ∈ "registered"（已注册启用）/"disabled"（已断开
+        保留注册）/"none"（未注册）；rec 为匹配的注册表记录（无则 {}）。
+    """
+    name = str(name or "").strip()
+    for rec in mgr.records():
+        if str(rec.get("serverName", "")) == name:
+            return ("disabled" if rec.get("disabled") else "registered", rec)
+    return ("none", {})
 
 _CHANNEL_TEXT = {
     "ok": "frps 感知通道 在线",
@@ -202,7 +268,7 @@ class SessionWork(QWidget):
         btn_session_win.clicked.connect(lambda: self._mgr.ensure_session_window())
         head.addWidget(btn_session_win)
         btn_add = PrimaryPushButton(FluentIcon.ADD, "新建隧道", body)
-        btn_add.setToolTip("切到「P2P 访客」视图注册新隧道")
+        btn_add.setToolTip("切到「连接」视图注册新隧道")
         btn_add.clicked.connect(lambda: self._hub.switchTo(self._hub.visitor_work))
         head.addWidget(btn_add)
         lay.addLayout(head)
@@ -325,7 +391,7 @@ class SessionWork(QWidget):
             self._win._append_log("[远程] 总开关停止 frpc")
             return
         if not self._mgr.records():
-            self._win._show_info_bar("无已注册隧道，请先在「P2P 访客」添加隧道",
+            self._win._show_info_bar("无已注册隧道，请先在「连接」添加隧道",
                                      "warning")
             self._hub.switchTo(self._hub.visitor_work)
             return
@@ -674,10 +740,16 @@ class SessionWork(QWidget):
         self._win._show_info_bar(msg, kind, duration=4000)
 
 
-# ==================== 视图 2：P2P 访客 ====================
+# ==================== 视图 2：连接（XTCP|TCP 双模） ====================
 
 class VisitorWork(QWidget):
-    """P2P 访客：visitor 注册表 + 添加访客表单（写入统一 TOML 并落盘）"""
+    """连接视图（原「P2P 访客」，2026-09-24 P1 双模化）：XTCP 访客 + TCP 直连
+
+    - XTCP 模式：visitor 注册表 + 添加访客表单（写入统一 TOML 并落盘）
+    - TCP 模式：保存的服务器列表（settings tcp_servers，与主面板同源）
+      + host/port/凭据表单 → open_direct_session 直连（不经 frpc）
+    模式选择记忆到配置（remote_conn_mode），下次进入保持。
+    """
 
     def __init__(self, win, hub, parent=None):
         super().__init__(parent)
@@ -694,12 +766,20 @@ class VisitorWork(QWidget):
         lay.setContentsMargins(20, 8, 20, 12)
         lay.setSpacing(12)
 
+        # ---------- 连接模式切换（P1：模式记忆，下次进入保持） ----------
+        self.mode_seg = SegmentedWidget(body)
+        self.mode_seg.addItem("xtcp", "XTCP 访客（P2P 打洞）")
+        self.mode_seg.addItem("tcp", "TCP 直连（经 frps / 局域网）")
+        self.mode_seg.currentItemChanged.connect(self._on_conn_mode_changed)
+        lay.addWidget(self.mode_seg)
+
         # ---------- 添加访客卡（置于注册表上方；球桌号搜索联动带出 serverName） ----------
-        add_card = CardWidget(body)
-        al = QVBoxLayout(add_card)
+        self.add_card = CardWidget(body)
+        add_card = self.add_card  # 局部别名（下方大量 parent 引用沿用原名）
+        al = QVBoxLayout(self.add_card)
         al.setContentsMargins(16, 14, 16, 14)
         al.setSpacing(10)
-        al.addWidget(BodyLabel("添加访客", add_card))
+        al.addWidget(BodyLabel("添加访客", self.add_card))
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
@@ -765,7 +845,88 @@ class VisitorWork(QWidget):
             add_card)
         cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         al.addWidget(cap)
-        lay.addWidget(add_card)
+        lay.addWidget(self.add_card)
+
+        # ---------- TCP 直连卡（P1：与主面板 TCP 模式同源同语义） ----------
+        self.tcp_card = CardWidget(body)
+        tl = QVBoxLayout(self.tcp_card)
+        tl.setContentsMargins(16, 14, 16, 14)
+        tl.setSpacing(10)
+        tl.addWidget(BodyLabel("TCP 直连", self.tcp_card))
+        tcp_grid = QGridLayout()
+        tcp_grid.setHorizontalSpacing(12)
+        tcp_grid.setVerticalSpacing(8)
+        self.tcp_host = LineEdit(self.tcp_card)
+        self.tcp_host.setPlaceholderText("主机地址（IP 或域名）")
+        self.tcp_host.setFixedWidth(220)
+        self.tcp_port = SpinBox(self.tcp_card)
+        self.tcp_port.setRange(1, 65535)
+        self.tcp_port.setValue(22)
+        self.tcp_port.setFixedWidth(110)
+        self.tcp_user = LineEdit(self.tcp_card)
+        self.tcp_user.setPlaceholderText("SSH 用户名")
+        self.tcp_user.setFixedWidth(150)
+        self.tcp_pass = PasswordLineEdit(self.tcp_card)
+        self.tcp_pass.setPlaceholderText("SSH 密码")
+        self.tcp_pass.setFixedWidth(150)
+        _merged = _app_settings_merged()
+        self.tcp_user.setText(str(_merged.get("ssh_user", "") or ""))
+        self.tcp_pass.setText(str(_merged.get("ssh_pass", "") or ""))
+        tcp_grid.addWidget(BodyLabel("主机:", self.tcp_card), 0, 0)
+        tcp_grid.addWidget(self.tcp_host, 0, 1)
+        tcp_grid.addWidget(BodyLabel("端口:", self.tcp_card), 0, 2)
+        tcp_grid.addWidget(self.tcp_port, 0, 3, Qt.AlignLeft)
+        tcp_grid.addWidget(BodyLabel("用户:", self.tcp_card), 1, 0)
+        tcp_grid.addWidget(self.tcp_user, 1, 1)
+        tcp_grid.addWidget(BodyLabel("密码:", self.tcp_card), 1, 2)
+        tcp_grid.addWidget(self.tcp_pass, 1, 3, Qt.AlignLeft)
+        tcp_grid.setColumnStretch(4, 1)
+        tl.addLayout(tcp_grid)
+        tcp_btns = QHBoxLayout()
+        tcp_btns.setSpacing(8)
+        self.btn_tcp_ssh = PrimaryPushButton(FluentIcon.CONNECT, "连接 SSH", self.tcp_card)
+        self.btn_tcp_ssh.clicked.connect(lambda: self._tcp_connect("ssh"))
+        tcp_btns.addWidget(self.btn_tcp_ssh)
+        self.btn_tcp_sftp = PushButton(FluentIcon.FOLDER, "连接 SFTP", self.tcp_card)
+        self.btn_tcp_sftp.clicked.connect(lambda: self._tcp_connect("sftp"))
+        tcp_btns.addWidget(self.btn_tcp_sftp)
+        btn_save = PushButton(FluentIcon.ADD, "保存服务器", self.tcp_card)
+        btn_save.setToolTip("把当前 host:port 存入服务器列表（与主面板同源）")
+        btn_save.clicked.connect(self._tcp_save)
+        tcp_btns.addWidget(btn_save)
+        btn_del = PushButton(FluentIcon.DELETE, "删除选中", self.tcp_card)
+        btn_del.clicked.connect(self._tcp_delete_selected)
+        tcp_btns.addWidget(btn_del)
+        tcp_btns.addStretch(1)
+        tl.addLayout(tcp_btns)
+        # 保存的服务器表（settings tcp_servers，与主面板完全同源）
+        tl.addSpacing(12)   # 按钮行与「保存的服务器」分段留白（卡片被拉伸时多余高度沉底，不均摊进控件间隙）
+        tl.addWidget(BodyLabel("保存的服务器", self.tcp_card))
+        self.tcp_table = TableWidget(self.tcp_card)
+        self.tcp_table.setColumnCount(2)
+        self.tcp_table.setHorizontalHeaderLabels(["主机:端口", "操作"])
+        self.tcp_table.verticalHeader().setVisible(False)
+        self.tcp_table.setAlternatingRowColors(True)
+        self.tcp_table.setWordWrap(False)
+        self.tcp_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tcp_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tcp_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self.tcp_table.setColumnWidth(1, 70)
+        self.tcp_table.setMinimumHeight(150)
+        self.tcp_table.setMaximumHeight(230)
+        self.tcp_table.cellClicked.connect(self._on_tcp_row_clicked)
+        tl.addWidget(self.tcp_table)
+        tl.addSpacing(8)    # 表格与说明文字间距
+        tcp_cap = CaptionLabel(
+            "TCP 直连不经 frpc：局域网地址或 frps 转发端口（frps 代理页 tcp 页签可一键存入）。"
+            "凭据与主面板共享（ssh_user/ssh_pass），连接成功进全局会话窗口。",
+            self.tcp_card)
+        tcp_cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
+        tl.addWidget(tcp_cap)
+        tl.addStretch(1)    # 剩余高度沉底：控件间隙不被均摊拉大
+        self.tcp_card.setVisible(False)   # 默认 XTCP 模式
+        lay.addWidget(self.tcp_card)
 
         # 球桌搜索防抖：停止输入 300ms 后才查库，避免逐字触发同步查询
         # （与球桌管理搜索栏/售后面板球房搜索同范式）
@@ -777,21 +938,21 @@ class VisitorWork(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._do_table_search)
 
-        # ---------- 访客表 ----------
-        card = CardWidget(body)
-        cl = QVBoxLayout(card)
+        # ---------- 访客表（XTCP 注册表；TCP 模式下隐藏） ----------
+        self.visitor_card = CardWidget(body)
+        cl = QVBoxLayout(self.visitor_card)
         cl.setContentsMargins(16, 14, 16, 14)
         cl.setSpacing(10)
         head = QHBoxLayout()
-        head.addWidget(BodyLabel("xtcp visitor 注册表", card))
+        head.addWidget(BodyLabel("xtcp visitor 注册表", self.visitor_card))
         head.addStretch(1)
-        btn_refresh = ToolButton(FluentIcon.SYNC, card)
+        btn_refresh = ToolButton(FluentIcon.SYNC, self.visitor_card)
         btn_refresh.setToolTip("重新读取注册表")
         btn_refresh.clicked.connect(self.refresh)
         head.addWidget(btn_refresh)
         cl.addLayout(head)
 
-        self.table = TableWidget(card)
+        self.table = TableWidget(self.visitor_card)
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
             ["serverName", "类型", "bindPort", "关联球桌", "来源", "最近使用"])
@@ -809,7 +970,12 @@ class VisitorWork(QWidget):
         self.table.setColumnWidth(5, 100)
         self.table.setMinimumHeight(200)
         cl.addWidget(self.table, 1)
-        lay.addWidget(card, 1)
+        lay.addWidget(self.visitor_card, 1)
+
+        # 初始模式：读记忆（缺省 XTCP）；setCurrentItem 在构造期不触发
+        # currentItemChanged（信号在 connect 后手动补一次应用）
+        self.mode_seg.setCurrentItem(self._saved_conn_mode())
+        self._apply_conn_mode(self._saved_conn_mode(), save=False)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -821,6 +987,125 @@ class VisitorWork(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
+
+    # ---------- 连接模式切换（P1 双模） ----------
+
+    def _saved_conn_mode(self) -> str:
+        """上次的连接模式（remote_conn_mode，缺省 xtcp）"""
+        return "tcp" if _app_settings_merged().get(
+            "remote_conn_mode") == "tcp" else "xtcp"
+
+    def _on_conn_mode_changed(self, key):
+        self._apply_conn_mode(str(key))
+
+    def _apply_conn_mode(self, key: str, save: bool = True):
+        """切换 XTCP/TCP 双模显隐并记忆（save=False 用于构造期恢复）"""
+        tcp = (key == "tcp")
+        self.add_card.setVisible(not tcp)      # xtcp 添加访客表单
+        self.visitor_card.setVisible(not tcp)  # xtcp 注册表
+        self.tcp_card.setVisible(tcp)          # TCP 直连卡
+        if save:
+            try:
+                from core import app_settings
+                app_settings.set("remote_conn_mode", key)
+            except Exception:
+                pass
+        if tcp:
+            self._refresh_tcp_table()
+
+    # ---------- TCP 直连（与主面板 TCP 模式同源同语义） ----------
+
+    def _refresh_tcp_table(self):
+        """保存的服务器列表 ← settings tcp_servers（双端同源）"""
+        self.tcp_table.setRowCount(0)
+        for entry in load_tcp_servers():
+            r = self.tcp_table.rowCount()
+            self.tcp_table.insertRow(r)
+            it = QTableWidgetItem(entry)
+            it.setToolTip("点击行填入上方表单")
+            self.tcp_table.setItem(r, 0, it)
+            wrap = QWidget(self.tcp_table)
+            wrap.setStyleSheet("background: transparent;")
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 0, 0, 0)
+            btn = ToolButton(FluentIcon.DELETE, wrap)
+            btn.setFixedSize(28, 24)
+            btn.setToolTip(f"删除 {entry}")
+            btn.clicked.connect(lambda _=False, e=entry:
+                                self._tcp_delete_entry(e))
+            h.addWidget(btn, 0, Qt.AlignCenter)
+            self.tcp_table.setCellWidget(r, 1, wrap)
+
+    def _on_tcp_row_clicked(self, row, _col):
+        """点击服务器行 → 填充表单（主面板同交互）"""
+        servers = load_tcp_servers()
+        if not (0 <= row < len(servers)):
+            return
+        entry = servers[row]
+        host, _, port_str = entry.rpartition(":")
+        if not host:
+            host, port = entry, 22
+        else:
+            try:
+                port = int(port_str)
+            except ValueError:
+                host, port = entry, 22
+        self.tcp_host.setText(host)
+        self.tcp_port.setValue(port)
+
+    def _tcp_save(self):
+        """当前 host:port 存入服务器列表（去重，双端同源）"""
+        host = self.tcp_host.text().strip()
+        if not host:
+            self._win._show_info_bar("请先填写主机地址", "warning")
+            return
+        entry = f"{host}:{self.tcp_port.value()}"
+        if save_tcp_server(entry):
+            self._win._show_info_bar(f"已保存服务器 {entry}", "success")
+            self._win._append_log(f"[远程] 已保存服务器: {entry}")
+        else:
+            self._win._show_info_bar(f"{entry} 已在服务器列表", "info",
+                                     duration=3000)
+        self._refresh_tcp_table()
+
+    def _tcp_delete_selected(self):
+        """删除当前选中行对应的服务器"""
+        servers = load_tcp_servers()
+        row = self.tcp_table.currentRow()
+        if 0 <= row < len(servers):
+            self._tcp_delete_entry(servers[row])
+
+    def _tcp_delete_entry(self, entry: str):
+        if not delete_tcp_server(entry):
+            return
+        self._win._show_info_bar(f"已删除服务器 {entry}", "success")
+        self._win._append_log(f"[远程] 已删除服务器: {entry}")
+        self._refresh_tcp_table()
+
+    def _tcp_connect(self, kind: str):
+        """TCP 直连 SSH/SFTP（凭据写回 settings，与主面板共享）"""
+        host = self.tcp_host.text().strip()
+        if not host:
+            self._win._show_info_bar("请输入主机地址", "warning")
+            self.tcp_host.setFocus()
+            return
+        # 凭据写回（主面板 _save_ssh_credentials 同语义：非空才覆盖）
+        data = {}
+        if self.tcp_user.text().strip():
+            data["ssh_user"] = self.tcp_user.text().strip()
+        if self.tcp_pass.text():
+            data["ssh_pass"] = self.tcp_pass.text()
+        if data:
+            try:
+                from core import app_settings
+                for k, v in data.items():
+                    app_settings.set(k, v)
+            except Exception:
+                pass  # 凭据持久化失败不阻塞连接
+        self._win._append_log(f"[远程] TCP 直连 {kind.upper()} {host}:"
+                              f"{self.tcp_port.value()}")
+        self._mgr.open_direct_session(
+            kind, host, self.tcp_port.value(), name=host, notifier=self._win)
 
     def refresh(self):
         self.table.setRowCount(0)
@@ -1209,7 +1494,20 @@ class FrpsProxiesWork(QWidget):
     （clientID → frpc 版本，网页面板 ClientVersion 列同源），经
     core.frps_admin.FrpsAdminClient.all_proxies()/client_version() 读取
     （随周期感知 best-effort 拉取，本视图零额外请求）。
+
+    2026-09-24 联动（去孤岛）：xtcp 页签按 serverName 匹配本地注册表
+    三态（已注册/未注册/已断开）+ 行内 SSH/SFTP/注册并连接/重连/删注册；
+    tcp 页签行内对 frps serverAddr:remotePort 直连 SSH/SFTP + 存服务器。
+    全部动作复用既有权威路径（open_session / register_visitor /
+    open_direct_session / settings tcp_servers），本视图仍零额外请求。
     """
+
+    # 注册表关联三态 → 「本地」列文案/颜色
+    _LOCAL_CELL = {
+        "registered": ("● 已注册", _C_SUCCESS),
+        "disabled": ("○ 已断开", _C_WARNING),
+        "none": ("— 未注册", _C_MUTED),
+    }
 
     def __init__(self, win, hub, parent=None):
         super().__init__(parent)
@@ -1218,6 +1516,7 @@ class FrpsProxiesWork(QWidget):
         self._win = win
         self._hub = hub
         self._frps = get_frps_client()
+        self._mgr = get_session_manager()
         self._tab = "tcp"
 
         body = QWidget(self)
@@ -1255,10 +1554,10 @@ class FrpsProxiesWork(QWidget):
         cl.setContentsMargins(16, 14, 16, 14)
         cl.setSpacing(10)
         self.table = TableWidget(card)
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels(
             ["Name", "Port / 域名", "Connections", "Traffic In",
-             "Traffic Out", "ClientVersion", "Status"])
+             "Traffic Out", "ClientVersion", "Status", "本地", "操作"])
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
@@ -1272,13 +1571,16 @@ class FrpsProxiesWork(QWidget):
         self.table.setColumnWidth(4, 96)
         self.table.setColumnWidth(5, 100)
         self.table.setColumnWidth(6, 80)
+        self.table.setColumnWidth(7, 92)
+        self.table.setColumnWidth(8, 230)
         self.table.setMinimumHeight(260)
         cl.addWidget(self.table, 1)
         lay.addWidget(card, 1)
 
         self.lbl_hint = CaptionLabel(
             "数据源 GET /api/proxy/{type} + /api/clients（frps 网页面板 Proxies 页同源，"
-            "随周期感知 best-effort 拉取，只读）", body)
+            "随周期感知 best-effort 拉取）。xtcp/tcp 页签可直连：动作走本地注册表与"
+            " TCP 直连的既有权威路径。", body)
         self.lbl_hint.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         lay.addWidget(self.lbl_hint)
 
@@ -1310,22 +1612,155 @@ class FrpsProxiesWork(QWidget):
             r = self.table.rowCount()
             self.table.insertRow(r)
             status = rec.get("status", "")
+            # 「本地」列：xtcp 页签与注册表实时匹配三态；其余页签「—」
+            if self._tab == "xtcp":
+                state, _local = local_tunnel_state(self._mgr,
+                                                   rec.get("name", ""))
+                loc_text, loc_color = self._LOCAL_CELL[state]
+            else:
+                loc_text, loc_color = "—", _C_MUTED
             values = (rec.get("name", ""), _proxy_port_text(rec),
                       str(rec.get("curConns", 0)),
                       _fmt_traffic_bytes(rec.get("todayTrafficIn", 0)),
                       _fmt_traffic_bytes(rec.get("todayTrafficOut", 0)),
                       self._frps.client_version(rec.get("clientID", "")) or "—",
-                      status)
+                      status, loc_text)
             for col, text in enumerate(values):
                 item = QTableWidgetItem(text)
                 item.setToolTip(text)
                 if col == 6:
                     item.setForeground(
                         _C_SUCCESS if status == "online" else _C_DANGER)
+                elif col == 7:
+                    item.setForeground(loc_color)
                 self.table.setItem(r, col, item)
+            # 「操作」列：xtcp/tcp 页签挂行内动作按钮组，其余页签留空
+            bar = self._make_action_cell(rec) if self._tab in ("xtcp", "tcp") else None
+            if bar is not None:
+                self.table.setCellWidget(r, 8, bar)
         self.lbl_state.setText(
             f"frps 代理清单 · {self._tab.upper()} {len(rows)} 条"
             + ("" if snap_state == "ok" else f"（感知通道 {snap_state}）"))
+
+    # ---------- 行内动作（2026-09-24 联动） ----------
+
+    def _act_btn(self, text, cb, tip=""):
+        """行内小动作按钮（统一 24px 高，透明背景不破表格观感）"""
+        b = PushButton(text, self.table)
+        b.setFixedHeight(24)
+        b.clicked.connect(cb)
+        if tip:
+            b.setToolTip(tip)
+        return b
+
+    def _make_action_cell(self, rec):
+        """按页签类型生成行内动作按钮组（xtcp=注册表联动 / tcp=直连+存）"""
+        bar = QWidget(self.table)
+        bar.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(2, 0, 2, 0)
+        h.setSpacing(4)
+        name = str(rec.get("name", ""))
+        if self._tab == "xtcp":
+            state, local = local_tunnel_state(self._mgr, name)
+            table_id = str(local.get("tableId", "") or "")
+            if state == "registered":
+                h.addWidget(self._act_btn(
+                    "SSH", lambda _=False, n=name, t=table_id:
+                    self._connect_xtcp(n, "ssh", t), "一键直连 SSH（打洞）"))
+                h.addWidget(self._act_btn(
+                    "SFTP", lambda _=False, n=name, t=table_id:
+                    self._connect_xtcp(n, "sftp", t), "一键直连 SFTP（打洞）"))
+            elif state == "disabled":
+                h.addWidget(self._act_btn(
+                    "重连", lambda _=False, n=name, t=table_id:
+                    self._connect_xtcp(n, "ssh", t),
+                    "已断开保留注册：连接即恢复启用"))
+                h.addWidget(self._act_btn(
+                    "删注册", lambda _=False, n=name: self._delete_local(n),
+                    "从本地注册表彻底移除（frps 侧不受影响）"))
+            else:
+                h.addWidget(self._act_btn(
+                    "＋ 注册并连", lambda _=False, n=name:
+                    self._register_and_connect(n),
+                    "按默认 secretKey + 随机本地端口注册，并直连 SSH"))
+        elif self._tab == "tcp":
+            port = (rec.get("conf") or {}).get("remotePort")
+            if port:
+                addr = self._mgr.frps_server_addr()
+                h.addWidget(self._act_btn(
+                    "SSH", lambda _=False, p=port, n=name:
+                    self._direct_connect("ssh", addr, p, n),
+                    f"直连 frps {addr}:{port}"))
+                h.addWidget(self._act_btn(
+                    "SFTP", lambda _=False, p=port, n=name:
+                    self._direct_connect("sftp", addr, p, n),
+                    f"直连 frps {addr}:{port}"))
+                entry = f"{addr}:{port}"
+                saved = entry in load_tcp_servers()
+                b = self._act_btn(
+                    "⊕ 存服务器", lambda _=False, e=entry:
+                    self._save_server(e),
+                    "保存到 TCP 直连服务器列表（与主面板/「连接」视图同源）")
+                b.setEnabled(not saved)
+                if saved:
+                    b.setToolTip(f"{entry} 已在服务器列表")
+                h.addWidget(b)
+        return bar
+
+    def _connect_xtcp(self, name: str, kind: str, table_id: str = ""):
+        """xtcp 代理 → 一键直连（复用注册表 open_session 完整链路）"""
+        self._win._append_log(f"[frps 代理] {kind.upper()} 连接 {name}")
+        self._mgr.open_session(kind, name, table_id, notifier=self._win)
+
+    def _register_and_connect(self, name: str):
+        """未注册的 xtcp 代理 → 默认参数注册 + 直连 SSH"""
+        try:
+            self._mgr.register_visitor(name, bind_port=None, secret_key=None,
+                                       source=SOURCE_SNK, table_id="")
+            self._mgr.persist()
+            if self._mgr.is_running():
+                self._mgr.apply()  # 热重载让新 visitor 端口立即监听
+        except (OSError, RuntimeError, ValueError) as e:
+            self._win._show_info_bar(f"注册失败：{e}", "error", duration=5000)
+            return
+        self.refresh()
+        self._win._append_log(f"[frps 代理] 已注册 visitor {name}，发起 SSH 连接")
+        self._mgr.open_session("ssh", name, "", notifier=self._win)
+
+    def _delete_local(self, name: str):
+        """删除本地注册（彻底移除；frps 侧 proxy 由现场设备管理，不受影响）"""
+        box = MessageBox("删除本地注册",
+                         f"将从本地注册表与持久化配置中彻底移除 {name}？\n"
+                         "frps 上的代理由现场设备管理，不受影响；"
+                         "如需重连可随时「注册并连」。", self._win)
+        box.yesButton.setText("删除")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        try:
+            self._mgr.delete_visitor(name)
+        except (OSError, RuntimeError, ValueError) as e:
+            self._win._show_info_bar(f"删除失败：{e}", "error", duration=5000)
+            return
+        self._win._show_info_bar(f"已删除本地注册 {name}", "success")
+        self._win._append_log(f"[frps 代理] 删除本地注册 {name}")
+        self.refresh()
+
+    def _direct_connect(self, kind: str, addr: str, port, name: str):
+        """tcp 代理 → 对 frps serverAddr:remotePort 直连（不经 frpc）"""
+        self._win._append_log(f"[frps 代理] TCP 直连 {addr}:{port}（{name}）")
+        self._mgr.open_direct_session(kind, addr, int(port), name=name,
+                                      notifier=self._win)
+
+    def _save_server(self, entry: str):
+        """tcp 代理 → 保存到服务器列表（与主面板/「连接」视图同源）"""
+        if save_tcp_server(entry):
+            self._win._show_info_bar(f"已保存服务器 {entry}", "success")
+            self._win._append_log(f"[frps 代理] 已保存服务器 {entry}")
+        else:
+            self._win._show_info_bar(f"{entry} 已在服务器列表", "info", duration=3000)
+        self.refresh()
 
 
 # ==================== 视图 4：隧道配置 ====================
@@ -1737,7 +2172,7 @@ class RemoteHub(PivotPage):
         self.tunnel_conf_work = TunnelConfWork(self._win, self, self)
 
         self.addPage(self.session_work, "会话总览")
-        self.addPage(self.visitor_work, "P2P 访客")
+        self.addPage(self.visitor_work, "连接")
         self.addPage(self.quality_work, "连接质量")
         self.addPage(self.frps_proxies_work, "frps 代理")
         self.addPage(self.tunnel_conf_work, "隧道配置")

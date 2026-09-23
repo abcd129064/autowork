@@ -544,6 +544,13 @@ class RemoteSessionManager(QObject):
         """启用中（非 disabled）的隧道数——静默预连的必要性判定"""
         return sum(1 for v in self._visitors.values() if not v.get("disabled"))
 
+    def frps_server_addr(self) -> str:
+        """frps 服务器地址（frpc_server.serverAddr）——frps 代理视图 tcp
+        页签「直连」的目标主机（remotePort 监听在 frps 机器上）"""
+        frpc_server = _load_settings().get("frpc_server") or {}
+        return str(frpc_server.get("serverAddr")
+                   or _FRPC_SERVER_DEFAULTS["serverAddr"])
+
     def autostart(self) -> str:
         """开机静默预连：后台自动拉起 frpc 并恢复启用中的全部隧道，
         让「点 SSH/SFTP 秒连」（ensure_visitor 走复用路径，省 2.5s 冷启动）
@@ -1075,13 +1082,46 @@ class RemoteSessionManager(QObject):
             [port],
             lambda: self._do_open(kind, snk, table_id, port, notifier))
 
-    def _do_open(self, kind: str, snk: str, table_id: str, port: int, notifier=None):
-        """隧道就绪后实际打开会话面板（隧道在本地 127.0.0.1:port）"""
+    def open_direct_session(self, kind: str, host: str, port: int,
+                            name: str = "", notifier=None):
+        """TCP 直连会话（不经 frpc）：对任意 host:port 打开 SSH/SFTP 面板
+
+        供远程页「连接」TCP 模式与 frps 代理视图「直连」动作使用——与
+        主面板 TCP 模式同语义：凭据取 settings ssh_user/ssh_pass（主面板
+        连接时写回的同一组），会话进全局会话窗口（会话总览可见）。
+        """
+        if kind in ("ssh", "sftp") and not PARAMIKO_AVAILABLE:
+            self._notify("无法远程", "paramiko 未安装，无法建立 SSH/SFTP 会话",
+                         error=True, notifier=notifier)
+            return
+        host = str(host or "").strip()
+        if not host:
+            self._notify("无法连接", "主机地址不能为空", error=True,
+                         notifier=notifier)
+            return
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            self._notify("无法连接", f"端口非法: {port}", error=True,
+                         notifier=notifier)
+            return
+        title = str(name or "").strip() or f"{host}:{port}"
+        self._notify("正在建立连接", f"{title} → {host}:{port}",
+                     notifier=notifier)
+        self.log_message.emit(f"[远程会话] TCP 直连: {title} ({host}:{port}, {kind})")
+        self._do_open(kind, title, "", port, notifier=notifier, host=host)
+
+    def _do_open(self, kind: str, snk: str, table_id: str, port: int,
+                 notifier=None, host: str = "127.0.0.1"):
+        """隧道就绪后实际打开会话面板（默认隧道在本地 127.0.0.1:port；
+        host 可变——TCP 直连路径经 open_direct_session 传目标地址）"""
         # 会话面板依赖 paramiko 等重组件，延迟导入避免模块加载开销
         settings = _load_settings()
         username = settings.get("ssh_user", "")
         password = settings.get("ssh_pass", "")
-        host = "127.0.0.1"
+        # TCP 直连路径传入目标主机（如 frps remotePort 所在机器）；
+        # 隧道路径未传 host 时保持默认本机
+        host = str(host or "").strip() or "127.0.0.1"
         title_snk = f"{table_id}（{snk}）" if table_id else snk
         try:
             if kind == "ssh":

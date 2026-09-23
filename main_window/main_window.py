@@ -375,7 +375,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 # 弹出后各视图改管理面板式左侧子导航；其余 Hub 维持内嵌 Pivot
                 nav_icons = {
                     "remoteHub": {"会话总览": FluentIcon.HOME,
-                                  "P2P 访客": FluentIcon.PEOPLE,
+                                  "连接": FluentIcon.PEOPLE,
                                   "连接质量": FluentIcon.PIE_SINGLE,
                                   "frps 代理": FluentIcon.GLOBE,
                                   "隧道配置": FluentIcon.SETTING},

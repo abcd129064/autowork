@@ -14,7 +14,8 @@
 ## 3.13（2026-09-19 ~ 2026-09-23，进行中）— 远程二期 + frps 感知 + 仓库治理
 
 ### 远程 / frp
-- 远程页 RemoteHub 由三视图扩为**四视图**：会话总览 │ P2P 访客 │ **连接质量**（新增）│ 隧道配置（`main_window/remote_hub.py`，2026-09-21）。
+- 远程页 RemoteHub 由三视图扩为**四视图**：会话总览 │ 连接 │ **连接质量**（新增）│ 隧道配置（`windows/remote_session/remote_hub.py`，2026-09-21）。
+- **远程页 TCP 直连双模化**（2026-09-24，设计稿 `design/remote_hub_tcp_linkage_v1.html`）：①视图 2「P2P 访客」更名**「连接」**，顶部 XTCP│TCP Segmented 切换——TCP 模式为直连表单 + 保存服务器列表（`settings.tcp_servers` 与主面板远程菜单同键同源）；`RemoteSessionManager.open_direct_session()` 直连任意 host:port 开 SSH/SFTP（复用主面板 ssh_user/ssh_pass）；②frps 代理视图去孤岛化：xtcp 页签联动本地注册表三态（已注册/已断开/未注册），行内动作——已注册 SSH/SFTP 直连、已断开 重连/删注册、未注册 ＋注册并连；tcp 页签行内 SSH/SFTP 直连（目标 = frps serverAddr:remotePort）+ ⊕存服务器；③模式记忆 `remote_conn_mode`，弹出窗口左导航同步更名。
 - frps 在线感知：进入远程页即探测 frps 管理 API，会话总览新增 **frps 概览卡**（`core/frps_admin.py`）；连接质量视图每 30s 一轮探测 visitor 打洞质量。
 - frpc visitor **热重载**（`core/frp_remote.py`，2026-09-21）：注册/删除隧道不再整进程重启 frpc。
 - **frp 总开关**（2026-09-22）：配置页一键启停全部隧道；首页日志工作台支持排除 frp 日志。

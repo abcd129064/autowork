@@ -302,10 +302,10 @@ if rh is not None:
     check("8c.10c manager 提供 autostart/prewarm_async/active_count",
           all(callable(getattr(_mgr, a, None))
               for a in ("autostart", "prewarm_async", "active_count")))
-    # frps 代理视图（2026-09-23）：8 类型 tab + 7 列表 + 搜索
+    # frps 代理视图（2026-09-23；09-24 联动扩 9 列：+本地+操作）：8 类型 tab + 9 列表 + 搜索
     _fp = getattr(rh, "frps_proxies_work", None)
-    check("8c.10d frps 代理视图 7 列表+tab 存在",
-          _fp is not None and _fp.table.columnCount() == 7
+    check("8c.10d frps 代理视图 9 列表+tab 存在",
+          _fp is not None and _fp.table.columnCount() == 9
           and hasattr(_fp, "tabs") and hasattr(_fp, "edit_kw"))
     try:
         rh._apply_table_smooth_all()

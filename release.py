@@ -41,7 +41,7 @@ import shutil
 import subprocess
 import sys
 import time
-# C:\Users\shen_zhe\.workbuddy\binaries\python\envs\default\Scripts\python.exe
+# $env:AFT_SSH_PASS='Password';C:\Users\shen_zhe\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 # release.py --notes 卡死修复;conda构建守卫，解决深色主题下售后记录状态显示问题及conda构建安全防护
 # 本脚本位于项目根目录（2026-09-20 从 tools/ 移出）；若在 tools/ 下运行则回退旧推导
 _here = os.path.dirname(os.path.abspath(__file__))
