@@ -3,7 +3,8 @@
 
 卡片式对话框：标题显示文件名与序号，中间图片，
 左右箭头/键盘 ←→ 切换列表内图片，底部复用四个迁移按钮
-（使用/精度/问题/废弃），迁移成功自动刷新文件列表。
+（使用/精度/问题/废弃），点击迁移后窗口保持开启（连续处理多张），
+迁移结果由设备页 InfoBar 提示并自动刷新文件列表。
 
 图片 URL 规则：
     http://kd.newbv.cn:30005/media/{yyyy/MM/dd}/{device_code}/{分类目录}/{文件名}
@@ -365,6 +366,12 @@ class ImageViewerDialog(QDialog):
 
     def _on_migrate(self, dest_cat):
         fname, src_cat = self._entries[self._idx]
-        # 复用设备页迁移链路（含进行中互斥、成功后静默刷新文件列表）
+        # 复用设备页迁移链路（含进行中互斥、成功后静默刷新文件列表；
+        # 迁移结果由设备页 InfoBar 提示）
         self._device_page.migrate_file(fname, src_cat, dest_cat)
-        self.accept()
+        # 保持窗口开启：本地条目同步为目标分类（迁移后图片落新目录，
+        # 翻页回看按新目录构造 URL 才能命中），状态行给出已提交标记
+        self._entries[self._idx] = (fname, dest_cat)
+        self._lbl_status.setText(
+            f"{self._idx + 1} / {len(self._entries)} · "
+            f"已提交迁移「{src_cat} → {dest_cat}」")

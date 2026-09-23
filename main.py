@@ -53,8 +53,13 @@ from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 # ComboBox 下拉），开关切换后下一次弹出即生效（幂等，重复调用无害）
 from core.perf import (patch_menu_animation, patch_dialog_animation,
                        patch_table_hover_repaint,
-                       patch_lean_table_delegate)
+                       patch_lean_table_delegate,
+                       patch_mica_policy)
 patch_menu_animation()
+# 云母环境兜底（2026-09-24）：RDP 会话 / 系统透明效果关闭时 DWM 静默
+# 不渲染 Mica backdrop，而 qfw 已把窗口背景置全透明——表现为"同一份产物
+# 有的电脑没云母且窗口生硬"。命中时双层短路，窗口回退纯主题色背景
+patch_mica_policy()
 # 中央拦截 MessageBoxBase 弹窗淡入/淡出（QGraphicsOpacityEffect 整窗离屏
 # 渲染是「双击打开面板」低帧/卡顿主因）：动画关闭时直接显示，秒开无渐变
 patch_dialog_animation()

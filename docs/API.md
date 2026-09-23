@@ -127,6 +127,7 @@ import core.acrylic_patch  # noqa: F401
 | `patch_menu_animation()` | 拦截 qfluentwidgets 菜单/ComboBox 下拉弹出动画，按「面板覆盖→全局」生效值降级 |
 | `patch_dialog_animation()` | 拦截 MaskDialogBase 弹窗淡入/淡出：动画关闭时直接显示（规避整窗离屏渲染卡顿） |
 | `patch_table_hover_repaint()` | 拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代库默认整视口重绘，≈1/23 面积） |
+| `patch_mica_policy()` | 云母环境兜底（2026-09-24）：DWM 在 **RDP 会话** / **系统透明效果关闭**（含省电模式自动关）时静默不渲染 Mica backdrop，而 qfw 已把窗口背景置全透明 → "同一份产物有的电脑没云母"。命中时双层短路——①`FluentWidget.setMicaEffectEnabled` 开关路径强制不开（背景保持实色）；②`WindowsWindowEffect.setMicaEffect` no-op（FluentWidget 基类 FramelessWindow 在 Win11 分支构造时**绕过开关直调**此方法，必须一并拦）。判定：`mica_block_reason()` ∈ below-win11 / rdp-session / transparency-off / ''（支持）。环境支持时零 patch；不支持时窗口回退纯主题色背景，日志记 `[perf] Mica 云母已禁用（原因）` |
 
 #### 轻量表格委托（LeanTableDelegate 开关，配 `core.lean_table_delegate`）
 

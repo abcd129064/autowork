@@ -31,6 +31,9 @@
 - 球桌管理新增 **ToDesk 远程开关列**（2026-09-20）：worker 池按设备编码并发下发开/关，权威显示口径 = `todesk_action`。
 - 导航栏新增**更新状态图标**（2026-09-20）：发现新版本才显示，位于「设置」上方。
 
+### 界面 / 主题
+- **Mica 云母环境兜底**（2026-09-24）：RDP 会话 / 系统透明效果关闭（省电模式自动关）时 DWM 静默不渲染 backdrop，而 qfw 已把窗口背景置全透明——表现为"同一份产物有的电脑没云母"。启动时探测（`core/perf.py patch_mica_policy`），命中则双层短路回退纯主题色背景。判定与诊断：`mica_block_reason()`。
+
 ### 工程 / 仓库治理
 - **四目录整合**（2026-09-22）：`tests/` `tools/` `design/` `docs/` 职责边界落档为 [AGENTS.md](../AGENTS.md)（硬约束）；`tools/` 按运行方式拆 `deploy/ smoke/ perf/ probe/ stress_test/ update_sim/ _scratch/`。
 - 构建修复：PATH 污染导致的 SSL 库冲突（2026-09-22）；conda 构建安全防护与深色主题下售后状态显示（2026-09-21）。

@@ -493,6 +493,120 @@ def _persist(key: str, value: bool):
         pass
 
 
+# ==================== Mica 云母环境兜底（2026-09-24） ====================
+# 背景：qfluentwidgets 的 FluentWindow 全系在构造时自动 setMicaEffectEnabled(True)
+# 并把窗口背景置为全透明（_normalBackgroundColor → QColor(0,0,0,0)）。但 DWM
+# 在以下场景会**静默不渲染** backdrop（DWMWA_SYSTEMBACKDROP_TYPE /
+# ACCENT_ENABLE_HOSTBACKDROP 调用不报错、也没效果）：
+#   1. RDP 远程会话 —— Mica/Acrylic 在远程桌面里明确不支持；
+#   2. 系统「透明效果」关闭（设置>个性化>颜色；省电模式会自动关它）。
+# 结果就是"同一份产物，有的 Win11 有云母有的没有"——且没渲染的窗口只剩
+# 透明背景 + DwmExtendFrameIntoClientArea 的裸框架，观感生硬。
+# 兜底策略：启动时探测一次，命中即中央短路 setMicaEffectEnabled，
+# 窗口自动回退 qfw 纯主题色背景（对齐 Win10 的既有回退形态）。
+
+_SM_REMOTESESSION = 0x1000  # GetSystemMetrics：非零=当前在 RDP 会话中
+_TRANSPARENCY_KEY = (r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+                     r"\Themes\Personalize")
+
+
+def _is_remote_session() -> bool:
+    """当前是否处于 RDP/远程桌面会话（探测失败按否处理）"""
+    try:
+        import ctypes
+        return bool(ctypes.windll.user32.GetSystemMetrics(_SM_REMOTESESSION))
+    except Exception:
+        return False
+
+
+def _is_transparency_disabled() -> bool:
+    """系统「透明效果」是否被关闭（注册表键缺失/读取失败按开启处理）"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            _TRANSPARENCY_KEY) as k:
+            v, _t = winreg.QueryValueEx(k, "EnableTransparency")
+            return not int(v)
+    except Exception:
+        return False
+
+
+def mica_block_reason() -> str:
+    """返回禁用 Mica 的原因标识（'' = 环境支持，可启用）
+
+    判定口径与 qfluentwidgets 门禁（sys.getwindowsversion().build ≥ 22000）
+    保持一致；在其之上追加两类「DWM 静默不渲染」环境：
+    - below-win11 : Win10（build < 22000），库本身就不启用
+    - rdp-session : RDP 远程会话，DWM backdrop 明确不支持
+    - transparency-off : 系统透明效果关闭（含省电模式自动关闭）
+    """
+    import sys as _sys
+    if _sys.platform != "win32":
+        return ""
+    try:
+        if _sys.getwindowsversion().build < 22000:
+            return "below-win11"
+    except Exception:
+        return "unknown-version"
+    if _is_remote_session():
+        return "rdp-session"
+    if _is_transparency_disabled():
+        return "transparency-off"
+    return ""
+
+
+def patch_mica_policy():
+    """云母环境兜底（幂等，启动时调用一次）：命中不渲染场景时双层短路，
+    所有 FluentWindow 窗口回退纯主题色背景，杜绝「透明背景叠裸框架」
+    的半残观感
+
+    双层原因（qfw 开启 Mica 有两条独立通路，缺一不可）：
+    1. FluentWidget.__init__ → setMicaEffectEnabled(True) —— 开关路径，
+       强制短路后 _isMicaEnabled=False，窗口背景走实色而非全透明；
+    2. FluentWidget 的基类 FramelessWindow（Win11 分支）在构造时
+       **无条件直调** windowEffect.setMicaEffect() —— 绕过开关的 DWM
+       backdrop 路径，必须一并 no-op，否则标题栏透明区仍会漏出 Mica。
+
+    环境支持时完全不 patch（保持库原行为）；探测只做一次，运行期系统
+    设置变化不追（透明效果重新打开需重启程序，与 qfw 现状一致）。
+    """
+    try:
+        from qfluentwidgets.window.fluent_window import FluentWidget
+        from qframelesswindow.windows.window_effect import WindowsWindowEffect
+    except Exception:
+        return
+    if getattr(FluentWidget, "_perf_mica_patched", False):
+        return
+    reason = mica_block_reason()
+    FluentWidget._perf_mica_patched = True
+    if not reason:
+        return  # 环境支持：保持库原行为
+
+    def _setMicaEffectEnabled(self, isEnabled: bool):
+        if isEnabled:
+            return  # 静默拒绝：_isMicaEnabled 保持 False，窗口走纯色背景
+        try:
+            self.windowEffect.removeBackgroundEffect(self.winId())
+        except Exception:
+            pass
+
+    def _setMicaEffect(self, hWnd, isDarkMode=False, isAlt=False):
+        return  # 静默跳过：不给 DWM 发任何 backdrop 属性（含基类直调路径）
+
+    FluentWidget.setMicaEffectEnabled = _setMicaEffectEnabled
+    WindowsWindowEffect.setMicaEffect = _setMicaEffect
+    _log(f"[perf] Mica 云母已禁用（{reason}），窗口使用纯色背景")
+
+
+def _log(message: str):
+    """写连接日志（失败静默——性能选项绝不阻塞启动）"""
+    try:
+        from core.conn_logger import conn_logger
+        conn_logger._write("INFO", "PERF", message)
+    except Exception:
+        pass
+
+
 # ==================== 向后兼容 ====================
 
 def is_performance_mode() -> bool:

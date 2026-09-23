@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, QRect, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QScrollArea, QSizePolicy,
-    QTableWidgetItem, QVBoxLayout, QWidget)
+    QTableWidgetItem, QToolTip, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, CaptionLabel, CardWidget, ComboBox,
     FluentIcon, FlowLayout, PrimaryPushButton, PushButton, SearchLineEdit,
@@ -48,6 +48,11 @@ def _text_color() -> str:
 
 def _muted_color() -> str:
     return "#9CA3AF" if not isDarkTheme() else "#555f6b"
+
+
+def _primary_text_color() -> str:
+    """主文本色（与右侧表格 QSS 默认字色一致，图表文字可读性对齐表格）"""
+    return "#20242B" if not isDarkTheme() else "#C8D0DC"
 
 
 # 排名前三徽章色（金/银/铜，深浅主题通用的中明度色）
@@ -121,12 +126,27 @@ class _RankHBarChart(QWidget):
         if idx != self._hover:
             self._hover = idx
             self.update()
+        # 名称被截断时悬停显示完整名 tooltip（_DailyBarChart 同范式）
+        if idx >= 0:
+            r = self._rows[idx]
+            name = str(r.get("name") or "")
+            fm = QFontMetrics(self.font())
+            if fm.horizontalAdvance(name) > self.LABEL_W - 6:
+                QToolTip.showText(
+                    self.mapToGlobal(e.position().toPoint()),
+                    f"{name} · {int(r.get('total') or 0)} 条 · "
+                    f"{int(r.get('share') or 0)}%", self)
+            else:
+                QToolTip.hideText()
+        else:
+            QToolTip.hideText()
         super().mouseMoveEvent(e)
 
     def leaveEvent(self, e):
         if self._hover != -1:
             self._hover = -1
             self.update()
+        QToolTip.hideText()
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
@@ -149,7 +169,8 @@ class _RankHBarChart(QWidget):
         base = QColor(self._bar_color or current_accent_hex())
         hover_c = QColor(base)
         hover_c.setAlpha(28)
-        bar_x = self.LABEL_W + 8
+        pad_l = 8   # 左内边距：名称不贴卡片边
+        bar_x = pad_l + self.LABEL_W + 8
         bar_w = max(20.0, self.width() - bar_x - self.VAL_W - 8)
         for i, r in enumerate(self._rows):
             y = 5 + i * self.ROW_H
@@ -162,15 +183,15 @@ class _RankHBarChart(QWidget):
             name = fm.elidedText(
                 str(r.get("name") or ""), Qt.TextElideMode.ElideRight,
                 self.LABEL_W - 6)
-            p.setPen(QColor(_text_color()))
-            p.drawText(QRect(0, y, self.LABEL_W, 18),
+            p.setPen(QColor(_primary_text_color()))
+            p.drawText(QRect(pad_l, y, self.LABEL_W, 18),
                        Qt.AlignmentFlag.AlignRight
                        | Qt.AlignmentFlag.AlignVCenter, name)
             bw = max(3.0, bar_w * n / max_v)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(base)
             p.drawRoundedRect(QRectF(bar_x, y + 2, bw, 13), 4, 4)
-            p.setPen(QColor(_muted_color()))
+            p.setPen(QColor(_primary_text_color()))
             p.drawText(
                 QRectF(bar_x + bar_w + 8, y, self.VAL_W, 18),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -383,6 +404,13 @@ class RankPage(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._chart = _RankHBarChart(self._chart_scroll)
         self._chart_scroll.setWidget(self._chart)
+        # 视口透明（FlowToolbarScrollArea 同款）：深色主题下 QScrollArea
+        # 视口默认按 Base 色绘制，会在卡片内形成突兀黑块；必须在 setWidget
+        # 之后设置（setWidget 会重建视口）
+        self._chart_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }")
+        self._chart_scroll.viewport().setStyleSheet(
+            "background: transparent;")
         self._chart.rowClicked.connect(self._on_chart_row)
         body.addWidget(self._chart_scroll, 2)
 
