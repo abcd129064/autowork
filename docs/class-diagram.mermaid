@@ -1,8 +1,14 @@
+%% AutoWork 数据层 + Worker 层 类关系图
+%% 刷新：2026-09-23（对齐 database/schema.py 单一来源、mysql_sync 镜像推送下线、
+%%       sqlite_io 已被 merge_back 实际引用等现状）
+%% 说明：mermaid classDiagram 用「类」表示模块门面；标注 [module] 的实为模块级
+%%       函数/常量集合（非 Python class），此处仅为表达依赖关系。
 classDiagram
     direction LR
 
     %% ============ 数据层 database/ ============
     class Backend {
+        <<module database.backend>>
         +STATE_ONLINE: str
         +STATE_DEGRADED: str
         +MYSQL_DDL: dict
@@ -15,6 +21,7 @@ classDiagram
         +convert_placeholders(sql) str
         +convert_on_conflict(sql) str
         +convert_insert_or_replace(sql) str
+        +_convert_sql(sql) str
     }
     class MysqlConnectionAdapter {
         -_conn
@@ -32,38 +39,41 @@ classDiagram
         +lastrowid / rowcount / description
     }
     class Schema {
-        +TABLE_META: dict
+        <<module database.schema>>
+        +TABLE_NAMES: list
+        +TABLE_COLUMNS: dict
+        +TABLE_INDEXES: dict
         +MIGRATIONS: dict
         +to_sqlite_ddl(table) str
         +to_mysql_ddl(table) str
+        +sqlite_alter_for(table, col) str
+        +mysql_alter_for(table, col) str
     }
     class SqliteIO {
-        +read_sqlite_table(table, columns) list
+        <<module database.sqlite_io>>
+        +read_sqlite_table(conn, table, columns) list
     }
     class TableDB {
+        <<module database.table_db>>
         +DB_PATH: str
-        +FIELDS: tuple
-        +STATUS_FIELDS: tuple
-        +KD_EXTRA_FIELDS: tuple
-        +_get_conn()
-        +_upsert_sync_meta(conn, key, value)
+        +get_conn()
         +save_all(rows) int
         +query_page(page, size, kw) tuple
         +save_xqzg(rows, file_path) int
-        +query_xqzg_page(...) tuple
         +save_kd(rows, file_path) int
         +upsert_kd(rows, file_path) int
-        +query_kd_page(...) tuple
         +get_latest_kd_status(table_id) dict
         +sync_health_alerts(rows) int
         +log_submission(...) int
         +get_device_mapping(code) dict
         +set_device_mapping(code, dir, source) bool
+        +get_todesk_ids(codes) dict
+        +update_todesk_status(code, status) int
         +_ensure_initialized(conn)
     }
     class AftersaleDB {
+        <<module database.aftersale_db>>
         +RECORD_FIELDS: tuple
-        +RECORD_KEY_COLS: tuple
         +insert_record(record) int
         +update_record(record) int
         +delete_record(id) int
@@ -71,26 +81,39 @@ classDiagram
         +export_xlsx(path, ...) int
         +import_excel_rows(path) int
         +cycle_start_of(dt) str
+        +change_fingerprint() str
+        +auto_refresh_enabled() bool
+    }
+    class LedgerDB {
+        <<module database.ledger_db>>
+        +CATEGORIES: list
+        +insert_record / query_page / ...
+        +change_fingerprint() str
+        +auto_refresh_enabled() bool
     }
     class MysqlSync {
-        +_read_sqlite(table, columns) list
-        +push_all(progress_cb) tuple
-        +push_table(table, progress_cb) tuple
-        +push_aftersale(cfg, progress_cb) tuple
+        <<module database.mysql_sync>>
         +test_connection(cfg) tuple
-        +_ensure_schema(cfg)
+        +_connect(cfg) connection
     }
     class MergeBack {
+        <<module database.merge_back>>
         +merge_back(progress_cb) tuple
         +merge_aftersale(mysql_conn, cb) int
         +merge_device_mapping(mysql_conn, cb) int
         +merge_ops_tables(mysql_conn, cb) int
     }
     class FallbackBackup {
+        <<module database.fallback_backup>>
         +backup_mysql_to_sqlite(cb) tuple
         +maybe_backup(cb) tuple
         +is_backup_due() bool
         +get_last_backup_time() str
+    }
+    class DataRetention {
+        <<module database.data_retention>>
+        +is_enabled() bool
+        +run_cleanup(progress_cb) tuple
     }
 
     %% ============ workers/ ============
@@ -99,7 +122,7 @@ classDiagram
         +result: Signal(bool, str, int)
         +run()
     }
-    class MysqlSyncWorker {
+    class MysqlTestWorker {
         +progress: Signal(str)
         +success: Signal(int, str)
         +error: Signal(str)
@@ -109,7 +132,11 @@ classDiagram
         +result: Signal(bool, str, int)
         +run()
     }
-    class TableWorker {
+    class CleanupWorker {
+        +result: Signal(bool, str, int)
+        +run()
+    }
+    class TableFetchWorker {
         +result_ready: Signal(list)
         +error: Signal(str)
         +run()
@@ -117,43 +144,38 @@ classDiagram
 
     %% ============ windows/ ============
     class ManagementPanel {
+        <<windows.management.*>>
         +TablePage
-        +UploadListDialog
-        +DeviceFilesDialog
+        +DevicePage
         +HealthPage
         +MysqlSyncCard
-        +_trigger_auto_mysql_sync()
-    }
-    class TablePanel {
-        +_check_device_offline(name) bool
     }
     class ForensicReport {
+        <<windows.remote_session.forensic_report>>
         +lookup_table_info(snk, host) dict
         +lookup_kd_status(table_id, snk) dict
     }
 
     %% ============ 关系 ============
+    note for MysqlSync "镜像推送 push_all/push_table/push_aftersale 已下线（2026-08）"
     TableDB --> Backend : 路由连接/方言
-    TableDB --> Schema : 生成 DDL（目标态）
-    TableDB --> SqliteIO : 只读工具（目标态）
+    TableDB --> Schema : 生成 DDL + 自动迁移补列
     AftersaleDB --> TableDB : get_conn()
-    MysqlSync --> Backend : is_mysql_test_mode 守卫
-    MysqlSync --> Schema : DDL 引用（目标态）
-    MysqlSync --> SqliteIO : 读 SQLite（目标态）
+    LedgerDB --> TableDB : get_conn()
     MergeBack --> Backend : create_mysql_connection
-    MergeBack --> Schema : 列元数据（目标态）
-    MergeBack --> SqliteIO : 读 SQLite（目标态）
+    MergeBack --> SqliteIO : read_sqlite_table（已落地）
     FallbackBackup --> Backend : create_mysql_connection
-    FallbackBackup --> SqliteIO : 读/写 SQLite（目标态）
+    FallbackBackup --> SqliteIO : 读/写 SQLite
+    DataRetention --> Backend : 双后端同一套清理
     Backend --> MysqlConnectionAdapter : 创建
+    Backend --> Schema : MYSQL_DDL 由 schema 生成
     MysqlConnectionAdapter --> MysqlCursorAdapter : 包装
 
     MergeBackWorker --> MergeBack : run 调用
-    MysqlSyncWorker --> MysqlSync : run 调用
+    MysqlTestWorker --> MysqlSync : test_connection
     BackupWorker --> FallbackBackup : run 调用
-    TableWorker --> TableDB : save_all/upsert_kd
+    CleanupWorker --> DataRetention : run 调用
+    TableFetchWorker --> TableDB : save_all/upsert_kd
     ManagementPanel --> TableDB : 查询/保存
-    ManagementPanel --> TableWorker : 拉 API
-    ManagementPanel --> MysqlSyncCard : 配置卡片
-    TablePanel --> TableDB : get_latest_kd_status（目标态）
-    ForensicReport --> TableDB : 只读 API（目标态）
+    ManagementPanel --> TableFetchWorker : 拉 API
+    ForensicReport --> TableDB : 只读 API
