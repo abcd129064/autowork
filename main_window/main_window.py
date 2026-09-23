@@ -25,7 +25,7 @@ from core.log_rules import DEFAULT_LOG_RULES, compile_log_rules
 
 from .settings_mixin import SettingsMixin
 from .process_mixin import ProcessMixin
-from .remote_mixin import RemoteMixin
+from windows.remote_session.remote_mixin import RemoteMixin
 from .ui_mixin import UIMixin
 from .update_mixin import UpdateMixin
 from qfluentwidgets import Dialog
@@ -224,7 +224,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         from main_window.hub_pages import (ManagementHub, AftersaleHub,
                                            LedgerHub, SettingsHubPage, AboutPage)
         from main_window.tool_hub import ToolHub
-        from main_window.remote_hub import RemoteHub
+        from windows.remote_session.remote_hub import RemoteHub
 
         # 页面通过 getattr(self.window(), "_remote_bridge", None) 取远程会话中心
         # （全局单例，与球桌面板/主窗口远程面板共享同一 frpc 进程）
@@ -246,6 +246,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         # 自动刷新开关/间隔变更 → 售后记录页即时启停定时器（2026-09-16）
         self.settings_hub.aftersale_auto_refresh_changed.connect(
             self.aftersale_hub.apply_auto_refresh)
+        # 跑视频自动刷新开关/间隔变更 → 记录页即时启停定时器（需求4）
+        self.settings_hub.ledger_auto_refresh_changed.connect(
+            self.ledger_hub.apply_auto_refresh)
         self.settings_hub.table_smooth_changed.connect(
             self._apply_all_table_smooth)
 
@@ -374,6 +377,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                     "remoteHub": {"会话总览": FluentIcon.HOME,
                                   "P2P 访客": FluentIcon.PEOPLE,
                                   "连接质量": FluentIcon.PIE_SINGLE,
+                                  "frps 代理": FluentIcon.GLOBE,
                                   "隧道配置": FluentIcon.SETTING},
                     "toolHub": {"单杆视频": FluentIcon.VIDEO,
                                 "端口占用": FluentIcon.CONNECT,

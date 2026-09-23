@@ -281,7 +281,99 @@ function renderAging() {
   });
 }
 
-/* ---------------- 6. 自定义图表 ---------------- */
+/* ---------------- 6. 球桌售后排行 TOP10（横向条形图） ---------------- */
+const tableTopRef = ref();
+const { setOptions: setTableTop, getInstance: getTableTopInstance } =
+  useECharts(tableTopRef, {
+    theme,
+    renderer: "svg"
+  });
+
+/** 球桌排行原始行（渲染序=倒序，与 dataIndex 对齐，点击跳转取 room/table） */
+let tableTopRows: Array<{ room_name: string; table_no: string }> = [];
+
+function renderTableTop() {
+  const data = [...(charts.value.table_top ?? [])].reverse();
+  tableTopRows = data;
+  if (!data.length) return setTableTop(emptyOption);
+  setTableTop({
+    color: [PALETTE[5]],
+    grid: { left: 8, right: 36, top: 12, bottom: 8, containLabel: true },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: {
+      type: "value",
+      splitLine: { lineStyle: { type: "dashed" } },
+      axisLabel: { fontSize: 11 }
+    },
+    yAxis: {
+      type: "category",
+      data: data.map(d => d.name),
+      axisLabel: { fontSize: 11 },
+      axisTick: { show: false }
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 14,
+        itemStyle: { borderRadius: [0, 3, 3, 0] },
+        label: {
+          show: true,
+          position: "right",
+          fontSize: 11,
+          color: "#909399"
+        },
+        data: data.map(d => d.value)
+      }
+    ]
+  });
+}
+
+/* ---------------- 7. 球房售后排行 TOP10（横向条形图） ---------------- */
+const roomTopRef = ref();
+const { setOptions: setRoomTop, getInstance: getRoomTopInstance } = useECharts(
+  roomTopRef,
+  {
+    theme,
+    renderer: "svg"
+  }
+);
+
+function renderRoomTop() {
+  const data = [...(charts.value.room_top ?? [])].reverse();
+  if (!data.length) return setRoomTop(emptyOption);
+  setRoomTop({
+    color: [PALETTE[2]],
+    grid: { left: 8, right: 36, top: 12, bottom: 8, containLabel: true },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: {
+      type: "value",
+      splitLine: { lineStyle: { type: "dashed" } },
+      axisLabel: { fontSize: 11 }
+    },
+    yAxis: {
+      type: "category",
+      data: data.map(d => d.name),
+      axisLabel: { fontSize: 11 },
+      axisTick: { show: false }
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 14,
+        itemStyle: { borderRadius: [0, 3, 3, 0] },
+        label: {
+          show: true,
+          position: "right",
+          fontSize: 11,
+          color: "#909399"
+        },
+        data: data.map(d => d.value)
+      }
+    ]
+  });
+}
+
+/* ---------------- 8. 自定义图表 ---------------- */
 const customRef = ref();
 const { setOptions: setCustom } = useECharts(customRef, {
   theme,
@@ -400,6 +492,8 @@ function renderCustom() {
  * - 每日柱状图：点柱子 → occurred_at=<完整日期>（dataIndex 对齐 dailyDates）
  * - 我方问题环：点扇区 → is_our_problem=是/否
  * - 类型条形图：点条目 → issue_type=<类型>
+ * - 球桌排行：点条目 → room_name+table_no（联合精确筛选，跨球房同名桌不串）
+ * - 球房排行：点条目 → room_name
  * off+on 幂等：主题切换/resize 重绘后重绑也不会重复触发
  */
 function bindChartClicks() {
@@ -428,6 +522,23 @@ function bindChartClicks() {
   issueChart?.on("click", (p: any) => {
     if (p?.name) goListWith({ issue_type: String(p.name) });
   });
+
+  // 球桌排行：dataIndex 对齐倒序后的 tableTopRows（不能用 name 拆"·"，
+  // 球房名本身可能含"·"）；带 room_name+table_no 双参精确筛选
+  const tableTopChart = getTableTopInstance();
+  tableTopChart?.off("click");
+  tableTopChart?.on("click", (p: any) => {
+    const row = tableTopRows[p?.dataIndex];
+    if (row?.room_name) {
+      goListWith({ room_name: row.room_name, table_no: row.table_no || "" });
+    }
+  });
+
+  const roomTopChart = getRoomTopInstance();
+  roomTopChart?.off("click");
+  roomTopChart?.on("click", (p: any) => {
+    if (p?.name) goListWith({ room_name: String(p.name) });
+  });
 }
 
 /** 数据变化后统一重绘（nextTick 等 DOM 尺寸就绪） */
@@ -438,6 +549,8 @@ async function renderAll() {
   renderOur();
   renderIssue();
   renderAging();
+  renderTableTop();
+  renderRoomTop();
   bindChartClicks();
 }
 
@@ -588,6 +701,20 @@ onBeforeUnmount(() => {
             <span class="chart-hint">仅统计未解决记录 · 超期越久越需优先处理</span>
           </div>
           <div ref="agingRef" class="chart-box" />
+        </el-col>
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">
+            球房售后排行 TOP10
+            <span class="chart-hint">点击条目跳列表筛选该球房</span>
+          </div>
+          <div ref="roomTopRef" class="chart-box chart-clickable" />
+        </el-col>
+        <el-col :xs="24" :sm="12" :lg="12" class="mb-4">
+          <div class="chart-title">
+            球桌售后排行 TOP10
+            <span class="chart-hint">球房·桌号联合统计 · 点击跳列表筛选</span>
+          </div>
+          <div ref="tableTopRef" class="chart-box chart-clickable" />
         </el-col>
       </el-row>
     </el-card>

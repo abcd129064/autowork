@@ -211,12 +211,13 @@ check("8b.5 设置-工具保留快捷键/诊断/前往",
       "_on_modify_shortcuts" in _gt_src and "_on_open_conn_diag" in _gt_src
       and "_on_open_tool_hub" in _gt_src)
 
-print("\n[8c] 远程页 RemoteHub（二期 2026-09-21 四视图 Pivot：+连接质量）")
+print("\n[8c] 远程页 RemoteHub（五视图 Pivot：+连接质量 +frps 代理 2026-09-23）")
 rh = getattr(w, "remote_hub", None)
-check("8c.1 RemoteHub 四视图工作区",
-      rh is not None and rh.stack.count() == 4)
-check("8c.2 Pivot 4 项", rh is not None
-      and len(rh.pivot.items) == 4)
+check("8c.1 RemoteHub 五视图工作区",
+      rh is not None and rh.stack.count() == 5)
+check("8c.2 Pivot 5 项", rh is not None
+      and len(rh.pivot.items) == 5
+      and "remoteFrpsProxiesWork" in rh.pivot.items)
 if rh is not None:
     check("8c.2b 连接诊断不内嵌（入口在设置-工具）",
           getattr(rh, "diag_work", None) is None)
@@ -294,6 +295,18 @@ if rh is not None:
     check("8c.10 隧道配置控件齐备",
           rh.tunnel_conf_work.log_view is not None
           and rh.tunnel_conf_work.edit_addr.width() == 200)
+    # 开机静默预连（2026-09-23）：配置页开关 + manager 能力齐备
+    check("8c.10b 静默预连开关存在",
+          hasattr(rh.tunnel_conf_work, "chk_autostart")
+          and rh.tunnel_conf_work.chk_autostart.text() == "开启时静默预连")
+    check("8c.10c manager 提供 autostart/prewarm_async/active_count",
+          all(callable(getattr(_mgr, a, None))
+              for a in ("autostart", "prewarm_async", "active_count")))
+    # frps 代理视图（2026-09-23）：8 类型 tab + 7 列表 + 搜索
+    _fp = getattr(rh, "frps_proxies_work", None)
+    check("8c.10d frps 代理视图 7 列表+tab 存在",
+          _fp is not None and _fp.table.columnCount() == 7
+          and hasattr(_fp, "tabs") and hasattr(_fp, "edit_kw"))
     try:
         rh._apply_table_smooth_all()
         check("8c.11 平滑联动 _apply_table_smooth_all 无异常", True)
@@ -623,9 +636,10 @@ try:
     _rk = list(_r.navigationInterface.panel.items.keys())
     check("16.7b 远程弹出为 HubPopoutWindow",
           _r is not None and type(_r).__name__ == "HubPopoutWindow")
-    check("16.7c 左侧导航含四视图且无 Hub 壳",
+    check("16.7c 左侧导航含五视图且无 Hub 壳",
           set(["remoteSessionWork", "remoteVisitorWork",
-               "remoteQualityWork", "remoteTunnelConfWork"]) <= set(_rk)
+               "remoteQualityWork", "remoteFrpsProxiesWork",
+               "remoteTunnelConfWork"]) <= set(_rk)
           and "remoteHub" not in _rk, str(_rk))
     check("16.7d Hub 空壳已隐藏", _r.hub.isHidden())
     check("16.7e 视图已从 hub.stack 摘出",

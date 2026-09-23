@@ -63,6 +63,13 @@ function clearOccurred() {
   onSearch();
 }
 
+/** 清除「球房/球桌」筛选（统计页排行榜点击跳转带入） */
+function clearRoomTable() {
+  form.room_name = "";
+  form.table_no = "";
+  onSearch();
+}
+
 // ---- 工具弹窗 ----
 const detailVisible = ref(false);
 const recycleVisible = ref(false);
@@ -139,6 +146,12 @@ onBeforeUnmount(stopAutoTimer);
       <el-form-item v-if="form.occurred_at" label="发生日期：">
         <el-tag closable type="primary" @close="clearOccurred">
           {{ form.occurred_at }}
+        </el-tag>
+      </el-form-item>
+      <!-- 排行榜点击跳转带入的球房/球桌筛选（可单独关闭回退到不筛） -->
+      <el-form-item v-if="form.room_name || form.table_no" label="球房/球桌：">
+        <el-tag closable type="warning" @close="clearRoomTable">
+          {{ form.room_name }}{{ form.table_no ? `·${form.table_no}` : "" }}
         </el-tag>
       </el-form-item>
       <el-form-item label="账期：" prop="cycle_start">

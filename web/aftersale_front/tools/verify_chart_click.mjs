@@ -82,14 +82,43 @@ const clickedType = await page.evaluate(() => {
   inst.dispatchAction({ type: "select" }); // 占位，真正 click 事件用下面方式
   return name;
 }).catch(e => null);
-// dispatchAction select 不触发 click 事件，改用坐标点击：取 yAxis 第一个类目的条形位置
+// dispatchAction select 不触发 click 事件，改用 SVG path 定位（与趋势柱同款）：
+// 找类型图里面积最大的彩色条形 path，取其轮廓中点换算视口坐标点击——不猜像素位置
 if (typeBoxPos) {
-  // 点击条形区域：图表顶部第一个条形大约在 y=typeBoxPos.y+35, x=typeBoxPos.x+180
-  await page.mouse.click(typeBoxPos.x + 200, typeBoxPos.y + 40);
-  await page.waitForTimeout(2500);
-  const url = decodeURIComponent(page.url());
-  const okType = /aftersale\/list/.test(page.url()) && url.includes("issue_type=");
-  ok("类型条点击跳列表带 issue_type", okType, page.url());
+  await page.locator(".chart-box").nth(1).evaluate(el => el.scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(400);
+  // 注意：类型图若为饼图，扇区 path 首尾同点，轮廓中点会落在圆心上（点不到扇区）。
+  // 改用「面积最大 path 的包围盒左上角 + 35%/40%」取点——对条形和饼形都落在图形内。
+  const pos = await page.evaluate(() => {
+    const el = document.querySelectorAll(".chart-box")[1];
+    const svg = el?.querySelector("svg");
+    if (!svg) return { error: "no svg" };
+    const paths = [...svg.querySelectorAll("path")].filter(p => {
+      const f = (p.getAttribute("fill") || "").toLowerCase();
+      return f && f !== "none" && f !== "rgb(0,0,0)";
+    });
+    let best = null, bestArea = 0;
+    for (const p of paths) {
+      try {
+        const b = p.getBoundingClientRect();
+        const a = b.width * b.height;
+        if (a > bestArea) { bestArea = a; best = p; }
+      } catch { /* ignore */ }
+    }
+    if (!best || bestArea <= 0) return { error: "no sized path" };
+    const r = best.getBoundingClientRect();
+    return { x: r.left + r.width * 0.35, y: r.top + r.height * 0.4, fill: best.getAttribute("fill") };
+  });
+  ok("类型条定位成功", !!pos && !pos.error, pos ? JSON.stringify(pos).slice(0, 120) : "null");
+  if (pos && !pos.error) {
+    await page.mouse.click(pos.x, pos.y);
+    await page.waitForTimeout(2500);
+    const url = decodeURIComponent(page.url());
+    const okType = /aftersale\/list/.test(page.url()) && url.includes("issue_type=");
+    ok("类型条点击跳列表带 issue_type", okType, page.url());
+  } else {
+    ok("类型条点击跳列表带 issue_type", false, "定位失败");
+  }
 }
 
 // ---- 3. 回总览：趋势柱点击某天 → occurred_at ----

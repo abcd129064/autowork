@@ -614,7 +614,7 @@ class _HealthCopyTable(TableWidget):
     文本矩形），保证高亮与文字逐字对齐。
     """
 
-    # 文本列（0 列是勾选框 cellWidget，不参与文本选择）
+    # 文本列（0 列是可勾选 item，不参与文本选择）
     _TEXT_COLS = (1, 2, 3, 4)
 
     def __init__(self, parent=None):
@@ -958,6 +958,8 @@ class HealthPage(QWidget):
             QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
+        # 勾选列可勾选 item 点击翻转 → 联动「已处理」按钮可用性
+        self._table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self._table, 1)
 
         btn_row = QHBoxLayout()
@@ -1036,54 +1038,81 @@ class HealthPage(QWidget):
             self._lbl_sync.setText(base)
 
     def _rebuild_table(self):
-        """从 self._rows 全量重建表格行（仅数据刷新时调用），重建后套用过滤"""
-        self._table.setRowCount(0)
-        for r in self._rows:
-            h = float(r.get("health") or 0)
-            # 阈值分级：>5000 严重异常（红），4000~5000 健康度异常（橙）
-            severe = h > table_db.HEALTH_SEVERE
-            color = QColor(SEMANTIC["danger"]) if severe else QColor(SEMANTIC["warning"])
-            level = "严重异常" if severe else "健康度异常"
-            # stale（已处理超 48 小时数据源仍未刷新）：加 * 号 + 整行黄色底
-            stale = bool(r.get("stale"))
-            row_bg = (_STALE_BG_DARK if isDarkTheme() else _STALE_BG_LIGHT) \
-                if stale else None
-            row = self._table.rowCount()
-            self._table.insertRow(row)
-            cb = CheckBox(self)
-            cb.setToolTip("勾选后可标记已处理")
-            cb.setProperty("alert_name", r.get("name") or "")
-            cb.toggled.connect(lambda _c: self._update_resolved_enabled())
-            self._table.setCellWidget(row, 0, cb)
-            for col, key in ((1, "name"), (2, "roomName"), (3, "onlineStatusName")):
-                it = QTableWidgetItem(str(r.get(key) or ""))
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        """从 self._rows 全量重建表格行（仅数据刷新时调用），重建后套用过滤
+
+        性能（2026-09-23 卡顿修复）：勾选列改用可勾选 QTableWidgetItem +
+        delegate 原生绘制（qfluentwidgets TableItemDelegate 对 CheckStateRole
+        项画同款 Fluent 勾选框，点击由 QStyledItemDelegate::editorEvent 原生
+        翻转）。旧实现逐行 new CheckBox 作 cellWidget，每个控件都要走一次
+        QSS 装配 + setCellWidget 布局，实测 1000 行主线程冻结 ~293ms
+        （offscreen 无渲染；真机叠加绘制/销毁更严重），点「已处理」后
+        刷新表格即全程序卡顿的主因；纯 item 重建同量实测 ~10ms。
+        重建期间 blockSignals 防止逐行 setItem 触发 itemChanged 把
+        _update_resolved_enabled 放大成 O(n²)。
+        """
+        t = self._table
+        t.blockSignals(True)
+        try:
+            t.setRowCount(0)
+            for r in self._rows:
+                h = float(r.get("health") or 0)
+                # 阈值分级：>5000 严重异常（红），4000~5000 健康度异常（橙）
+                severe = h > table_db.HEALTH_SEVERE
+                color = QColor(SEMANTIC["danger"]) if severe else QColor(SEMANTIC["warning"])
+                level = "严重异常" if severe else "健康度异常"
+                # stale（已处理超 48 小时数据源仍未刷新）：加 * 号 + 整行黄色底
+                stale = bool(r.get("stale"))
+                row_bg = (_STALE_BG_DARK if isDarkTheme() else _STALE_BG_LIGHT) \
+                    if stale else None
+                row = t.rowCount()
+                t.insertRow(row)
+                it0 = QTableWidgetItem()
+                it0.setFlags(Qt.ItemFlag.ItemIsEnabled
+                             | Qt.ItemFlag.ItemIsUserCheckable)
+                it0.setData(Qt.ItemDataRole.UserRole, r.get("name") or "")
+                it0.setCheckState(Qt.CheckState.Unchecked)
+                it0.setToolTip("点击勾选后可标记已处理")
                 if row_bg is not None:
-                    it.setBackground(row_bg)
-                self._table.setItem(row, col, it)
-            it_h = QTableWidgetItem(f"{h:.0f}{' *' if stale else ''} · {level}")
-            it_h.setFlags(it_h.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            it_h.setForeground(QBrush(color))
-            if stale:
-                it_h.setBackground(row_bg)
-                it_h.setToolTip(
-                    "已处理超过 48 小时，服务器数据仍未变化——"
-                    "可能是数据源未刷新或重置未生效，可重新勾选处理")
-            self._table.setItem(row, 4, it_h)
+                    it0.setBackground(row_bg)
+                t.setItem(row, 0, it0)
+                for col, key in ((1, "name"), (2, "roomName"),
+                                 (3, "onlineStatusName")):
+                    it = QTableWidgetItem(str(r.get(key) or ""))
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if row_bg is not None:
+                        it.setBackground(row_bg)
+                    t.setItem(row, col, it)
+                it_h = QTableWidgetItem(f"{h:.0f}{' *' if stale else ''} · {level}")
+                it_h.setFlags(it_h.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                it_h.setForeground(QBrush(color))
+                if stale:
+                    it_h.setBackground(row_bg)
+                    it_h.setToolTip(
+                        "已处理超过 48 小时，服务器数据仍未变化——"
+                        "可能是数据源未刷新或重置未生效，可重新勾选处理")
+                t.setItem(row, 4, it_h)
+        finally:
+            t.blockSignals(False)
         self._update_resolved_enabled()
         self._apply_filter()  # 重建后按当前搜索词套用显隐（含状态栏计数）
 
-    def _iter_checkboxes(self):
-        """逐行产出首列勾选框（跳过被其他控件占用的行）"""
+    def _iter_alert_items(self):
+        """逐行产出首列可勾选条目（跳过无 item 的行）"""
         for row in range(self._table.rowCount()):
-            cb = self._table.cellWidget(row, 0)
-            if isinstance(cb, CheckBox):
-                yield cb
+            it = self._table.item(row, 0)
+            if it is not None and it.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                yield it
+
+    def _on_item_changed(self, item):
+        """勾选框点击翻转：刷新「已处理」按钮可用性（仅首列生效）"""
+        if item.column() == 0:
+            self._update_resolved_enabled()
 
     def _update_resolved_enabled(self):
         """有勾选条目时启用「已处理」按钮"""
         self._btn_resolved.setEnabled(
-            any(cb.isChecked() for cb in self._iter_checkboxes()))
+            any(it.checkState() == Qt.CheckState.Checked
+                for it in self._iter_alert_items()))
 
     # ---------- 数据获取 ----------
 
@@ -1140,8 +1169,10 @@ class HealthPage(QWidget):
         设备码取告警表 device_code（球桌库 code 字段）；成功后本地标记
         已处理（记录当时 health，后续未变化不再展示），失败保留告警。
         """
-        names = [cb.property("alert_name")
-                 for cb in self._iter_checkboxes() if cb.isChecked()]
+        names = [str(it.data(Qt.ItemDataRole.UserRole) or "")
+                 for it in self._iter_alert_items()
+                 if it.checkState() == Qt.CheckState.Checked]
+        names = [n for n in names if n]
         if not names:
             return
         if self._health_worker is not None and self._health_worker.isRunning():

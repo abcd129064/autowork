@@ -10,6 +10,7 @@ SSH 建连体感的忠实指标（frps 对 visitor 侧流量不可见，服务�
 - 默认 30s 一轮 / 单次 connect 超时 800ms（settings.frp_quality 可调）；
 - frpc 未运行即停探；隧道消失自动清理其样本；
 - 连续 N 次超时（默认 3）判「异常」（在线但不可达，区分于 frps 离线）；
+  冷洞首拍例外：无样本隧道的首轮用 3s 长超时且不计失败（打洞 1~3s 属常态）；
 - 环形缓冲每隧道 120 点（约 1 小时），只存内存，落库留三期。
 
 线程约定：探测线程只 emit Qt 信号（自动 queued 到主线程），不触碰任何
@@ -34,6 +35,10 @@ _DEFAULT_TIMEOUT_MS = 800
 _DEFAULT_INTERVAL_SEC = 30
 _DEFAULT_FAIL_BAD = 3
 _MAX_INTERVAL_SEC = 600
+# 冷洞首拍长超时（2026-09-23 P1-3）：从未预热/连过的隧道，首个本地 connect
+# 要承担 1~3s XTCP 打洞，800ms RTT 口径必然"超时"；首拍用 3s 长超时给打洞
+# 留足时间（顺带把洞打穿），且其结果不进质量样本（见 _record）
+_COLD_FIRST_TIMEOUT_MS = 3000
 
 
 def _load_quality() -> dict:
@@ -180,20 +185,35 @@ class VisitorProber(QObject):
                 self.changed.emit()
             return
         for snk, port in targets.items():
+            # 冷洞首拍判定（P1-3）：该 snk 从未探测过 → 用长超时 connect，
+            # 给首次 XTCP 打洞留足时间（正常轮次仍用配置的 RTT 口径）
+            with self._lock:
+                ent = self._data.get(snk)
+                cold = ent is None or not ent.get("warmed")
+            timeout_ms = (max(self._timeout_ms, _COLD_FIRST_TIMEOUT_MS)
+                          if cold else self._timeout_ms)
             try:
-                rtt = probe("127.0.0.1", port, self._timeout_ms)
+                rtt = probe("127.0.0.1", port, timeout_ms)
             except Exception:
                 rtt = None
-            self._record(snk, rtt)
+            self._record(snk, rtt, cold=cold)
             self.sample.emit(snk, rtt)
         self.changed.emit()
 
-    def _record(self, snk: str, rtt):
+    def _record(self, snk: str, rtt, cold: bool = False):
         flip = None
         with self._lock:
             ent = self._data.setdefault(snk, {
                 "rtts": deque(maxlen=_RING_POINTS),
                 "bad_streak": 0, "verdict": "unknown"})
+            if cold:
+                # 无论成败，本轮起视为「已暖」：冷首拍只此一次，后续轮次
+                # 回归正常 800ms 口径（超时照常计入连续失败）
+                ent["warmed"] = True
+                if rtt is None:
+                    # 冷洞首拍超时（P1-3）：打洞未完成≠隧道异常，不进样本、
+                    # 不计连续失败——下一轮洞已打穿（或预热完成），按正常口径探
+                    return
             ent["rtts"].append(rtt)
             if rtt is None:
                 ent["bad_streak"] += 1

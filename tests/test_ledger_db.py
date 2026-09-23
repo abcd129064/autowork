@@ -321,3 +321,103 @@ def test_query_page_repro_combined_with_category(db):
     ldb.insert_record(_rec(category="问题", kind="遮挡问题", repro="是"))
     total, rows = ldb.query_page(1, 50, category="精度", repro="是")
     assert total == 1 and rows[0]["id"] == r1
+
+
+# ==================== 自动刷新指纹（需求4） ====================
+
+def test_change_fingerprint_shape(db):
+    """指纹 = (条数, 最大 updated_at, 最大 id)；空库返回 (0, '', 0)"""
+    fp = ldb.change_fingerprint()
+    assert fp == (0, "", 0)
+    rid = ldb.insert_record(_rec())
+    fp2 = ldb.change_fingerprint()
+    assert fp2[0] == 1
+    assert fp2[2] == rid
+    assert isinstance(fp2[1], str) and fp2[1]
+
+
+def test_change_fingerprint_detects_insert_and_delete(db):
+    """增删都改变指纹（COUNT 入指纹，删除不改 MAX(updated_at) 也能感知）"""
+    fp0 = ldb.change_fingerprint()
+    rid = ldb.insert_record(_rec())
+    fp1 = ldb.change_fingerprint()
+    assert fp1 != fp0            # 新增后变化
+    ldb.delete_record(rid)
+    fp2 = ldb.change_fingerprint()
+    assert fp2 != fp1            # 删除后再次变化
+    assert fp2[0] == 0
+
+
+# ==================== 记住上次日期 / 自动刷新开关（配置类） ====================
+
+@pytest.fixture
+def cfg(monkeypatch, tmp_path):
+    """app_settings 隔离（misc 域落 tmp_path/config/misc.json）"""
+    import core.app_paths
+    import core.app_settings as fas
+    monkeypatch.setattr(core.app_paths, "get_app_dir", lambda: str(tmp_path))
+    fas.invalidate_cache()
+    fas._migrated = False
+    yield
+    fas.invalidate_cache()
+    fas._migrated = False
+
+
+def test_auto_refresh_defaults(cfg):
+    """开关默认关；间隔默认 30"""
+    assert ldb.auto_refresh_enabled() is False
+    assert ldb.auto_refresh_interval() == 30
+
+
+def test_set_auto_refresh_roundtrip(cfg):
+    ldb.set_auto_refresh(True)
+    assert ldb.auto_refresh_enabled() is True
+    ldb.set_auto_refresh(False)
+    assert ldb.auto_refresh_enabled() is False
+
+
+def test_auto_refresh_interval_clamped(cfg):
+    """间隔 <5 秒钳制到 5；正常值原样保存"""
+    ldb.set_auto_refresh_interval(60)
+    assert ldb.auto_refresh_interval() == 60
+    ldb.set_auto_refresh_interval(1)
+    assert ldb.auto_refresh_interval() == 5   # 下限钳制
+
+
+def test_auto_refresh_interval_invalid_fallback(cfg):
+    """非法间隔回落 30"""
+    ldb.set_auto_refresh_interval("bad")     # int() 抛错被吞，不写
+    assert ldb.auto_refresh_interval() == 30
+
+
+def test_remember_occurred_default_on(cfg):
+    """记住上次日期开关默认开"""
+    assert ldb.remember_occurred_enabled() is True
+
+
+def test_save_load_last_occurred(cfg):
+    ldb.save_last_occurred("2026-09-23")
+    assert ldb.load_last_occurred() == "2026-09-23"
+
+
+def test_save_last_occurred_ignores_empty(cfg):
+    """空值不写"""
+    ldb.save_last_occurred("2026-09-23")
+    ldb.save_last_occurred("   ")
+    assert ldb.load_last_occurred() == "2026-09-23"  # 保留旧值
+
+
+def test_load_last_occurred_disabled_returns_empty(cfg):
+    """开关关闭时 load 返回空串（表单回落当日）"""
+    ldb.save_last_occurred("2026-09-23")
+    ldb.set_remember_occurred(False)
+    assert ldb.remember_occurred_enabled() is False
+    assert ldb.load_last_occurred() == ""
+
+
+def test_set_remember_occurred_off_clears(cfg):
+    """关闭开关一并清除已记住的日期（重开后从当日重新开始）"""
+    ldb.save_last_occurred("2026-09-23")
+    ldb.set_remember_occurred(False)
+    ldb.set_remember_occurred(True)          # 重新打开
+    assert ldb.load_last_occurred() == ""    # 旧日期已清，不复活

@@ -47,6 +47,9 @@ class LedgerPanelWindow(FluentWindow):
         # 表格平滑滚动开关变更：实时刷新记录页表格滚动模式（仅本面板）
         self.settings_page.table_smooth_changed.connect(
             lambda _v: self.records_page._apply_smooth_mode())
+        # 自动刷新开关/间隔变更：记录页即时启停定时器（需求4）
+        self.settings_page.auto_refresh_changed.connect(
+            self.records_page._sync_auto_timer)
 
         self.navigationInterface.setAcrylicEnabled(is_acrylic_enabled())
         self.navigationInterface.setCurrentItem(self.entry_page.objectName())

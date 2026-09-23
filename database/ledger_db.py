@@ -18,6 +18,7 @@ MySQL 不可用时自动降级本地 SQLite，恢复后由 merge_back 合并回 
 """
 from datetime import datetime
 
+from core import app_settings
 from database import table_db
 
 # ==================== 字段枚举（来源：在线模板.xlsx 解析） ====================
@@ -277,3 +278,93 @@ def export_xlsx(path: str, category: str = "") -> int:
             exported += 1
     wb.save(path)
     return exported
+
+
+# ==================== 记住上次视频日期（连续录入体验，仿售后范式） ====================
+
+_REMEMBER_OCCURRED_KEY = "ledger_remember_occurred"
+_LAST_OCCURRED_KEY = "ledger_last_occurred"
+
+
+def remember_occurred_enabled() -> bool:
+    """「记住上次视频日期」开关（misc 域，缺省开启）"""
+    return bool(app_settings.get(_REMEMBER_OCCURRED_KEY, True))
+
+
+def load_last_occurred() -> str:
+    """上次新增记录的视频日期（yyyy-MM-dd）；开关关闭或无记录返回空串。
+
+    供 LedgerForm 计算日期默认值——连续补录同一天的多条记录时免重复拨日期。
+    """
+    if not remember_occurred_enabled():
+        return ""
+    v = app_settings.get(_LAST_OCCURRED_KEY)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return ""
+
+
+def save_last_occurred(occurred: str) -> None:
+    """记住本次新增记录的视频日期（开关关闭 / 空值时不写）"""
+    occurred = (occurred or "").strip()
+    if not occurred or not remember_occurred_enabled():
+        return
+    app_settings.set(_LAST_OCCURRED_KEY, occurred)
+
+
+def set_remember_occurred(enabled: bool) -> None:
+    """写「记住上次视频日期」开关（统一设置-面板设置-跑视频 联动入口）。
+
+    关闭时一并清除已记住的日期：重新打开后从「当日」重新开始。
+    """
+    app_settings.set(_REMEMBER_OCCURRED_KEY, bool(enabled))
+    if not enabled:
+        app_settings.remove(_LAST_OCCURRED_KEY)
+
+
+# ==================== 记录自动刷新（他人填写免手动同步，仿售后范式） ====================
+
+_AUTO_REFRESH_KEY = "ledger_auto_refresh"
+_AUTO_REFRESH_INTERVAL_KEY = "ledger_auto_refresh_interval"
+
+
+def auto_refresh_enabled() -> bool:
+    """「自动刷新记录」开关（misc 域，缺省关闭）"""
+    return bool(app_settings.get(_AUTO_REFRESH_KEY, False))
+
+
+def auto_refresh_interval() -> int:
+    """自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数，防误配高频轮询）"""
+    try:
+        v = int(app_settings.get(_AUTO_REFRESH_INTERVAL_KEY, 30))
+    except (TypeError, ValueError):
+        return 30
+    return v if v >= 5 else 30
+
+
+def set_auto_refresh(enabled: bool) -> None:
+    """写「自动刷新记录」开关（统一设置-面板设置-跑视频 联动入口）"""
+    app_settings.set(_AUTO_REFRESH_KEY, bool(enabled))
+
+
+def set_auto_refresh_interval(seconds: int) -> None:
+    """写自动刷新间隔秒数（<5 秒的入参按 5 秒下限钳制）"""
+    try:
+        v = int(seconds)
+    except (TypeError, ValueError):
+        return
+    app_settings.set(_AUTO_REFRESH_INTERVAL_KEY, max(5, v))
+
+
+def change_fingerprint() -> tuple:
+    """全表轻量指纹 (条数, 最大 updated_at, 最大 id)——自动刷新判据。
+
+    轮询只跑这一条聚合 SQL（COUNT/MAX 毫秒级），与记录页上次快照比对：
+    一致则完全不动表格（保滚动位置），不一致才触发一次静默重查。
+    删除不改 MAX(updated_at)，故 COUNT 也入指纹；id 单调增兜底同秒批量写入。
+    """
+    conn = table_db.get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*), MAX(updated_at), MAX(id) "
+        "FROM ledger_records").fetchone()
+    return (int(row[0] or 0), str(row[1] or ""), int(row[2] or 0))

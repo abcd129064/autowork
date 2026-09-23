@@ -812,6 +812,124 @@ def query_stats_detail(keyword: str = "", cycle_start: str = "",
             "regions": regions, "types": types}
 
 
+# ==================== 球房/球桌售后排行 ====================
+
+# 排行排序白名单：sort 键 → ORDER BY 片段（SELECT 别名排序，SQLite/MySQL
+# 均支持；与 Web 端 /api/stats/rank 的 _RANK_SORT 同口径，并列时按名称稳定排序）
+_RANK_SORT = {
+    "total": "total DESC, rn ASC",
+    "total_asc": "total ASC, rn ASC",
+    "unresolved": "unres DESC, total DESC, rn ASC",
+    "our_problem": "ourp DESC, total DESC, rn ASC",
+    "last_occurred": "lastd DESC, total DESC, rn ASC",
+}
+
+
+def query_rank(level: str = "room", limit: int = 10, sort: str = "total",
+               start: str = "", end: str = "", cycle_start: str = "",
+               resolved: str = "", is_initiative: str = "",
+               is_our_problem: str = "", region: str = "",
+               room_name: str = "", keyword: str = "") -> dict:
+    """球房/球桌售后排行（与 Web 端 /api/stats/rank 同口径）
+
+    口径：
+    - WHERE 复用 _build_where（keyword/resolved/is_initiative/is_our_problem
+      + deleted=0 软删除隔离）+ _append_cycle_where（账期物化列），追加
+      region / room_name（下钻，TRIM 精确）/ start~end（记录日期区间，
+      _RECORD_DATE_EXPR 字符串比较，跨 SQLite/MySQL 一致）
+    - 排行排除未填球房（球桌级同时排除未填桌号）的记录；球桌级联合名
+      「球房 · 桌号」在 Python 侧拼装（避开 CONCAT/|| 双后端方言差异）
+    - 每组一次 SQL 算齐 总量/未解决/我方问题/主动发起/最近发生
+      （SUM 布尔表达式 + MAX 日期，与 query_stats_detail 同范式）
+    - summary 反映同 WHERE 全量口径（不受 TOP N 截断影响）：
+      total/unresolved/覆盖球房（DISTINCT 非空球房）/覆盖球桌
+      （DISTINCT 非空球房+桌号对，经去重子查询——COUNT(DISTINCT) 多表达式
+      与 CONCAT 均为 MySQL 专属，子查询形式两端通用）
+    - share = 组总量 × 100 ÷ summary.total（整数百分比，四舍五入）
+
+    返回 {"rows": [{rank, room_name, table_no, name, total, share,
+    unresolved, our_problem, initiative, last_occurred}, ...],
+    "summary": {total, unresolved, rooms, tables}}。
+    """
+    if level not in ("room", "table"):
+        raise ValueError("level 仅支持 room/table")
+    order = _RANK_SORT.get(sort) or _RANK_SORT["total"]
+    conn = _conn()
+    where, params = _build_where(keyword, "", resolved, is_initiative,
+                                 is_our_problem)
+    where, params = _append_cycle_where(where, params, cycle_start)
+    region_v = str(region or "").strip()
+    if region_v:
+        where += " AND TRIM(region) = ?"
+        params.append(region_v)
+    drill = str(room_name or "").strip()
+    if drill:
+        where += " AND TRIM(room_name) = ?"
+        params.append(drill)
+    start_v = str(start or "").strip()
+    end_v = str(end or "").strip()
+    if start_v:
+        where += f" AND {_RECORD_DATE_EXPR} >= ?"
+        params.append(start_v)
+    if end_v:
+        where += f" AND {_RECORD_DATE_EXPR} <= ?"
+        params.append(end_v)
+
+    # 排行：排除未填球房（球桌级再排除未填桌号）
+    where_rank = where + " AND TRIM(room_name) != ''"
+    if level == "table":
+        where_rank += " AND TRIM(table_no) != ''"
+    if level == "table":
+        sel = "TRIM(room_name) AS rn, TRIM(table_no) AS tn"
+        group = "TRIM(room_name), TRIM(table_no)"
+    else:
+        sel = "TRIM(room_name) AS rn, '' AS tn"
+        group = "TRIM(room_name)"
+    cur = conn.execute(
+        f"SELECT {sel}, COUNT(*) AS total, "
+        f"SUM(resolved = '否') AS unres, "
+        f"SUM(is_our_problem = '是') AS ourp, "
+        f"SUM(is_initiative = '是') AS init_, "
+        f"MAX({_RECORD_DATE_EXPR}) AS lastd "
+        f"FROM aftersale_records{where_rank} "
+        f"GROUP BY {group} ORDER BY {order} LIMIT ?",
+        list(params) + [max(1, int(limit))])
+
+    # summary：同 WHERE 全量口径（三条轻量聚合，均不受 TOP N 截断影响）
+    row = conn.execute(
+        "SELECT COUNT(*), SUM(resolved = '否'), "
+        "COUNT(DISTINCT CASE WHEN TRIM(room_name) != '' "
+        f"THEN TRIM(room_name) END) FROM aftersale_records{where}",
+        params).fetchone()
+    total_n = int(row[0] or 0)
+    unresolved_n = int(row[1] or 0)
+    rooms_n = int(row[2] or 0)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT TRIM(room_name), "
+        f"TRIM(table_no) FROM aftersale_records{where} "
+        "AND TRIM(room_name) != '' AND TRIM(table_no) != '') t",
+        params).fetchone()
+    tables_n = int(row[0] or 0)
+
+    rows = []
+    for i, r in enumerate(cur.fetchall(), 1):
+        rn, tn = str(r[0] or ""), str(r[1] or "")
+        n = int(r[2] or 0)
+        rows.append({
+            "rank": i, "room_name": rn, "table_no": tn,
+            "name": f"{rn} · {tn}" if level == "table" else rn,
+            "total": n,
+            "share": int(round(n * 100 / total_n)) if total_n else 0,
+            "unresolved": int(r[3] or 0),
+            "our_problem": int(r[4] or 0),
+            "initiative": int(r[5] or 0),
+            "last_occurred": str(r[6] or ""),
+        })
+    return {"rows": rows,
+            "summary": {"total": total_n, "unresolved": unresolved_n,
+                        "rooms": rooms_n, "tables": tables_n}}
+
+
 def get_cycle_options() -> list:
     """周期下拉选项：库中记录实际归属的周期（按 occurred_at 动态计算，
 

@@ -64,7 +64,8 @@ def _cycle_range(cycle_start: str) -> tuple | None:
 
 def _build_where(keyword: str, issue_type: str, resolved: str,
                  is_initiative: str, is_our_problem: str, cycle_start: str,
-                 occurred_at: str = "", region: str = ""):
+                 occurred_at: str = "", region: str = "",
+                 room_name: str = "", table_no: str = ""):
     conds, params = [], []
     # 软删除隔离：回收站（deleted=1）不出现在任何常规查询
     conds.append("deleted = 0")
@@ -72,6 +73,14 @@ def _build_where(keyword: str, issue_type: str, resolved: str,
         conds.append("issue_type = %s"); params.append(str(issue_type).strip())
     if region:
         conds.append("region = %s"); params.append(str(region).strip())
+    if room_name:
+        # 球房精确筛选（统计页「球房/球桌排行」点击跳转用）。
+        # TRIM 比较：库内旧数据可能有首尾空格，排名聚合口径同为 TRIM
+        conds.append("TRIM(room_name) = %s"); params.append(str(room_name).strip())
+    if table_no:
+        # 桌号仅在球房范围内有意义（跨球房同名桌普遍），单独 table_no
+        # 精确筛选也走 TRIM 口径
+        conds.append("TRIM(table_no) = %s"); params.append(str(table_no).strip())
     if resolved:
         conds.append("resolved = %s"); params.append(str(resolved).strip())
     if is_initiative:
@@ -141,12 +150,13 @@ def records(
     keyword: str = "", cycle_start: str = "", issue_type: str = "",
     resolved: str = "", is_initiative: str = "", is_our_problem: str = "",
     occurred_at: str = "", region: str = "",
+    room_name: str = "", table_no: str = "",
     sort_by: str = "", sort_order: str = "",
 ):
     """分页列表 + 统计一次返回（与桌面端 query_with_stats 同口径）"""
     where, params = _build_where(keyword, issue_type, resolved,
                                  is_initiative, is_our_problem, cycle_start,
-                                 occurred_at, region)
+                                 occurred_at, region, room_name, table_no)
     # 排序：白名单列 + asc/desc；非法输入回退默认 created_at DESC。
     # 追加 id 作稳定次序键（同 created_at 的行分页不抖动）。
     order = "ORDER BY created_at DESC, id DESC"
@@ -451,8 +461,32 @@ def stats_charts(cycle_start: str = "", issue_type: str = "", resolved: str = ""
         cur.execute(aging_sql, params)
         aging_map = {r["bucket"]: r["n"] for r in cur.fetchall() if r.get("bucket")}
     aging = [{"name": b, "value": aging_map.get(b, 0)} for b in order_aging]
+
+    # ===== 排行 TOP10（2026-09-23 需求：球桌/球房售后数量排序） =====
+    # 口径要点：
+    # - 桌号跨球房不唯一（"3 号桌"遍地都是）→ 球桌排行必须按
+    #   TRIM(room_name)+TRIM(table_no) 联合分组，name 用 "球房·桌号" 展示，
+    #   同时带 room_name/table_no 供点击跳列表精确筛选
+    # - 空值排除：TRIM 后为空的球房/桌号不参与排行（脏数据不配上榜）
+    # - 跟随页面筛选（含周期；无周期时沿用上方 90 天兜底 where）
+    with _db() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT TRIM(room_name) rn, TRIM(table_no) tn, COUNT(*) n "
+            "FROM aftersale_records" + where +
+            " AND TRIM(room_name) <> '' AND TRIM(table_no) <> ''"
+            " GROUP BY rn, tn ORDER BY n DESC, rn ASC, tn ASC LIMIT 10", params)
+        table_top = [{"name": f"{r['rn']}·{r['tn']}", "value": r["n"],
+                      "room_name": r["rn"], "table_no": r["tn"]}
+                     for r in cur.fetchall()]
+        cur.execute(
+            "SELECT TRIM(room_name) rn, COUNT(*) n "
+            "FROM aftersale_records" + where +
+            " AND TRIM(room_name) <> ''"
+            " GROUP BY rn ORDER BY n DESC, rn ASC LIMIT 10", params)
+        room_top = [{"name": r["rn"], "value": r["n"]} for r in cur.fetchall()]
     return {"region_dist": region, "daily": daily, "our_problem": our,
-            "issue_type_dist": issue, "aging": aging, "total": total}
+            "issue_type_dist": issue, "aging": aging, "total": total,
+            "table_top": table_top, "room_top": room_top}
 
 
 # ===== PHASE-2A APPEND: generic aggregation (custom charts) =====
@@ -503,6 +537,126 @@ def stats_query(payload: dict = Body(...)):
             x["percent"] = round(x["value"] * 100 / total, 1)
     return {"columns": out, "dimension": dim, "measure": measure, "chart": chart,
             "total": total, "limit": limit}
+
+
+# ===== 售后排行页（2026-09-23）：球房/球桌两级排行 + 概览 summary =====
+# 排序白名单（防注入）：sort 键 → SQL ORDER BY 片段
+_RANK_SORT = {
+    "total": "n DESC, rn ASC",
+    "total_asc": "n ASC, rn ASC",
+    "unresolved": "unres DESC, n DESC, rn ASC",
+    "our_problem": "ourp DESC, n DESC, rn ASC",
+    "last_occurred": "lastd DESC, n DESC, rn ASC",
+}
+
+
+@app.get("/api/stats/rank")
+def stats_rank(level: str = "room", limit: int = Query(10, ge=1, le=200),
+               cycle_start: str = "", start: str = "", end: str = "",
+               resolved: str = "", is_initiative: str = "", is_our_problem: str = "",
+               region: str = "", room_name: str = "", keyword: str = "",
+               sort: str = "total"):
+    """球房/球桌售后排行（独立排行页数据源）
+
+    - level=room  按 TRIM(room_name) 分组
+    - level=table 按 TRIM(room_name)+TRIM(table_no) 联合分组（跨球房同名桌不合并）；
+      传 room_name 时为该球房内桌号下钻榜
+    - start/end（yyyy-MM-dd，含首尾）自定义时间范围，与 cycle_start 互斥使用
+      （同传时 cycle_start 优先，对齐看板口径）
+    - 无任何时间条件时兜底近 90 天（与 stats/charts 一致）
+    - SUM(CASE WHEN…) 一条 SQL 算齐 total/unresolved/our_problem/initiative/last
+    """
+    if level not in ("room", "table"):
+        raise HTTPException(400, f"bad level: {level}")
+    if sort not in _RANK_SORT:
+        raise HTTPException(400, f"bad sort: {sort}")
+
+    where, params = _build_where(keyword, "", resolved, is_initiative,
+                                 is_our_problem, cycle_start,
+                                 region=region, room_name=room_name)
+    # 自定义时间范围（仅在未传账期时生效；日期格式非法直接 400 防脏参）
+    if not cycle_start and (start or end):
+        for v in (start, end):
+            if v:
+                try:
+                    datetime.strptime(v.strip()[:10], "%Y-%m-%d")
+                except (ValueError, TypeError):
+                    raise HTTPException(400, f"bad date: {v}")
+        if start:
+            where += (" AND " if where else " WHERE ") + f"{DATE_EXPR} >= %s"
+            params.append(start.strip()[:10])
+        if end:
+            where += (" AND " if where else " WHERE ") + f"{DATE_EXPR} <= %s"
+            params.append(end.strip()[:10])
+    elif not cycle_start and not start and not end:
+        where += (" AND " if where else " WHERE ") + \
+            f"{DATE_EXPR} >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
+
+    # 空值排除口径与 stats/charts 排行一致（脏数据不配上榜）
+    nonempty = " AND TRIM(room_name) <> ''"
+    if level == "table":
+        nonempty += " AND TRIM(table_no) <> ''"
+
+    metrics = (
+        "COUNT(*) n, "
+        "SUM(CASE WHEN resolved='否' THEN 1 ELSE 0 END) unres, "
+        "SUM(CASE WHEN is_our_problem='是' THEN 1 ELSE 0 END) ourp, "
+        "SUM(CASE WHEN is_initiative='是' THEN 1 ELSE 0 END) init_, "
+        f"MAX({DATE_EXPR}) lastd "
+    )
+    if level == "room":
+        select = "TRIM(room_name) rn, '' tn, "
+        group = "GROUP BY rn"
+    else:
+        select = "TRIM(room_name) rn, TRIM(table_no) tn, "
+        group = "GROUP BY rn, tn"
+    sql = (f"SELECT {select}{metrics}FROM aftersale_records{where}{nonempty} "
+           f"{group} ORDER BY {_RANK_SORT[sort]} LIMIT {int(limit)}")
+
+    # summary：同一 where（不含 nonempty），一次带出覆盖面指标
+    sum_sql = (
+        "SELECT COUNT(*) total, "
+        "COUNT(DISTINCT CASE WHEN TRIM(room_name) <> '' THEN TRIM(room_name) END) rooms, "
+        "COUNT(DISTINCT CASE WHEN TRIM(room_name) <> '' AND TRIM(table_no) <> '' "
+        "THEN CONCAT(TRIM(room_name), '|', TRIM(table_no)) END) tables_, "
+        "SUM(CASE WHEN resolved='否' THEN 1 ELSE 0 END) unres "
+        f"FROM aftersale_records{where}"
+    )
+    with _db() as c, c.cursor() as cur:
+        cur.execute(sum_sql, params)
+        s = cur.fetchone() or {}
+        cur.execute(sql, params)
+        raw = cur.fetchall()
+
+    total = int(s.get("total") or 0)
+    rows = []
+    for i, r in enumerate(raw, 1):
+        n = int(r["n"])
+        rows.append({
+            "rank": i,
+            "room_name": r["rn"],
+            "table_no": r["tn"],
+            "name": f"{r['rn']}·{r['tn']}" if level == "table" and not room_name
+                    else (r["tn"] or r["rn"]),
+            "total": n,
+            "share": round(n * 100 / total, 1) if total else 0.0,
+            "unresolved": int(r["unres"] or 0),
+            "our_problem": int(r["ourp"] or 0),
+            "initiative": int(r["init_"] or 0),
+            "last_occurred": r["lastd"] or "",
+        })
+    return {
+        "level": level,
+        "sort": sort,
+        "limit": int(limit),
+        "rows": rows,
+        "summary": {
+            "rooms": int(s.get("rooms") or 0),
+            "tables": int(s.get("tables_") or 0),
+            "total": total,
+            "unresolved": int(s.get("unres") or 0),
+        },
+    }
 
 
 # ===== PHASE-3 APPEND: 审计 / 回收站 / 批量导入 / 用户偏好 =====

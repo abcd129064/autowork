@@ -56,6 +56,8 @@ export function useAftersaleCharts() {
     our_problem: { yes: 0, no: 0 },
     issue_type_dist: [],
     aging: [],
+    table_top: [],
+    room_top: [],
     total: 0
   });
 

@@ -90,6 +90,15 @@ export type ChartsResult = {
   issue_type_dist: Array<{ name: string; value: number }>;
   /** 未解决时长分布（当日/1-3天/4-7天/8-15天/15天以上） */
   aging: Array<{ name: string; value: number }>;
+  /** 球桌售后排行 TOP10（name="球房·桌号"，联合分组避免跨球房同名桌合并） */
+  table_top: Array<{
+    name: string;
+    value: number;
+    room_name: string;
+    table_no: string;
+  }>;
+  /** 球房售后排行 TOP10 */
+  room_top: Array<{ name: string; value: number }>;
   total: number;
 };
 
@@ -163,6 +172,59 @@ export const getCharts = (params?: { cycle_start?: string }) => {
 /** 自定义维度聚合查询 */
 export const postStatsQuery = (data?: object) => {
   return http.request<any>("post", "/api/stats/query", { data });
+};
+
+/** ===== 售后排行页（/aftersale/rank） ===== */
+
+/** 排行行（level=room 时 table_no 为空串） */
+export type RankRow = {
+  rank: number;
+  room_name: string;
+  table_no: string;
+  /** 展示名：球桌全局榜="球房·桌号"，下钻榜=桌号，球房榜=球房名 */
+  name: string;
+  total: number;
+  /** 占同口径记录总数的百分比（后端已算好，1 位小数） */
+  share: number;
+  unresolved: number;
+  our_problem: number;
+  initiative: number;
+  /** 最近一次发生日期 yyyy-MM-dd */
+  last_occurred: string;
+};
+
+export type RankResult = {
+  level: "room" | "table";
+  sort: string;
+  limit: number;
+  rows: RankRow[];
+  summary: {
+    rooms: number;
+    tables: number;
+    total: number;
+    unresolved: number;
+  };
+};
+
+/** 排行查询入参（时间三选一：cycle_start 优先，start/end 次之，全空=后端兜底近90天） */
+export type RankQuery = {
+  level?: "room" | "table";
+  limit?: number;
+  cycle_start?: string;
+  start?: string;
+  end?: string;
+  resolved?: string;
+  is_initiative?: string;
+  is_our_problem?: string;
+  region?: string;
+  room_name?: string;
+  keyword?: string;
+  sort?: string;
+};
+
+/** 球房/球桌售后排行 */
+export const getRank = (params?: RankQuery) => {
+  return http.request<RankResult>("get", "/api/stats/rank", { params });
 };
 
 /** 新增售后记录（需 WRITE_ENABLED） */

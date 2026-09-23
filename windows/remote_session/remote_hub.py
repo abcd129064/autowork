@@ -2,8 +2,8 @@
 """远程页 RemoteHub（二期，2026-09-21 重构）——统一远程会话中心
 
 设计稿：design/remote_page_v3_065.html（frps 0.65 能力锁定版）
-形态：与工具页同风格——横排 Pivot 二级切换（无图标），四视图堆叠：
-    会话总览 │ P2P 访客 │ 连接质量 │ 隧道配置
+形态：与工具页同风格——横排 Pivot 二级切换（无图标），五视图堆叠：
+    会话总览 │ P2P 访客 │ 连接质量 │ frps 代理 │ 隧道配置
 （连接诊断不属本页，2026-09-07 用户定稿：入口保留在 设置-工具）
 
 数据源：
@@ -12,6 +12,8 @@
   - P2P 访客 = visitor 注册表增删（register_visitor/persist/delete_visitor）
   - 连接质量 = core/visitor_probe（P1：本地 bindPort TCP connect RTT，
                30s 一轮串行；sparkline 趋势 + 评级）
+  - frps 代理 = frps 网页面板 Proxies 页同源 API（GET /api/proxy/{type}
+               ×7 + /api/clients 版本关联；xtcp 复用权威名单零额外 GET）
   - 隧道配置 = settings.frpc_server 嵌套 dict（与 设置-远程连接 同键，
     单点写回）+ frpc 进程控制（apply 热重载 / /api/stop 优雅停止 P1）
     + 管理通道卡（frps_admin credentials 配置 + frpc admin 自检）+ 实时日志
@@ -21,15 +23,17 @@
 """
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-                               QTableWidgetItem, QAbstractItemView, QHeaderView)
+                               QTableWidgetItem, QAbstractItemView, QHeaderView,
+                               QListWidget, QListWidgetItem)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, StrongBodyLabel,
                             CardWidget, LineEdit, PasswordLineEdit, PushButton,
                             PrimaryPushButton, ComboBox, SpinBox, TableWidget,
                             ToolButton, MessageBox, FluentIcon, InfoBar,
-                            InfoBarPosition)
+                            InfoBarPosition, CheckBox, SearchLineEdit,
+                            SegmentedWidget)
 
 from main_window.pivot_page import PivotPage
 from main_window.tool_hub import _transparent, _make_terminal
@@ -37,6 +41,9 @@ from core.frp_remote import (get_session_manager, SOURCE_MANUAL,
                              _FRPC_SERVER_DEFAULTS)
 from core.frps_admin import get_frps_client
 from core.visitor_probe import get_prober
+from database import table_db
+from workers.aftersale_worker import AftersaleDBWorker
+from windows.aftersale.common import _style_cand_list
 
 # 语义色（对齐 core/design_tokens：success/warning/danger/info/accent）
 _C_SUCCESS = QColor(0x1a, 0x9e, 0x6c)
@@ -81,6 +88,19 @@ def _fmt_traffic(nbytes: int) -> str:
     if nbytes >= 1048576:
         return f"{nbytes / 1048576:.1f}MB"
     return f"{nbytes / 1024:.0f}KB"
+
+
+def _fmt_traffic_bytes(nbytes: int) -> str:
+    """frps 代理清单流量列：保留 bytes 级（网页面板口径 "362 bytes"/"3 KB"）
+
+    _fmt_traffic 面向概览卡（KB 起），清单列照网页面板显示原始量级，
+    小流量（心跳包几百字节）不被截成 0KB。
+    """
+    if not nbytes:
+        return "0 bytes"
+    if nbytes < 1024:
+        return f"{nbytes} bytes"
+    return _fmt_traffic(nbytes)
 
 
 def _spark(vals, width: int = 12) -> str:
@@ -443,11 +463,19 @@ class SessionWork(QWidget):
         rtts = []
         for rec in records:
             sess_total += len(mgr.sessions_on_port(rec.get("bindPort", 0)))
-            if self._frps.online(rec.get("serverName", "")) == "online":
+            sn_i = rec.get("serverName", "")
+            if self._frps.online(sn_i) == "online":
                 online_total += 1
-            st = self._prober.stats(rec.get("serverName", ""))
+            st = self._prober.stats(sn_i)
             if st["avg_ms"] is not None:
                 rtts.append(st["avg_ms"])
+            # P2-5 失联感知上报：frps 权威 offline 或探测判异常（bad）
+            # 即视为失联；frpc 未运行同样视为失联（自愈中/放弃态）
+            lost = (not rec.get("disabled") and (
+                    not running
+                    or self._frps.online(sn_i) == "offline"
+                    or self._prober.verdict(sn_i) == "bad"))
+            mgr.report_tunnel_issue(sn_i, lost)
         self.num_run.setText("运行中" if running else "未启动")
         self.num_run.setStyleSheet(
             f"color: {(_C_SUCCESS if running else _C_MUTED).name()};"
@@ -507,10 +535,16 @@ class SessionWork(QWidget):
             status, color = "未启动", _C_MUTED
         elif sessions:
             status, color = "会话中", _C_SUCCESS
+        elif rec.get("prewarmedAt"):
+            # P2-6：本轮预热打洞已完成，点击连接免打洞等待（秒连体感）
+            status, color = "已预热", _C_INFO
         else:
             status, color = "已连接", _C_ACCENT
         it = QTableWidgetItem(status)
         it.setForeground(color)
+        if rec.get("prewarmedAt") and not sessions:
+            it.setToolTip(f"预热打洞完成于 {rec.get('prewarmedAt')}，"
+                          "点击连接免打洞等待")
         table.setItem(r, 0, it)
 
         # frps 在线感知列（P0）：online/offline/未注册/无感知 四态
@@ -660,6 +694,89 @@ class VisitorWork(QWidget):
         lay.setContentsMargins(20, 8, 20, 12)
         lay.setSpacing(12)
 
+        # ---------- 添加访客卡（置于注册表上方；球桌号搜索联动带出 serverName） ----------
+        add_card = CardWidget(body)
+        al = QVBoxLayout(add_card)
+        al.setContentsMargins(16, 14, 16, 14)
+        al.setSpacing(10)
+        al.addWidget(BodyLabel("添加访客", add_card))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        # 球桌号搜索（与球桌管理搜索栏同款动态搜索：300ms 防抖 + 异步查库）：
+        # 命中球桌后带出 snk_code 填入 serverName，并同步关联球桌号
+        self.edit_table_search = SearchLineEdit(add_card)
+        self.edit_table_search.setPlaceholderText("搜索球桌号带出 serverName")
+        self.edit_table_search.setFixedWidth(260)
+        self.edit_table_search.textChanged.connect(self._on_table_search_changed)
+        self.edit_table_search.clearSignal.connect(self._hide_table_candidates)
+        self.edit_name = LineEdit(add_card)
+        self.edit_name.setPlaceholderText("snk 标识（与球桌 frps proxy 同名）")
+        self.edit_name.setFixedWidth(260)
+        self.edit_key = PasswordLineEdit(add_card)
+        self.edit_key.setPlaceholderText("secretKey（留空用默认）")
+        self.edit_key.setFixedWidth(200)
+        self.spin_port = SpinBox(add_card)
+        self.spin_port.setRange(0, 65535)
+        self.spin_port.setValue(0)
+        self.spin_port.setSpecialValueText("随机")
+        self.spin_port.setFixedWidth(130)
+        self.edit_table_id = LineEdit(add_card)
+        self.edit_table_id.setPlaceholderText("关联球桌号（选填）")
+        self.edit_table_id.setFixedWidth(130)
+        lbl0 = BodyLabel("球桌搜索:", add_card)
+        lbl1 = BodyLabel("serverName:", add_card)
+        lbl2 = BodyLabel("secretKey:", add_card)
+        lbl3 = BodyLabel("本地端口:", add_card)
+        lbl4 = BodyLabel("关联球桌:", add_card)
+        grid.addWidget(lbl0, 0, 0)
+        grid.addWidget(self.edit_table_search, 0, 1)
+        grid.addWidget(lbl2, 0, 2)
+        grid.addWidget(self.edit_key, 0, 3)
+        grid.addWidget(lbl1, 1, 0)
+        grid.addWidget(self.edit_name, 1, 1)
+        grid.addWidget(lbl3, 1, 2)
+        grid.addWidget(self.spin_port, 1, 3, Qt.AlignLeft)
+        grid.addWidget(lbl4, 2, 0)
+        grid.addWidget(self.edit_table_id, 2, 1, Qt.AlignLeft)
+        grid.setColumnStretch(4, 1)
+        al.addLayout(grid)
+        # 球桌候选列表（默认隐藏，搜索命中后展示；点选带出 snk/桌号）
+        self._cand_list = QListWidget(add_card)
+        self._cand_list.setFixedHeight(132)
+        self._cand_list.setVisible(False)
+        self._cand_list.itemClicked.connect(self._on_table_candidate_clicked)
+        _style_cand_list(self._cand_list)
+        al.addWidget(self._cand_list)
+
+        btns = QHBoxLayout()
+        self.btn_add = PrimaryPushButton(FluentIcon.ADD, "添加并注册", add_card)
+        self.btn_add.clicked.connect(self._on_add)
+        btns.addWidget(self.btn_add)
+        self.btn_add_connect = PushButton(FluentIcon.PLAY, "添加并连接 SSH", add_card)
+        self.btn_add_connect.clicked.connect(self._on_add_connect)
+        btns.addWidget(self.btn_add_connect)
+        btns.addStretch(1)
+        al.addLayout(btns)
+        cap = CaptionLabel(
+            "注册仅写入 frpc_xtcp_panel.toml（不拉起 frpc）；「添加并连接」经一键直连建立隧道。"
+            "搜索球桌号可带出 serverName（snk 标识）与关联球桌。",
+            add_card)
+        cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
+        al.addWidget(cap)
+        lay.addWidget(add_card)
+
+        # 球桌搜索防抖：停止输入 300ms 后才查库，避免逐字触发同步查询
+        # （与球桌管理搜索栏/售后面板球房搜索同范式）
+        self._search_kw = ""
+        self._cand_rows = []
+        self._cand_worker = None
+        self._search_timer = QTimer(self)
+        self._search_timer.setInterval(300)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._do_table_search)
+
         # ---------- 访客表 ----------
         card = CardWidget(body)
         cl = QVBoxLayout(card)
@@ -694,61 +811,6 @@ class VisitorWork(QWidget):
         cl.addWidget(self.table, 1)
         lay.addWidget(card, 1)
 
-        # ---------- 添加访客卡（卡铺满、控件定宽） ----------
-        add_card = CardWidget(body)
-        al = QVBoxLayout(add_card)
-        al.setContentsMargins(16, 14, 16, 14)
-        al.setSpacing(10)
-        al.addWidget(BodyLabel("添加访客", add_card))
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
-
-        self.edit_name = LineEdit(add_card)
-        self.edit_name.setPlaceholderText("snk 标识（与球桌 frps proxy 同名）")
-        self.edit_name.setFixedWidth(260)
-        self.edit_key = PasswordLineEdit(add_card)
-        self.edit_key.setPlaceholderText("secretKey（留空用默认）")
-        self.edit_key.setFixedWidth(200)
-        self.spin_port = SpinBox(add_card)
-        self.spin_port.setRange(0, 65535)
-        self.spin_port.setValue(0)
-        self.spin_port.setSpecialValueText("随机")
-        self.spin_port.setFixedWidth(130)
-        self.edit_table_id = LineEdit(add_card)
-        self.edit_table_id.setPlaceholderText("关联球桌号（选填）")
-        self.edit_table_id.setFixedWidth(130)
-        lbl1 = BodyLabel("serverName:", add_card)
-        lbl2 = BodyLabel("secretKey:", add_card)
-        lbl3 = BodyLabel("本地端口:", add_card)
-        lbl4 = BodyLabel("关联球桌:", add_card)
-        grid.addWidget(lbl1, 0, 0)
-        grid.addWidget(self.edit_name, 0, 1)
-        grid.addWidget(lbl2, 0, 2)
-        grid.addWidget(self.edit_key, 0, 3)
-        grid.addWidget(lbl3, 1, 0)
-        grid.addWidget(self.spin_port, 1, 1, Qt.AlignLeft)
-        grid.addWidget(lbl4, 1, 2)
-        grid.addWidget(self.edit_table_id, 1, 3, Qt.AlignLeft)
-        grid.setColumnStretch(4, 1)
-        al.addLayout(grid)
-
-        btns = QHBoxLayout()
-        self.btn_add = PrimaryPushButton(FluentIcon.ADD, "添加并注册", add_card)
-        self.btn_add.clicked.connect(self._on_add)
-        btns.addWidget(self.btn_add)
-        self.btn_add_connect = PushButton(FluentIcon.PLAY, "添加并连接 SSH", add_card)
-        self.btn_add_connect.clicked.connect(self._on_add_connect)
-        btns.addWidget(self.btn_add_connect)
-        btns.addStretch(1)
-        al.addLayout(btns)
-        cap = CaptionLabel(
-            "注册仅写入 frpc_xtcp_panel.toml（不拉起 frpc）；「添加并连接」经一键直连建立隧道。",
-            add_card)
-        cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
-        al.addWidget(cap)
-        lay.addWidget(add_card)
-
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(body)
@@ -782,6 +844,84 @@ class VisitorWork(QWidget):
                     item.setForeground(_C_WARNING)
                 self.table.setItem(r, col, item)
 
+    # ---------- 球桌搜索联动（球桌管理动态搜索范式） ----------
+
+    def _on_table_search_changed(self, text=""):
+        """球桌号输入变动：失效旧关联，防抖后异步搜索球桌管理库"""
+        self._search_kw = str(text or "").strip()
+        if not self._search_kw:
+            self._hide_table_candidates()
+            return
+        self._search_timer.start()
+
+    def _do_table_search(self):
+        """防抖到期：按关键词异步查球桌（含关键词快照，过期结果丢弃）"""
+        kw = self._search_kw
+        if not kw:
+            return
+        if self._cand_worker is not None and self._cand_worker.isRunning():
+            # 快速连续输入：打断旧查询并断开信号，避免过期候选覆盖新结果
+            self._cand_worker.requestInterruption()
+            self._cand_worker.disconnect(self)
+        self._cand_worker = AftersaleDBWorker(
+            table_db.query_page, 1, 20, kw,
+            include_test=False, include_manual=False, include_tuidan=False)
+        self._cand_worker.result_ready.connect(
+            lambda result, k=kw: self._on_table_candidates(k, result))
+        self._cand_worker.error.connect(lambda _m: self._hide_table_candidates())
+        self._cand_worker.start()
+
+    def _on_table_candidates(self, kw, result):
+        if kw != self._search_kw:
+            return  # 输入已变化，丢弃过期结果
+        rows = (result or ([], []))[1] or []
+        # 只命中唯一球桌：静默带出，不弹候选
+        if len(rows) == 1:
+            self._apply_table(rows[0])
+            self._hide_table_candidates()
+            return
+        self._cand_list.clear()
+        if not rows:
+            item = QListWidgetItem(f"未找到「{kw}」的球桌，可直接手填 serverName")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._cand_list.addItem(item)
+            self._cand_list.setVisible(True)
+            return
+        self._cand_rows = rows
+        for r in rows:
+            name = str(r.get("name") or "")
+            room = str(r.get("roomName") or "")
+            snk = str(r.get("snk_code") or "")
+            item = QListWidgetItem(f"{name} · {room}")
+            item.setToolTip(f"桌号: {name}\n球房: {room}\nSNK: {snk or '（未登记）'}")
+            self._cand_list.addItem(item)
+        self._cand_list.setVisible(True)
+
+    def _on_table_candidate_clicked(self, item):
+        row_idx = self._cand_list.row(item)
+        if 0 <= row_idx < len(self._cand_rows):
+            self._apply_table(self._cand_rows[row_idx])
+        self._hide_table_candidates()
+
+    def _apply_table(self, row):
+        """选中球桌 → 带出 serverName（snk_code）与关联球桌号
+
+        snk 未登记时不覆盖已填 serverName，仅提示去球桌管理补录。
+        """
+        name = str(row.get("name") or "").strip()
+        snk = str(row.get("snk_code") or "").strip()
+        if name:
+            self.edit_table_id.setText(name)
+        if snk:
+            self.edit_name.setText(snk)
+        else:
+            self._win._show_info_bar(
+                f"球桌 {name} 未登记 snk 标识，请在球桌管理补录或手填 serverName",
+                "warning", duration=4000)
+
+    def _hide_table_candidates(self):
+        self._cand_list.setVisible(False)
+
     # ---------- 操作 ----------
 
     def _register(self):
@@ -812,6 +952,7 @@ class VisitorWork(QWidget):
         self.edit_name.clear()
         self.edit_key.clear()
         self.edit_table_id.clear()
+        self.edit_table_search.clear()
         self.spin_port.setValue(0)
         self.refresh()
         return sn
@@ -1038,6 +1179,155 @@ class QualityWork(QWidget):
             table.setItem(r, 7, QTableWidgetItem(str(rec.get("bindPort", "") or "—")))
 
 
+# ==================== 视图 5：frps 代理（网页面板同源） ====================
+
+# 类型页签顺序与 frps 网页面板 Proxies 页一致（2026-09-23 截图）
+_PROXY_TABS = ("tcp", "udp", "http", "https", "tcpmux", "stcp", "sudp", "xtcp")
+
+
+def _proxy_port_text(proxy: dict) -> str:
+    """proxy.conf → 端口/域名展示文本（对齐网页面板 Port 列）
+
+    v1 conf（model/types.go *OutConf）：tcp/udp=remotePort；http/https/
+    tcpmux=customDomains/subdomain；stcp/sudp/xtcp 无端口（P2P 语义）。
+    """
+    conf = proxy.get("conf") or {}
+    port = conf.get("remotePort")
+    if port:
+        return str(port)
+    domains = conf.get("customDomains") or []
+    if isinstance(domains, list) and domains:
+        return ",".join(str(d) for d in domains[:2])
+    sub = str(conf.get("subdomain") or "")
+    return sub or "—"
+
+
+class FrpsProxiesWork(QWidget):
+    """frps 代理清单：网页面板 Proxies 页同源 API 的桌面端呈现
+
+    数据源 GET /api/proxy/{type}（v1，0.65 即有）+ GET /api/clients
+    （clientID → frpc 版本，网页面板 ClientVersion 列同源），经
+    core.frps_admin.FrpsAdminClient.all_proxies()/client_version() 读取
+    （随周期感知 best-effort 拉取，本视图零额外请求）。
+    """
+
+    def __init__(self, win, hub, parent=None):
+        super().__init__(parent)
+        self.setObjectName("remoteFrpsProxiesWork")
+        _transparent(self)
+        self._win = win
+        self._hub = hub
+        self._frps = get_frps_client()
+        self._tab = "tcp"
+
+        body = QWidget(self)
+        body.setAutoFillBackground(False)
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 8, 20, 12)
+        lay.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.lbl_state = BodyLabel("frps 代理清单", body)
+        head.addWidget(self.lbl_state)
+        head.addStretch(1)
+        self.edit_kw = SearchLineEdit(body)
+        self.edit_kw.setPlaceholderText("搜索代理名")
+        self.edit_kw.setFixedWidth(200)
+        self.edit_kw.textChanged.connect(lambda _t: self.refresh())
+        head.addWidget(self.edit_kw)
+        btn_refresh = PushButton(FluentIcon.SYNC, "刷新感知", body)
+        btn_refresh.setToolTip("重新拉取 frps 全类型代理清单（后台线程）")
+        btn_refresh.clicked.connect(lambda: self._frps.request_refresh())
+        head.addWidget(btn_refresh)
+        lay.addLayout(head)
+
+        self.tabs = SegmentedWidget(body)
+        for t in _PROXY_TABS:
+            self.tabs.addItem(t, t.upper())
+        self.tabs.setCurrentItem(self._tab)
+        self.tabs.currentItemChanged.connect(self._on_tab_changed)
+        lay.addWidget(self.tabs)
+
+        card = CardWidget(body)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+        self.table = TableWidget(card)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(
+            ["Name", "Port / 域名", "Connections", "Traffic In",
+             "Traffic Out", "ClientVersion", "Status"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(1, 110)
+        self.table.setColumnWidth(2, 90)
+        self.table.setColumnWidth(3, 96)
+        self.table.setColumnWidth(4, 96)
+        self.table.setColumnWidth(5, 100)
+        self.table.setColumnWidth(6, 80)
+        self.table.setMinimumHeight(260)
+        cl.addWidget(self.table, 1)
+        lay.addWidget(card, 1)
+
+        self.lbl_hint = CaptionLabel(
+            "数据源 GET /api/proxy/{type} + /api/clients（frps 网页面板 Proxies 页同源，"
+            "随周期感知 best-effort 拉取，只读）", body)
+        self.lbl_hint.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
+        lay.addWidget(self.lbl_hint)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(body)
+
+        self._frps.all_proxies_changed.connect(lambda _d: self.refresh())
+        self._frps.proxies_changed.connect(lambda _d: self.refresh())
+        self._frps.channel_state_changed.connect(lambda _s: self.refresh())
+
+    def _on_tab_changed(self, key):
+        if key in _PROXY_TABS:
+            self._tab = key
+            self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        snap_state = self._frps.snapshot().get("state")
+        rows = self._frps.all_proxies().get(self._tab, [])
+        kw = str(self.edit_kw.text() or "").strip().lower()
+        if kw:
+            rows = [r for r in rows if kw in r.get("name", "").lower()]
+        self.table.setRowCount(0)
+        for rec in rows:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            status = rec.get("status", "")
+            values = (rec.get("name", ""), _proxy_port_text(rec),
+                      str(rec.get("curConns", 0)),
+                      _fmt_traffic_bytes(rec.get("todayTrafficIn", 0)),
+                      _fmt_traffic_bytes(rec.get("todayTrafficOut", 0)),
+                      self._frps.client_version(rec.get("clientID", "")) or "—",
+                      status)
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setToolTip(text)
+                if col == 6:
+                    item.setForeground(
+                        _C_SUCCESS if status == "online" else _C_DANGER)
+                self.table.setItem(r, col, item)
+        self.lbl_state.setText(
+            f"frps 代理清单 · {self._tab.upper()} {len(rows)} 条"
+            + ("" if snap_state == "ok" else f"（感知通道 {snap_state}）"))
+
+
 # ==================== 视图 4：隧道配置 ====================
 # 连接诊断不属于本页（2026-09-07 用户定稿）：入口保留在 设置-工具
 # 「连接诊断」行（win._on_open_conn_diag 打开 ConnDiagPanel 独立窗口）。
@@ -1124,6 +1414,19 @@ class TunnelConfWork(QWidget):
         self.btn_stop.clicked.connect(self._on_stop)
         btns.addWidget(self.btn_stop)
         btns.addStretch(1)
+        # 开机静默预连开关（2026-09-23）：启动 6s 后自动拉起 frpc 恢复启用
+        # 隧道并预热打洞，点 SSH/SFTP 秒连；当场勾选=立即执行一次预连
+        from core import app_settings as _as0
+        self.chk_autostart = CheckBox("开启时静默预连", card)
+        self.chk_autostart.setChecked(
+            _as0.get("frp_autostart", True) is not False)
+        self.chk_autostart.setToolTip(
+            "程序启动后自动拉起 frpc 并恢复启用中的隧道（跳过已断开的），\n"
+            "再预热打洞——点 SSH/SFTP 直接秒连，不再等 2.5s+ 冷启动。\n"
+            "全程静默：失败只进日志不打扰；勾选时立即执行一次。\n"
+            "注意：会在后台常驻 frpc 进程并保持到 frps 的控制连接。")
+        self.chk_autostart.clicked.connect(self._on_autostart_toggled)
+        btns.addWidget(self.chk_autostart)
         cl.addLayout(btns)
         lay.addWidget(card)
 
@@ -1313,6 +1616,35 @@ class TunnelConfWork(QWidget):
         self._win._show_info_bar("frpc 已停止（注册表保留）", "success")
         self._win._append_log("[远程] 手动优雅停止 frpc")
 
+    def _on_autostart_toggled(self):
+        """保存「开启时静默预连」开关；当场勾选立即执行一次预连
+
+        取消勾选只影响下次启动，不主动停止正在运行的 frpc（停有专属的
+        「优雅停止 frpc」按钮，各管各的，互不越权）。
+        """
+        from core import app_settings as _as
+        checked = self.chk_autostart.isChecked()
+        _as.set("frp_autostart", bool(checked))
+        self._win._append_log(f"[远程] 开机静默预连已{'开启' if checked else '关闭'}")
+        if not checked:
+            self._win._show_info_bar("已关闭：下次启动不再自动预连", "info")
+            return
+        result = self._mgr.autostart()
+        if result in ("started", "restarted", "reloaded"):
+            # 就绪轮询后预热（P2-4）：bindPort 监听即打洞，不等固定 3s
+            self._mgr.prewarm_when_ready()
+            self._win._show_info_bar(
+                "已立即执行一次静默预连并预热打洞", "success")
+        elif result == "skipped_running":
+            self._win._show_info_bar("已开启；frpc 正在运行，无需重复启动", "info")
+        else:
+            # skipped_no_tunnel / failed（失败细节已进日志区）
+            self._win._show_info_bar(
+                "已开启；当前无启用隧道可预连（已断开的隧道不自动复活，"
+                "点 SSH/SFTP 即重连）" if result == "skipped_no_tunnel"
+                else "已开启；本次预连未成功（详见 frpc 日志）", "warning")
+        self._update_state()
+
     # ---------- 管理通道操作 ----------
 
     def _on_channel_save(self):
@@ -1401,11 +1733,13 @@ class RemoteHub(PivotPage):
         self.session_work = SessionWork(self._win, self, self)
         self.visitor_work = VisitorWork(self._win, self, self)
         self.quality_work = QualityWork(self._win, self, self)
+        self.frps_proxies_work = FrpsProxiesWork(self._win, self, self)
         self.tunnel_conf_work = TunnelConfWork(self._win, self, self)
 
         self.addPage(self.session_work, "会话总览")
         self.addPage(self.visitor_work, "P2P 访客")
         self.addPage(self.quality_work, "连接质量")
+        self.addPage(self.frps_proxies_work, "frps 代理")
         self.addPage(self.tunnel_conf_work, "隧道配置")
         self.lock_pivot_width()
         self.switchTo(self.session_work)
@@ -1418,5 +1752,5 @@ class RemoteHub(PivotPage):
         """统一设置页平滑开关联动：本页三张表"""
         from core.perf import apply_table_smooth_mode
         for t in (self.session_work.table, self.visitor_work.table,
-                  self.quality_work.table):
+                  self.quality_work.table, self.frps_proxies_work.table):
             apply_table_smooth_mode(t, panel="remote")

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""MainWindow 远程连接 Mixin：P2P 面板、XTCP/TCP 连接、frpc 管理、SFTP/SSH/RDP 窗口启动"""
+"""MainWindow 远程连接 Mixin：P2P 面板、XTCP/TCP 连接、frpc 管理、SFTP/SSH/RDP 窗口启动
+
+（2026-09-23 自 main_window/remote_mixin.py 迁入：远程页面文件统一归口
+windows/remote_session/；main_window.main_window 按新路径导入，无 shim。）
+"""
 from __future__ import annotations
 
 import sys
@@ -229,6 +233,11 @@ class RemoteMixin:
         # 布局调整（Task #46）：按钮归位 + 服务器搜索框默认隐藏(Ctrl+F 唤起)
         self._rearrange_p2p_layout()
         self._init_p2p_search_shortcuts()
+        # 开机静默预连（2026-09-23）：延迟 6s 自动拉起 frpc 恢复启用隧道，
+        # 成功后后台预热打洞——点 SSH/SFTP 从"冷启动等 2.5s+打洞"变为秒连。
+        # 延迟让位启动关键路径（DB/窗口/网络初始化）；frp_autostart=False
+        # 或无启用隧道时 autostart 内部自静默跳过。
+        QTimer.singleShot(6000, self._frp_autostart)
         # 「当前隧道」入口：挂在远程面板标题下方，展示全局活跃隧道
         self._tunnel_panel_window = None
         self._p2p_tunnels_btn = FluentPushButton(
@@ -238,6 +247,28 @@ class RemoteMixin:
         self.ui.p2p_panel.layout().insertWidget(1, self._p2p_tunnels_btn)
         self._update_p2p_visibility()
         self._update_p2p_buttons()
+
+    def _frp_autostart(self):
+        """开机静默预连：自动拉起 frpc 并预热打洞（启动 6s 后延迟触发）
+
+        口径「静默」：不弹 InfoBar、不阻塞、失败只进日志区——现场无网或
+        frps 不可达属常态（笔记本带去现场才需要远程），惊扰开机流程不如
+        留给人工连接路径重试。隧道配置页「开启时静默预连」开关可关。
+        """
+        try:
+            from core import app_settings
+            if app_settings.get("frp_autostart", True) is False:
+                return
+        except Exception:
+            pass  # 配置门面异常按默认（开）处理
+        mgr = self._session_mgr
+        result = mgr.autostart()
+        if result in ("started", "restarted", "reloaded"):
+            # 隧道端口就绪≠可秒连：XTCP 打洞在首个本地 connect 才触发，
+            # 轮询 bindPort 监听就绪（200ms 间隔、8s 上限）后立即后台预热
+            # 一轮（串行 3s 超时 connect）。UI 联动无需手动刷新：apply 成功
+            # 已发 frpc_state_changed，各视图与按钮随信号自动翻转。
+            mgr.prewarm_when_ready()
 
     def _rearrange_p2p_layout(self):
         """布局调整：添加/删除按钮移到 secretKey 下方，连接/断开按钮移到密码框下方

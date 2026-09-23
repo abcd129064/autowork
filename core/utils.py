@@ -123,26 +123,71 @@ def cleanup_log_dir(dir_path, max_files=500, max_age_days=30, suffix='.log'):
     return removed
 
 
-def show_info_bar(message, message_type="info", title=None, duration=2500, parent=None):
+def show_info_bar(message, message_type="info", title=None, duration=2500,
+                  parent=None, bottom_offset=0):
     """统一 InfoBar 提示：位置固定 BOTTOM_RIGHT，标题按类型自动映射。
 
     参数与主窗口 _show_info_bar 一致（message/message_type/title/duration），
     额外提供 parent（默认取当前活动窗口兜底）；返回 InfoBar 实例，
     便于调用方追加 Action/Widget（如「打开文件夹」按钮）。
+
+    bottom_offset：在默认贴底位置基础上再向上抬升的像素数（2026-09-23 需求：
+    设备状态页文件面板底部有迁移按钮行，贴底提示会遮挡按钮）。做法是给该条
+    InfoBar 打 bottomOffset 动态属性 + 对 BottomRightInfoBarManager._pos 装一次
+    识别该属性的补丁——manager 的滑入/重排/resize 定位全部经 _pos 计算，因此
+    提示从屏幕右缘直接滑到抬升后的坐标，全程不经过贴底位置，无遮挡闪现；
+    未设属性的其他 InfoBar 不受影响（manager 为子类级单例，补丁只改算法）。
     """
     # 延迟导入：core 层不硬依赖 UI 库，worker 等非 GUI 上下文也可安全引用
+    from PySide6.QtCore import Qt
     from qfluentwidgets import InfoBar, InfoBarPosition
+    from qfluentwidgets.components.widgets.info_bar import InfoBarIcon
     if parent is None:
         from PySide6.QtWidgets import QApplication
         parent = QApplication.activeWindow()
     if title is None:
         title = {'success': '成功', 'info': '提示',
                  'warning': '警告', 'error': '错误'}.get(message_type, '提示')
-    factory = {'success': InfoBar.success, 'info': InfoBar.info,
-               'warning': InfoBar.warning, 'error': InfoBar.error}
-    return factory.get(message_type, InfoBar.info)(
-        title=title, content=message, parent=parent,
-        position=InfoBarPosition.BOTTOM_RIGHT, duration=duration)
+    icon = {'success': InfoBarIcon.SUCCESS, 'info': InfoBarIcon.INFORMATION,
+            'warning': InfoBarIcon.WARNING,
+            'error': InfoBarIcon.ERROR}.get(message_type,
+                                            InfoBarIcon.INFORMATION)
+    if bottom_offset:
+        _patch_bottom_right_offset()
+    # 不能用 InfoBar.success 等 classmethod：其内部创建后立即 show()，滑入动画
+    # 终值已按贴底坐标定死——必须先建对象、打上 bottomOffset，再 show()
+    bar = InfoBar(icon, title, message, orient=Qt.Horizontal,
+                  isClosable=True, duration=duration,
+                  position=InfoBarPosition.BOTTOM_RIGHT, parent=parent)
+    if bottom_offset:
+        bar.setProperty("bottomOffset", int(bottom_offset))
+    bar.show()
+    return bar
+
+
+def _patch_bottom_right_offset():
+    """让 BottomRightInfoBarManager._pos 识别 InfoBar 的 bottomOffset 属性（幂等）
+
+    manager 的滑入动画（_slideStartPos/_createSlideAni 终值）、多条重排
+    （_updateDropAni）、父容器 resize 复位（eventFilter）都以 _pos 为唯一
+    坐标来源，补丁一处即全链路生效；仅对带属性的条生效，零副作用。
+    """
+    from qfluentwidgets.components.widgets.info_bar import \
+        BottomRightInfoBarManager as BRM
+
+    if getattr(BRM._pos, '_bottom_offset_aware', False):
+        return
+    orig_pos = BRM._pos
+
+    def _pos(self, infoBar, parentSize=None):
+        pt = orig_pos(self, infoBar, parentSize)
+        offset = infoBar.property('bottomOffset') or 0
+        if offset:
+            pt.setY(pt.y() - int(offset))
+        return pt
+
+    _pos._bottom_offset_aware = True
+    BRM._pos = _pos
 
 
 # ==================== 打包版兄弟程序拉起 ====================

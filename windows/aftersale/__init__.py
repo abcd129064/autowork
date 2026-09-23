@@ -8,6 +8,7 @@
 - entry.py    : EntryPage 填写录入页
 - dialogs.py  : EditRecordDialog / ImportPreviewDialog
 - records.py  : RecordsPage 记录与统计页
+- rank.py     : RankPage 售后排行页（球房/球桌两级排行 + 下钻）
 - settings.py : CycleSettingsPage 周期设置 + SettingsPage 设置面板
 - window.py   : AftersalePanelWindow 主窗口（FluentWindow 组装）
 
@@ -25,6 +26,7 @@ from windows.aftersale.dialogs import (  # noqa: F401
 )
 from windows.aftersale.stats_dialog import AfterSaleStatsDialog  # noqa: F401
 from windows.aftersale.records import RecordsPage  # noqa: F401
+from windows.aftersale.rank import RankPage  # noqa: F401
 from windows.aftersale.settings import (  # noqa: F401
     CycleSettingsPage, SettingsPage,
 )
@@ -43,6 +45,8 @@ __all__ = [
     "AfterSaleStatsDialog",
     # records
     "RecordsPage",
+    # rank
+    "RankPage",
     # settings
     "CycleSettingsPage", "SettingsPage",
     # 主窗口

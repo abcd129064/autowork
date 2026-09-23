@@ -27,6 +27,15 @@ export default {
         icon: "ri/bar-chart-2-line",
         title: $t("menus.pureAftersaleStats")
       }
+    },
+    {
+      path: "/aftersale/rank",
+      name: "AftersaleRank",
+      component: () => import("@/views/aftersale/rank/index.vue"),
+      meta: {
+        icon: "ri/trophy-line",
+        title: $t("menus.pureAftersaleRank")
+      }
     }
   ]
 } satisfies RouteConfigsTable;

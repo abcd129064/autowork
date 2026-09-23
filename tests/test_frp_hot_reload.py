@@ -13,6 +13,7 @@ _request_admin_api → 受控返回、_restart_frpc → 记录调用（不起真
 """
 import base64
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock
 
@@ -182,6 +183,68 @@ def test_apply_stops_when_registry_empty(mgr):
     assert mgr.apply() == "stopped"
     assert not mgr.is_running()
     assert mgr._applied_signature is None
+
+
+# ==================== 开机静默预连 autostart（2026-09-23）====================
+
+def test_autostart_skips_when_running_or_no_active(mgr):
+    assert mgr.autostart() == "skipped_no_tunnel"   # 空注册表
+    _add_visitor(mgr, "snk_1")
+    mgr._visitors["snk_1"]["disabled"] = True
+    assert mgr.autostart() == "skipped_no_tunnel"   # 只剩已断开：不复活
+    assert not mgr.is_running()
+    mgr._visitors["snk_1"]["disabled"] = False
+    assert mgr.autostart() == "started"             # 有启用隧道：拉起
+    assert mgr.is_running()
+    assert mgr.autostart() == "skipped_running"     # 再调幂等跳过
+
+
+def test_autostart_swallows_errors_and_logs(mgr, tmp_path):
+    (tmp_path / "frpc.exe").unlink()   # frpc 缺失 → apply 抛 OSError
+    _add_visitor(mgr, "snk_1")
+    del mgr._restart_frpc              # 还原真实重启实现暴露失败
+    assert mgr.autostart() == "failed"  # 绝不抛错（静默纪律）
+    assert any("静默预连失败" in m for m in mgr._logs)
+    assert not mgr.is_running()
+
+
+def test_active_count_only_counts_enabled(mgr):
+    _add_visitor(mgr, "snk_1", 40001)
+    _add_visitor(mgr, "snk_2", 40002)
+    assert mgr.active_count() == 2
+    mgr._visitors["snk_1"]["disabled"] = True
+    assert mgr.active_count() == 1
+    mgr.remove_visitor("snk_2")
+    assert mgr.active_count() == 0
+
+
+def test_prewarm_serial_connects_enabled_only(mgr, monkeypatch):
+    """预热只对启用隧道 connect（disabled 跳过），串行、超时 3s 口径
+
+    断言走 hits（子线程直接 append 的共享列表）而非 mgr._logs：
+    log_message 是跨线程 queued 信号，pytest 主线程无事件循环不会投递。
+    """
+    import core.visitor_probe as vp
+    _add_visitor(mgr, "snk_on", 40001)
+    _add_visitor(mgr, "snk_off", 40002)
+    mgr._visitors["snk_off"]["disabled"] = True
+    hits = []
+
+    def fake_connect(host, port, timeout_ms):
+        hits.append((host, port, timeout_ms))
+        return 12.3
+    monkeypatch.setattr(vp, "tcp_connect_rtt_ms", fake_connect)
+    mgr.apply()                        # snk_on 启用 → frpc「运行中」
+    mgr.prewarm_async()
+    t0 = time.time()
+    while not hits and time.time() - t0 < 5.0:
+        time.sleep(0.02)
+    assert hits, "预热线程未触发 connect"
+    time.sleep(0.3)                    # 留窗口：若误探 snk_off 早已入列
+    # disabled 的 snk_off 不被 connect：只命中启用中的 snk_on 一条
+    assert [p for (_h, p, _t) in hits] == [40001]
+    assert hits[0][0] == "127.0.0.1"
+    assert hits[0][2] == fr._PREWARM_TIMEOUT_MS  # 长超时口径（非 800ms）
 
 
 # ==================== 断开=置 disabled 保留注册（2026-09-22 修复：

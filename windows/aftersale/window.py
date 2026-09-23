@@ -29,13 +29,14 @@ from windows.mysql_sync_card import MysqlSyncCard
 
 from windows.aftersale.common import *  # noqa: F401,F403
 from windows.aftersale.entry import EntryPage
+from windows.aftersale.rank import RankPage
 from windows.aftersale.records import RecordsPage
 from windows.aftersale.settings import SettingsPage
 
 # ==================== 售后面板窗口 ====================
 
 class AftersalePanelWindow(FluentWindow):
-    """售后面板：FluentWindow + 左侧导航 + 三个功能页面（填写录入/记录与统计/设置）"""
+    """售后面板：FluentWindow + 左侧导航 + 四个功能页面（填写录入/记录与统计/售后排行/设置）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,9 +48,15 @@ class AftersalePanelWindow(FluentWindow):
         self.entry_page.setObjectName("aftersaleEntryPage")
         self.records_page = RecordsPage(self)
         self.records_page.setObjectName("aftersaleRecordsPage")
+        self.rank_page = RankPage(self)
+        self.rank_page.setObjectName("aftersaleRankPage")
 
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
+        # 售后排行（球房/球桌两级排行，与 Web 端 /aftersale/rank 同功能）
+        self.addSubInterface(self.rank_page, FluentIcon.VIEW, "售后排行")
+        # 明细跳转：排行页操作列「明细」→ 记录页关键词预筛选
+        self.rank_page.jump_to_records.connect(self._on_rank_jump_records)
 
         # 设置面板：统计周期设置 + 数据库设置（原 MySQL 设置）
         self.settings_page = SettingsPage(self)
@@ -70,9 +77,17 @@ class AftersalePanelWindow(FluentWindow):
             pass
 
     def _on_cycle_saved(self):
-        """周期设置保存成功：记录页重建周期下拉并重查，统计页刷新（新周期立即生效）"""
+        """周期设置保存成功：记录页重建周期下拉并重查，统计页刷新（新周期立即生效）；
+        排行页账期下拉选项置旧（可见时立即重拉，不可见时下次进入重拉）"""
         self.records_page._cycles_loaded = False
         self.records_page._load_cycles_then_data()
+        self.rank_page.reload_options()
+
+    def _on_rank_jump_records(self, keyword: str):
+        """排行页「明细」跳转：切到记录页并按关键词预筛选（同球桌管理右键入口）"""
+        self.records_page.set_keyword(keyword)
+        self.switchTo(self.records_page)
+        self.records_page.refresh_async()
 
     def _on_nav_changed(self, current, _pre=None):
         """导航切换：进入设置面板时刷新数据库配置表单（showEvent 已兜底，此处兼容旧信号）"""
@@ -114,7 +129,7 @@ class AftersalePanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
-        for page in (self.entry_page, self.records_page):
+        for page in (self.entry_page, self.records_page, self.rank_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))

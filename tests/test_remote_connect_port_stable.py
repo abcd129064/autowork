@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import core.frp_remote as fr
-import main_window.remote_mixin as rm
+import windows.remote_session.remote_mixin as rm
 from core.frp_remote import (RemoteSessionManager, SOURCE_MANUAL,
                              SOURCE_TABLE, SOURCE_SNK)
 

@@ -70,6 +70,9 @@ export function useAftersale(tableRef: Ref) {
     is_our_problem: "",
     // 按发生日期筛选（YYYY-MM-DD；来自总览页图表点击跳转）
     occurred_at: "",
+    // 球房/球桌精确筛选（统计页排行榜点击跳转；空=不筛）
+    room_name: "",
+    table_no: "",
     // 排序（表头点击；空=后端默认 created_at DESC）
     sort_by: "",
     sort_order: ""
@@ -87,6 +90,8 @@ export function useAftersale(tableRef: Ref) {
     "is_initiative",
     "is_our_problem",
     "occurred_at",
+    "room_name",
+    "table_no",
     "sort_by",
     "sort_order"
   ] as const;
@@ -718,6 +723,8 @@ export function useAftersale(tableRef: Ref) {
     if (!formEl) return;
     formEl.resetFields();
     form.occurred_at = ""; // 无对应表单项，手动清（图表点击跳转带入的日期筛选）
+    form.room_name = ""; // 排行榜点击跳转带入的球房/球桌筛选（同上）
+    form.table_no = "";
     form.sort_by = ""; // 排序状态同样不在表单项里
     form.sort_order = "";
     onSearch();

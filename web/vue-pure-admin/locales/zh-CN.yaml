@@ -74,6 +74,7 @@ menus:
   pureAftersale: 售后记录
   pureAftersaleList: 记录查询
   pureAftersaleStats: 数据看板
+  pureAftersaleRank: 售后排行
   pureTable: 表格
   pureSysManagement: 系统管理
   pureUser: 用户管理

@@ -165,6 +165,13 @@ class LedgerHub(PivotPage):
         except Exception:
             pass
 
+    def apply_auto_refresh(self):
+        """自动刷新开关/间隔变更：记录页即时启停定时器（需求4，售后同款）"""
+        try:
+            self.records_page._sync_auto_timer()
+        except Exception:
+            pass
+
     def open_entry_with_context(self, ctx: dict):
         """主界面「跑视频」入口：切到填写录入页并预填会话上下文（原 window.py:54-61）"""
         self.switchTo(self.entry_page)
@@ -211,6 +218,8 @@ class SettingsHubPage(QWidget):
 
     aftersale_cycle_saved = Signal()
     aftersale_auto_refresh_changed = Signal()
+    # 跑视频自动刷新开关/间隔变更（主窗口转发 LedgerHub.apply_auto_refresh，需求4）
+    ledger_auto_refresh_changed = Signal()
     table_smooth_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -576,9 +585,39 @@ class SettingsHubPage(QWidget):
 
     def _group_ledger(self, parent):
         g = SettingGroup("跑视频", parent)
+        from database import ledger_db
         from windows.run_video.settings import SignerSettingsCard
         self.signer_card = SignerSettingsCard(parent)
         g.addWidget(self.signer_card)
+        # 记住上次视频日期（需求3）：连续补录同一天的多条记录免重复拨日期
+        g.addRow(SettingRow(
+            FluentIcon.CALENDAR, "记住上次视频日期",
+            "新增跑视频记录时，「日期」默认沿用上一条填写的日期，"
+            "而不是回到当天（关闭后恢复默认当日）",
+            make_switch(ledger_db.remember_occurred_enabled(),
+                        ledger_db.set_remember_occurred)))
+        # 自动刷新（需求4）：定时比对全表指纹，有变化即静默重查，
+        # 免手动点刷新即可看到他人新填记录；开关/间隔变更即时转发记录页生效
+        def _apply():
+            self.ledger_auto_refresh_changed.emit()
+        g.addRow(SettingRow(
+            FluentIcon.SYNC, "自动刷新记录",
+            "定时检查数据库变化（他人填写的记录自动出现，无需手动同步）；"
+            "仅在数据真正变化时刷新，不打扰当前浏览",
+            make_switch(ledger_db.auto_refresh_enabled(),
+                        lambda on: (ledger_db.set_auto_refresh(on),
+                                    _apply()))))
+        _interval_items = [("15 秒", 15), ("30 秒", 30),
+                           ("1 分钟", 60), ("5 分钟", 300)]
+        _cur_iv = ledger_db.auto_refresh_interval()
+        _iv_idx = next((i for i, (_l, v) in enumerate(_interval_items)
+                        if v == _cur_iv), 1)
+        g.addRow(SettingRow(
+            FluentIcon.DATE_TIME, "自动刷新间隔",
+            "两次数据库检查之间的时间",
+            make_combo(_interval_items, _iv_idx,
+                       lambda v: (ledger_db.set_auto_refresh_interval(v),
+                                  _apply()))))
         return g
 
     def _group_management(self, parent):

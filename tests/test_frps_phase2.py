@@ -115,8 +115,11 @@ def test_unconfigured_state(client, monkeypatch):
 def test_circuit_breaker_opens_and_recovers(client, monkeypatch):
     calls = []
 
-    def dead(*a, **k):
-        calls.append("dead")
+    def dead(url, *a, **k):
+        # 只计 proxies 权威请求：失败轮不会走到 serverinfo/all_proxies，
+        # 口径与恢复轮一致
+        if "/api/proxy/xtcp" in url:
+            calls.append("dead")
         return (0, "")
     monkeypatch.setattr(fa, "_http_get", dead)
     for _ in range(fa._CIRCUIT_FAILS):
@@ -128,11 +131,14 @@ def test_circuit_breaker_opens_and_recovers(client, monkeypatch):
     # 窗口过后恢复（成功轮会追加一次 best-effort serverinfo GET，
     # 按 URL 区分只计 proxies 权威请求）
     client._circuit_until = 0.0
-    monkeypatch.setattr(
-        fa, "_http_get",
-        lambda url, *a, **k: (calls.append("ok"),
-                              (200, '{"proxies":[]}'))[1]
-        if "serverinfo" not in url else (200, "{}"))
+    def ok(url, *a, **k):
+        # 成功轮会追加 serverinfo + 全类型清单（/api/proxy/{type} ×8 +
+        # /api/clients）等 best-effort GET：按 URL 区分只计 xtcp 权威请求
+        if "/api/proxy/xtcp" in url:
+            calls.append("ok")
+            return (200, '{"proxies":[]}')
+        return (200, '{"proxies":[]}' if "/api/proxy/" in url else "{}")
+    monkeypatch.setattr(fa, "_http_get", ok)
     assert client.refresh() == "ok"
     assert calls == ["dead"] * fa._CIRCUIT_FAILS + ["ok"]
 
@@ -218,6 +224,82 @@ def test_restart_timer_clears_serverinfo(client, monkeypatch):
     client.stop()
 
 
+# ==================== frps_admin：全类型代理清单（网页面板同源） ====================
+
+_ALL_TCP = ('{"proxies":[{"name":"147_cam1","conf":{"remotePort":4241},'
+            '"clientID":"cid1","status":"online","curConns":0,'
+            '"todayTrafficIn":362,"todayTrafficOut":0}]}')
+_CLIENTS = ('{"clients":[{"key":"k","clientID":"cid1","version":"0.65.0",'
+            '"online":true}]}')
+
+
+def test_parse_proxy_list_065_shape():
+    d = fa._parse_proxy_list(_ALL_TCP)
+    assert len(d) == 1
+    p = d[0]
+    assert p["name"] == "147_cam1"
+    assert p["conf"]["remotePort"] == 4241
+    assert p["clientID"] == "cid1"
+    assert p["status"] == "online"
+    assert p["todayTrafficIn"] == 362
+
+
+@pytest.mark.parametrize("body", ["not json", '{"proxy":[]}', '[1,2]', '""'])
+def test_parse_proxy_list_bad_shape_returns_none(body):
+    assert fa._parse_proxy_list(body) is None
+
+
+def test_parse_clients_maps_version():
+    assert fa._parse_clients(_CLIENTS) == {"cid1": "0.65.0"}
+    assert fa._parse_clients("nope") is None
+    assert fa._parse_clients('{"clients":{}}') is None
+
+
+def test_all_proxies_fetched_and_version_joined(client, monkeypatch):
+    def fake_get(url, *a, **k):
+        if "/api/proxy/xtcp" in url:
+            return (200, '{"proxies":[{"name":"snk_1","status":"online"}]}')
+        if url.endswith("/api/proxy/tcp"):
+            return (200, _ALL_TCP)
+        if "/api/clients" in url:
+            return (200, _CLIENTS)
+        return (200, '{"proxies":[]}')
+    monkeypatch.setattr(fa, "_http_get", fake_get)
+    assert client.refresh() == "ok"
+    allp = client.all_proxies()
+    assert len(allp["tcp"]) == 1
+    assert allp["tcp"][0]["name"] == "147_cam1"
+    assert client.client_version("cid1") == "0.65.0"
+    assert client.client_version("missing") == ""
+
+
+def test_all_proxies_failure_never_degrades_perception(client, monkeypatch):
+    # 全类型端点全挂（旧版 frps/网络抖动）：通道仍 ok、名单照常、不计熔断；
+    # 清单仅剩复用权威名单的 xtcp 页签（零额外 GET），其余类型空
+    def fake_get(url, *a, **k):
+        if "/api/proxy/xtcp" in url:
+            return (200, '{"proxies":[{"name":"a","status":"online"}]}')
+        return (0, "")
+    monkeypatch.setattr(fa, "_http_get", fake_get)
+    assert client.refresh() == "ok"
+    assert client.online("a") == "online"
+    allp = client.all_proxies()
+    assert set(allp) == {"xtcp"}
+    assert allp["xtcp"][0]["name"] == "a"
+    assert client._fails == 0          # best-effort：不计熔断
+
+
+def test_all_proxies_stale_degrades_to_empty(client, monkeypatch):
+    monkeypatch.setattr(
+        fa, "_http_get",
+        lambda url, *a, **k: (200, _ALL_TCP) if url.endswith("/api/proxy/tcp")
+        else (200, '{"proxies":[]}'))
+    client.refresh()
+    assert client.all_proxies().get("tcp")
+    client._fetched_at -= (fa._CACHE_TTL_SEC + 5)
+    assert client.all_proxies() == {}
+
+
 # ==================== frps_admin：后台线程刷新 ====================
 
 def test_request_refresh_runs_off_main_thread(client, monkeypatch):
@@ -239,8 +321,9 @@ def test_request_refresh_dedups_inflight(client, monkeypatch):
     release = threading.Event()
 
     def slow_get(url, *a, **k):
-        if "serverinfo" in url:
-            return (200, "{}")
+        # 只数权威名单端点：serverinfo/全类型清单/clients 均为 best-effort 追加 GET
+        if "/api/proxy/xtcp" not in url:
+            return (200, "{}" if "serverinfo" in url else '{"proxies":[]}')
         calls.append(1)
         release.wait(2.0)
         return (200, '{"proxies":[]}')
@@ -251,7 +334,7 @@ def test_request_refresh_dedups_inflight(client, monkeypatch):
     assert client._bg_busy is True
     release.set()
     _wait_until(lambda: not client._bg_busy)
-    assert len(calls) == 1     # 没有并发第二发（serverinfo 不计）
+    assert len(calls) == 1     # 没有并发第二发（追加 GET 不计）
 
 
 def test_start_and_restart_timer_refetch(client, monkeypatch):
@@ -259,7 +342,7 @@ def test_start_and_restart_timer_refetch(client, monkeypatch):
     monkeypatch.setattr(
         fa, "_http_get",
         lambda url, *a, **k: (n.append(1), (200, '{"proxies":[]}'))[1]
-        if "serverinfo" not in url else (200, "{}"))
+        if "/api/proxy/xtcp" in url else (200, "{}"))
     client.start()
     assert _wait_until(lambda: len(n) == 1)
     assert _wait_until(lambda: not client._bg_busy)   # 等本轮线程收尾
@@ -305,27 +388,47 @@ def test_probe_grades_and_p95(monkeypatch):
 
 
 def test_probe_consecutive_timeouts_flip_bad(monkeypatch):
-    monkeypatch.setattr(vp, "tcp_connect_rtt_ms", lambda h, p, t: None)
+    calls = []
+    monkeypatch.setattr(vp, "tcp_connect_rtt_ms",
+                        lambda h, p, t: calls.append(t) or None)
     pr = VisitorProber(targets_provider=lambda: {"snk_b": 40002})
     flips = []
     pr.verdict_changed.connect(flips.append)
     pr.run_once()
+    # 冷洞首拍（P1-3）：长超时给打洞留时间，超时不计入连续失败
+    assert calls == [vp._COLD_FIRST_TIMEOUT_MS]
     assert pr.verdict("snk_b") == "unknown"
+    assert pr.stats("snk_b")["samples"] == 0   # 首拍不进样本
     pr.run_once()
     pr.run_once()
-    assert pr.verdict("snk_b") == "bad"    # fail_bad=3
+    pr.run_once()
+    assert pr.verdict("snk_b") == "bad"    # fail_bad=3（冷首拍除外）
     assert pr.stats("snk_b")["grade"] == "bad"
     assert flips == ["snk_b"]
     pr.run_once()
     assert flips == ["snk_b"]              # 已是 bad 不再重复翻转
 
 
+def test_probe_cold_first_shot_long_timeout_success(monkeypatch):
+    """冷洞首拍成功：用长超时且样本正常入环（打洞完成后的真实 RTT）"""
+    calls = []
+    monkeypatch.setattr(vp, "tcp_connect_rtt_ms",
+                        lambda h, p, t: calls.append(t) or 120.0)
+    pr = VisitorProber(targets_provider=lambda: {"snk_cold": 40005})
+    pr.run_once()
+    assert calls == [vp._COLD_FIRST_TIMEOUT_MS]
+    st = pr.stats("snk_cold")
+    assert st["samples"] == 1 and st["verdict"] == "ok"
+    pr.run_once()
+    assert calls[1] == 800                  # 第二轮回归正常 RTT 口径
+
+
 def test_probe_recovers_after_bad(monkeypatch):
-    seq = iter([None, None, None, 30.0])
+    seq = iter([None, None, None, None, 30.0])  # 首个 None=冷首拍（不计失败）
     monkeypatch.setattr(vp, "tcp_connect_rtt_ms",
                         lambda h, p, t: next(seq))
     pr = VisitorProber(targets_provider=lambda: {"snk_c": 40003})
-    for _ in range(4):
+    for _ in range(5):
         pr.run_once()
     assert pr.verdict("snk_c") == "ok"     # 一次成功即解除 bad
 
@@ -590,14 +693,32 @@ def test_preflight_exception_fail_open(mgr, monkeypatch):
 # ==================== remote_hub 纯函数 ====================
 
 def test_fmt_traffic():
-    import main_window.remote_hub as rh
+    import windows.remote_session.remote_hub as rh
     assert rh._fmt_traffic(0) == "0"
     assert rh._fmt_traffic(2048) == "2KB"
     assert rh._fmt_traffic(5 * 1048576) == "5.0MB"
 
 
+def test_fmt_traffic_bytes_panel_style():
+    import windows.remote_session.remote_hub as rh
+    assert rh._fmt_traffic_bytes(0) == "0 bytes"
+    assert rh._fmt_traffic_bytes(362) == "362 bytes"   # 网页面板口径
+    assert rh._fmt_traffic_bytes(3072) == "3KB"
+    assert rh._fmt_traffic_bytes(5 * 1048576) == "5.0MB"
+
+
+def test_proxy_port_text_by_type():
+    import windows.remote_session.remote_hub as rh
+    assert rh._proxy_port_text({"conf": {"remotePort": 4241}}) == "4241"
+    assert rh._proxy_port_text(
+        {"conf": {"customDomains": ["a.cn", "b.cn"]}}) == "a.cn,b.cn"
+    assert rh._proxy_port_text({"conf": {"subdomain": "cam1"}}) == "cam1"
+    assert rh._proxy_port_text({"conf": {}}) == "—"     # stcp/sudp/xtcp 无端口
+    assert rh._proxy_port_text({}) == "—"
+
+
 def test_spark_pattern():
-    import main_window.remote_hub as rh
+    import windows.remote_session.remote_hub as rh
     assert rh._spark([None, None], 4) == "··"   # 不足 width 不补齐
     s = rh._spark([10, 500], 2)
     assert s[0] == "▁" and s[-1] == "█"    # 最低/最高锚定两端
@@ -608,7 +729,7 @@ def test_spark_pattern():
 
 
 def test_frps_cell_mapping(monkeypatch):
-    import main_window.remote_hub as rh
+    import windows.remote_session.remote_hub as rh
 
     class F:
         def __init__(self, s):

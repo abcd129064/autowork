@@ -1,15 +1,22 @@
+%% AutoWork 双后端数据流时序图
+%% 刷新：2026-09-23（修正未声明参与者 FB/TablePanel；直读旁路已落地为
+%%       table_db.get_latest_kd_status；补充数据保留清理链路；
+%%       周备份触发时序对齐 main_window 实测：延迟 5s 首查 + 24h QTimer）
 sequenceDiagram
     autonumber
     actor U as 用户
     participant MP as ManagementPanel<br/>(windows/management/)
-    participant TW as TableWorker<br/>(workers/table_worker.py)
-    participant TD as TableDB<br/>(database/table_db.py)
-    participant BKD as Backend<br/>(database/backend.py)
-    participant SC as Schema<br/>(database/schema.py)
+    participant TW as TableFetchWorker<br/>(workers/table_worker.py)
+    participant TD as table_db<br/>(database/table_db.py)
+    participant BKD as backend<br/>(database/backend.py)
     participant MYSQL as MySQL
     participant SQLITE as SQLite tables.db
     participant MBW as MergeBackWorker
-    participant MB as MergeBack
+    participant MB as merge_back<br/>(database/merge_back.py)
+    participant FBW as BackupWorker
+    participant FB as fallback_backup
+    participant CW as CleanupWorker
+    participant DR as data_retention
 
     %% ===== 1. API 拉取并保存（MySQL 主模式 ONLINE） =====
     U->>MP: 点击刷新
@@ -44,24 +51,32 @@ sequenceDiagram
     TD->>MBW: _trigger_merge_back()（异步）
     MBW->>MB: merge_back()
     MB->>BKD: create_mysql_connection()
-    MB->>SQLITE: read_sqlite_table（sqlite_io）
+    MB->>SQLITE: read_sqlite_table（database/sqlite_io）
     MB->>MYSQL: merge_aftersale（业务键+LWW）
     MB->>MYSQL: merge_device_mapping（主键+LWW）
     MB->>MYSQL: merge_ops_tables（SQLite 优先）
     MB-->>MBW: (ok, msg, count)
     MBW-->>U: InfoBar「兜底数据已合并回 MySQL」
 
-    %% ===== 4. 周备份：MySQL → SQLite 兜底基线 =====
-    BKD-->>FB: 启动延迟 5s + 24h QTimer（main_window）
-    FB->>BKD: get_state()==ONLINE
+    %% ===== 4. 周备份：MySQL → SQLite 兜底基线（main_window 延迟 5s 首查 + 24h） =====
+    Note over FBW,FB: 仅 MySQL 主模式（get_state()==ONLINE）生效
+    FBW->>FB: maybe_backup()
+    FB->>FB: is_backup_due()（距上次 ≥ 7 天？）
     FB->>MYSQL: SELECT 全表
     FB->>SQLITE: DELETE + INSERT OR REPLACE
     FB->>SQLITE: set_last_backup_time（sync_meta）
 
-    %% ===== 5. 直读旁路收敛（目标态） =====
-    U->>TablePanel: 远程连接前离线检查
-    TablePanel->>TD: get_latest_kd_status(table_id)
+    %% ===== 5. 数据保留清理（main_window 延迟 8s 首查 + 24h，双后端同一套） =====
+    CW->>DR: run_cleanup()
+    DR->>DR: is_enabled()？（config/database.json data_retention）
+    DR->>MYSQL: xqzg_status/kd_status 过期分区（age_days）
+    DR->>SQLITE: 同上（DEGRADED 时落本地）
+    DR->>DR: 流水表 > max_size_gb → 逐日删到 < min_size_gb（min_keep_days 保护）
+
+    %% ===== 6. 直读旁路（已落地）：远程连接前离线检查 =====
+    U->>MP: 球桌/设备页发起远程连接
+    MP->>TD: get_latest_kd_status(table_id)
     TD->>BKD: get_conn()（ONLINE→MySQL / DEGRADED→SQLite）
     BKD-->>TD: conn
-    TD-->>TablePanel: {"status","file_path"}
-    Note over TablePanel: 目标态：不再裸 sqlite3.connect(table_db.DB_PATH)
+    TD-->>MP: {"status","file_path"}
+    Note over MP,TD: 统一走 table_db 公开函数，不再裸 sqlite3.connect(DB_PATH)
