@@ -404,6 +404,9 @@ def _get_conn():
                 conn = backend.create_mysql_connection()
             except Exception:
                 _last_mysql_probe_ts = time.monotonic()
+                # 幂等记账：已 DEGRADED 时不打日志，但会清零迟滞计数——
+                # 恢复路上任何一次失败都打断"连续成功"
+                backend.mark_degraded()
                 return _get_sqlite_conn()  # 仍不可用，继续兜底
             # 恢复成功
             _last_mysql_probe_ts = time.monotonic()
@@ -412,7 +415,10 @@ def _get_conn():
                 _mysql_tables_ready = True
             _mysql_local.conn = conn
             _mysql_local.generation = generation
-            backend.mark_online()
+            # 迟滞恢复：连续 N 次试连成功才翻回 ONLINE（backend.note_probe_success）。
+            # 未达阈值时状态保持 DEGRADED：本次沿用刚建好的 MySQL 连接，
+            # 其余线程在节流窗口内走 SQLite，避免连接风暴（同毫秒翻转修复）。
+            backend.note_probe_success()
             _trigger_merge_back()  # 阶段二：合并兜底增量回 MySQL
             return conn
     # 配置关闭后及时释放当前线程此前建立的 MySQL 连接。

@@ -460,6 +460,14 @@ STATE_DEGRADED = "DEGRADED"  # MySQL 不可用，回退本地 SQLite 兜底
 _state = STATE_ONLINE
 _state_lock = threading.Lock()
 
+# DEGRADED→ONLINE 迟滞：连续 N 次试连成功才真正翻回 ONLINE。
+# 无迟滞时多 worker 并发"一线程失败 mark_degraded、另一线程恰好试连成功
+# mark_online"会造成同毫秒翻转（conn 日志 2026-09-23 实锤：degraded 与
+# online 相隔 1ms 反复出现），导致 DEGRADED 的探活节流完全失效——
+# 快速切换页面的每个 worker 都硬撞 connect_timeout=3s，界面卡死 5-10s。
+_ONLINE_CONFIRM_N = 2
+_confirm_streak = 0
+
 
 def get_state() -> str:
     """当前后端状态：ONLINE=MySQL 主库，DEGRADED=SQLite 兜底"""
@@ -468,9 +476,14 @@ def get_state() -> str:
 
 
 def mark_degraded() -> bool:
-    """标记降级（MySQL 不可用）。返回是否发生状态切换"""
-    global _state
+    """标记降级（MySQL 不可用）。返回是否发生状态切换。
+
+    幂等：已处于 DEGRADED 时再次调用直接返回 False（不打日志），
+    并同时清零迟滞计数——恢复路上的任何一次失败都打断"连续成功"。
+    """
+    global _state, _confirm_streak
     with _state_lock:
+        _confirm_streak = 0
         if _state == STATE_DEGRADED:
             return False
         _state = STATE_DEGRADED
@@ -478,10 +491,37 @@ def mark_degraded() -> bool:
     return True
 
 
-def mark_online() -> bool:
-    """标记在线（MySQL 恢复）。返回是否发生状态切换"""
-    global _state
+def note_probe_success() -> bool:
+    """DEGRADED 期间试连成功上报（迟滞记账）。
+
+    连续 _ONLINE_CONFIRM_N 次成功才真正翻回 ONLINE。未达阈值时返回
+    False：调用方（table_db._get_conn）本次可继续使用刚建成功的 MySQL
+    连接，但全局状态仍保持 DEGRADED——其余线程在探活节流窗口内直接
+    走 SQLite 秒回，不再各自付一遍连接超时。
+    返回是否发生状态切换（翻回 ONLINE）。
+    """
+    global _state, _confirm_streak
     with _state_lock:
+        if _state == STATE_ONLINE:
+            return False
+        _confirm_streak += 1
+        if _confirm_streak < _ONLINE_CONFIRM_N:
+            return False
+        _confirm_streak = 0
+        _state = STATE_ONLINE
+    _log_state_change(STATE_ONLINE)
+    return True
+
+
+def mark_online() -> bool:
+    """立即标记在线（MySQL 恢复）。返回是否发生状态切换。
+
+    注意：常规恢复路径应走 note_probe_success()（带迟滞）；本函数仅
+    保留给"用户在设置页显式测试连接成功"等确定性场景。
+    """
+    global _state, _confirm_streak
+    with _state_lock:
+        _confirm_streak = 0
         if _state == STATE_ONLINE:
             return False
         _state = STATE_ONLINE
