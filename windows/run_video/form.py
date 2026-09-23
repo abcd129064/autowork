@@ -14,7 +14,7 @@ from qfluentwidgets import (LineEdit, PlainTextEdit, ScrollArea, CardWidget,
                             PrimaryPushButton, PushButton, BodyLabel,
                             CaptionLabel, FluentIcon, TableWidget,
                             ProgressBar, ZhDatePicker, ComboBox,
-                            EditableComboBox)
+                            EditableComboBox, CalendarPicker, ToolButton)
 
 from core.design_tokens import SEMANTIC
 from core.utils import show_info_bar
@@ -98,14 +98,33 @@ class LedgerForm(QWidget):
         self.frame_edit.setFixedWidth(80)
         col_frame.addWidget(self.frame_edit)
         row2.addLayout(col_frame)
-        # 日期：视频日期（需求7）——默认当天，看昨天的视频可翻到昨天再提交
+        # 日期：视频日期（需求7）——默认「记住上次日期」或当天；
+        # 需求1：控件改为与主面板相同方式（CalendarPicker + ◀▶ 步进按钮）
         col_date = QVBoxLayout()
         col_date.setSpacing(3)
         col_date.addWidget(_field_label("日期", False, self))
-        self.date_edit = ZhDatePicker(self)
-        self.date_edit.setDate(QDate.currentDate())
-        self.date_edit.setFixedWidth(125)
-        col_date.addWidget(self.date_edit)
+        date_row = QHBoxLayout()
+        date_row.setSpacing(2)
+        self.date_edit = CalendarPicker(self)
+        self.date_edit.setMinimumWidth(150)
+        self.date_edit.setFixedHeight(33)
+        self.date_edit.setDate(self._default_date())
+        date_row.addWidget(self.date_edit)
+        # 日期步进按钮（与主面板 date_prev/date_next 同款 26×32）：
+        # 连续点击逐日前移/后移，补录历史视频日期免开日历面板
+        self._btn_date_prev = ToolButton(FluentIcon.LEFT_ARROW, self)
+        self._btn_date_prev.setFixedSize(26, 32)
+        self._btn_date_prev.setToolTip("前一天")
+        self._btn_date_prev.clicked.connect(
+            lambda _=False: self._step_date(-1))
+        date_row.addWidget(self._btn_date_prev)
+        self._btn_date_next = ToolButton(FluentIcon.RIGHT_ARROW, self)
+        self._btn_date_next.setFixedSize(26, 32)
+        self._btn_date_next.setToolTip("后一天")
+        self._btn_date_next.clicked.connect(
+            lambda _=False: self._step_date(1))
+        date_row.addWidget(self._btn_date_next)
+        col_date.addLayout(date_row)
         row2.addLayout(col_date)
         row2.addStretch(1)
         sec1.content_layout.addLayout(row2)
@@ -210,6 +229,27 @@ class LedgerForm(QWidget):
         except Exception:
             pass
 
+    # ---------- 日期步进 / 默认值 ----------
+
+    def _step_date(self, delta_days: int):
+        """视频日期步进：负数前移、正数后移（需求1，与主面板同交互）"""
+        self.date_edit.setDate(self.date_edit.date.addDays(delta_days))
+
+    @staticmethod
+    def _default_date() -> QDate:
+        """新增/清空表单时「日期」的默认值（需求3：与售后连续录入同逻辑）。
+
+        开「记住上次视频日期」（统一设置-面板设置-跑视频，默认开）且已记住
+        日期时沿用上一条新增的日期（连续补录同一天免重复拨日期），否则回落当日；
+        记住值非法（格式损坏）同样回落当日。
+        """
+        try:
+            last = QDate.fromString(ledger_db.load_last_occurred(),
+                                    "yyyy-MM-dd")
+        except Exception:
+            last = QDate()
+        return last if last.isValid() else QDate.currentDate()
+
     # ---------- 校验与收集 ----------
 
     def validate(self, show_errors: bool = True) -> list:
@@ -268,7 +308,7 @@ class LedgerForm(QWidget):
         self.room_edit.clear()
         self.video_edit.clear()
         self.frame_edit.clear()
-        self.date_edit.setDate(QDate.currentDate())  # 日期重置当天
+        self.date_edit.setDate(self._default_date())  # 记住的日期或当天
         self.desc_edit.clear()
         self.repro_seg.setValue("否")  # 复现默认「否」（seg 无 clear，回默认）
         self.new_program_seg.setValue("否")  # 新程序默认「否」（seg 无 clear，回默认）

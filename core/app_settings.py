@@ -148,8 +148,16 @@ KEY_DOMAIN = {
     # 工具页·单杆视频行为开关（2026-09-07 二期）
     "single_random_session_code": "misc",
     "single_auto_open_dir": "misc",
+    # 跑视频面板（2026-09 重构）：记住上次日期 + 记录自动刷新（仿售后域键）
+    "ledger_remember_occurred": "misc",
+    "ledger_last_occurred": "misc",
+    "ledger_auto_refresh": "misc",
+    "ledger_auto_refresh_interval": "misc",
     # 连接质量与 frps 感知调度（2026-09-22 二期）：interval_sec/enabled 等
     "frp_quality": "misc",
+    # 开机静默预连（2026-09-23）：bool，启动后自动拉起 frpc 并预热打洞，
+    # 让点 SSH/SFTP 秒连；未登记键也归 misc，登记于此使语义显式
+    "frp_autostart": "misc",
 }
 
 # ==================== 运行时状态 ====================

@@ -9,11 +9,13 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
 from PySide6.QtCore import Signal
 
 from qfluentwidgets import (ScrollArea, CardWidget, BodyLabel, CaptionLabel,
-                            LineEdit, PushButton, FluentIcon, SwitchButton)
+                            LineEdit, PushButton, FluentIcon, SwitchButton,
+                            ComboBox)
 
 from core.perf import (get_table_smooth, set_table_smooth,
                        get_animation, set_animation)
 from core.utils import show_info_bar
+from database import ledger_db
 from windows.mysql_sync_card import (MysqlSyncCard, _load_settings,
                                      _save_settings)
 
@@ -56,11 +58,86 @@ class SignerSettingsCard(CardWidget):
                       "success", title="默认署名", parent=self, duration=3000)
 
 
+class AutoRefreshCard(CardWidget):
+    """自动刷新卡片（需求4）：开关 + 间隔下拉，写 ledger_db 配置并发信号
+
+    与售后「自动刷新记录」同范式：定时比对全表指纹，仅在数据真的变化时
+    静默重查记录页，他人填写免手动同步。开关/间隔变更即时转发记录页生效。
+    """
+
+    # 开关或间隔变更后发出（窗口据此调记录页 _sync_auto_timer）
+    changed = Signal()
+
+    _INTERVALS = (("15 秒", 15), ("30 秒", 30),
+                  ("1 分钟", 60), ("5 分钟", 300))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(8)
+        vbox.addWidget(BodyLabel("自动刷新", self))
+        vbox.addWidget(CaptionLabel(
+            "定时检查数据库变化（他人填写的记录自动出现，无需手动同步）；"
+            "仅在数据真正变化时刷新，不打扰当前浏览", self))
+
+        row_sw = QHBoxLayout()
+        row_sw.setSpacing(8)
+        lbl_sw = BodyLabel("自动刷新记录", self)
+        row_sw.addWidget(lbl_sw, 1)
+        self.sw_enabled = SwitchButton(self)
+        self.sw_enabled.setOnText("开")
+        self.sw_enabled.setOffText("关")
+        self.sw_enabled.setChecked(ledger_db.auto_refresh_enabled())
+        self.sw_enabled.checkedChanged.connect(self._on_toggle)
+        row_sw.addWidget(self.sw_enabled)
+        vbox.addLayout(row_sw)
+
+        row_iv = QHBoxLayout()
+        row_iv.setSpacing(8)
+        lbl_iv = BodyLabel("刷新间隔", self)
+        row_iv.addWidget(lbl_iv, 1)
+        self.combo_interval = ComboBox(self)
+        for label, _v in self._INTERVALS:
+            self.combo_interval.addItem(label)
+        cur = ledger_db.auto_refresh_interval()
+        idx = next((i for i, (_l, v) in enumerate(self._INTERVALS)
+                    if v == cur), 1)
+        self.combo_interval.setCurrentIndex(idx)
+        self.combo_interval.setFixedWidth(120)
+        self.combo_interval.currentIndexChanged.connect(self._on_interval)
+        row_iv.addWidget(self.combo_interval)
+        vbox.addLayout(row_iv)
+
+    def load(self):
+        """回显当前配置（外部改动后进入页面刷新；blockSignals 防误触发持久化）"""
+        self.sw_enabled.blockSignals(True)
+        self.sw_enabled.setChecked(ledger_db.auto_refresh_enabled())
+        self.sw_enabled.blockSignals(False)
+        cur = ledger_db.auto_refresh_interval()
+        idx = next((i for i, (_l, v) in enumerate(self._INTERVALS)
+                    if v == cur), 1)
+        self.combo_interval.blockSignals(True)
+        self.combo_interval.setCurrentIndex(idx)
+        self.combo_interval.blockSignals(False)
+
+    def _on_toggle(self, checked):
+        ledger_db.set_auto_refresh(bool(checked))
+        self.changed.emit()
+
+    def _on_interval(self, index):
+        if 0 <= index < len(self._INTERVALS):
+            ledger_db.set_auto_refresh_interval(self._INTERVALS[index][1])
+            self.changed.emit()
+
+
 class SettingsPage(QWidget):
     """设置面板：默认署名 + 性能（动画/表格平滑滚动）+ 数据库设置（MySQL 同步，仅推跑视频记录）"""
 
     # 表格平滑滚动开关变更（窗口据此刷新记录页表格滚动模式）
     table_smooth_changed = Signal(bool)
+    # 自动刷新开关/间隔变更（窗口据此调记录页 _sync_auto_timer，需求4）
+    auto_refresh_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -77,6 +154,11 @@ class SettingsPage(QWidget):
         self.signer_card = SignerSettingsCard(content)
         self.signer_card.load()
         cl.addWidget(self.signer_card)
+
+        # 自动刷新卡片（需求4）
+        self.auto_refresh_card = AutoRefreshCard(content)
+        self.auto_refresh_card.changed.connect(self.auto_refresh_changed.emit)
+        cl.addWidget(self.auto_refresh_card)
 
         # 性能卡片（动画/表格平滑滚动，仅影响本面板）
         self._perf_card = self._make_perf_card(content)

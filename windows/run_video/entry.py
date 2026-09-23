@@ -151,12 +151,16 @@ class EntryPage(QWidget):
         self._btn_submit.setEnabled(False)
         record = self.form.collect()
         self._save_worker = AftersaleDBWorker(ledger_db.insert_record, record)
-        self._save_worker.result_ready.connect(self._on_saved)
+        self._save_worker.result_ready.connect(
+            lambda rid, occ=record.get("occurred_at"): self._on_saved(rid, occ))
         self._save_worker.error.connect(self._on_save_error)
         self._save_worker.start()
 
-    def _on_saved(self, _new_id):
+    def _on_saved(self, _new_id, occurred_at=None):
         self._btn_submit.setEnabled(True)
+        # 记住本次视频日期（需求3：与售后连续录入同逻辑——下一条默认沿用）
+        if occurred_at:
+            ledger_db.save_last_occurred(str(occurred_at))
         show_info_bar("已提交跑视频记录（列表页刷新可见）", "success",
                       title="提交成功", parent=self, duration=3000)
         self.form.clear_form()
