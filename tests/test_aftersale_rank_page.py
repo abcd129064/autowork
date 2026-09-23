@@ -189,3 +189,30 @@ def test_rank_page_detail_jump_signal(qapp, db):
     finally:
         page.hide()
         page.deleteLater()
+
+
+def test_aftersale_hub_contains_rank_page(qapp, db):
+    """主工作台内嵌 AftersaleHub（Pivot）含「售后排行」子页（与弹出面板同组件）
+
+    回归 2026-09-24 bug：排行页最初只注册在 AftersalePanelWindow，
+    主界面 Pivot 内不可见。
+    """
+    from main_window.hub_pages import AftersaleHub
+    _seed(db)
+    hub = AftersaleHub()
+    try:
+        hub.show()
+        # Pivot 默认当前页为填写录入：切到「售后排行」触发 showEvent 加载链
+        hub.switchTo(hub.rank_page)
+        assert _wait(hub.rank_page, lambda: hub.rank_page._table.rowCount() > 0)
+        assert hub.rank_page._rows[0]["total"] == 3
+        # 「明细」跳转：本 Pivot 内切记录页并预筛选关键词
+        hub._on_rank_jump_records("甲球房")
+        assert hub.records_page._search_edit.text() == "甲球房"
+        assert hub.records_page.isVisible()
+        # 周期保存转发：reload_cycles 同时置旧排行页选项
+        hub.reload_cycles()
+        assert hub.rank_page._options_loaded is False
+    finally:
+        hub.hide()
+        hub.deleteLater()

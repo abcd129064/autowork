@@ -61,6 +61,31 @@ from windows.management.dialogs import (
 
 # ==================== 文件列表面板（右侧滑出） ====================
 
+class _FileNameTable(TextDragSelectTableMixin, TableWidget):
+    """文件名单列表格：字符级拖选复制（Mixin），双击打开图片查看
+
+    拖选/复制能力来自 TextDragSelectTableMixin（与健康度页告警表格同一
+    实现）；本类只做两件事：
+    - row_text 覆盖：Ctrl+C / 右键「复制整行」的回退文本截取 kd 前缀
+      （与 FileListPanel._clip_name 口径一致）；
+    - 双击钩子：委托面板打开图片查看器（非图片条目由面板提示）。
+    """
+
+    _TEXT_COLS = (0,)   # 单列文件名
+
+    def __init__(self, panel, parent=None):
+        self._panel = panel
+        super().__init__(parent)
+
+    def row_text(self, row):
+        it = self.item(row, 0)
+        return self._panel._clip_name(it.text()) if it is not None else ""
+
+    def _on_text_double_clicked(self, row, col) -> bool:
+        self._panel._open_entry_preview(row)
+        return True
+
+
 class FileListPanel(QWidget):
     """设备状态页右侧滑出面板：文件名单列展示，双击编辑复制，Ctrl+C/右键复制，底部四按钮迁移"""
 
@@ -117,7 +142,7 @@ class FileListPanel(QWidget):
         header.addWidget(self._btn_close)
         layout.addLayout(header)
 
-        self._list = TableWidget(self)
+        self._list = _FileNameTable(self, self)
         # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
         apply_table_smooth_mode(self._list, panel="management")
         self._list.setColumnCount(1)
@@ -128,9 +153,9 @@ class FileListPanel(QWidget):
         self._list.setAlternatingRowColors(True)
         self._list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        # 双击进入只读编辑态：可拖选部分文件名复制（与球桌管理一致）
-        self._list.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
-        self._list.setItemDelegate(_ReadOnlySelectDelegate(self._list))
+        # 拖选复制（2026-09-24）：文件名支持字符级拖选（Mixin），不再需要
+        # 「双击进编辑态」这条旧路径——双击改为打开图片查看
+        self._list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         # 单击选中行 → 启用底部迁移按钮
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -160,7 +185,7 @@ class FileListPanel(QWidget):
             btn_row.addWidget(btn, 1)
         layout.addWidget(self._migrate_wrap)
 
-        hint = CaptionLabel("双击或右键进行复制", self)
+        hint = CaptionLabel("拖选复制 · 双击打开图片 · 右键更多", self)
         layout.addWidget(hint)
 
     def _apply_theme(self):
@@ -234,13 +259,11 @@ class FileListPanel(QWidget):
     # ---------- 复制与迁移交互 ----------
 
     def _on_copy_shortcut(self):
-        """Ctrl+C：编辑态优先复制光标选中部分，否则复制选中行文件名（截取 kd 前缀）"""
-        focus = QApplication.focusWidget()
-        if focus is not None and self._list.isAncestorOf(focus):
-            tc = getattr(focus, "textCursor", None)
-            if tc is not None and tc.hasSelection():
-                QApplication.clipboard().setText(
-                    tc.selectedText().replace("\u2029", "\n"))
+        """Ctrl+C：拖选文本优先（字符级选区），否则复制选中行文件名（截取 kd 前缀）"""
+        if self._list._has_selection():
+            text = self._list.selection_text()
+            if text:
+                QApplication.clipboard().setText(text)
                 return
         rows = sorted({it.row() for it in self._list.selectedItems()})
         if rows:
@@ -263,18 +286,32 @@ class FileListPanel(QWidget):
         """打开图片查看对话框（非模态，不阻塞面板操作）：卡片式展示当前选中
         图片，支持左右翻页与迁移；已打开时复用窗口跳转到新选中图片"""
         rows = sorted({it.row() for it in self._list.selectedItems()})
-        if not rows or not (0 <= rows[0] < len(self._entries)):
+        if rows:
+            self._open_entry_preview(rows[0])
+
+    def _open_entry_preview(self, row):
+        """按条目行号打开图片查看器（双击/按钮共用入口）
+
+        非图片条目给出轻提示（双击图片以外的文件不再进入旧编辑态）。
+        """
+        if not (0 <= row < len(self._entries)):
+            return
+        if not is_image_file(self._entries[row][0]):
+            show_info_bar("该条目不是图片，双击仅支持打开图片文件",
+                          "warning", title="无法预览",
+                          parent=self, duration=2000,
+                          bottom_offset=self._info_raise())
             return
         from windows.management.image_viewer import ImageViewerDialog
         dlg = self._preview_dlg
         if dlg is not None and dlg.isVisible():
             # 复用打开中的查看器：同步最新条目快照并跳转，避免窗口堆叠
-            dlg.set_entries(self._entries, rows[0])
+            dlg.set_entries(self._entries, row)
             dlg.raise_()
             dlg.activateWindow()
             return
         dlg = ImageViewerDialog(
-            self._entries, rows[0],
+            self._entries, row,
             file_path=self._device_page._current_date(),
             device_code=self._row.get("device_code", ""),
             device_page=self._device_page,
@@ -297,7 +334,7 @@ class FileListPanel(QWidget):
         self._device_page.migrate_file(fname, src_cat, dest_cat)
 
     def _show_context_menu(self, pos):
-        """右键条目：复制文件名 / 复制全部（迁移已移至底部固定按钮）"""
+        """右键条目：复制选中（拖选文本）/ 复制文件名 / 复制全部（迁移已移至底部固定按钮）"""
         row = self._list.rowAt(pos.y())
         if not (0 <= row < len(self._entries)):
             return
@@ -311,6 +348,15 @@ class FileListPanel(QWidget):
             act_view.triggered.connect(self._open_image_preview)
             menu.addAction(act_view)
             menu.addSeparator()
+
+        # 字符级拖选区（MixIn）：优先提供「复制选中」，与文本编辑器习惯一致
+        sel_text = self._list.selection_text() \
+            if self._list._has_selection() else ""
+        if sel_text:
+            act_sel = Action(FluentIcon.COPY, "复制选中", self)
+            act_sel.triggered.connect(
+                lambda: QApplication.clipboard().setText(sel_text))
+            menu.addAction(act_sel)
 
         act_copy = Action(FluentIcon.COPY, "复制文件名", self)
         act_copy.triggered.connect(

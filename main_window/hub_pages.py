@@ -90,10 +90,12 @@ class ManagementHub(PivotPage):
 # ==================== 售后 ====================
 
 class AftersaleHub(PivotPage):
-    """售后：两页 Pivot（填写录入/记录与统计）
+    """售后：三页 Pivot（填写录入/记录与统计/售后排行）
 
     「设置」页已迁入统一设置界面；周期保存后的刷新由主窗口把
     settings_hub.aftersale_cycle_saved 转发到 :meth:`reload_cycles`。
+    排行页与独立弹出的 AftersalePanelWindow 同组件（windows/aftersale/
+    rank.py RankPage）；「明细」跳转在本 Pivot 内切记录页预筛选。
     """
 
     def __init__(self, parent=None):
@@ -101,21 +103,34 @@ class AftersaleHub(PivotPage):
         self.setObjectName("aftersaleHub")
 
         from windows.aftersale.entry import EntryPage
+        from windows.aftersale.rank import RankPage
         from windows.aftersale.records import RecordsPage
 
         self.entry_page = EntryPage(self)
         self.entry_page.setObjectName("aftersaleEntryPage")
         self.records_page = RecordsPage(self)
         self.records_page.setObjectName("aftersaleRecordsPage")
+        self.rank_page = RankPage(self)
+        self.rank_page.setObjectName("aftersaleRankPage")
 
         self.addPage(self.entry_page, "填写录入", FluentIcon.EDIT)
         self.addPage(self.records_page, "记录与统计", FluentIcon.LIBRARY)
+        self.addPage(self.rank_page, "售后排行", FluentIcon.VIEW)
+        self.rank_page.jump_to_records.connect(self._on_rank_jump_records)
         self.lock_pivot_width()
 
+    def _on_rank_jump_records(self, keyword: str):
+        """排行页「明细」跳转：本 Pivot 内切记录页并按关键词预筛选"""
+        self.records_page.set_keyword(keyword)
+        self.switchTo(self.records_page)
+        self.records_page.refresh_async()
+
     def reload_cycles(self):
-        """周期设置保存成功：记录页重建周期下拉并重查（原 window.py:72-75）"""
+        """周期设置保存成功：记录页重建周期下拉并重查（原 window.py:72-75）；
+        排行页账期下拉选项置旧"""
         self.records_page._cycles_loaded = False
         self.records_page._load_cycles_then_data()
+        self.rank_page.reload_options()
 
     def apply_auto_refresh(self):
         """自动刷新开关/间隔变更：记录页即时启停定时器（2026-09-16）"""
