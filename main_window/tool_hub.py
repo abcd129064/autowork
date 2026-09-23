@@ -114,6 +114,8 @@ def _make_scroll(body_widget, parent):
     scroll.viewport().setAutoFillBackground(False)
     scroll.setStyleSheet("QScrollArea { background: transparent; }")
     scroll.setWidget(body_widget)
+    # setWidget() 会重建视口，透明设置必须在其后补（否则深色主题下视口呈黑块）
+    scroll.viewport().setStyleSheet("background: transparent;")
     return scroll
 
 

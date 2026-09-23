@@ -220,6 +220,8 @@ class CardPage(QWidget):
         outer.addWidget(scroll)
         body = QWidget(scroll)
         scroll.setWidget(body)
+        # setWidget() 会重建视口，透明设置必须在其后补（否则深色主题下视口呈黑块）
+        scroll.viewport().setStyleSheet("background: transparent;")
 
         lay = QVBoxLayout(body)
         lay.setContentsMargins(24, 20, 24, 20)

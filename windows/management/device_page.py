@@ -320,7 +320,7 @@ class FileListPanel(QWidget):
             btn_qss=_MIGRATE_BTN_QSS,
             parent=self.window())
         self._preview_dlg = dlg
-        # 关闭即销毁（含迁移成功 accept）：销毁时清引用，避免残留隐藏窗口
+        # 关闭即销毁（迁移不关窗，仅手动关闭时销毁）：销毁时清引用，避免残留隐藏窗口
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.destroyed.connect(lambda: setattr(self, '_preview_dlg', None))
         dlg.show()

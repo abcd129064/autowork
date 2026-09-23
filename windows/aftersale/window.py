@@ -54,7 +54,8 @@ class AftersalePanelWindow(FluentWindow):
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
         # 售后排行（球房/球桌两级排行，与 Web 端 /aftersale/rank 同功能）
-        self.addSubInterface(self.rank_page, FluentIcon.VIEW, "售后排行")
+        # 图标 CERTIFICATE 奖章：VIEW（眼睛）在 Pivot 小尺寸下渲染似"00"，观感突兀
+        self.addSubInterface(self.rank_page, FluentIcon.CERTIFICATE, "售后排行")
         # 明细跳转：排行页操作列「明细」→ 记录页关键词预筛选
         self.rank_page.jump_to_records.connect(self._on_rank_jump_records)
 

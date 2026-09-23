@@ -115,7 +115,7 @@ class AftersaleHub(PivotPage):
 
         self.addPage(self.entry_page, "填写录入", FluentIcon.EDIT)
         self.addPage(self.records_page, "记录与统计", FluentIcon.LIBRARY)
-        self.addPage(self.rank_page, "售后排行", FluentIcon.VIEW)
+        self.addPage(self.rank_page, "售后排行", FluentIcon.CERTIFICATE)
         self.rank_page.jump_to_records.connect(self._on_rank_jump_records)
         self.lock_pivot_width()
 
@@ -311,6 +311,8 @@ class SettingsHubPage(QWidget):
         scroll.setStyleSheet("QScrollArea { background: transparent; }")
         body = QWidget(scroll)
         scroll.setWidget(body)
+        # setWidget() 会重建视口，透明设置必须在其后补（否则深色主题下视口呈黑块）
+        scroll.viewport().setStyleSheet("background: transparent;")
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 8, 8, 8)
         lay.setSpacing(14)
