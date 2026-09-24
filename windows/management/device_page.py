@@ -602,9 +602,10 @@ class DevicePage(QWidget):
         # 根据数据源调整日期选择器可用状态（xqzg 不按日期区分）
         self._apply_source_date_state()
         # 复用缓存日历：替换 DatePicker._showCalendarView，避免每次点击重建（0.5s+ 延迟）。
-        # 缓存构建较重（日视图生成数万日期项），延后到事件循环空闲执行，
-        # 避免首次切页卡顿；构建完成前点击日历走默认路径（功能不受影响）
-        QTimer.singleShot(0, self._apply_calendar_cache)
+        # 缓存构建较重（实测 ~77ms，qfluentwidgets 1.11.2），不再用 singleShot(0) 排队尾
+        # （仍在首切「到可操作」的感知窗口内串行执行），改为**首查填充完成后**再空闲
+        # 延迟触发（见 _on_query_finished）；构建完成前点击日历走默认路径（功能不受影响）
+        self._calendar_cache_pending = True
         # 每小时定时拉取当天设备状态（仅 kd 数据源），保持状态字段时效性
         self._hourly_timer = QTimer(self)
         self._hourly_timer.setInterval(3600 * 1000)
@@ -889,6 +890,10 @@ class DevicePage(QWidget):
         self._total = total
         self._populate(rows, hf_stats)
         self._update_pager(date, keyword)
+        # 首查填充完成后，用户感知窗口已过，再空闲 800ms 构建日历缓存（N1）
+        if getattr(self, "_calendar_cache_pending", False):
+            self._calendar_cache_pending = False
+            QTimer.singleShot(800, self._apply_calendar_cache)
 
     def _search_from_api(self):
         """按当前日期从服务器拉取设备数据（kd 数据源携带搜索词减少传输量）"""

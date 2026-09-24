@@ -32,6 +32,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -171,6 +172,7 @@ class RemoteSessionManager(QObject):
     visitor_removed = Signal(str)      # visitor 被「删除 snk」彻底移除（主窗口列表同步清理用）
     tunnel_issue_changed = Signal(str, str)  # (snk, "lost"/"ok") 隧道失联/恢复
     prewarmed = Signal(list)           # 预热成功的 snk 列表（预热线程 → 主线程标记）
+    async_done = Signal(int, object)   # 后台任务完成（(序号, ("ok", 结果)|("err", 异常))）
 
     def __init__(self):
         super().__init__()
@@ -195,6 +197,12 @@ class RemoteSessionManager(QObject):
         self._tunnel_issues: set = set()
         # 静默预连有界重试（P1-2）：autostart 瞬态失败的已重试次数
         self._autostart_retries = 0
+        # P0-2（2026-09-24）：apply 热重载 HTTP 往返移后台线程的基建；
+        # async_done 从工作线程 emit，Qt 自动 queued 回 GUI 线程分发回调
+        self._bg_seq = 0
+        self._bg_cbs: dict = {}
+        self._bg_inflight = False
+        self.async_done.connect(self._on_bg_done)
         # P2-6/P2-5 信号回接：预热标记 / 失联告警联动会话面板
         self.prewarmed.connect(self._mark_prewarmed)
         self.tunnel_issue_changed.connect(self.notify_tunnel_issue)
@@ -395,6 +403,55 @@ class RemoteSessionManager(QObject):
         self.mark_used(snk, table_id)
         return self._visitors[snk]["bindPort"], result in ("started", "restarted")
 
+    def ensure_visitor_async(self, snk: str, table_id: str = "",
+                             source: str = SOURCE_SNK,
+                             on_ready=None, on_error=None):
+        """ensure_visitor 的异步包装（P0-1）：apply/热重载 HTTP 移后台
+
+        回调式语义：on_ready(port, cold_start) / on_error(exc) 均在 GUI
+        线程执行。复用且端口已在听（0.2s 回环探测）→ 同步回调零延迟；
+        需补齐/注册 → 走 apply_async（热重载分支真后台）。register_visitor
+        （内存 + 信号）与端口探测仍在 GUI 线程——均为毫秒级轻操作。
+        """
+        snk = str(snk or "").strip()
+        if not snk:
+            if on_error is not None:
+                on_error(ValueError("snk 不能为空"))
+            return
+        info = self._visitors.get(snk)
+        if info is not None and not info.get("disabled") and self.is_running():
+            from p2p import is_port_in_use
+            if is_port_in_use(info["bindPort"]):
+                self.mark_used(snk, table_id)
+                if on_ready is not None:
+                    on_ready(self._visitors[snk]["bindPort"], False)
+                return
+            self.log_message.emit(
+                f"[远程会话] {snk} 端口 {info['bindPort']} 未监听，热重载补齐")
+
+            def _reloaded(_result):
+                self.mark_used(snk, table_id)
+                if on_ready is not None:
+                    on_ready(self._visitors[snk]["bindPort"], False)
+
+            self.apply_async(on_done=_reloaded, on_error=on_error)
+            return
+        # 注册并应用新配置：register_visitor 同步（内存+信号），apply 异步
+        try:
+            self.register_visitor(snk, source=source, table_id=table_id)
+        except (OSError, RuntimeError, ValueError) as e:
+            if on_error is not None:
+                on_error(e)
+            return
+
+        def _applied(result):
+            self.mark_used(snk, table_id)
+            if on_ready is not None:
+                on_ready(self._visitors[snk]["bindPort"],
+                         result in ("started", "restarted"))
+
+        self.apply_async(on_done=_applied, on_error=on_error)
+
     def mark_used(self, server_name: str, table_id: str = ""):
         """刷新 visitor 最近使用时间（可顺带补关联球桌）并通知 UI 刷新"""
         info = self._visitors.get(str(server_name or "").strip())
@@ -463,6 +520,41 @@ class RemoteSessionManager(QObject):
             return "error"
         return "ok"
 
+    def disconnect_visitor_async(self, server_name: str, on_done):
+        """disconnect_visitor 的异步包装（P0-2）：apply 移后台，语义不变
+
+        门控（not_found/not_running/幂等）与关会话、置 disabled 仍在
+        GUI 线程同步完成（毫秒级）；on_done(result) 在 GUI 线程收到
+        与同步版相同的 "ok"/"not_running"/"not_found"/"error"。
+        apply 失败时回滚 disabled 标记后以 "error" 结束。
+        """
+        name = str(server_name or "").strip()
+        info = self._visitors.get(name)
+        if info is None:
+            on_done("not_found")
+            return
+        if info.get("disabled"):
+            on_done("ok")
+            return
+        if not self.is_running():
+            on_done("not_running")
+            return
+        self.close_sessions_on_port(info["bindPort"], reason=name)
+        info["disabled"] = True
+        self.visitors_changed.emit()
+
+        def _ok(_result):
+            on_done("ok")
+
+        def _err(e):
+            info["disabled"] = False
+            self._persist_registry()
+            self.visitors_changed.emit()
+            self.log_message.emit(f"[远程会话] 应用变更失败: {e}")
+            on_done("error")
+
+        self.apply_async(on_done=_ok, on_error=_err)
+
     def delete_visitor(self, server_name: str) -> str:
         """隧道面板「删除 snk」：从注册表与持久化文件中彻底移除 visitor
 
@@ -489,6 +581,31 @@ class RemoteSessionManager(QObject):
         # frpc 未启动：仅移除并重写持久化文件，不启动 frpc
         self._persist_registry()
         return "ok"
+
+    def delete_visitor_async(self, server_name: str, on_done):
+        """delete_visitor 的异步包装（P0-2）：apply 移后台，语义不变
+
+        关会话、移除注册、发 visitor_removed 仍在 GUI 线程同步完成；
+        on_done(result) 在 GUI 线程收到与同步版相同的结果串。
+        """
+        name = str(server_name or "").strip()
+        info = self._visitors.get(name)
+        if info is None:
+            on_done("not_found")
+            return
+        if self.is_running():
+            self.close_sessions_on_port(info["bindPort"], reason=name)
+        self.remove_visitor(name)
+        self.visitor_removed.emit(name)
+        if self.is_running():
+            def _err(e):
+                self.log_message.emit(f"[远程会话] 应用变更失败: {e}")
+                on_done("error")
+
+            self.apply_async(on_done=lambda _r: on_done("ok"), on_error=_err)
+            return
+        self._persist_registry()
+        on_done("ok")
 
     def records(self) -> list:
         """全部 visitor 记录（浅拷贝，供隧道面板展示）"""
@@ -796,6 +913,96 @@ class RemoteSessionManager(QObject):
         self._restart_frpc(signature)
         return "restarted" if was_running else "started"
 
+    # ---------- P0-2（2026-09-24）：apply/断开/删除的异步包装 ----------
+
+    def _run_bg(self, job, on_done=None, on_error=None):
+        """后台线程执行 job，结果经 async_done 信号回 GUI 线程分发回调
+
+        同一时刻只允许一个后台任务：frpc 配置是单进程单状态机，并发
+        apply 本身不安全；已有任务在跑时退化为同步执行（正确性优先，
+        阻塞窗口仍远小于旧的全同步路径）。回调统一在 GUI 线程，
+        on_error 缺省时异常只写日志。
+        """
+        if self._bg_inflight:
+            try:
+                result = job()
+            except Exception as e:  # 与后台路径同口径：失败进 on_error
+                if on_error is not None:
+                    on_error(e)
+                else:
+                    self.log_message.emit(f"[远程会话] 后台任务失败: {e}")
+                return
+            if on_done is not None:
+                on_done(result)
+            return
+        self._bg_inflight = True
+        self._bg_seq += 1
+        seq = self._bg_seq
+        self._bg_cbs[seq] = (on_done, on_error)
+
+        def _worker():
+            try:
+                payload = ("ok", job())
+            except Exception as e:  # noqa: BLE001 - 后台线程统一抛回主线程处置
+                payload = ("err", e)
+            self.async_done.emit(seq, payload)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"frpc-bg-{seq}").start()
+
+    def _on_bg_done(self, seq, payload):
+        """后台任务完成分发（GUI 线程）：先清 inflight 再回调，
+        回调里再次发起后台任务不会被误判为并发"""
+        self._bg_inflight = False
+        on_done, on_error = self._bg_cbs.pop(seq, (None, None))
+        kind, val = payload
+        if kind == "ok":
+            if on_done is not None:
+                on_done(val)
+            return
+        if on_error is not None:
+            on_error(val)
+        else:
+            self.log_message.emit(f"[远程会话] 后台任务失败: {val}")
+
+    def apply_async(self, on_done, on_error=None):
+        """apply 的异步包装：仅热重载分支（HTTP 往返，最坏 ~3s）真正后台
+
+        路径判定与停/重启 frpc 涉及 QProcess/QTimer，必须留在 GUI 线程。
+        on_done(result)/on_error(exc) 统一回 GUI 线程；result 语义同 apply。
+        """
+        self._persist_registry()
+        was_running = self.is_running()
+        if not any(not v.get("disabled") for v in self._visitors.values()):
+            self._stop_frpc()
+            on_done("stopped")
+            return
+        signature = "".join(self._common_config_lines(warn=False))
+        if was_running and signature == self._applied_signature:
+            def _fin(status_body):
+                status, body = status_body
+                if status == 200:
+                    self.log_message.emit("[远程会话] 已热重载 visitor 配置"
+                                          "（现有隧道不中断）")
+                    on_done("reloaded")
+                elif 400 <= status < 500:
+                    err = RuntimeError(f"frpc 热重载拒绝新配置: {body or status}")
+                    if on_error is not None:
+                        on_error(err)
+                    else:
+                        self.log_message.emit(str(err))
+                else:
+                    # 连不上/5xx：admin 通道不可用，回退重启路径
+                    self.log_message.emit("[远程会话] 热重载不可用"
+                                          f"（HTTP {status or 'unreachable'}），重启 frpc 应用配置")
+                    self._restart_frpc(signature)
+                    on_done("restarted" if was_running else "started")
+            self._run_bg(self._reload_with_retry, on_done=_fin,
+                         on_error=on_error)
+            return
+        self._restart_frpc(signature)
+        on_done("restarted" if was_running else "started")
+
     def _reload_with_retry(self) -> tuple:
         """GET /api/reload，不可达时做有界重试
 
@@ -898,7 +1105,9 @@ class RemoteSessionManager(QObject):
                 # admin 通道不可达：无从优雅停止，直接强杀（同日一期行为）
                 proc.kill()
             else:
-                proc.quit()  # 尽力而为的退出信号（frpc 通常已由 /api/stop 收尾）
+                # terminate = 进程级优雅终止（POSIX SIGTERM / Windows 控制台关闭事件）
+                # ⚠️ QProcess 没有 quit()（那是 QThread/QEventLoop 的方法）
+                proc.terminate()  # 尽力而为（frpc 通常已由 /api/stop 自行收尾）
                 # 兜底：2.5s 后仍在运行才强杀（异步回检，绝不在主线程 waitFor）
                 def _force_kill(p=proc):
                     try:
@@ -1043,6 +1252,11 @@ class RemoteSessionManager(QObject):
             self._notify("无法远程", "远程桌面仅支持 Windows", error=True, notifier=notifier)
             return
 
+        # P0-1（2026-09-24）：受理即反馈——旧链路在预检/ensure 完成前无任何
+        # 提示（缓存过期时最长冻结 GUI 十秒级），用户会连点多次
+        self._notify("正在建立远程连接", f"{table_id or snk} → {snk}：已受理，"
+                     "正在准备隧道…", notifier=notifier)
+
         # ---- 二期 P0 连接预检：frps 权威离线 → 秒提示，不盲等打洞超时 ----
         # 感知不可用（未配置/不可达/缓存过期）一律放行回退一期路径；
         # unregistered 也放行——visitor 注册先于设备上线是正常时序，
@@ -1050,12 +1264,21 @@ class RemoteSessionManager(QObject):
         try:
             from core.frps_admin import get_frps_client
             state = get_frps_client().online(snk)
-            if state is None and get_frps_client().configured():
-                # 缓存不可信时当场刷一次（2.5s 超时上限），仍失败则放行
-                get_frps_client().refresh()
-                state = get_frps_client().online(snk)
+            stale = state is None and get_frps_client().configured()
         except Exception:
-            state = None
+            state, stale = None, False
+        if stale:
+            # P0-1：缓存不可信时不再同步 refresh()（最坏 25s GUI 冻结）——
+            # 挂起本次打开，后台感知刷新，回执后续接（_open_after_preflight）
+            self._pending_open = (kind, snk, table_id, source, notifier)
+            frps = get_frps_client()
+            try:
+                frps.refresh_finished.disconnect(self._on_refresh_finished_resume)
+            except (TypeError, RuntimeError):
+                pass  # 未连接过/接收者已销毁：无需断开
+            frps.refresh_finished.connect(self._on_refresh_finished_resume)
+            frps.request_refresh()
+            return
         if state == "offline":
             self._notify("设备未在线",
                          f"{snk} 在 frps 上状态为 offline（设备断电/断网/现场 "
@@ -1063,24 +1286,66 @@ class RemoteSessionManager(QObject):
                          f"球桌管理页核对现场状态。", error=True, notifier=notifier)
             self.log_message.emit(f"[远程会话] 预检拦截: {snk} frps offline，未发起打洞")
             return
+        self._open_after_preflight(kind, snk, table_id, source, notifier)
 
+    def _on_refresh_finished_resume(self, state: str):
+        """预检挂起的打开请求：感知回执后续接（P0-1）
+
+        Qt 同 bound method 重复 connect 自动去重，无需额外去重逻辑；
+        一次回执只消费一次挂起请求（多窗口连点时后者重挂）。
+        感知失败（state != ok）时 fail-open 放行，与旧同步版
+        「仍失败则放行」口径一致。
+        """
         try:
-            port, _fresh = self.ensure_visitor(snk, table_id=table_id, source=source)
-        except (OSError, RuntimeError, ValueError) as e:
-            self._notify("远程准备失败", str(e), error=True, notifier=notifier)
+            from core.frps_admin import get_frps_client
+            get_frps_client().refresh_finished.disconnect(
+                self._on_refresh_finished_resume)
+        except (TypeError, RuntimeError):
+            pass
+        pending = getattr(self, "_pending_open", None)
+        self._pending_open = None
+        if not pending:
             return
-        msg = f"{table_id or snk} → {snk}（本地端口 {port}）"
-        # SFTP 会话按球桌号在 videos_dir 下自动建本地目录，下载直接落位
-        if kind == "sftp" and table_id:
-            videos_dir = str(_load_settings().get("videos_dir") or "").strip()
-            if videos_dir and os.path.isdir(videos_dir):
-                msg += f"，本地目录 videos{os.sep}{table_id}"
-        self._notify("正在建立远程连接", msg, notifier=notifier)
-        # P2-4：轮询隧道端口监听就绪（200ms 间隔、8s 上限）替代固定延时——
-        # 复用路径端口已在听首轮即中，冷启动快网早开、慢网不再赌输
-        self.wait_ports_ready(
-            [port],
-            lambda: self._do_open(kind, snk, table_id, port, notifier))
+        kind, snk, table_id, source, notifier = pending
+        if state == "ok":
+            try:
+                if get_frps_client().online(snk) == "offline":
+                    state = "offline"
+            except Exception:
+                pass
+        if state == "offline":
+            self._notify("设备未在线",
+                         f"{snk} 在 frps 上状态为 offline（设备断电/断网/现场 "
+                         f"frpc 掉线），已跳过打洞等待。可稍后重试，或到"
+                         f"球桌管理页核对现场状态。", error=True, notifier=notifier)
+            self.log_message.emit(f"[远程会话] 预检拦截: {snk} frps offline，未发起打洞")
+            return
+        self._open_after_preflight(kind, snk, table_id, source, notifier)
+
+    def _open_after_preflight(self, kind: str, snk: str, table_id: str,
+                              source: str, notifier=None):
+        """预检放行后的续接（P0-1）：ensure visitor（异步）→ 等端口就绪
+        → 开面板；apply/热重载 HTTP 不再阻塞 GUI 线程"""
+
+        def _ready(port: int, _cold_start: bool):
+            msg = f"{table_id or snk} → {snk}（本地端口 {port}）"
+            # SFTP 会话按球桌号在 videos_dir 下自动建本地目录，下载直接落位
+            if kind == "sftp" and table_id:
+                videos_dir = str(_load_settings().get("videos_dir") or "").strip()
+                if videos_dir and os.path.isdir(videos_dir):
+                    msg += f"，本地目录 videos{os.sep}{table_id}"
+            self._notify("正在建立远程连接", msg, notifier=notifier)
+            # P2-4：轮询隧道端口监听就绪（200ms 间隔、8s 上限）替代固定延时——
+            # 复用路径端口已在听首轮即中，冷启动快网早开、慢网不再赌输
+            self.wait_ports_ready(
+                [port],
+                lambda: self._do_open(kind, snk, table_id, port, notifier))
+
+        self.ensure_visitor_async(
+            snk, table_id=table_id, source=source,
+            on_ready=_ready,
+            on_error=lambda e: self._notify("远程准备失败", str(e),
+                                            error=True, notifier=notifier))
 
     def open_direct_session(self, kind: str, host: str, port: int,
                             name: str = "", notifier=None):

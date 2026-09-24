@@ -864,8 +864,11 @@ class UploadListWork(QWidget):
         # 表头第 0 列放全选复选框（常开三态：部分勾选时显示半选）
         self.chk_all = CheckBox("", self.table.horizontalHeader())
         self.chk_all.setTristate(True)  # 仅为回显半选；用户单击由 clicked 接管
-        self._syncing = False           # 程序同步勾选态时抑制 clicked/stateChanged 递归
+        self._syncing = False           # 程序同步勾选态时抑制 clicked/itemChanged 递归
         self.chk_all.clicked.connect(self._on_header_clicked)
+        # 勾选列=可勾选 item（P0 2026-09-25）：qfw TableItemDelegate 对
+        # CheckStateRole 原生绘制 Fluent 勾选框，零子控件（health_page 同款范式）
+        self.table.itemChanged.connect(self._on_item_changed)
 
         self.progress_bar = ProgressBar(card)
         self.progress_bar.setRange(0, 100)
@@ -935,16 +938,22 @@ class UploadListWork(QWidget):
             self.lbl_total.setText("暂无待上传文件，请先右键日志文件→添加到上传目录")
             return
         total_size = 0
-        for cur, _dirs, files in os.walk(root):
-            for name in sorted(files):
-                full = os.path.join(cur, name)
-                try:
-                    size = os.path.getsize(full)
-                except OSError:
-                    size = 0
-                total_size += size
-                rel = os.path.relpath(full, root)
-                self._add_row(full, rel, self._type_of(name), size)
+        # 重建期间屏蔽 itemChanged：否则每行 setCheckState 都会触发
+        # _on_row_checked → _sync_check_all 全表扫描，放大成 O(n²)
+        self.table.blockSignals(True)
+        try:
+            for cur, _dirs, files in os.walk(root):
+                for name in sorted(files):
+                    full = os.path.join(cur, name)
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        size = 0
+                    total_size += size
+                    rel = os.path.relpath(full, root)
+                    self._add_row(full, rel, self._type_of(name), size)
+        finally:
+            self.table.blockSignals(False)
         self.lbl_total.setText(
             f"共 {len(self._rows)} 个文件，总大小 {_fmt_size(total_size)}")
         self._sync_check_all()
@@ -954,14 +963,14 @@ class UploadListWork(QWidget):
         r = self.table.rowCount()
         self.table.insertRow(r)
         self._rows.append((full, size))
-        cb = CheckBox("", self.table)
-        cb.stateChanged.connect(lambda _s: self._on_row_checked())
-        cw = QWidget(self.table)
-        hl = QHBoxLayout(cw)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setAlignment(Qt.AlignCenter)
-        hl.addWidget(cb)
-        self.table.setCellWidget(r, 0, cw)
+        # 勾选列改可勾选 item（P0 2026-09-25）：原 CheckBox+QWidget 容器
+        # 每行 2 个真控件，QSS 装配 + setCellWidget 布局随文件数线性放大
+        # （实测 1000 个 qfw 控件 ≈ 760ms，tools/perf/perf_ops_links_vs_buttons.py）；
+        # item 方案零子控件，重建只付 setItem 成本
+        it = QTableWidgetItem()
+        it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(Qt.CheckState.Unchecked)
+        self.table.setItem(r, 0, it)
         ft = QTableWidgetItem(rel)
         ft.setFont(_term_font())
         ft.setToolTip(full)
@@ -974,11 +983,14 @@ class UploadListWork(QWidget):
         st.setFont(_term_font())
         self.table.setItem(r, 3, st)
 
-    def _row_checkbox(self, r):
-        cw = self.table.cellWidget(r, 0)
-        if cw is None:
-            return None
-        return cw.findChild(CheckBox)
+    def _row_checked(self, r):
+        it = self.table.item(r, 0)
+        return it is not None and it.checkState() == Qt.CheckState.Checked
+
+    def _on_item_changed(self, item):
+        """勾选列 item 翻转（用户点击 / 程序 setCheckState）→ 走原行勾选链路"""
+        if item.column() == 0:
+            self._on_row_checked()
 
     def _on_row_checked(self):
         """行复选框变化：回显表头三态 + 更新已选统计（程序同步期间跳过）"""
@@ -995,28 +1007,27 @@ class UploadListWork(QWidget):
         """
         if self._worker is not None and self._worker.isRunning():
             return
-        boxes = [self._row_checkbox(r) for r in range(self.table.rowCount())]
-        boxes = [b for b in boxes if b is not None]
-        if not boxes:
+        rows = self.table.rowCount()
+        if rows == 0:
             return
-        target = not all(b.isChecked() for b in boxes)
+        target = not all(self._row_checked(r) for r in range(rows))
+        state = Qt.CheckState.Checked if target else Qt.CheckState.Unchecked
         self._syncing = True
         try:
-            for b in boxes:
-                b.setChecked(target)
+            for r in range(rows):
+                self.table.item(r, 0).setCheckState(state)
         finally:
             self._syncing = False
         self._sync_check_all()
 
     def _sync_check_all(self):
         """按各行勾选态回显表头全选框（全选/部分/未选）"""
-        boxes = [self._row_checkbox(r) for r in range(self.table.rowCount())]
-        boxes = [b for b in boxes if b is not None]
-        n = sum(1 for b in boxes if b.isChecked())
+        rows = self.table.rowCount()
+        n = sum(1 for r in range(rows) if self._row_checked(r))
         self.chk_all.blockSignals(True)
-        if not boxes or n == 0:
+        if rows == 0 or n == 0:
             self.chk_all.setCheckState(Qt.CheckState.Unchecked)
-        elif n == len(boxes):
+        elif n == rows:
             self.chk_all.setCheckState(Qt.CheckState.Checked)
         else:
             self.chk_all.setCheckState(Qt.CheckState.PartiallyChecked)
@@ -1025,10 +1036,9 @@ class UploadListWork(QWidget):
 
     def _update_sel_count(self):
         total = self.table.rowCount()
-        n = sum(1 for r in range(total)
-                if (b := self._row_checkbox(r)) and b.isChecked())
-        sel_size = sum(self._rows[r][1] for r in range(total)
-                       if (b := self._row_checkbox(r)) and b.isChecked())
+        n = sum(1 for r in range(total) if self._row_checked(r))
+        sel_size = sum(self._rows[r][1] for r in range(min(total, len(self._rows)))
+                       if self._row_checked(r))
         base = f"共 {total} 个文件" if total else "暂无待上传文件"
         self.lbl_progress.setText(
             f"已选 {n} 个 · {_fmt_size(sel_size)}" if n else base)
@@ -1079,8 +1089,7 @@ class UploadListWork(QWidget):
     def _checked_files(self):
         out = []
         for r in range(self.table.rowCount()):
-            cb = self._row_checkbox(r)
-            if cb is not None and cb.isChecked() and r < len(self._rows):
+            if self._row_checked(r) and r < len(self._rows):
                 out.append(self._rows[r][0])
         return out
 

@@ -3,7 +3,7 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QTableWidgetItem,
-                               QHeaderView, QAbstractItemView, QWidget)
+                               QHeaderView, QAbstractItemView)
 from qfluentwidgets import (TableWidget, FluentIcon, BodyLabel,
                             CaptionLabel, MessageBox,
                             PushButton as FluentPushButton)
@@ -11,11 +11,12 @@ from qfluentwidgets.window.fluent_window import FluentTitleBar
 from qframelesswindow import FramelessWindow
 
 from core.frp_remote import get_session_manager
+from core.ops_link_delegate import LINKS_ROLE, install_ops_links
 from core.perf import apply_table_smooth_mode
 from core.utils import show_info_bar
 
-_HEADERS = ["serverName", "关联球桌", "本地端口", "来源", "最近使用", "断开连接", "删除 snk"]
-_COL_WIDTHS = [160, 110, 70, 90, 95, 86, 80]
+_HEADERS = ["serverName", "关联球桌", "本地端口", "来源", "最近使用", "操作"]
+_COL_WIDTHS = [160, 110, 70, 90, 95, 150]
 
 
 class TunnelPanelWindow(FramelessWindow):
@@ -66,6 +67,10 @@ class TunnelPanelWindow(FramelessWindow):
         for i, w in enumerate(_COL_WIDTHS):
             self._table.setColumnWidth(i, w)
         layout.addWidget(self._table, 1)
+        # 操作列：委托自绘文字链接（断开/删除，零子控件）——与远程页会话
+        # 总览/frps 代理表同款（2026-09-24 P0-2 委托化）
+        self._row_recs: dict = {}
+        install_ops_links(self._table, self._on_ops_link)
 
         self._hint = CaptionLabel("暂无活跃隧道 —— 通过远程面板连接或球桌右键远程后在此显示", self)
         self._hint.setStyleSheet("color: #8a919b;")
@@ -111,12 +116,11 @@ class TunnelPanelWindow(FramelessWindow):
         self._hint.setVisible(not records)
 
         self._table.setRowCount(0)
+        self._row_recs.clear()
         for rec in records:
-            # 行内 lambda 必须用默认参数捕获当前 sn：闭包是延迟求值，
-            # 直接引用循环变量的话所有行的回调都绑到最后一行的 sn，
-            # 点哪行的断开/删除都操作同一个隧道
             row = self._table.rowCount()
             self._table.insertRow(row)
+            self._row_recs[row] = rec
             values = [
                 rec.get("serverName", ""),
                 rec.get("tableId", "") or "—",
@@ -133,35 +137,26 @@ class TunnelPanelWindow(FramelessWindow):
                 if col == 2:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(row, col, item)
-            # 「断开连接」列：仅 frpc 运行中生效，未启动时只提示不自动拉起
-            sn = rec.get("serverName", "")
-            disc_holder = QWidget(self._table)
-            dl = QHBoxLayout(disc_holder)
-            dl.setContentsMargins(0, 0, 0, 0)
-            dl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            disc_btn = FluentPushButton("断开", disc_holder)
-            disc_btn.setFixedSize(60, 26)
-            disc_btn.setToolTip(
-                f"断开隧道 {sn}：关闭相关 SSH/SFTP 会话并释放本地端口"
-                "（保留注册，可重新连接）")
-            disc_btn.setEnabled(not disabled)  # 已断开的行幂等无意义
-            disc_btn.clicked.connect(
-                lambda _=False, s=sn: self._on_disconnect(s))
-            dl.addWidget(disc_btn)
-            self._table.setCellWidget(row, 5, disc_holder)
-            # 「删除 snk」列：从注册表与持久化配置中彻底移除该隧道
-            del_holder = QWidget(self._table)
-            el = QHBoxLayout(del_holder)
-            el.setContentsMargins(0, 0, 0, 0)
-            el.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            del_btn = FluentPushButton("删除", del_holder)
-            del_btn.setFixedSize(60, 26)
-            del_btn.setToolTip(
-                f"删除 snk 隧道 {sn}：移除注册与配置，下次启动不再恢复")
-            del_btn.clicked.connect(
-                lambda _=False, s=sn: self._on_delete(s))
-            el.addWidget(del_btn)
-            self._table.setCellWidget(row, 6, del_holder)
+            # 「操作」列：委托自绘文字链接（零子控件，旧 cellWidget 按钮组已
+            # 移除）；已断开行幂等无意义 → 省略「断开」链接
+            links = []
+            if not disabled:
+                links.append(("断开", "ghost", "disconnect"))
+            links.append(("删除", "danger", "delete"))
+            ops = QTableWidgetItem("")
+            ops.setData(LINKS_ROLE, tuple(links))
+            self._table.setItem(row, 5, ops)
+
+    def _on_ops_link(self, row, _col, action):
+        """操作列文字链接回调（row → 记录映射见 refresh）"""
+        rec = self._row_recs.get(row)
+        if rec is None:
+            return  # 行重建竞态：映射里已无此行，忽略本次点击
+        sn = str(rec.get("serverName", ""))
+        if action == "disconnect":
+            self._on_disconnect(sn)
+        elif action == "delete":
+            self._on_delete(sn)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -225,19 +220,22 @@ class TunnelPanelWindow(FramelessWindow):
         if mgr.is_transferring_on_port(rec.get("bindPort", 0)) \
                 and not self._confirm_interrupt_transfer(server_name):
             return
-        # 3. 关会话/移除/apply 全委托 manager，保证「先关会话再释放端口」的顺序
-        result = mgr.disconnect_visitor(server_name)
-        if result == "ok":
-            self.refresh()  # 显式即时刷新兜底（信号刷新外的双保险）
-            show_info_bar(f"已断开隧道 {server_name}，相关会话已关闭、本地端口已释放；"
-                          "注册保留，可重新连接",
-                          "success", title="断开成功", parent=self, duration=3000)
-        elif result == "not_running":
-            show_info_bar("当前 frpc 未启动", "warning",
-                          title="无法断开", parent=self, duration=3500)
-        else:
-            show_info_bar(f"隧道 {server_name} 断开失败", "error",
-                          title="断开失败", parent=self, duration=4000)
+        # 3. 关会话/移除/apply 全委托 manager，保证「先关会话再释放端口」；
+        #    P0-2：热重载 HTTP 往返已移后台，结果回 GUI 线程后提示
+        def _done(result: str):
+            if result == "ok":
+                self.refresh()  # 显式即时刷新兜底（信号刷新外的双保险）
+                show_info_bar(f"已断开隧道 {server_name}，相关会话已关闭、本地端口已释放；"
+                              "注册保留，可重新连接",
+                              "success", title="断开成功", parent=self, duration=3000)
+            elif result == "not_running":
+                show_info_bar("当前 frpc 未启动", "warning",
+                              title="无法断开", parent=self, duration=3500)
+            else:
+                show_info_bar(f"隧道 {server_name} 断开失败", "error",
+                              title="断开失败", parent=self, duration=4000)
+
+        mgr.disconnect_visitor_async(server_name, _done)
 
     def _on_delete(self, server_name: str):
         """删除 snk：从注册表与持久化配置中彻底移除（frpc 未运行时也可执行，
@@ -262,15 +260,17 @@ class TunnelPanelWindow(FramelessWindow):
         if not dlg.exec():
             return
         # 删除不受 frpc 状态门控：未运行也执行（仅落盘），
-        # manager 内部保证这条路径绝不拉起 frpc
-        result = mgr.delete_visitor(server_name)
-        if result == "ok":
-            self.refresh()  # 显式即时刷新兜底，确保已删除的 snk 不残留
-            show_info_bar(f"已删除 snk 隧道 {server_name}",
-                          "success", title="删除成功", parent=self, duration=3000)
-        else:
-            show_info_bar(f"隧道 {server_name} 删除失败", "error",
-                          title="删除失败", parent=self, duration=4000)
+        # manager 内部保证这条路径绝不拉起 frpc（P0-2：apply 部分后台化）
+        def _done(result: str):
+            if result == "ok":
+                self.refresh()  # 显式即时刷新兜底，确保已删除的 snk 不残留
+                show_info_bar(f"已删除 snk 隧道 {server_name}",
+                              "success", title="删除成功", parent=self, duration=3000)
+            else:
+                show_info_bar(f"隧道 {server_name} 删除失败", "error",
+                              title="删除失败", parent=self, duration=4000)
+
+        mgr.delete_visitor_async(server_name, _done)
 
     def _on_stop_all(self):
         """全部断开：关闭全部会话、全部隧道置「已断开」并停止 frpc

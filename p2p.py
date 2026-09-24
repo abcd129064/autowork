@@ -27,10 +27,16 @@ def generate_random_port(exclude_ports=None):
 
 
 def is_port_in_use(port, host='127.0.0.1'):
-    """检测端口是否被占用"""
+    """检测端口是否被占用（仅回环用途，调用方均在 GUI 线程）
+
+    P0-4（2026-09-24 性能调查）：Windows 25H2 对回环上未监听端口会静默
+    丢 SYN 而不是回 RST，超时设多大就走多满——旧值 1s 导致每次未就绪
+    探测固定阻塞 1s（wait_ports_ready 有效周期 ~1.2s）。本函数所有调用
+    都只探测 127.0.0.1，回环握手 <1ms，0.2s 超时余量充足。
+    """
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
+        sock.settimeout(0.2)
         result = sock.connect_ex((host, port))
         sock.close()
         return result == 0

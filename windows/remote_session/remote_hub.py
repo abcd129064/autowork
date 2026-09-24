@@ -42,6 +42,7 @@ from core.frp_remote import (get_session_manager, SOURCE_MANUAL,
                              SOURCE_SNK, _FRPC_SERVER_DEFAULTS)
 from core.frps_admin import get_frps_client
 from core.visitor_probe import get_prober
+from core.ops_link_delegate import LINKS_ROLE, install_ops_links
 from database import table_db
 from workers.aftersale_worker import AftersaleDBWorker
 from windows.aftersale.common import _style_cand_list
@@ -200,30 +201,6 @@ def _stat_card(parent, color):
     return card, num, lbl
 
 
-def _row_buttons(parent, specs):
-    """操作列按钮组（specs=[(文本, 回调, tooltip)]），返回容器 widget
-
-    按钮宽度按字体度量自适应（2026-09-20 修复：原默认 sizeHint 在
-    大字号/缩放环境下偏窄，「SSH/SFTP/RDP/断开/删除」文字被裁切显示不全）。
-    """
-    holder = QWidget(parent)
-    h = QHBoxLayout(holder)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.setSpacing(6)
-    for spec in specs:
-        text, cb, tip = spec[:3]
-        enabled = spec[3] if len(spec) > 3 else True
-        b = PushButton(text, holder)
-        b.setFixedHeight(26)
-        b.setToolTip(tip if enabled else f"{tip}（当前不可用）")
-        b.clicked.connect(cb)
-        b.setEnabled(enabled)
-        fm = b.fontMetrics()
-        b.setFixedWidth(fm.horizontalAdvance(text) + 24)
-        h.addWidget(b)
-    return holder
-
-
 # ==================== 视图 1：会话总览 ====================
 
 class SessionWork(QWidget):
@@ -314,12 +291,17 @@ class SessionWork(QWidget):
         self.table.setColumnWidth(5, 170)
         self.table.setColumnWidth(6, 108)
         self.table.setColumnWidth(7, 90)
-        # 操作列需容纳 5 个自适应宽按钮（SSH/SFTP/RDP/断开/删除 + 间距），
-        # 250px 在默认字号下即不足（2026-09-20 字体裁切修复）
-        self.table.setColumnWidth(8, 330)
+        # 操作列：委托自绘文字链接（SSH/SFTP/RDP/断开/删除，零子控件）——
+        # 2026-09-24 P0-2 委托化：原先 330px 是为容纳 5 个自适应宽按钮，
+        # 文字链接密度高，260px 足够
+        self.table.setColumnWidth(8, 260)
         self.table.setMinimumHeight(260)
         cl.addWidget(self.table, 1)
         lay.addWidget(card, 1)
+        # 操作列视图级委托（setItemDelegate 不能列级：会丢 hover 高亮）；
+        # 点击回调经 _row_recs 行映射取当前记录（重建后行号失效问题由刷新时重建映射解决）
+        self._row_recs: dict = {}
+        install_ops_links(self.table, self._on_ops_link)
 
         self.lbl_hint = CaptionLabel("", body)
         self.lbl_hint.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
@@ -340,6 +322,8 @@ class SessionWork(QWidget):
         self._receipt_armed = False
         self._prober = get_prober()
         self._prober.changed.connect(self._on_probe_round)
+        # P1-1 合帧门控：五个信号源同帧连发时只重建一次（见 refresh）
+        self._refresh_pending = False
 
     def _on_probe_round(self):
         # 质量视图非当前页时不整表重绘（探测每 30s 一轮，成本可忽略但保持克制）
@@ -500,6 +484,16 @@ class SessionWork(QWidget):
     # ---------- 刷新 ----------
 
     def refresh(self):
+        # P1-1（2026-09-24）：五个刷新源（visitors_changed/frpc_state/
+        # proxies_changed/channel_state/probe_round）同帧连发时归并到下一轮
+        # 事件循环只整表重建一次（重建成本 ~每行 1ms+，五连发即五倍白费）
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._refresh_now)
+
+    def _refresh_now(self):
+        self._refresh_pending = False
         mgr = self._mgr
         try:
             records = mgr.records()
@@ -527,10 +521,15 @@ class SessionWork(QWidget):
         sess_total = 0
         online_total = 0
         rtts = []
+        # P2-3（2026-09-24）：每行 online() 只算一次（旧实现在本循环 ×2、
+        # _add_row 再 ×2——含 _frps_cell 内部一次），状态汇总给 _add_row 复用
+        frps_states: dict = {}
         for rec in records:
             sess_total += len(mgr.sessions_on_port(rec.get("bindPort", 0)))
             sn_i = rec.get("serverName", "")
-            if self._frps.online(sn_i) == "online":
+            frps_state = self._frps.online(sn_i)
+            frps_states[sn_i] = frps_state
+            if frps_state == "online":
                 online_total += 1
             st = self._prober.stats(sn_i)
             if st["avg_ms"] is not None:
@@ -539,7 +538,7 @@ class SessionWork(QWidget):
             # 即视为失联；frpc 未运行同样视为失联（自愈中/放弃态）
             lost = (not rec.get("disabled") and (
                     not running
-                    or self._frps.online(sn_i) == "offline"
+                    or frps_state == "offline"
                     or self._prober.verdict(sn_i) == "bad"))
             mgr.report_tunnel_issue(sn_i, lost)
         self.num_run.setText("运行中" if running else "未启动")
@@ -575,8 +574,10 @@ class SessionWork(QWidget):
             self.lbl_rtt.setText("RTT 中位数（探测积累中）")
 
         self.table.setRowCount(0)
+        self._row_recs.clear()
         for rec in records:
-            self._add_row(rec, running)
+            self._add_row(rec, running,
+                          frps_states.get(str(rec.get("serverName", ""))))
         if not records:
             self.lbl_hint.setText("暂无隧道 —— 点右上「新建隧道」注册 xtcp visitor")
         else:
@@ -585,7 +586,7 @@ class SessionWork(QWidget):
                 "断开=关会话并释放端口（保留注册，点 SSH/SFTP/RDP 即重连），"
                 "删除=彻底移除注册与持久化配置（需确认、不可恢复）")
 
-    def _add_row(self, rec, running):
+    def _add_row(self, rec, running, frps_state=None):
         mgr = self._mgr
         sn = str(rec.get("serverName", ""))
         port = int(rec.get("bindPort", 0) or 0)
@@ -614,7 +615,8 @@ class SessionWork(QWidget):
         table.setItem(r, 0, it)
 
         # frps 在线感知列（P0）：online/offline/未注册/无感知 四态
-        frps_text, frps_color = _frps_cell(sn)
+        # （P2-3：状态由 refresh 循环算好传入，不再经 _frps_cell 重复探测）
+        frps_text, frps_color = _FRPS_CELL.get(frps_state, _FRPS_CELL[None])
         it_frps = QTableWidgetItem(frps_text)
         it_frps.setForeground(frps_color)
         info = self._frps.info(sn)
@@ -653,28 +655,38 @@ class SessionWork(QWidget):
             item.setToolTip(text)
             table.setItem(r, col, item)
 
-        # 设备确认离线（frps 权威）时禁用打开类按钮——点击只会盲等超时；
+        # 设备确认离线（frps 权威）时省略打开类链接——点击只会盲等超时；
         # 无感知（None）/未注册（visitor 可先于设备上线注册）不禁用；
-        # 已断开行的打开类按钮不禁用——点击即经 ensure_visitor 重新启用并重连
-        confirmed_offline = (self._frps.online(sn) == "offline"
+        # 已断开行的打开类链接保留——点击即经 ensure_visitor 重新启用并重连
+        confirmed_offline = (frps_state == "offline"
                              and not rec.get("disabled"))
         disabled_row = bool(rec.get("disabled"))
-        table.setCellWidget(r, 8, _row_buttons(table, [
-            ("SSH", lambda _=False, s=sn, t=rec: self._open("ssh", s, t),
-             (f"重新启用并重连 {sn}（SSH）" if disabled_row
-              else "通过该隧道打开 SSH 终端"), not confirmed_offline),
-            ("SFTP", lambda _=False, s=sn, t=rec: self._open("sftp", s, t),
-             (f"重新启用并重连 {sn}（SFTP）" if disabled_row
-              else "通过该隧道打开 SFTP 文件传输"), not confirmed_offline),
-            ("RDP", lambda _=False, s=sn, t=rec: self._open("rdp", s, t),
-             (f"重新启用并重连 {sn}（远程桌面）" if disabled_row
-              else "通过该隧道打开远程桌面"), not confirmed_offline),
-            ("断开", lambda _=False, s=sn: self._disconnect(s),
-             f"断开隧道 {sn}：关闭相关会话并释放本地端口（保留注册，可重连）",
-             not disabled_row),
-            ("删除", lambda _=False, s=sn: self._delete(s),
-             f"删除隧道 {sn}：移除注册与持久化配置"),
-        ]))
+        self._row_recs[r] = rec
+        # 操作列：委托自绘文字链接（零子控件，旧 cellWidget 按钮组已移除）。
+        # 委托不支持置灰，禁用语义改为省略（悬停提示由确认弹窗兜底）
+        links = []
+        if not confirmed_offline:
+            links += [("SSH", "primary", "ssh"), ("SFTP", "primary", "sftp"),
+                      ("RDP", "primary", "rdp")]
+        if not disabled_row:
+            links.append(("断开", "ghost", "disconnect"))
+        links.append(("删除", "danger", "delete"))
+        cell = QTableWidgetItem("")
+        cell.setData(LINKS_ROLE, tuple(links))
+        table.setItem(r, 8, cell)
+
+    def _on_ops_link(self, row, _col, action):
+        """会话总览表操作列文字链接回调（row → 记录映射见 _add_row）"""
+        rec = self._row_recs.get(row)
+        if rec is None:
+            return  # 行重建竞态：映射里已无此行，忽略本次点击
+        sn = str(rec.get("serverName", ""))
+        if action in ("ssh", "sftp", "rdp"):
+            self._open(action, sn, rec)
+        elif action == "disconnect":
+            self._disconnect(sn)
+        elif action == "delete":
+            self._delete(sn)
 
     # ---------- 操作 ----------
 
@@ -707,14 +719,19 @@ class SessionWork(QWidget):
             return
         if not self._confirm_transfer(sn):
             return
-        result = mgr.disconnect_visitor(sn)
-        if result == "ok":
-            self._info(f"已断开隧道 {sn}：会话已关闭、端口已释放，"
-                       "注册保留，点 SSH/SFTP/RDP 可重连", "success")
-        elif result == "not_running":
-            self._info("当前 frpc 未启动", "warning")
-        else:
-            self._info(f"隧道 {sn} 断开失败", "error")
+        # P0-2：断开的 apply（热重载 HTTP）已移后台，结果回 GUI 线程后提示；
+        # 行内状态立即置「已断开」（refresh 由 visitors_changed 信号顺带触发）
+        def _done(result: str):
+            if result == "ok":
+                self._info(f"已断开隧道 {sn}：会话已关闭、端口已释放，"
+                           "注册保留，点 SSH/SFTP/RDP 可重连", "success")
+            elif result == "not_running":
+                self._info("当前 frpc 未启动", "warning")
+            else:
+                self._info(f"隧道 {sn} 断开失败", "error")
+            self.refresh()
+
+        mgr.disconnect_visitor_async(sn, _done)
         self.refresh()
 
     def _delete(self, sn):
@@ -729,12 +746,15 @@ class SessionWork(QWidget):
         dlg.cancelButton.setText("取消")
         if not dlg.exec():
             return
-        result = mgr.delete_visitor(sn)
-        if result == "ok":
-            self._info(f"已删除隧道 {sn}", "success")
-        else:
-            self._info(f"隧道 {sn} 删除失败（{result}）", "error")
-        self.refresh()
+        # P0-2：删除的 apply 部分后台化，结果回 GUI 线程后提示
+        def _done(result: str):
+            if result == "ok":
+                self._info(f"已删除隧道 {sn}", "success")
+            else:
+                self._info(f"隧道 {sn} 删除失败（{result}）", "error")
+            self.refresh()
+
+        mgr.delete_visitor_async(sn, _done)
 
     def _info(self, msg, kind):
         self._win._show_info_bar(msg, kind, duration=4000)
@@ -1534,7 +1554,12 @@ class FrpsProxiesWork(QWidget):
         self.edit_kw = SearchLineEdit(body)
         self.edit_kw.setPlaceholderText("搜索代理名")
         self.edit_kw.setFixedWidth(200)
-        self.edit_kw.textChanged.connect(lambda _t: self.refresh())
+        # P1-2（2026-09-24）：输入防抖 300ms——逐键触发整表重建是大清单卡顿主因
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self.refresh)
+        self.edit_kw.textChanged.connect(lambda _t: self._search_timer.start())
         head.addWidget(self.edit_kw)
         btn_refresh = PushButton(FluentIcon.SYNC, "刷新感知", body)
         btn_refresh.setToolTip("重新拉取 frps 全类型代理清单（后台线程）")
@@ -1572,10 +1597,13 @@ class FrpsProxiesWork(QWidget):
         self.table.setColumnWidth(5, 100)
         self.table.setColumnWidth(6, 80)
         self.table.setColumnWidth(7, 92)
-        self.table.setColumnWidth(8, 230)
+        # 操作列：委托自绘文字链接（2026-09-24 P0-2 委托化，旧 cellWidget 按钮组已移除）
+        self.table.setColumnWidth(8, 220)
         self.table.setMinimumHeight(260)
         cl.addWidget(self.table, 1)
         lay.addWidget(card, 1)
+        self._row_recs: dict = {}
+        install_ops_links(self.table, self._on_proxy_ops_link)
 
         self.lbl_hint = CaptionLabel(
             "数据源 GET /api/proxy/{type} + /api/clients（frps 网页面板 Proxies 页同源，"
@@ -1608,9 +1636,11 @@ class FrpsProxiesWork(QWidget):
         if kw:
             rows = [r for r in rows if kw in r.get("name", "").lower()]
         self.table.setRowCount(0)
+        self._row_recs.clear()
         for rec in rows:
             r = self.table.rowCount()
             self.table.insertRow(r)
+            self._row_recs[r] = rec
             status = rec.get("status", "")
             # 「本地」列：xtcp 页签与注册表实时匹配三态；其余页签「—」
             if self._tab == "xtcp":
@@ -1634,79 +1664,70 @@ class FrpsProxiesWork(QWidget):
                 elif col == 7:
                     item.setForeground(loc_color)
                 self.table.setItem(r, col, item)
-            # 「操作」列：xtcp/tcp 页签挂行内动作按钮组，其余页签留空
-            bar = self._make_action_cell(rec) if self._tab in ("xtcp", "tcp") else None
-            if bar is not None:
-                self.table.setCellWidget(r, 8, bar)
+            # 「操作」列：委托自绘文字链接（xtcp/tcp 页签，其余页签留空）
+            links = self._action_links(rec) if self._tab in ("xtcp", "tcp") else None
+            if links:
+                cell = QTableWidgetItem("")
+                cell.setData(LINKS_ROLE, tuple(links))
+                self.table.setItem(r, 8, cell)
         self.lbl_state.setText(
             f"frps 代理清单 · {self._tab.upper()} {len(rows)} 条"
             + ("" if snap_state == "ok" else f"（感知通道 {snap_state}）"))
 
-    # ---------- 行内动作（2026-09-24 联动） ----------
+    # ---------- 行内动作（2026-09-24 联动；P0-2 委托化） ----------
 
-    def _act_btn(self, text, cb, tip=""):
-        """行内小动作按钮（统一 24px 高，透明背景不破表格观感）"""
-        b = PushButton(text, self.table)
-        b.setFixedHeight(24)
-        b.clicked.connect(cb)
-        if tip:
-            b.setToolTip(tip)
-        return b
+    def _action_links(self, rec):
+        """按页签类型生成操作列链接清单（(文案, 色键, 动作键) 元组）
 
-    def _make_action_cell(self, rec):
-        """按页签类型生成行内动作按钮组（xtcp=注册表联动 / tcp=直连+存）"""
-        bar = QWidget(self.table)
-        bar.setStyleSheet("background: transparent;")
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(2, 0, 2, 0)
-        h.setSpacing(4)
+        xtcp=注册表联动（registered→SSH/SFTP，disabled→重连/删注册，
+        未注册→注册并连）；tcp=直连+存服务器；无可用动作返回空清单
+        （不设 LINKS_ROLE，单元格留空）。
+        """
         name = str(rec.get("name", ""))
+        links = []
         if self._tab == "xtcp":
             state, local = local_tunnel_state(self._mgr, name)
-            table_id = str(local.get("tableId", "") or "")
             if state == "registered":
-                h.addWidget(self._act_btn(
-                    "SSH", lambda _=False, n=name, t=table_id:
-                    self._connect_xtcp(n, "ssh", t), "一键直连 SSH（打洞）"))
-                h.addWidget(self._act_btn(
-                    "SFTP", lambda _=False, n=name, t=table_id:
-                    self._connect_xtcp(n, "sftp", t), "一键直连 SFTP（打洞）"))
+                links += [("SSH", "primary", "ssh"), ("SFTP", "primary", "sftp")]
             elif state == "disabled":
-                h.addWidget(self._act_btn(
-                    "重连", lambda _=False, n=name, t=table_id:
-                    self._connect_xtcp(n, "ssh", t),
-                    "已断开保留注册：连接即恢复启用"))
-                h.addWidget(self._act_btn(
-                    "删注册", lambda _=False, n=name: self._delete_local(n),
-                    "从本地注册表彻底移除（frps 侧不受影响）"))
+                links += [("重连", "primary", "ssh"), ("删注册", "danger", "del_local")]
             else:
-                h.addWidget(self._act_btn(
-                    "＋ 注册并连", lambda _=False, n=name:
-                    self._register_and_connect(n),
-                    "按默认 secretKey + 随机本地端口注册，并直连 SSH"))
+                links += [("＋ 注册并连", "primary", "reg_connect")]
         elif self._tab == "tcp":
             port = (rec.get("conf") or {}).get("remotePort")
             if port:
-                addr = self._mgr.frps_server_addr()
-                h.addWidget(self._act_btn(
-                    "SSH", lambda _=False, p=port, n=name:
-                    self._direct_connect("ssh", addr, p, n),
-                    f"直连 frps {addr}:{port}"))
-                h.addWidget(self._act_btn(
-                    "SFTP", lambda _=False, p=port, n=name:
-                    self._direct_connect("sftp", addr, p, n),
-                    f"直连 frps {addr}:{port}"))
-                entry = f"{addr}:{port}"
-                saved = entry in load_tcp_servers()
-                b = self._act_btn(
-                    "⊕ 存服务器", lambda _=False, e=entry:
-                    self._save_server(e),
-                    "保存到 TCP 直连服务器列表（与主面板/「连接」视图同源）")
-                b.setEnabled(not saved)
-                if saved:
-                    b.setToolTip(f"{entry} 已在服务器列表")
-                h.addWidget(b)
-        return bar
+                links += [("SSH", "primary", "ssh"), ("SFTP", "primary", "sftp")]
+                entry = f"{self._mgr.frps_server_addr()}:{port}"
+                if entry not in load_tcp_servers():
+                    links.append(("存服务器", "ghost", "save"))
+        return links
+
+    def _on_proxy_ops_link(self, row, _col, action):
+        """frps 代理表操作列文字链接回调（row → 记录映射见 refresh）"""
+        rec = self._row_recs.get(row)
+        if rec is None:
+            return  # 行重建竞态：映射里已无此行，忽略本次点击
+        name = str(rec.get("name", ""))
+        if action == "del_local":
+            self._delete_local(name)
+            return
+        if action == "reg_connect":
+            self._register_and_connect(name)
+            return
+        if action == "save":
+            port = (rec.get("conf") or {}).get("remotePort")
+            if port:
+                self._save_server(f"{self._mgr.frps_server_addr()}:{port}")
+            return
+        # ssh / sftp：xtcp 页签走注册表一键直连，tcp 页签走直连
+        if self._tab == "xtcp":
+            _state, local = local_tunnel_state(self._mgr, name)
+            self._connect_xtcp(name, action, str(local.get("tableId", "") or ""))
+        else:
+            port = (rec.get("conf") or {}).get("remotePort")
+            if port:
+                self._direct_connect(action, self._mgr.frps_server_addr(),
+                                     port, name)
 
     def _connect_xtcp(self, name: str, kind: str, table_id: str = ""):
         """xtcp 代理 → 一键直连（复用注册表 open_session 完整链路）"""
@@ -2128,18 +2149,32 @@ class TunnelConfWork(QWidget):
         if not self._mgr.is_running():
             self._win._show_info_bar("frpc 未运行，无本机管理通道", "warning")
             return
-        code, _body = self._mgr.ping_admin("/healthz")
-        if code != 200:
+        # P0-3（2026-09-24）：健康检查两次 HTTP 往返（最坏 ~6s）移后台线程，
+        # 受理即反馈；结果经 manager 的 async_done 信号回 GUI 线程提示
+        self._win._show_info_bar("正在检测 frpc 管理通道…", "info", duration=2000)
+        admin_port = self._mgr.admin_port
+
+        def _job():
+            code, _body = self._mgr.ping_admin("/healthz")
+            if code != 200:
+                return ("fail", code)
+            code2, body2 = self._mgr.ping_admin("/api/status")
+            return ("ok", code2, body2)
+
+        def _done(result):
+            if result[0] == "fail":
+                self._win._show_info_bar(
+                    f"frpc 管理通道不可达（HTTP {result[1] or 'unreachable'}，"
+                    f"端口 {admin_port}）", "error", duration=5000)
+                return
+            _tag, code2, body2 = result
             self._win._show_info_bar(
-                f"frpc 管理通道不可达（HTTP {code or 'unreachable'}，"
-                f"端口 {self._mgr.admin_port}）", "error", duration=5000)
-            return
-        code2, body2 = self._mgr.ping_admin("/api/status")
-        self._win._show_info_bar(
-            f"frpc 通道正常 :{self._mgr.admin_port} · /api/status "
-            + ("OK" if code2 == 200 else f"HTTP {code2 or 'unreachable'}")
-            + (f" {body2[:60]}" if code2 == 200 and body2 else ""),
-            "success", duration=5000)
+                f"frpc 通道正常 :{admin_port} · /api/status "
+                + ("OK" if code2 == 200 else f"HTTP {code2 or 'unreachable'}")
+                + (f" {body2[:60]}" if code2 == 200 and body2 else ""),
+                "success", duration=5000)
+
+        self._mgr._run_bg(_job, on_done=_done)
 
     def _on_toggle_quality(self):
         if self._prober.running:

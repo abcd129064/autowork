@@ -136,7 +136,7 @@ autowork 集成位置：
 ### 3.3 `POST /api/stop`
 - **优雅停止**：`go svr.GracefulClose(100ms)`，frpc 自行收尾退出。
 - ⚠️ 方法必须是 **POST**（GET 不匹配路由）。
-- autowork `_stop_frpc` 两段式：POST /api/stop → `proc.quit()` → 2.5s QTimer 回检兜底 `kill`，全异步不阻塞 GUI。
+- autowork `_stop_frpc` 三段式：POST /api/stop（应用级优雅）→ `proc.terminate()`（进程级优雅，SIGTERM）→ 2.5s QTimer 回检兜底 `proc.kill()`，全异步不阻塞 GUI。⚠️ QProcess 无 `quit()`（那是 QThread/QEventLoop 的方法）。
 
 ### 3.4 `GET /api/status`
 - 本机各代理**运行态**。响应 `StatusResp = { 类型: [ {name,type,status,err,local_addr,plugin,remote_addr}, ... ] }`。

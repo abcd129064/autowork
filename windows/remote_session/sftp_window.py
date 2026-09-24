@@ -5,6 +5,7 @@ import os
 import time
 import shutil
 import subprocess
+import threading
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
     QWidget, QTreeWidgetItem,
@@ -332,7 +333,12 @@ class SFTPPanel(QWidget):
         self._closing = False
         self._health_worker = None
         self._init_ui()
-        _cleanup_sftp_temp()  # 清理 _sftp_temp 中超过 7 天的旧临时文件
+        # P2-2（2026-09-24）：清理挪后台线程——_sftp_temp 积压大量文件时
+        # listdir+rmtree 会拖慢窗口构建；清理逻辑只碰文件系统，线程安全。
+        # 右键「打开」路径（_ctx_remote_open）仍同步清理：需先清完再落下载文件，
+        # 后台跑会与下载写同一目录竞态
+        threading.Thread(target=_cleanup_sftp_temp, name="sftp-temp-cleanup",
+                         daemon=True).start()
         QTimer.singleShot(100, self._connect_and_list)
 
     @property

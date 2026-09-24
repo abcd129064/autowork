@@ -425,26 +425,36 @@ class TablePage(QWidget):
         return cell
 
     def _refresh_frps_column(self):
-        """frps 名单刷新后仅重绘该列（不重查库，保住当前页/滚动位置）"""
+        """frps 名单刷新后仅重绘该列（不重查库，保住当前页/滚动位置）
+
+        N4（2026-09-25）：snk/frps 列索引循环外枚举一次（原每行重复
+        O(rows×cols)）；已有 item 只 setText/setForeground，仅空格才新建
+        —— 对已有 item 重复 setItem 会触发 Qt「cannot insert an item that
+        is already owned」警告，每次刷新数百条掩盖真实日志。
+        """
         col = next((i for i, (k, _, _) in enumerate(TABLE_COLUMNS)
                     if k == "frps_online"), -1)
         if col < 0:
             return
+        snk_col = next((i for i, (k, _, _) in enumerate(TABLE_COLUMNS)
+                        if k == "snk_code"), col)
+        info_fg = QColor(SEMANTIC["info"])
         tbl = self._table
         for r in range(tbl.rowCount()):
-            snk_item = tbl.item(r, next(
-                (i for i, (k, _, _) in enumerate(TABLE_COLUMNS)
-                 if k == "snk_code"), col))
+            snk_item = tbl.item(r, snk_col)
             snk = snk_item.text().strip() if snk_item else ""
             state = get_frps_client().online(snk) if snk else None
             text, color_key = self._FRPS_CELL.get(state, self._FRPS_CELL[None])
-            cell = tbl.item(r, col) or QTableWidgetItem()
-            cell.setText(text if snk else "—")
+            cell = tbl.item(r, col)
+            if cell is None:
+                cell = QTableWidgetItem(text if snk else "—")
+                tbl.setItem(r, col, cell)
+            else:
+                cell.setText(text if snk else "—")
             if snk and state is not None:
                 cell.setForeground(QColor(SEMANTIC[color_key]))
             else:
-                cell.setForeground(QColor(SEMANTIC["info"]))
-            tbl.setItem(r, col, cell)
+                cell.setForeground(info_fg)
 
     def update_frps_column(self):
         """供 frps proxies_changed 信号驱动的实时刷新入口"""

@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -643,20 +644,52 @@ class HealthPage(QWidget):
         self._mark_worker = None
         self._sync_worker = None
         self._rows = []
+        # N3（2026-09-25）：上次拉取/重建时刻（time.monotonic 秒），供
+        # showEvent 冷却补拉判断；0 表示从未执行（首次必拉）
+        self._last_fetch_ts = 0.0
+        self._last_display_ts = 0.0
         self._init_ui()
 
         self._fetch_timer = QTimer(self)
         self._fetch_timer.setInterval(self._FETCH_INTERVAL_MS)
-        self._fetch_timer.timeout.connect(self._fetch_health_data)
+        self._fetch_timer.timeout.connect(self._on_fetch_timer_tick)
         self._fetch_timer.start()
 
         self._display_timer = QTimer(self)
         self._display_timer.setInterval(self._DISPLAY_INTERVAL_MS)
-        self._display_timer.timeout.connect(self._refresh_display)
+        self._display_timer.timeout.connect(self._on_display_timer_tick)
         self._display_timer.start()
 
         # 页面载入立即拉取一次（完成后自动刷新展示）
         self._fetch_health_data()
+
+    def showEvent(self, event):
+        """N3：回看页面时若已超过冷却间隔，立即补拉/补刷一次
+
+        页面隐藏期间定时器照跑但跳过（见 _on_*_timer_tick），期间积累的
+        更新由回看时刻补齐，数据时效口径与门控前一致。
+        """
+        super().showEvent(event)
+        now = time.monotonic()
+        if (now - self._last_fetch_ts) * 1000 >= self._FETCH_INTERVAL_MS:
+            self._fetch_health_data()
+        if (now - self._last_display_ts) * 1000 >= self._DISPLAY_INTERVAL_MS:
+            self._refresh_display()
+
+    def _on_fetch_timer_tick(self):
+        """30min 定时拉取（N3）：页面不可见时跳过全量接口拉取与落库
+
+        HealthPage 此前是全程序唯一无可见性门控的周期任务（对照
+        table_page._refresh_frps_column 与售后 records 自动刷新），
+        面板最小化/其他页签期间仍每 30 分钟全量拉接口+全表落库。
+        """
+        if self.isVisible():
+            self._fetch_health_data()
+
+    def _on_display_timer_tick(self):
+        """1h 定时重建（N3）：页面不可见时跳过"""
+        if self.isVisible():
+            self._refresh_display()
 
     def _apply_smooth_mode(self):
         """按当前生效的平滑滚动设置刷新本页表格（管理面板设置页联动）"""
@@ -743,6 +776,7 @@ class HealthPage(QWidget):
         会挂到 TCP 超时才返回，定时刷新撞上就是整界面冻结十秒上下。
         同名旧任务在途时断开信号丢弃（告警数据以最后一次为准）。
         """
+        self._last_display_ts = time.monotonic()
         old = getattr(self, "_alerts_worker", None)
         if old is not None and old.isRunning():
             try:
@@ -891,6 +925,7 @@ class HealthPage(QWidget):
         """全量拉取球桌数据（含 health 字段）并同步告警表"""
         if self._fetch_worker is not None and self._fetch_worker.isRunning():
             return
+        self._last_fetch_ts = time.monotonic()
         self._fetch_worker = TableFetchWorker(self)
         self._fetch_worker.result_ready.connect(self._on_fetch_ok)
         self._fetch_worker.error.connect(self._on_fetch_fail)

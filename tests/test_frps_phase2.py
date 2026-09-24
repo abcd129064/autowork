@@ -529,7 +529,7 @@ class _FakeModuleTimer:
         self.scheduled.append((ms, fn))
 
 
-def test_graceful_stop_prefers_api_then_quit(mgr, monkeypatch):
+def test_graceful_stop_prefers_api_then_terminate(mgr, monkeypatch):
     timer = _FakeModuleTimer()
     monkeypatch.setattr(fr, "QTimer", timer)
     api = []
@@ -545,7 +545,7 @@ def test_graceful_stop_prefers_api_then_quit(mgr, monkeypatch):
 
     mgr._stop_frpc()
     assert api == [("/api/stop", "POST")]
-    proc.quit.assert_called_once()
+    proc.terminate.assert_called_once()
     proc.kill.assert_not_called()
     assert mgr._frpc_process is None
     assert states == [False]
@@ -565,7 +565,7 @@ def test_graceful_stop_fallback_kill_when_hung(mgr, monkeypatch):
     proc = MagicMock()          # state() 返回 MagicMock ≠ NotRunning → 视为仍在跑
     mgr._frpc_process = proc
     mgr._stop_frpc()
-    proc.quit.assert_called_once()
+    proc.terminate.assert_called_once()
     proc.kill.assert_not_called()
     timer.scheduled[0][1]()     # 2.5s 回检：未退出 → 强杀兜底
     proc.kill.assert_called_once()
@@ -578,7 +578,7 @@ def test_stop_kill_direct_when_admin_unreachable(mgr):
     mgr._frpc_process = proc
     mgr._stop_frpc()
     proc.kill.assert_called_once()   # 无从优雅停止，同日一期直接强杀
-    proc.quit.assert_not_called()
+    proc.terminate.assert_not_called()
 
 
 def test_public_stop_api(mgr, monkeypatch):
@@ -593,10 +593,19 @@ def test_public_stop_api(mgr, monkeypatch):
     assert mgr.ping_admin() == (200, "healthy")
 
 
-# ==================== open_session P0 预检 ====================
+# ==================== open_session P0 预检（P0-1：异步挂起续接） ====================
 
-class _FakeFrps:
+from PySide6.QtCore import QObject, Signal
+
+
+class _FakeFrps(QObject):
+    """仿真 frps 感知客户端：online 序列弹出 + request_refresh 计数；
+    refresh_finished 为真 Qt Signal（同线程 emit 直接续接，无需事件循环）"""
+
+    refresh_finished = Signal(str)
+
     def __init__(self, states, configured_flag=True):
+        super().__init__()
         self._states = list(states)
         self._configured = configured_flag
         self.refresh_calls = 0
@@ -611,6 +620,19 @@ class _FakeFrps:
         self.refresh_calls += 1
         return "ok"
 
+    def request_refresh(self):
+        self.refresh_calls += 1
+
+
+def _fake_ensure_async(ensured):
+    """ensure_visitor_async 的回调式仿真：登记 snk 后立即 on_ready"""
+    def _impl(snk, table_id="", source=fr.SOURCE_SNK,
+              on_ready=None, on_error=None):
+        ensured.append(snk)
+        if on_ready is not None:
+            on_ready(40001, False)
+    return _impl
+
 
 def _preflight_env(mgr, monkeypatch, fake):
     monkeypatch.setattr(fr, "PARAMIKO_AVAILABLE", True)
@@ -619,8 +641,8 @@ def _preflight_env(mgr, monkeypatch, fake):
     mgr._notify = lambda title, msg, error=False, notifier=None: \
         notices.append((title, error))
     ensured = []
-    mgr.ensure_visitor = lambda snk, table_id="", source=fr.SOURCE_SNK: \
-        (ensured.append(snk) or (40001, False))
+    mgr.ensure_visitor_async = _fake_ensure_async(ensured)
+    monkeypatch.setattr("p2p.is_port_in_use", lambda p, host="127.0.0.1": False)
     timer = _FakeModuleTimer()
     monkeypatch.setattr(fr, "QTimer", timer)
     return notices, ensured, timer
@@ -630,7 +652,8 @@ def test_preflight_blocks_confirmed_offline(mgr, monkeypatch):
     notices, ensured, timer = _preflight_env(
         mgr, monkeypatch, _FakeFrps(["offline"]))
     mgr.open_session("ssh", "snk_x", "")
-    assert notices == [("设备未在线", True)]
+    # P0-1：受理即反馈（第一条），随后预检拦截
+    assert notices == [("正在建立远程连接", False), ("设备未在线", True)]
     assert ensured == [] and timer.scheduled == []
     assert any("预检拦截" in s for s in mgr._logs)
 
@@ -660,13 +683,29 @@ def test_preflight_none_not_configured_passes(mgr, monkeypatch):
     assert fake.refresh_calls == 0
 
 
-def test_preflight_stale_cache_refresh_once_then_block(mgr, monkeypatch):
-    # 缓存过期（None）但已配置 → 当场刷一次；刷出 offline 仍拦截
+def test_preflight_stale_cache_refresh_async_then_block(mgr, monkeypatch):
+    # 缓存过期（None）但已配置 → 挂起 + request_refresh（后台），
+    # 不再同步阻塞；回执刷出 offline 仍拦截（P0-1 挂起续接）
+    fake = _FakeFrps([None, "offline"])
+    notices, ensured, _s = _preflight_env(mgr, monkeypatch, fake)
+    mgr.open_session("ssh", "snk_x", "")
+    assert fake.refresh_calls == 1
+    assert ensured == []              # 感知回执前挂起，不进入 ensure
+    # 受理即反馈（title 口径，与 test_preflight_blocks_confirmed_offline 一致；
+    # 「已受理，正在准备隧道」文案在 msg 中，桩只记 title）
+    assert any("正在建立远程连接" in _t for _t, _e in notices)
+    fake.refresh_finished.emit("ok")  # 回执续接：刷出 offline → 拦截
+    assert ensured == []
+    assert any("预检拦截" in s for s in mgr._logs)
+
+
+def test_preflight_refresh_fail_fail_open(mgr, monkeypatch):
+    # 感知回执失败（非 ok）→ fail-open 放行，与旧「仍失败则放行」口径一致
     fake = _FakeFrps([None, "offline"])
     _n, ensured, _s = _preflight_env(mgr, monkeypatch, fake)
     mgr.open_session("ssh", "snk_x", "")
-    assert fake.refresh_calls == 1
-    assert ensured == []
+    fake.refresh_finished.emit("unreachable")
+    assert ensured == ["snk_x"]
 
 
 def test_preflight_exception_fail_open(mgr, monkeypatch):
@@ -681,8 +720,8 @@ def test_preflight_exception_fail_open(mgr, monkeypatch):
     monkeypatch.setattr(fa, "get_frps_client", lambda: Boom())
     mgr._notify = lambda *a, **k: None
     ensured = []
-    mgr.ensure_visitor = lambda snk, table_id="", source=fr.SOURCE_SNK: \
-        (ensured.append(snk) or (40001, False))
+    mgr.ensure_visitor_async = _fake_ensure_async(ensured)
+    monkeypatch.setattr("p2p.is_port_in_use", lambda p, host="127.0.0.1": False)
     import core.frp_remote as _f
     monkeypatch.setattr(_f.QTimer, "singleShot",
                         staticmethod(lambda ms, fn: None))

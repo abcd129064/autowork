@@ -52,6 +52,49 @@ class _FakeTimer:
         self.scheduled.append((ms, fn))
 
 
+# ===== 停止 frpc：进程 API 契约（防复发） =====
+
+def test_stop_frpc_uses_real_qprocess_api(mgr, monkeypatch):
+    """QProcess 没有 quit()（2026-09-24 关窗崩溃：AttributeError）
+
+    既有测试用裸 MagicMock 当进程桩——任何属性调用都静默返回一个新
+    MagicMock，所以 `proc.quit()` 这个根本不存在的 API 从未被发现。
+    这里改用 spec=QProcess 的受限桩：访问类上不存在的属性会抛
+    AttributeError，从而锁死「优雅停止只能调真实存在的 terminate()」。
+    """
+    from unittest.mock import MagicMock
+    timer = _FakeTimer()
+    monkeypatch.setattr(fr, "QTimer", timer)
+    mgr._request_admin_api = lambda p, method="GET": (200, "")
+    proc = MagicMock(spec=fr.QProcess)
+    proc.state.return_value = fr.QProcess.ProcessState.NotRunning
+    mgr._frpc_process = proc
+
+    mgr._stop_frpc()   # 误用 quit() 或任何不存在的 API → 这里抛 AttributeError
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_not_called()      # admin 可达：不直接强杀
+    timer.scheduled[0][1]()            # 2.5s 回检：已自行退出 → 不兜底
+    proc.kill.assert_not_called()
+
+
+def test_stop_frpc_terminate_then_kill_when_hung(mgr, monkeypatch):
+    """admin 可达但进程卡住：terminate 后 2.5s 回检才强杀兜底"""
+    from unittest.mock import MagicMock
+    timer = _FakeTimer()
+    monkeypatch.setattr(fr, "QTimer", timer)
+    mgr._request_admin_api = lambda p, method="GET": (200, "")
+    # state() 返回 MagicMock ≠ NotRunning → 视为仍在运行
+    proc = MagicMock(spec=fr.QProcess)
+    mgr._frpc_process = proc
+
+    mgr._stop_frpc()
+    proc.terminate.assert_called_once()
+    proc.kill.assert_not_called()
+    timer.scheduled[0][1]()
+    proc.kill.assert_called_once()
+
+
 # ==================== P1-1：意外退出退避自愈 ====================
 
 def test_crash_schedules_first_backoff_and_recovers(mgr, monkeypatch):

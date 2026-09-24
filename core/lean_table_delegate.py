@@ -20,6 +20,13 @@ save/restore + 裁剪 + 抗锯齿 + 圆角/矩形背景 + ``initStyleOption``（
 字体/字测缓存。实测 **-49.4%**（11.87 → 6.01 ms/帧），像素级比对与库的
 差异仅 **5.2%**（只剩字符断行与亚像素位置，结构性视觉 100% 一致）。
 
+S2（2026-09-25，见 ``docs/表格滚动延迟调查报告2026-09-25.md``）：文本层
+再预渲染成 QPixmap，滚动帧只 blit——**只缓存文本层**，背景/hover/选中/
+勾选框仍实时绘制，交互状态不受缓存影响。失效键含 (row, col, 尺寸, 文本,
+主题, 字体, 前景色, 对齐, dpr)：排序移动行、编辑单元格、切主题均自然失效。
+offscreen 实测 lean 帧成本再降 16~28%（售后 7.2→5.9 / 10.6→7.6 ms/步，
+scale 1.0/2.0；像素等价探针证实缓存命中与直接 drawText 逐像素一致）。
+
 三个必须遵守的回归点（原型已踩，改动时勿回退）
 ---------------------------------------------
 1. ``ForegroundRole`` 返回的是 **QBrush 不是 QColor**，直接 ``QColor(brush)``
@@ -30,8 +37,10 @@ save/restore + 裁剪 + 抗锯齿 + 圆角/矩形背景 + ``initStyleOption``（
    用 4px 会让整行文本左移 13px。
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from math import ceil
+
+from PySide6.QtCore import Qt, QRect
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPixmap
 
 from qfluentwidgets import getFont, isDarkTheme, qconfig
 from qfluentwidgets.components.widgets.table_view import TableItemDelegate
@@ -43,6 +52,10 @@ _TEXT_INSET_R = 9
 # 省略号缓存上限：超容量整体清空（简易 LFU 不划算，滚动时命中率主要在当页）
 _ELIDE_CACHE_MAX = 4000
 
+# 文本层 QPixmap 缓存上限（S2）。单格 ~120x38x4B ≈ 18KB，2000 项 ≈ 36MB
+# （dpr=2 时物理像素翻两番，~144MB 是极端上界，实际滚动命中集中在当页几百格）
+_TEXT_PM_CACHE_MAX = 2000
+
 
 class LeanTableDelegate(TableItemDelegate):
     """保留 qfluentwidgets 表格全部视觉，仅替换文本绘制路径的轻量委托"""
@@ -52,6 +65,7 @@ class LeanTableDelegate(TableItemDelegate):
         self._base_font = None
         self._fm_cache = {}
         self._elide_cache = {}
+        self._text_pm_cache = {}   # S2：文本层预渲染位图（键见 _draw_text）
         self._dark = None
         # 主题切换会改变文本色/背景色，缓存必须失效（浅色文本色为黑，深色为白）
         try:
@@ -66,6 +80,7 @@ class LeanTableDelegate(TableItemDelegate):
         self._base_font = None
         self._fm_cache.clear()
         self._elide_cache.clear()
+        self._text_pm_cache.clear()
         self._dark = None
 
     def _is_dark(self) -> bool:
@@ -161,9 +176,9 @@ class LeanTableDelegate(TableItemDelegate):
         fg = index.data(Qt.ItemDataRole.ForegroundRole)
         if fg is not None:
             # ForegroundRole 返回 QBrush，不能直接 QColor(brush)
-            painter.setPen(QColor(fg.color() if hasattr(fg, "color") else fg))
+            color = QColor(fg.color() if hasattr(fg, "color") else fg)
         else:
-            painter.setPen(QColor(255, 255, 255) if dark else QColor(0, 0, 0))
+            color = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
 
         align = index.data(Qt.ItemDataRole.TextAlignmentRole)
         if align is not None:
@@ -173,4 +188,34 @@ class LeanTableDelegate(TableItemDelegate):
                         | Qt.AlignmentFlag.AlignVCenter)
         # 必须带 TextWordWrap，否则 '\n' 不换行（回归点 2）
         flags |= int(Qt.TextFlag.TextWordWrap)
-        painter.drawText(rect, flags, elided)
+
+        # S2：文本层预渲染 QPixmap，滚动帧只 blit（drawText 只发生在首次）。
+        # 键含 dpr：跨屏拖动窗口时物理分辨率变化必须重渲染，否则发糊
+        dev = painter.device()
+        dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+        key = (index.row(), index.column(), rect.width(), rect.height(),
+               text, dark, font.family(), font.pointSizeF(), font.weight(),
+               font.bold(), color.rgba(), flags, dpr)
+        pm = self._text_pm_cache.get(key)
+        if pm is None:
+            pm = self._render_text_pixmap(rect, font, color, flags, elided, dpr)
+            if len(self._text_pm_cache) > _TEXT_PM_CACHE_MAX:
+                self._text_pm_cache.clear()
+            self._text_pm_cache[key] = pm
+        painter.drawPixmap(rect.topLeft(), pm)
+
+    @staticmethod
+    def _render_text_pixmap(rect, font, color, flags, elided, dpr) -> QPixmap:
+        """把一段 elided 文本渲染成透明底位图（与直接 drawText 同一条路径）"""
+        pm = QPixmap(max(1, ceil(rect.width() * dpr)),
+                     max(1, ceil(rect.height() * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        try:
+            p.setFont(font)
+            p.setPen(color)
+            p.drawText(QRect(0, 0, rect.width(), rect.height()), flags, elided)
+        finally:
+            p.end()
+        return pm

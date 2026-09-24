@@ -31,7 +31,10 @@ docs/
 │                      架构评审与SQL代码优化方案.md / 售后面板UI改进方案.md /
 │                      frp-source-integration.md / settings_panel_redesign/
 ├── 性能调查类         PERF_REVIEW.md / perf_scroll_investigation.md /
-│                      售后面板性能调查报告2026-09-06.md / QSS使用审计与弃用评估.md
+│                      售后面板性能调查报告2026-09-06.md / QSS使用审计与弃用评估.md /
+│                      远程面板性能调查报告2026-09-24.md /
+│                      管理面板性能调查报告2026-09-25.md /
+│                      表格滚动延迟调查报告2026-09-25.md
 ├── 外部接口类         xqzg接口清单.md / newbv_inventory_fields.md
 └── 图表              class-diagram.mermaid / sequence-diagram.mermaid
 ```
@@ -80,6 +83,9 @@ docs/
 | [perf_scroll_investigation.md](perf_scroll_investigation.md) | 全项目表格与滚动列表的系统性调研，结论全部基于实测，可用 `tools/perf/scroll_profile.py` 复跑 | 调研快照（2026-09-07） |
 | [售后面板性能调查报告2026-09-06.md](售后面板性能调查报告2026-09-06.md) | 售后面板（记录页/统计弹窗/pygwalker）性能专项，只调研不改业务代码 | 调研快照（S1/S3/S4 已落地，见 `tests/test_aftersale_perf_opt.py`） |
 | [QSS使用审计与弃用评估.md](QSS使用审计与弃用评估.md) | QSS 使用面审计与弃用评估（环境基线 PySide6 6.11.2 + qfluentwidgets 1.11.3） | 调研快照（2026-09-07；结论已吸收进 [DESIGN.md](DESIGN.md) §3） |
+| [远程面板性能调查报告2026-09-24.md](远程面板性能调查报告2026-09-24.md) | 远程面板（四视图表格滚动 / 按钮反馈链路 / open_session 全链路）性能专项；harness 可复跑（`tools/perf/perf_remote_*.py`，已同步优化后口径） | 调研快照 + P0/P1/P2 已落地（2026-09-24，见报告头部核对块） |
+| [管理面板性能调查报告2026-09-25.md](管理面板性能调查报告2026-09-25.md) | 运维管理面板（构造/懒构建/填充/查询/定时刷新）专项 + 售后面板落地收益复测；harness 可复跑（`tools/perf/perf_management_panel.py`、`tools/perf/perf_aftersale_residual.py`）；增量方案 N1~N4 已实施（见报告 §七） | 调研快照 + N1~N4 已落地（2026-09-25） |
+| [表格滚动延迟调查报告2026-09-25.md](表格滚动延迟调查报告2026-09-25.md) | 售后「记录与统计」与球桌管理表滚动 150~300ms 延迟根因（性能全关 = 回退 2× 慢的 qfw 默认委托 × CJK 字体 × DPI 光栅放大）；文本层绘制缓存实测地板 -84%；harness `tools/perf/perf_scroll_latency.py` 支持 `--scale` 模拟真机 DPI | 调研快照 + S2 文本层缓存已落地（2026-09-25，`core/lean_table_delegate.py`，像素等价已验证） |
 
 ## 五、外部系统接口与字段
 

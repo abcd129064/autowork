@@ -673,9 +673,11 @@ class SSHTerminalPanel(QWidget):
         self._terminal.set_input_enabled(False)
         # 1. 通知 reader 线程退出
         self._stop_event.set()
-        # 2. 等待 reader 线程结束（recv 超时 0.1s + 循环检查，最多 ~0.5s）
+        # 2. 等待 reader 线程结束（recv 超时 0.1s + 循环检查，正常 ~0.5s 内退出）。
+        #    P1-3（2026-09-24）：上限 2.0s→0.8s——超时后旧代码同样继续关
+        #    channel，缩短上限只减最坏阻塞不改变语义（关闭标签不卡 GUI）
         if self._reader_thread is not None and self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=2.0)
+            self._reader_thread.join(timeout=0.8)
         self._reader_thread = None
         # 3. reader 已退出，安全关闭 channel（此时无并发访问）
         if self._channel:
@@ -684,9 +686,11 @@ class SSHTerminalPanel(QWidget):
             except Exception:
                 pass
             self._channel = None
-        # 4. 取证 worker 短暂等待（连接关闭后其逐条命令会快速失败降级，不阻塞关闭）
-        if self._forensic_worker is not None and self._forensic_worker.isRunning():
-            self._forensic_worker.wait(2000)
+        # 4. 取证 worker：不再等待（P1-3：旧 wait(2000) 白白拖慢关闭）——
+        #    连接关闭后其逐条命令会快速失败自结束，生命周期已由
+        #    _safe_release_worker 的 _pending_workers 强引用托管
+        #    （finished→deleteLater），面板引用置空即可
+        self._forensic_worker = None
         # 5. 关闭 SSH client（close+join 等待 transport 后台线程退出）
         if self._client:
             try:

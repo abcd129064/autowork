@@ -66,8 +66,25 @@ class GamePage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 懒构建（2026-09-25）：打开面板时只建壳，首次显示（切到本页）才装配
+        # 4 个游戏。GamePage 全建 38ms，占 ManagementPanelWindow 构造 96ms 的
+        # ~40%，且是构造期最大可削减项；与 DevicePage/AdminSettingsPage 的
+        # _lazy_built 范式一致。游戏无跨页状态依赖，可安全延迟
+        self._lazy_built = False
+        self._pages = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+    def showEvent(self, event):
+        """首次显示时才装配 Pivot + 4 游戏堆栈（懒构建）"""
+        super().showEvent(event)
+        if not self._lazy_built:
+            self._lazy_built = True
+            self._build_content()
+
+    def _build_content(self):
+        """原 __init__ 装配逻辑：ScrollArea + Pivot + 游戏堆栈"""
+        layout = self.layout()
 
         area = ScrollArea(self)
         area.setWidgetResizable(True)
@@ -85,7 +102,6 @@ class GamePage(QWidget):
         self.game_2048 = Game2048Widget(self.stack)
         self.game_snake = SnakeWidget(self.stack)
         self.game_mines = MinesweeperWidget(self.stack)
-        self._pages = {}
         for key, title, attr in self._TABS:
             page = getattr(self, attr)
             self._pages[key] = page
@@ -101,7 +117,7 @@ class GamePage(QWidget):
         self.stack.currentChanged.connect(self._on_tab_changed)
 
     def _switch_game(self, key):
-        """Pivot 页签切换：同步高亮与内容堆栈"""
+        """Pivot 页签切换：同步高亮与内容堆栈（懒构建前空表无页可切）"""
         page = self._pages.get(key)
         if page is None:
             return
