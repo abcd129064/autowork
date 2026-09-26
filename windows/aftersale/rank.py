@@ -91,7 +91,7 @@ class _RankHBarChart(QWidget):
     （球房级行点击=下钻该球房，球桌级行点击=跳转明细）。悬停行淡色高亮。
     """
 
-    ROW_H = 28
+    ROW_H = 32
     LABEL_W = 150
     VAL_W = 96
     rowClicked = Signal(int)
@@ -112,6 +112,7 @@ class _RankHBarChart(QWidget):
         self._hover = -1
         self.setMinimumHeight(
             len(self._rows) * self.ROW_H + 10 if self._rows else 64)
+        self.updateGeometry()   # 行数变化 → 通知父布局重算 sizeHint
         self.update()
 
     def sizeHint(self):
@@ -178,22 +179,23 @@ class _RankHBarChart(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(hover_c)
                 p.drawRoundedRect(
-                    QRect(2, y - 3, self.width() - 4, self.ROW_H - 2), 4, 4)
+                    QRect(2, y, self.width() - 4, self.ROW_H), 4, 4)
             n = int(r.get("total") or 0)
             name = fm.elidedText(
                 str(r.get("name") or ""), Qt.TextElideMode.ElideRight,
                 self.LABEL_W - 6)
             p.setPen(QColor(_primary_text_color()))
-            p.drawText(QRect(pad_l, y, self.LABEL_W, 18),
+            p.drawText(QRect(pad_l, y, self.LABEL_W, self.ROW_H),
                        Qt.AlignmentFlag.AlignRight
                        | Qt.AlignmentFlag.AlignVCenter, name)
             bw = max(3.0, bar_w * n / max_v)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(base)
-            p.drawRoundedRect(QRectF(bar_x, y + 2, bw, 13), 4, 4)
+            p.drawRoundedRect(
+                QRectF(bar_x, y + (self.ROW_H - 16) / 2, bw, 16), 4, 4)
             p.setPen(QColor(_primary_text_color()))
             p.drawText(
-                QRectF(bar_x + bar_w + 8, y, self.VAL_W, 18),
+                QRectF(bar_x + bar_w + 8, y, self.VAL_W, self.ROW_H),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 f"{n} · {int(r.get('share') or 0)}%")
 
@@ -234,7 +236,24 @@ class RankPage(QWidget):
     # ---------- UI 构造 ----------
 
     def _init_ui(self):
-        root = QVBoxLayout(self)
+        # --- 整页滚动容器：排行行数多（TOP 50/全部）时图表与卡片
+        #     高度自适应增长，靠页面滚动查看，而非把行挤进固定高度 ---
+        self._page_scroll = QScrollArea(self)
+        self._page_scroll.setWidgetResizable(True)
+        self._page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._page_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._page_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        page_lay = QVBoxLayout(self)
+        page_lay.setContentsMargins(0, 0, 0, 0)
+        page_lay.addWidget(self._page_scroll)
+        content = QWidget(self._page_scroll)
+        self._page_scroll.setWidget(content)
+        # setWidget() 会重建视口，透明设置必须在其后补（否则深色主题黑块）
+        self._page_scroll.viewport().setStyleSheet(
+            "background: transparent;")
+
+        root = QVBoxLayout(content)
         root.setContentsMargins(20, 14, 20, 12)
         root.setSpacing(8)
 
@@ -437,7 +456,18 @@ class RankPage(QWidget):
                 self._table.setColumnWidth(i, w)
         body.addWidget(self._table, 3)
         card_lay.addLayout(body, 1)
-        root.addWidget(card, 1)
+        # 卡片高度由内容（图表视口高度）决定，页面滚动承接超长内容
+        root.addWidget(card)
+        # 初始视口高度（空态）
+        self._sync_chart_height()
+
+    def _sync_chart_height(self):
+        """图表视口高度随行数自适应：TOP 10/20 完整展示不滚动，
+        更多行按实际高度展开（超 1600px 封顶后图表内部滚动），
+        避免 TOP 50/全部被挤进固定高度显得密密麻麻。"""
+        n = len(self._rows)
+        h = min(n * _RankHBarChart.ROW_H + 18, 1600) if n else 280
+        self._chart_scroll.setFixedHeight(h)
 
     @staticmethod
     def _qdate_today():
@@ -602,12 +632,14 @@ class RankPage(QWidget):
         bar = (SEMANTIC["warning"]
                if (self._drill or self._level == "table") else None)
         self._chart.set_rows(self._rows, bar_color=bar)
+        self._sync_chart_height()
         self._populate_table()
 
     def _on_error(self, msg, seq=None):
         if seq is not None and seq != self._query_seq:
             return
         self._chart.set_rows([])
+        self._sync_chart_height()
         self._table.setRowCount(0)
         self._lbl_rank_title.setText(f"售后排行（查询失败：{msg}）")
 

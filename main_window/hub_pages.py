@@ -379,12 +379,22 @@ class SettingsHubPage(QWidget):
         # 界面缩放：ComboBox 内联（保存后提示重启生效，同上内联化）
         dpi = int(settings.get("dpi_scale", 100))
         dpi_options = [100, 125, 150, 175, 200]
+        # P1-2（2026-09-25）：系统缩放 ≥150% 且应用内也设了缩放时行内告警
+        # （告警在 apply_dpi_scale 启动时经注册表探测写入，见 core/perf.py）
+        dpi_desc = "整体缩放界面，重启后生效"
+        try:
+            from core.perf import get_dpi_stack_warning
+            if get_dpi_stack_warning() and dpi != 100:
+                dpi_desc = ("整体缩放界面，重启后生效（⚠ 检测到与系统缩放"
+                            "叠加，渲染负担成倍增加，建议改回 100%）")
+        except Exception:
+            pass
         self._combo_dpi = make_combo(
             [(f"{o}%", o) for o in dpi_options],
             dpi_options.index(dpi) if dpi in dpi_options else 0,
             lambda v: win._set_dpi_scale_inline(v), width=110)
         g.addRow(SettingRow(
-            FluentIcon.ZOOM, "界面缩放", "整体缩放界面，重启后生效",
+            FluentIcon.ZOOM, "界面缩放", dpi_desc,
             self._combo_dpi))
 
         classic = bool(settings.get("classic_layout", True))
@@ -402,7 +412,8 @@ class SettingsHubPage(QWidget):
                                     TransparentDropDownPushButton)
         from core.perf import (is_acrylic_enabled, is_animation_enabled,
                                get_table_smooth, set_acrylic_enabled,
-                               set_animation_enabled, set_table_smooth)
+                               set_animation_enabled, set_table_smooth,
+                               is_bigscreen_mode, set_bigscreen_mode)
         # 2026-09-07 用户反馈定稿：三项 亚克力 / 动画 / 表格平滑滚动。
         # 平滑滚动方案演进：ExpandSettingCard 折叠卡（渲染挤压错乱）→
         # 范围下拉+开关（两段式操作割裂）→ 本版单一下拉控件：点开
@@ -418,6 +429,12 @@ class SettingsHubPage(QWidget):
             FluentIcon.QUIET_HOURS, "动画效果",
             "菜单和弹窗的过渡动画，关闭后立即显示",
             make_switch(is_animation_enabled(), set_animation_enabled)))
+        # 大屏性能模式（P1-4，2026-09-25）：像素阈值自动降级的手动覆盖
+        g.addRow(SettingRow(
+            FluentIcon.SPEED_HIGH, "大屏性能模式",
+            "4K/高缩放大屏卡顿时开启：动画自动降级保流畅"
+            "（默认按分辨率智能判定，此开关强制生效）",
+            make_switch(is_bigscreen_mode(), set_bigscreen_mode)))
 
         # 表格平滑滚动：下拉勾选各面板子选项，点击后菜单维持可连续勾选
         # （2026-09-07 用户反馈定稿）：「全部面板」为主控——勾选=全部开启

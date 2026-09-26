@@ -53,6 +53,9 @@ _HIT_PAD = 5        # 命中矩形左右放宽
 _FONT_SCALE = 0.92  # 链接字号 = 表格字号 × 0.92（对齐原 12px 按钮字观感）
 
 # 色键 → 颜色（沿用原按钮 QSS 的三套语义色，深浅主题各一份）
+# ⚠️ 顺序 = (深色主题用, 浅色主题用)。2026-09-25 修复：曾按 [1 if dark else 0]
+# 反取——深色画 #333 深底隐身、浅色画 #c8d0dc 白底看不清（用户截图报告；
+# 正确语义对照 windows/aftersale/common.py _row_btn_css 的 ghost 分支）
 _GHOST_FG = ("#c8d0dc", "#333333")
 
 
@@ -61,7 +64,7 @@ def _link_color(key: str, dark: bool) -> QColor:
         return QColor(current_accent_hex())
     if key == "danger":
         return QColor(SEMANTIC["danger"])
-    return QColor(_GHOST_FG[1 if dark else 0])
+    return QColor(_GHOST_FG[0 if dark else 1])
 
 
 class _OpsLinkMixin:

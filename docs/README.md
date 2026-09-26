@@ -34,7 +34,8 @@ docs/
 │                      售后面板性能调查报告2026-09-06.md / QSS使用审计与弃用评估.md /
 │                      远程面板性能调查报告2026-09-24.md /
 │                      管理面板性能调查报告2026-09-25.md /
-│                      表格滚动延迟调查报告2026-09-25.md
+│                      表格滚动延迟调查报告2026-09-25.md /
+│                      大屏与超高DPI渲染性能调查报告2026-09-25.md
 ├── 外部接口类         xqzg接口清单.md / newbv_inventory_fields.md
 └── 图表              class-diagram.mermaid / sequence-diagram.mermaid
 ```
@@ -85,7 +86,8 @@ docs/
 | [QSS使用审计与弃用评估.md](QSS使用审计与弃用评估.md) | QSS 使用面审计与弃用评估（环境基线 PySide6 6.11.2 + qfluentwidgets 1.11.3） | 调研快照（2026-09-07；结论已吸收进 [DESIGN.md](DESIGN.md) §3） |
 | [远程面板性能调查报告2026-09-24.md](远程面板性能调查报告2026-09-24.md) | 远程面板（四视图表格滚动 / 按钮反馈链路 / open_session 全链路）性能专项；harness 可复跑（`tools/perf/perf_remote_*.py`，已同步优化后口径） | 调研快照 + P0/P1/P2 已落地（2026-09-24，见报告头部核对块） |
 | [管理面板性能调查报告2026-09-25.md](管理面板性能调查报告2026-09-25.md) | 运维管理面板（构造/懒构建/填充/查询/定时刷新）专项 + 售后面板落地收益复测；harness 可复跑（`tools/perf/perf_management_panel.py`、`tools/perf/perf_aftersale_residual.py`）；增量方案 N1~N4 已实施（见报告 §七） | 调研快照 + N1~N4 已落地（2026-09-25） |
-| [表格滚动延迟调查报告2026-09-25.md](表格滚动延迟调查报告2026-09-25.md) | 售后「记录与统计」与球桌管理表滚动 150~300ms 延迟根因（性能全关 = 回退 2× 慢的 qfw 默认委托 × CJK 字体 × DPI 光栅放大）；文本层绘制缓存实测地板 -84%；harness `tools/perf/perf_scroll_latency.py` 支持 `--scale` 模拟真机 DPI | 调研快照 + S2 文本层缓存已落地（2026-09-25，`core/lean_table_delegate.py`，像素等价已验证） |
+| [表格滚动延迟调查报告2026-09-25.md](表格滚动延迟调查报告2026-09-25.md) | 售后「记录与统计」与球桌管理表滚动 150~300ms 延迟根因（性能全关 = 回退 2× 慢的 qfw 默认委托 × CJK 字体 × DPI 光栅放大）；文本层绘制缓存实测地板 -84%；harness `tools/perf/perf_scroll_latency.py` 支持 `--scale` 模拟真机 DPI；二·补充节：可见列数扫描（`--cols`）复现「列多更卡」 | 调研快照 + S2 文本层缓存已落地（2026-09-25）；**S5 整格缓存已落地**（2026-09-26，`core/lean_table_delegate.py`，35 例像素等价回归 + 全列实测 -44~-59%，勾选格 ±1 预乘微差已证明并容差化，见报告 §三 S5） |
+| [大屏与超高DPI渲染性能调查报告2026-09-25.md](大屏与超高DPI渲染性能调查报告2026-09-25.md) | 三台真机（27寸/14寸/55寸外接）卡顿与「未响应」根因：四条逐帧整窗渲染路径（弹窗 opacity/页面切换/菜单 setMask/亚克力模糊）成本 ≈ 线性于物理像素数，场景 C 为事件泵饥饿非死锁；harness `tools/perf/perf_popup_dpi.py`（新增）+ `perf_scroll_latency.py --win`；P0 三项（阈值自动降级）+ P1 四项（卡片级弹窗淡入 / dpi 叠加告警 / 菜单 FADE_IN 映射 / 大屏性能模式开关）已实施，P2-2 取消、P2-1 缓期（见 §五） | 调研快照 + P0/P1 已落地（2026-09-25，`tests/test_perf_dpi_degrade.py` 16 例 + `test_perf_dpi_p1.py` 10 例） |
 
 ## 五、外部系统接口与字段
 

@@ -1607,12 +1607,13 @@ class UIMixin:
         dlg.exec()
 
     def _on_perf_options(self):
-        """性能选项对话框：SwitchButton 独立控制亚克力/动画/表格平滑滚动，切换即时生效无需重启"""
+        """性能选项对话框：SwitchButton 独立控制亚克力/动画/表格平滑滚动/大屏模式，切换即时生效无需重启"""
         from core.perf import (is_acrylic_enabled, is_animation_enabled,
                                set_acrylic_enabled, set_animation_enabled,
                                is_table_smooth_scroll_enabled,
                                set_table_smooth_scroll_enabled,
-                               apply_table_smooth_globally)
+                               apply_table_smooth_globally,
+                               is_bigscreen_mode, set_bigscreen_mode)
 
         class PerfOptionsDialog(MessageBoxBase):
             def __init__(self, parent):
@@ -1660,6 +1661,20 @@ class UIMixin:
                 row3.addWidget(self.sw_table_smooth)
                 self.viewLayout.addLayout(row3)
 
+                # 大屏性能模式（P1-4）：无视阈值强制降级动画（大屏一键）
+                row4 = QHBoxLayout()
+                lbl4 = BodyLabel("大屏性能模式", self)
+                lbl4.setToolTip(
+                    "4K/高缩放大屏卡顿时开启：弹窗/页面切换/菜单动画\n"
+                    "自动降级保流畅（默认按分辨率智能判定，此开关为手动覆盖）")
+                row4.addWidget(lbl4, 1)
+                self.sw_bigscreen = SwitchButton(self)
+                self.sw_bigscreen.setOnText("开")
+                self.sw_bigscreen.setOffText("关")
+                self.sw_bigscreen.setChecked(is_bigscreen_mode())
+                row4.addWidget(self.sw_bigscreen)
+                self.viewLayout.addLayout(row4)
+
         dlg = PerfOptionsDialog(self)
         dlg.yesButton.setText("完成")
         dlg.cancelButton.hide()
@@ -1683,9 +1698,15 @@ class UIMixin:
             # 全局变更：刷新所有未单独覆盖的已打开面板表格滚动模式
             apply_table_smooth_globally()
 
+        def _on_bigscreen_toggled(checked):
+            set_bigscreen_mode(checked)
+            state = "开启" if checked else "关闭"
+            self._append_log(f"[性能] 大屏性能模式已{state}（即时生效）")
+
         dlg.sw_acrylic.checkedChanged.connect(_on_acrylic_toggled)
         dlg.sw_animation.checkedChanged.connect(_on_animation_toggled)
         dlg.sw_table_smooth.checkedChanged.connect(_on_table_smooth_toggled)
+        dlg.sw_bigscreen.checkedChanged.connect(_on_bigscreen_toggled)
         dlg.exec()
 
     # ==================== 设置应用 ====================
@@ -2019,5 +2040,18 @@ class UIMixin:
             scale = settings.get("dpi_scale", 100)
             if scale != 100:
                 os.environ["QT_SCALE_FACTOR"] = str(scale / 100.0)
+                # P1-2（2026-09-25）叠加告警：系统缩放 ≥150% 时应用内缩放与之
+                # 相乘（双 150% → dpr 2.25 → 物理像素 ×5），可把任何机器推入
+                # 「未响应」量级（docs/大屏与超高DPI渲染性能调查报告 §4.2）。
+                # 策略=告警不阻断：注册表探测系统缩放（pre-Qt 无副作用），
+                # 命中则落连接日志 + 供设置页「界面缩放」行内提示。
+                try:
+                    from core.perf import (detect_system_scale_percent,
+                                           set_dpi_stack_warning)
+                    sys_pct = detect_system_scale_percent()
+                    if sys_pct and sys_pct >= 150:
+                        set_dpi_stack_warning(int(scale), sys_pct)
+                except Exception:
+                    pass
         except Exception:
             pass

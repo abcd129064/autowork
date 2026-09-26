@@ -50,19 +50,28 @@ from PySide6.QtGui import QFont, QIcon, QColor, QPainter, QPixmap
 from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 
 # 中央拦截菜单弹出动画：按「面板覆盖→全局」生效值降级（含库内硬编码的
-# ComboBox 下拉），开关切换后下一次弹出即生效（幂等，重复调用无害）
+# ComboBox 下拉），开关切换后下一次弹出即生效（幂等，重复调用无害）；
+# 大屏超阈值时同样降级 NONE（P0-3：DROP_DOWN 每帧 setMask=SetWindowRgn）
 from core.perf import (patch_menu_animation, patch_dialog_animation,
                        patch_table_hover_repaint,
                        patch_lean_table_delegate,
-                       patch_mica_policy)
+                       patch_mica_policy,
+                       patch_switch_animation,
+                       patch_acrylic_downsample)
 patch_menu_animation()
 # 云母环境兜底（2026-09-24）：RDP 会话 / 系统透明效果关闭时 DWM 静默
 # 不渲染 Mica backdrop，而 qfw 已把窗口背景置全透明——表现为"同一份产物
 # 有的电脑没云母且窗口生硬"。命中时双层短路，窗口回退纯主题色背景
 patch_mica_policy()
 # 中央拦截 MessageBoxBase 弹窗淡入/淡出（QGraphicsOpacityEffect 整窗离屏
-# 渲染是「双击打开面板」低帧/卡顿主因）：动画关闭时直接显示，秒开无渐变
+# 渲染是「双击打开面板」低帧/卡顿主因）：动画关闭或大屏超阈值时直接显示，
+# 秒开无渐变；超阈值另把卡片阴影半径 60→30（P0-1，2026-09-25）
 patch_dialog_animation()
+# 大屏/超高 DPI 自动降级（P0-2/P0-3，2026-09-25）：亚克力模糊强制降采样
+# （4K 级 160~1090ms → 数 ms）+ 页面切换超阈值直切。阈值 perf 域
+# perf_dpi_degrade_pixels（默认 600 万物理像素，0=关闭），阈值以下零变化
+patch_acrylic_downsample()
+patch_switch_animation()
 # 中央拦截 TableWidget hover 重绘：鼠标扫过行只重绘新旧两行条带（替代
 # 库默认整视口重绘），滚轮滚动 + 鼠标移动叠加场景掉帧显著减少（幂等）
 patch_table_hover_repaint()
