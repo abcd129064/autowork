@@ -1,4 +1,5 @@
-PySide6>=6.5.0
+# Qt for Python：GUI 框架，LGPL-3.0 / GPL-2.0 / GPL-3.0 三重许可可选，本项目按 GPL-3.0 路线使用
+PySide6 >= 6.5.0
 PySide6-Fluent-Widgets>=1.11.0
 paramiko>=3.0.0
 requests>=2.28.0

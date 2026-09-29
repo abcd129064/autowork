@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AutoWork 入口文件 - 所有业务逻辑已拆分到模块化包中：
     core/         - 路径、日志、工具函数
     win_api/      - Windows ctypes 声明
@@ -8,9 +7,8 @@
     styles/       - QSS 主题样式文件
 """
 
-import sys
 import os
-import json
+import sys
 import threading
 import traceback
 
@@ -126,7 +124,7 @@ def _make_splash(app, is_dark):
         return None
 
 
-def main():
+def run_app():
     """启动入口：装异常钩子/敏感配置迁移/主题字体，再创建主窗口进事件循环"""
     # 全局异常钩子：主线程/后台线程未捕获异常先落盘日志，确保崩溃可追踪
     def _global_exception_hook(exc_type, exc_value, exc_tb):
@@ -151,7 +149,7 @@ def main():
     sys.excepthook = _global_exception_hook
     threading.excepthook = _thread_exception_hook
 
-    # 应用 DPI 缩放（必须在 QApplication 创建前设置环境变量）
+    # DPI 缩放系数必须先落到环境变量、再实例化 QApplication，晚一步就不生效；
     # 启动时自动迁移：旧整文件 settings.json 按域拆分到 config/ + 明文敏感字段 DPAPI 加密，用户无感
     try:
         from core import app_settings
@@ -161,13 +159,14 @@ def main():
         _settings = {}
     MainWindow.apply_dpi_scale(_settings)
 
-    app = QApplication(sys.argv)
+    app = QApplication(list(sys.argv))
 
     # 安装 Qt 消息处理器：qFatal/critical/warning 落盘
     qInstallMessageHandler(qt_message_handler)
 
-    # 设置应用程序样式
-    app.setStyle("Fusion")
+    # 样式基座固定用 Fusion，所有 QSS 主题都叠在它之上
+    _style_base = "Fusion"
+    app.setStyle(_style_base)
 
     # 设置应用图标（窗口标题栏/任务栏，.ico 内含多尺寸）
     _icon_path = os.path.join(get_resource_dir(), "app_icon.ico")
@@ -219,42 +218,43 @@ def main():
     if splash is not None:
         splash.show()
         app.processEvents()
-    window = MainWindow()
+    main_window = MainWindow()
     # offscreen 预热：强制完成首帧布局（FlowLayout 工具栏/按钮高度强制/
     # qfw polish 的 singleShot(0) 任务），用户不会看到半成品第一帧。
     # ⚠️ WA_DontShowOnScreen 下 show() 已把 isVisible 置 True，撤属性后
     # 再 show() 是空操作（原生窗口不会创建）——必须先 hide() 复位可见态；
     # try/finally 保证预热异常也一定走到真 show，闪屏不会把程序"带走"。
     try:
-        window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-        window.show()
+        main_window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        main_window.show()
         for _ in range(10):
             app.processEvents()
     finally:
-        window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
-        window.hide()  # 复位可见态，确保下面的 show() 真正创建原生窗口
+        main_window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        main_window.hide()  # 复位可见态，确保下面的 show() 真正创建原生窗口
     if splash is not None:
         splash.showMessage("正在准备工作台…", Qt.AlignmentFlag.AlignLeft
                            | Qt.AlignmentFlag.AlignBottom,
                            QColor("#9aa0a6"))
         app.processEvents()
-    window.show()
-    window.raise_()
-    window.activateWindow()
+    main_window.show()
+    main_window.raise_()
+    main_window.activateWindow()
     if splash is not None:
-        splash.finish(window)
+        splash.finish(main_window)
 
     # 自动更新（S3）：先消费上次安装的回执（成功/失败都给用户交代），
     # 再按配置静默自检新版本。两者都延后到事件循环起来之后，不抢启动资源。
     try:
         from PySide6.QtCore import QTimer as _QTimer
-        _QTimer.singleShot(0, window.consume_update_receipt_on_startup)
-        _QTimer.singleShot(0, window.auto_check_update_on_startup)
+        _QTimer.singleShot(0, main_window.consume_update_receipt_on_startup)
+        _QTimer.singleShot(0, main_window.auto_check_update_on_startup)
     except Exception:
         pass
 
-    sys.exit(app.exec())
+    rc = app.exec()
+    sys.exit(rc)
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # 仅直接执行本文件时进入事件循环
+    run_app()

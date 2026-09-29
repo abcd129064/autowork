@@ -107,7 +107,7 @@ tools/stress_test/README.md   压测套件说明
 - **双布局模式**：默认/经典布局一键切换
 - **自动版本号**：基于 git 提交数自动计算（`core/version.py`），标题栏展示 `主.次.提交数`
 
-## 技术栈
+## 技术选型
 
 | 组件 | 技术 |
 |------|------|
@@ -300,19 +300,19 @@ core ← win_api ← workers ← windows ← main_window ← main.py
 
 ### 安装依赖
 
-```bash
-pip install -r requirements.txt
+```console
+python -m pip install -r requirements.txt
 ```
 
 ### 开发模式运行
 
-```bash
+```console
 python main.py
 ```
 
 ### 打包为 exe
 
-```bash
+```console
 python build_exe.py
 ```
 
@@ -530,7 +530,7 @@ frp 服务器配置（设置 → 远程连接）：
   `serve_dist_v2.mjs`；v2 专用 `web/vue-pure-admin/tools/verify_pure_admin.mjs`）
 - **部署脚本密码**：一律从环境变量 `AFT_SSH_PASS` 读取，不落盘、不写命令行历史可见位置
 
-## 注意事项
+## 已知约束
 
 - `autowork_with_table.py` 由 `.ui` 文件编译生成，修改界面请编辑 `.ui` 后重新编译
 - P2P 功能需要 `frpc.exe` 与主程序在同一目录下
@@ -544,6 +544,6 @@ frp 服务器配置（设置 → 远程连接）：
 - 敏感配置（`ssh_pass` / `upload_pass` / `ai_api_keys` 等）经 DPAPI 加密后落盘，换机器或系统用户后需重新填写
 - 数据库表结构变更只改 `database/schema.py`（唯一 DDL 来源）：SQLite 与 MySQL 两侧均自动迁移补列
 
-## 许可证
+## 许可证与第三方授权
 
 石睿轩创作，由沈喆修改第二版。

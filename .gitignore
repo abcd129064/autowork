@@ -1,38 +1,38 @@
-# Python
+# 解释器与打包缓存
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 *.so
 .Python
-/build/
-develop-eggs/
-/dist/
-*.egg-info/
 *.egg
+*.egg-info/
+develop-eggs/
+
+# 构建与发布产物（整目录可重建，不入库）
+/build/
+/dist/
 # 更新发布打包产物（tools/deploy/publish_update.py 输出，含大 zip，不入库）
 /out/
 
-# Virtual Environment
+# 本地虚拟环境
 venv/
 env/
 ENV/
 
-# IDE
+# 编辑器与操作系统杂项
 /.idea/
 /.vscode/
 *.swp
 *.swo
 *~
-
-# Qt
-*.ui.c
-*.pyc
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Project specific
+# Qt 编译中间物
+*.ui.c
+
+# 业务数据、日志与本地配置（含客户库存/凭据，禁止入库）
 database/*.db
 database/*.db-shm
 database/*.db-wal

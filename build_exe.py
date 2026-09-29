@@ -12,10 +12,10 @@
 - frpc.exe：P2P 外部工具（完整版主程序的远程会话从 exe 目录启动）
 - 旧版 exe 命名（AutoWork.exe）清理，避免与新名混淆
 """
-import subprocess
-import sys
 import os
 import shutil
+import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
