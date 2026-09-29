@@ -135,7 +135,9 @@ if _qt_prefix and os.path.basename(os.path.normpath(_qt_prefix)) == 'Library':
     _qt_plugins = os.path.join(_qt_prefix, 'lib', 'qt6', 'plugins')
     # Qt6 DLL 黑名单：项目零引用 WebEngine/QML/Quick/Designer/Pdf 等模块，
     # conda 的 Library/bin 含全套 Qt DLL，无差别收集会引入 ~250MB 无用二进制，
-    # 只收集运行时必需的 Core/Gui/Widgets/Svg/Network/OpenGL 等
+    # 黑名单之外的 Qt6*.dll 全部收集。注意：此分支只对 conda 布局 PySide6 生效，
+    # pip 布局下由 PyInstaller hook 按 import 收集（项目零 GL 引用 → dist
+    # 实际不含 Qt6OpenGL/Qt6OpenGLWidgets，做 GL 试点需先显式补发，见调研 §1.2）
     _skip_qt_dlls = ('qt6webengine', 'qt6webchannel', 'qt6websockets',
                      'qt6quick', 'qt6qml', 'qt6labs', 'qt6designer',
                      'qt6pdf', 'qt6uitools', 'qt6help', 'qt6test',
