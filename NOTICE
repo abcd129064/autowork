@@ -1,0 +1,67 @@
+AutoWork
+Copyright (C) 2026 沈喆
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+--------------------------------------------------------------------------------
+（中文译文，只为方便阅读，条款以上方英文原文与 `LICENSE` 全文为准）
+
+本程序是自由软件，你可以在自由软件基金会发布的 GNU 通用公共许可证第 3 版
+或（由你选择的）任何更新版本的条款下重新分发和/或修改它。
+
+分发本程序的目的是希望它有用，但不含任何担保，甚至连适销性或在特定用途下的
+适用性这类默示担保也没有。详见 GNU GPL 全文。
+
+你在接收本程序时应当同时收到 GPL 全文副本（仓库根的 `LICENSE`）。如果没有
+收到，见 <https://www.gnu.org/licenses/>。
+
+--------------------------------------------------------------------------------
+## 关于原始作者
+
+本程序源自石睿轩的早期创作，经原作者授权后由沈喆大幅重写并维护第二版。
+除该授权所覆盖的部分外，本程序的版权归沈喆所有。
+
+## 完整对应源码（Complete Corresponding Source）
+
+本仓库按 GPLv3 分发，因此任何拿到本程序副本的人都能免费拿到完整对应源码：
+
+    https://github.com/abcd129064/autowork
+
+桌面端 exe 由仓库内的 `AutoWork.spec` / `AfterSale.spec` 加 `build_exe.py`
+从上述源码构建，构建脚本与依赖版本（`requirements.txt`）一并入库，任何人
+可复现同等产物。只要仓库还在，这个 Offer 就持续有效，不需要单独的书面报价。
+
+## 第三方组件与它们的许可证
+
+运行时依赖的许可证原文收在 `licenses/` 目录下，逐项对照表见
+`licenses/INDEX.md`。要点：
+
+- `PySide6-Fluent-Widgets`（qfluentwidgets）— GPL-3.0。这是本项目按 GPLv3
+  分发的直接原因：它与本程序作为一个整体一起分发，按 GPL 的 copyleft 条款，
+  整件作品必须以 GPLv3 授权下游。作者另售的 QFluentWidgets Pro 是另一个商业
+  产品，本项目未使用。
+- `PySide6` / `PySide6-Essentials` / `shiboken6` — 上游给的三选一
+  `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`，本项目取 GPL-3.0 这一支，
+  与整件作品的 GPLv3 授权对齐，因此不再单独附 Qt 的许可证文件。
+- `paramiko` — LGPL-2.1，依 GPL 第 6 条关于结合作品的条款随整件作品分发。
+- `bcrypt` / `requests` / `openai` / `pygwalker` / `opencv` — Apache-2.0。
+- `fastapi` / `urllib3` / `pymysql` / `openpyxl` — MIT；`Pillow` — MIT-CMU。
+- `numpy` / `pandas` / `uvicorn` / `lxml` / `darkdetect` — BSD 系。
+- `frpc.exe` — Apache-2.0，原文在 `frp-dev/LICENSE`。
+- `vendor/echarts.min.js` — Apache-2.0，声明在文件头部。
+- `web/vue-pure-admin/` — MIT，原文在该目录的 LICENSE 文件里。
+- `trafilatura` — 原文待补，见 `licenses/INDEX.md` 第四节。
+
+以上各项都允许在 GPL 条款下与本程序结合作为一个整体分发；各组件自身的版权
+声明保留在 `licenses/` 对应的原文文件中。
