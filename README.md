@@ -276,6 +276,9 @@ autowork/
 │   ├── logo/                  #   logo 定稿 v4 + spec.md + 生成脚本（_archive/ 为落选稿）
 │   └── shots/                 #   入库截图
 ├── AGENTS.md                  # ★ Agent / 开发者作业规范（目录边界、命名、禁改清单、验证基线）
+├── LICENSE                    # GPL-3.0 全文（FSF 标准文本，逐字未改）
+├── NOTICE                     # 授权声明 + 完整对应源码 Offer + 第三方许可要点
+├── licenses/                  # 各第三方组件许可证原文（索引 licenses/INDEX.md）
 ├── videos/                    # 视频/日志文件目录
 ├── logs/                      # 运行日志目录
 ├── build/                     # 构建临时输出
@@ -546,4 +549,18 @@ frp 服务器配置（设置 → 远程连接）：
 
 ## 许可证与第三方授权
 
-石睿轩创作，由沈喆修改第二版。
+本程序是自由软件，可在 **GNU GPL v3（或你选择的更新版本）** 条款下重新分发和/或修改；
+全文见根目录 [LICENSE](LICENSE)，中文摘要与第三方组件清单见 [NOTICE](NOTICE)。
+因为界面组件库 [PySide6-Fluent-Widgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets)
+本身就是 GPLv3，它与本程序作为一个整体分发，所以本项目同样按 GPLv3 授权 ——
+这意味着下游可以再分发、可修改、**也可用于商业目的**，唯一条件是一并带上源码与
+同等授权，且不得追加限制。
+
+本仓库是公开仓库，即完整对应源码（含 `AutoWork.spec` / `AfterSale.spec` 与
+`build_exe.py` 这套构建脚本）随时可获取，任何人可自行复现 exe 产物。
+
+石睿轩创作，由沈喆修改第二版（原始作者已授权重写与再分发）。
+
+依赖组件的许可证原文逐份收在 [licenses/](licenses/) 目录，对照表见
+[licenses/INDEX.md](licenses/INDEX.md)。详细说明（义务触发条件、内部使用与对外
+分发的区别）见 [docs/GPLv3依赖合规说明.md](docs/GPLv3依赖合规说明.md)。

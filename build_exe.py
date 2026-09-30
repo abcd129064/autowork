@@ -10,6 +10,7 @@
 构建完成后自动将运行时需要位于 exe 旁边的文件复制到各产物目录：
 - settings.json：用户可编辑配置（应用从 exe 目录读写），两份产物各一份
 - frpc.exe：P2P 外部工具（完整版主程序的远程会话从 exe 目录启动）
+- LICENSE / NOTICE / licenses/：GPLv3 授权全文与第三方许可证原文，随包分发
 - 旧版 exe 命名（AutoWork.exe）清理，避免与新名混淆
 """
 import os
@@ -148,6 +149,26 @@ if os.path.isfile(frpc_src):
     print('[build_exe] 已复制 frpc.exe -> dist/AutoWork/')
 else:
     print('[build_exe] 跳过 frpc.exe（源文件不存在）')
+
+# ---- 许可证随包分发 ----
+# 理由：整件作品按 GPLv3 分发（qfluentwidgets 是 GPL），拿到 exe 的人应当同时
+# 拿到授权全文与第三方许可证原文。走 build_exe.py 而不是 spec 的 datas，是因为
+# onedir 下 datas 会落进 _internal/，放在 exe 旁边才看得见；这两份产物各一份，
+# publish_update.py 打包更新 zip 时按目录整体收录，会自动带上
+for _lic in ('LICENSE', 'NOTICE'):
+    _src = os.path.join(ROOT, _lic)
+    if os.path.isfile(_src):
+        for dest in (dist_dir, os.path.join(ROOT, 'dist')):
+            shutil.copy2(_src, os.path.join(dest, _lic))
+        print(f'[build_exe] 已复制 {_lic} -> dist/AutoWork/ 与 dist/')
+_lic_dir_src = os.path.join(ROOT, 'licenses')
+if os.path.isdir(_lic_dir_src):
+    for dest in (dist_dir, os.path.join(ROOT, 'dist')):
+        _dst = os.path.join(dest, 'licenses')
+        if os.path.isdir(_dst):
+            shutil.rmtree(_dst)
+        shutil.copytree(_lic_dir_src, _dst)
+    print('[build_exe] 已复制 licenses/ -> dist/AutoWork/ 与 dist/')
 
 # ---- 旧产物清理 ----
 # 旧版 exe 命名清理（历史产物，避免与新名混淆）。注意：Windows 文件系统

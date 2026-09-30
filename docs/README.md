@@ -26,7 +26,8 @@ docs/
 ├── TODO.md            ★ 待办与未来计划（P0/P1/P2）
 │
 │  ── 专题（历史沉淀，按需查阅）──
-├── 规范类             Qt内联引导说明.md / frp-065-api-reference.md
+├── 规范类             Qt内联引导说明.md / frp-065-api-reference.md /
+│                      GPLv3依赖合规说明.md
 ├── 设计方案类         MySQL兜底降级设计.md / auto_update_research.md /
 │                      架构评审与SQL代码优化方案.md / 售后面板UI改进方案.md /
 │                      frp-source-integration.md / settings_panel_redesign/
@@ -65,6 +66,7 @@ docs/
 | --- | --- | --- |
 | [Qt内联引导说明.md](Qt内联引导说明.md) | conda base 激活态下为什么必须在 `import PySide6` 前执行内联引导、标准写法、哪些入口已内置 | 规范 |
 | [frp-065-api-reference.md](frp-065-api-reference.md) | frp 0.65 管理 API 完整参考手册：frps 六端点 + frpc 六端点 + 鉴权 + 版本墙（0.67/0.68/0.70）+ autowork 端点使用矩阵 | 规范（对照 v0.65.0 tag 源码核验；autowork 远程线改 API 用法前必读） |
+| [GPLv3依赖合规说明.md](GPLv3依赖合规说明.md) | qfluentwidgets 带来的 GPL 传染怎么处置：义务由 conveying 而非商用触发、三个分发面逐一判定、已落地的声明清单（`LICENSE`/`NOTICE`/`licenses/`）与后续改动的硬约束 | 规范（改 `requirements.txt` 或新增随包资产前必读） |
 
 ## 三、架构与设计方案
 
