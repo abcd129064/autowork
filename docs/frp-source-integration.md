@@ -542,6 +542,8 @@ bindPort = 47511
 
 **UI（RemoteHub 3→4 视图）**：会话总览 9 列+5 统计卡（新增 frps 在线、RTT/质量、今日流量列；offline 行禁用 SSH/SFTP/RDP；「立即感知」按钮）；新「连接质量」视图（4 卡+8 列 sparkline 明细+立即探测+双击开 SSH）；隧道配置新增「管理通道」卡（感知 URL/凭据编辑、测试连接、frpc 通道自检 healthz+/api/status、探测暂停、优雅停止按钮——废除旧「清注册表→apply→还原」绕行）；球桌管理页 TABLE_COLUMNS 末位 +`frps在线`（第 11 列，派生列不落库不进 CSV 导出，proxies_changed 仅重绘该列不重查库）。
 
+> 2026-10-04 更新：RemoteHub 已扩为**六视图**（+「frps 代理」、+「RDP」）；会话总览操作列**不再含 RDP 链接**（visitor 的 bindPort 只映射远端 22，3389 专用隧道属后续功能），原因与接入清单见新「RDP」视图，详见 [CHANGELOG.md](CHANGELOG.md) 3.13「远程页操作列移除 RDP + 新增「RDP」视图」条。
+
 **验证三段**：单测 `tests/test_frps_phase2.py` 35 例；全量 pytest **437 passed**；生产冒烟 `tools/smoke/smoke_frps_perception_prod.py` **22/22**（0.06s 拉 767 条名单、四态全对、6 条面板 snk 全在名单、真 frpc.exe `/api/stop` 5s 内自退且端口释放）。
 
 ### F.5 frps 概览卡（2026-09-22，0.65 能力盘点的直接产出）

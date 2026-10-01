@@ -31,6 +31,11 @@ DB_PATH = os.path.join(_DB_DIR, "tables.db")
 # 存储的字段（与面板展示列一致）
 FIELDS = ("name", "roomName", "onlineStatusName", "remark", "cameraPassExt", "snk_code", "code")
 
+# 参与关键词搜索的列（= FIELDS + 面板「版本号」列）
+# deviceVersion 是 wechat listext 的设备版本（如 200070-20061-100836），
+# 用户常直接按其中的数字段搜索（如 200070 / 20058），故纳入 FTS 与 LIKE 两条路径。
+SEARCH_FIELDS = FIELDS + ("deviceVersion",)
+
 # remark 中 snk 标识的提取规则（如 "... snk_001 ..." → "snk_001"），
 # 用于 frp xtcp 远程连接时定位设备（visitor serverName）
 _SNK_PATTERN = re.compile(r"snk[\w\-]*", re.IGNORECASE)
@@ -106,7 +111,7 @@ _FTS_MIN_LEN = 3
 
 # 主表 → (FTS 表名, 参与搜索的列) 映射
 _FTS_MAP = {
-    "billiard_tables": ("tables_fts", FIELDS),
+    "billiard_tables": ("tables_fts", SEARCH_FIELDS),
     "xqzg_status": ("xqzg_fts", STATUS_FIELDS + ("device_code",)),
     "kd_status": ("kd_fts", STATUS_FIELDS + ("device_code",)),
 }
@@ -276,7 +281,7 @@ def _ensure_initialized(conn):
     # 迁移：旧库按 schema.MIGRATIONS 注册表补列（列级元数据单一来源）。
     # 简单补列表（aftersale_records / kd_status / xqzg_status）统一走
     # _migrate_sqlite_add_columns；billiard_tables 因带回填/FTS 副作用
-    # 在下方单独处理。
+    # 在下方单独处理（先硬编码块补 snk_code/code/city，再按注册表补其余列）。
     _migrate_sqlite_add_columns(conn, "aftersale_records")
     _migrate_sqlite_add_columns(conn, "ledger_records")
     _migrate_sqlite_add_columns(conn, "health_alerts")
@@ -313,6 +318,11 @@ def _ensure_initialized(conn):
     if cols and "city" not in cols:
         conn.execute(schema.sqlite_alter_for("billiard_tables", "city"))
         conn.commit()
+    # 迁移：billiard_tables 其余注册表列（deviceVersion「版本号」/ status「退单」）
+    # 此前该表只走上面四个硬编码块，注册表条目形同虚设，导致 2026-09-20 之前
+    # 建成的本地库一直缺这两列（MySQL 侧 _ensure_mysql_tables 走注册表故正常），
+    # SQLite 兜底查询会因缺列直接报错，版本号/退单筛选也全部失效。
+    _migrate_sqlite_add_columns(conn, "billiard_tables")
     # 迁移：xqzg_fts 结构落后（缺 device_code 列）时删除，由 _setup_fts 重建
     # （含 rebuild），避免触发器列数不匹配导致 FTS 降级 LIKE
     try:
@@ -323,6 +333,21 @@ def _ensure_initialized(conn):
             conn.execute("DROP TRIGGER IF EXISTS xqzg_fts_ad")
             conn.execute("DROP TRIGGER IF EXISTS xqzg_fts_au")
             conn.execute("DROP TABLE IF EXISTS xqzg_fts")
+            conn.execute("DELETE FROM sync_meta WHERE key='fts_built'")
+            conn.commit()
+    except sqlite3.Error:
+        pass  # FTS 表尚不存在，由 _setup_fts 正常创建
+    # 迁移：tables_fts 结构落后（缺 deviceVersion 列）时删除，由 _setup_fts 重建
+    # （含 rebuild）。FTS 用 IF NOT EXISTS 创建，老库不会自动补列，触发器仍按旧列
+    # 集同步，会导致「版本号」搜索静默查不到，故必须显式重建。
+    try:
+        fts_cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(tables_fts)").fetchall()]
+        if fts_cols and "deviceVersion" not in fts_cols:
+            conn.execute("DROP TRIGGER IF EXISTS tables_fts_ai")
+            conn.execute("DROP TRIGGER IF EXISTS tables_fts_ad")
+            conn.execute("DROP TRIGGER IF EXISTS tables_fts_au")
+            conn.execute("DROP TABLE IF EXISTS tables_fts")
             conn.execute("DELETE FROM sync_meta WHERE key='fts_built'")
             conn.commit()
     except sqlite3.Error:
@@ -724,9 +749,9 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
             params.extend(fts[1])
         else:
             like = f"%{kw}%"
-            kw_cond = " OR ".join([f"{f} LIKE ?" for f in FIELDS])
+            kw_cond = " OR ".join([f"{f} LIKE ?" for f in SEARCH_FIELDS])
             conds.append(f"({kw_cond})")
-            params.extend([like] * len(FIELDS))
+            params.extend([like] * len(SEARCH_FIELDS))
 
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
 

@@ -72,12 +72,13 @@ tools/stress_test/README.md   压测套件说明
 - **多后端存储**：本地 SQLite / 远程 MySQL 双后端，跟随数据库设置开关切换；MySQL 模式下多人各自提交即落库，刷新可见
 - **数据库设置**：MySQL 连接配置、测试连接；启用后直接读写远程库，不可用时自动降级本地 SQLite
 
-### 远程页（左侧导航「远程」，Pivot 五视图）
-- **会话总览**：frps 概览卡 + 统计卡 + 隧道表（行内一键 SSH / SFTP / RDP / 断开 / 删除；SFTP 传输中删除有二次确认；断开保留注册）
-- **P2P 访客**：XTCP visitor 注册管理（基于 frp 的 P2P 内网穿透；注册只持久化不自动拉起 frpc；visitor 热重载；球桌号搜索带出 serverName）
+### 远程页（左侧导航「远程」，Pivot 六视图）
+- **会话总览**：frps 概览卡 + 统计卡 + 隧道表（行内一键 SSH / SFTP / 断开 / 删除；SFTP 传输中删除有二次确认；断开保留注册）
+- **连接**（原「P2P 访客」）：XTCP visitor 注册管理（基于 frp 的 P2P 内网穿透；注册只持久化不自动拉起 frpc；visitor 热重载；球桌号搜索带出 serverName）；TCP Segmented 模式直连服务器
 - **连接质量**：frps 在线感知 + visitor 打洞质量探测（每 30s 一轮）
 - **frps 代理**：frps 网页面板 Proxies 页同源清单（TCP/UDP/HTTP/… 八页签 + 端口/连接/流量/客户端版本/状态，只读）
 - **隧道配置**：frpc 服务器配置与进程控制 + frp 总开关 + 实时日志终端
+- **RDP**：远程桌面隧道预留页（说明操作列为何移除 RDP、当前可用路径、3389 隧道落地后的接入清单 + 打开会话中心）
 - **TCP 模式**：直连服务器，保存服务器列表
 - **SFTP 文件管理**：双面板文件浏览器，上传/下载/删除/重命名/创建，整目录递归传输，传输队列（暂停/恢复/取消）
 - **SSH 终端**：交互式 PTY + ANSI 彩色渲染，Tab 补全，命令历史，Windows Terminal 风格
@@ -212,6 +213,8 @@ autowork/
 │   ├── ledger_panel.py        #   跑视频面板（re-export shim）
 │   ├── run_video/             #   跑视频面板拆分包（表单/录入/记录/设置/窗口）
 │   ├── remote_session/        #   远程会话窗口（SFTP/SSH/RDP/取证/隧道/诊断）
+│   │   ├── remote_hub.py      #       远程页（六视图：会话总览/连接/连接质量/frps 代理/隧道配置/RDP）
+│   │   └── remote_mixin.py    #       远程连接（frpc/SSH/SFTP/RDP）
 │   ├── mysql_sync_card.py     #   MySQL 连接配置卡片（运维/售后/跑视频面板共用）
 │   ├── single_video_dialog.py #   单杆视频参数对话框/默认值常量
 │   ├── stat_charts.py         #   统计图表自助分析（pygwalker）
@@ -226,13 +229,11 @@ autowork/
 │   ├── main_window.py         #   MainWindow 主类（组合 Mixin，注册导航 Hub）
 │   ├── hub_pages.py           #   业务域容器页（ManagementHub/AftersaleHub/LedgerHub/SettingsHub/About）
 │   ├── tool_hub.py            #   工具页（四工作区：单杆视频/上传清单/批量整理/端口占用）
-│   ├── remote_hub.py          #   远程页（三视图：会话总览/P2P访客/隧道配置）
 │   ├── pivot_page.py          #   Pivot 二级导航容器页基建
 │   ├── hub_popout.py          #   Hub 弹出为独立窗口（HubPopoutWindow）
 │   ├── setting_cards.py       #   统一设置页卡片组件（SettingGroup/SettingRow）
 │   ├── settings_mixin.py      #   配置读写、快捷键
 │   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
-│   ├── remote_mixin.py        #   远程连接（frpc/SSH/SFTP/RDP）
 │   └── ui_mixin.py            #   状态栏/菜单栏/右键菜单/主题
 │
 ├── tools/                     # 开发/运维脚本（一律不参与运行时，规范见 AGENTS.md）

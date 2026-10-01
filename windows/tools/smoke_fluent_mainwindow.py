@@ -211,13 +211,14 @@ check("8b.5 设置-工具保留快捷键/诊断/前往",
       "_on_modify_shortcuts" in _gt_src and "_on_open_conn_diag" in _gt_src
       and "_on_open_tool_hub" in _gt_src)
 
-print("\n[8c] 远程页 RemoteHub（五视图 Pivot：+连接质量 +frps 代理 2026-09-23）")
+print("\n[8c] 远程页 RemoteHub（六视图 Pivot：+连接质量 +frps 代理 +RDP 2026-10-04）")
 rh = getattr(w, "remote_hub", None)
-check("8c.1 RemoteHub 五视图工作区",
-      rh is not None and rh.stack.count() == 5)
-check("8c.2 Pivot 5 项", rh is not None
-      and len(rh.pivot.items) == 5
-      and "remoteFrpsProxiesWork" in rh.pivot.items)
+check("8c.1 RemoteHub 六视图工作区",
+      rh is not None and rh.stack.count() == 6)
+check("8c.2 Pivot 6 项", rh is not None
+      and len(rh.pivot.items) == 6
+      and "remoteFrpsProxiesWork" in rh.pivot.items
+      and "remoteRdpWork" in rh.pivot.items)
 if rh is not None:
     check("8c.2b 连接诊断不内嵌（入口在设置-工具）",
           getattr(rh, "diag_work", None) is None)
@@ -251,35 +252,41 @@ if rh is not None:
           rh.visitor_work.table.columnCount() == 6
           and rh.visitor_work.edit_name.width() == 260)
     # 回归（真机首崩）：非空表 _add_row 行渲染（tooltip f-string 曾用错变量 s）
+    # 注：refresh() 自 2026-09-24 起只把整表重建排到下一轮事件循环（五源归并），
+    # 断言前必须跑事件循环，否则读到的是上一次的行集
     _mgr = rh.session_work._mgr
     _tmp_sn = "__smoke_tmp_tunnel__"
     _base_rows = len(_mgr.records())
     _mgr.register_visitor(_tmp_sn)
     try:
         rh.session_work.refresh()
+        for _ in range(3):
+            app.processEvents()
         check("8c.7 会话总览非空表行渲染无异常",
               rh.session_work.table.rowCount() == _base_rows + 1
               and _base_rows + 1 >= 1)
         rh.visitor_work.refresh()
+        for _ in range(3):
+            app.processEvents()
         check("8c.8 访客表非空表行渲染无异常",
               rh.visitor_work.table.rowCount() == _base_rows + 1)
         # 回归（2026-09-22 真机 bug「断开和删除操作一样」）：断开=disabled
-        # 态渲染——状态列「已断开」、断开按钮置灰、SSH 按钮仍可用（重连入口）
+        # 态渲染——状态列「已断开」，操作列保留重连入口（SSH/SFTP）与「删除」；
+        # 2026-10-04 起操作列不再有 RDP（visitor 只映射 22，无 3389 隧道）
         _mgr._visitors[_tmp_sn]["disabled"] = True
         rh.session_work.refresh()
+        for _ in range(3):
+            app.processEvents()
         _row_sn = next(i for i in range(rh.session_work.table.rowCount())
                        if (rh.session_work.table.item(i, 2)
                            and rh.session_work.table.item(i, 2).text() == _tmp_sn))
         check("8c.7b disabled 行状态列显示已断开",
               rh.session_work.table.item(_row_sn, 0).text() == "已断开")
-        from qfluentwidgets import PushButton as _PB
-        _btns = rh.session_work.table.cellWidget(_row_sn, 8).findChildren(_PB)
-        _by_text = {b.text(): b for b in _btns}
-        check("8c.7c 断开按钮置灰/SSH 可用（两按钮语义分离）",
-              _by_text.get("断开") is not None
-              and not _by_text["断开"].isEnabled()
-              and _by_text.get("SSH") is not None
-              and _by_text["SSH"].isEnabled())
+        from core.ops_link_delegate import LINKS_ROLE
+        _labels = [l[0] for l in
+                   rh.session_work.table.item(_row_sn, 8).data(LINKS_ROLE)]
+        check("8c.7c disabled 行链接=SSH/SFTP/删除（无 RDP、无「断开」）",
+              _labels == ["SSH", "SFTP", "删除"])
         _mgr._visitors[_tmp_sn]["disabled"] = False
     finally:
         _mgr.remove_visitor(_tmp_sn)
@@ -636,10 +643,10 @@ try:
     _rk = list(_r.navigationInterface.panel.items.keys())
     check("16.7b 远程弹出为 HubPopoutWindow",
           _r is not None and type(_r).__name__ == "HubPopoutWindow")
-    check("16.7c 左侧导航含五视图且无 Hub 壳",
+    check("16.7c 左侧导航含六视图且无 Hub 壳",
           set(["remoteSessionWork", "remoteVisitorWork",
                "remoteQualityWork", "remoteFrpsProxiesWork",
-               "remoteTunnelConfWork"]) <= set(_rk)
+               "remoteTunnelConfWork", "remoteRdpWork"]) <= set(_rk)
           and "remoteHub" not in _rk, str(_rk))
     check("16.7d Hub 空壳已隐藏", _r.hub.isHidden())
     check("16.7e 视图已从 hub.stack 摘出",

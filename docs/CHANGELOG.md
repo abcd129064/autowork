@@ -23,6 +23,7 @@
 - 开机静默预连（2026-09-23）：启动 6s 后 `autostart()`（仅启用隧道、异常全吞进日志），就绪轮询后 `prewarm_async()` 串行 connect 预热打洞；预连后点 SSH 秒连。详见 [frp-source-integration.md](frp-source-integration.md) 附录 G。
 - **远程可靠性批次**（2026-09-23）：①frpc 意外退出退避自愈重启（5s/30s/2min，健康 ≥60s 清零）；②autostart 瞬态失败有界重试（60s/120s）；③质量探测冷洞首拍 3s 长超时不计失败；④会话打开/预热改 bindPort 就绪轮询（200ms 间隔/8s 上限）替代固定延时；⑤隧道失联联动已开会话面板提示条（`windows/remote_session/tunnel_notice.py`）；⑥预热成功状态列「已预热」（`prewarmedAt` 仅内存）；⑦远程页文件归口 `windows/remote_session/`（remote_hub/remote_mixin 迁入）。
 - frp 0.65 管理 API 参考手册落档：[frp-065-api-reference.md](frp-065-api-reference.md)。
+- **远程页操作列移除 RDP + 新增「RDP」视图**（2026-10-04）：RemoteHub 扩为**六视图**（末位新增「RDP」，`windows/remote_session/remote_hub.py::RdpWork`）；会话总览操作列不再出现 RDP 链接（现为 SSH/SFTP/断开/删除）——visitor 的 `bindPort` 只映射远端 22（SSH/SFTP 复用），RDP 需要 3389 专用隧道（约定 `rdp_<serverName>`）属后续功能，此前点 RDP 必然连到 SSH 端口。新视图承载说明与状态（注册隧道数 / RDP 可用隧道 / 状态，当前恒「未开通」）+「打开会话中心」；`_on_ops_link` 仍接受 `'rdp'`，专用隧道落地后恢复入口零改动；弹出面板 `nav_icons["remoteHub"]` 同步补齐第 6 键（缺键会静默退回内嵌 Pivot 形态）。回归 `tests/test_remote_rdp_tab.py`（10 例，含 nav_icons 覆盖校验）。
 
 ### 售后 / 跑视频
 - 售后记录**连续录入模式**（2026-09-22）：提交后弹窗保持、表单清空，连续登记不关窗。

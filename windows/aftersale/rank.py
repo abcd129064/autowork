@@ -431,7 +431,11 @@ class RankPage(QWidget):
         self._chart_scroll.viewport().setStyleSheet(
             "background: transparent;")
         self._chart.rowClicked.connect(self._on_chart_row)
-        body.addWidget(self._chart_scroll, 2)
+        # AlignTop（2026-10-01）：布局对受 maximum/固定高度限制的子项默认
+        # 垂直居中（QLayoutPrivate::alignedRect 兜底 AlignCenter）——表格
+        # sizeHint 虚高把单元格撑高后，左图表被下推出现「与标题之间空白」。
+        # 显式顶对齐，高度差由 _sync_table_height/_sync_chart_height 消除。
+        body.addWidget(self._chart_scroll, 2, Qt.AlignmentFlag.AlignTop)
 
         self._table = TableWidget(card)
         install_ops_links(self._table, self._on_ops_link)
@@ -454,12 +458,13 @@ class RankPage(QWidget):
             else:
                 header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
                 self._table.setColumnWidth(i, w)
-        body.addWidget(self._table, 3)
+        body.addWidget(self._table, 3, Qt.AlignmentFlag.AlignTop)
         card_lay.addLayout(body, 1)
         # 卡片高度由内容（图表视口高度）决定，页面滚动承接超长内容
         root.addWidget(card)
         # 初始视口高度（空态）
         self._sync_chart_height()
+        self._sync_table_height()
 
     def _sync_chart_height(self):
         """图表视口高度随行数自适应：TOP 10/20 完整展示不滚动，
@@ -468,6 +473,20 @@ class RankPage(QWidget):
         n = len(self._rows)
         h = min(n * _RankHBarChart.ROW_H + 18, 1600) if n else 280
         self._chart_scroll.setFixedHeight(h)
+
+    def _sync_table_height(self):
+        """表格固定高 = 表头 + 行数×行高（与 _sync_chart_height 对称）。
+
+        qfw TableWidget 的 sizeHint 虚高（10 行数据 hint≈400px），不固定
+        高度时：① 排行卡底部多出大片空白；② body 单元格被撑高，与左侧
+        图表高度不齐（2026-10-01 用户截图报告）。TOP 50→10 切换后表格
+        残留旧高度同理。超 1600px 封顶转表格内滚动（与图表策略一致）。
+        """
+        hdr = self._table.horizontalHeader()
+        hh = hdr.height() or hdr.sizeHint().height() or 30
+        n = len(self._rows)
+        h = int(min(hh + n * _FIXED_ROW_HEIGHT + 4, 1600)) if n else 280
+        self._table.setFixedHeight(h)
 
     @staticmethod
     def _qdate_today():
@@ -634,6 +653,7 @@ class RankPage(QWidget):
         self._chart.set_rows(self._rows, bar_color=bar)
         self._sync_chart_height()
         self._populate_table()
+        self._sync_table_height()
 
     def _on_error(self, msg, seq=None):
         if seq is not None and seq != self._query_seq:
@@ -641,6 +661,7 @@ class RankPage(QWidget):
         self._chart.set_rows([])
         self._sync_chart_height()
         self._table.setRowCount(0)
+        self._sync_table_height()
         self._lbl_rank_title.setText(f"售后排行（查询失败：{msg}）")
 
     # ---------- 渲染 ----------

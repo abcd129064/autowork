@@ -2,8 +2,8 @@
 """远程页 RemoteHub（二期，2026-09-21 重构）——统一远程会话中心
 
 设计稿：design/remote_page_v3_065.html（frps 0.65 能力锁定版）
-形态：与工具页同风格——横排 Pivot 二级切换（无图标），五视图堆叠：
-    会话总览 │ 连接 │ 连接质量 │ frps 代理 │ 隧道配置
+形态：与工具页同风格——横排 Pivot 二级切换（无图标），六视图堆叠：
+    会话总览 │ 连接 │ 连接质量 │ frps 代理 │ 隧道配置 │ RDP
 （连接诊断不属本页，2026-09-07 用户定稿：入口保留在 设置-工具）
 
 数据源：
@@ -18,6 +18,10 @@
   - 隧道配置 = settings.frpc_server 嵌套 dict（与 设置-远程连接 同键，
     单点写回）+ frpc 进程控制（apply 热重载 / /api/stop 优雅停止 P1）
     + 管理通道卡（frps_admin credentials 配置 + frpc admin 自检）+ 实时日志
+  - RDP = 预留页（2026-10-04 用户需求）：现有 xtcp visitor 的 bindPort 固定
+          指向远端 22（SSH/SFTP 复用），3389 需专门的 rdp_<serverName> 隧道
+          （该能力为后续功能，见 core/frp_remote 尚无端口映射字段），故会话
+          总览操作列的 RDP 链接已移除，本页承载能力说明与后续接入位置
 
 与设置分工（设计稿）：设置-远程连接 = 凭据/FRP 静态配置；本页 = 会话与
 隧道的操作面。frpc 服务器参数两处共享同一 settings 键，避免双写分叉。
@@ -291,9 +295,9 @@ class SessionWork(QWidget):
         self.table.setColumnWidth(5, 170)
         self.table.setColumnWidth(6, 108)
         self.table.setColumnWidth(7, 90)
-        # 操作列：委托自绘文字链接（SSH/SFTP/RDP/断开/删除，零子控件）——
+        # 操作列：委托自绘文字链接（SSH/SFTP/断开/删除，零子控件）——
         # 2026-09-24 P0-2 委托化：原先 330px 是为容纳 5 个自适应宽按钮，
-        # 文字链接密度高，260px 足够
+        # 文字链接密度高，260px 足够（RDP 链接 2026-10-04 移除，见 _add_row）
         self.table.setColumnWidth(8, 260)
         self.table.setMinimumHeight(260)
         cl.addWidget(self.table, 1)
@@ -389,7 +393,7 @@ class SessionWork(QWidget):
             # 注册表只剩「已断开」隧道：没有启用项，frpc 无从启动
             # （断开保留注册的新口径），提示用户重连即恢复
             self._win._show_info_bar(
-                "全部隧道处于「已断开」状态：点该行的 SSH/SFTP/RDP 重连，"
+                "全部隧道处于「已断开」状态：点该行的 SSH/SFTP 重连，"
                 "frpc 会自动随首条重连隧道启动", "warning", duration=5000)
             return
         self._win._show_info_bar("frpc 已启动（按注册表应用配置）", "success")
@@ -582,8 +586,8 @@ class SessionWork(QWidget):
             self.lbl_hint.setText("暂无隧道 —— 点右上「新建隧道」注册 xtcp visitor")
         else:
             self.lbl_hint.setText(
-                "「连接」复用球桌一键直连（SSH/SFTP/RDP 标签窗口）；"
-                "断开=关会话并释放端口（保留注册，点 SSH/SFTP/RDP 即重连），"
+                "「连接」复用球桌一键直连（SSH/SFTP 标签窗口）；"
+                "断开=关会话并释放端口（保留注册，点 SSH/SFTP 即重连），"
                 "删除=彻底移除注册与持久化配置（需确认、不可恢复）")
 
     def _add_row(self, rec, running, frps_state=None):
@@ -596,7 +600,7 @@ class SessionWork(QWidget):
         table.insertRow(r)
         if rec.get("disabled"):
             # 已断开（保留注册）：隧道已从 frpc 摘除、端口已释放，
-            # 与「删除」不同——注册还在，SSH/SFTP/RDP 点击即重连
+            # 与「删除」不同——注册还在，SSH/SFTP 点击即重连
             status, color = "已断开", _C_WARNING
         elif not running:
             status, color = "未启动", _C_MUTED
@@ -664,10 +668,12 @@ class SessionWork(QWidget):
         self._row_recs[r] = rec
         # 操作列：委托自绘文字链接（零子控件，旧 cellWidget 按钮组已移除）。
         # 委托不支持置灰，禁用语义改为省略（悬停提示由确认弹窗兜底）
+        # RDP 链接 2026-10-04 按用户需求移除：visitor 的 bindPort 只映射远端 22，
+        # mstsc 打到 SSH 端口必然失败（3389 需专门的 rdp_<serverName> 隧道，属后续
+        # 功能）；入口改由本页新增的「RDP」视图承载（见 RdpWork）
         links = []
         if not confirmed_offline:
-            links += [("SSH", "primary", "ssh"), ("SFTP", "primary", "sftp"),
-                      ("RDP", "primary", "rdp")]
+            links += [("SSH", "primary", "ssh"), ("SFTP", "primary", "sftp")]
         if not disabled_row:
             links.append(("断开", "ghost", "disconnect"))
         links.append(("删除", "danger", "delete"))
@@ -681,6 +687,8 @@ class SessionWork(QWidget):
         if rec is None:
             return  # 行重建竞态：映射里已无此行，忽略本次点击
         sn = str(rec.get("serverName", ""))
+        # rdp 仍留在可接受集合内：行链接已不再生成，但 core.frp_remote.
+        # open_session 本就支持 'rdp'，3389 专用隧道落地后恢复入口零改动
         if action in ("ssh", "sftp", "rdp"):
             self._open(action, sn, rec)
         elif action == "disconnect":
@@ -724,7 +732,7 @@ class SessionWork(QWidget):
         def _done(result: str):
             if result == "ok":
                 self._info(f"已断开隧道 {sn}：会话已关闭、端口已释放，"
-                           "注册保留，点 SSH/SFTP/RDP 可重连", "success")
+                           "注册保留，点 SSH/SFTP 可重连", "success")
             elif result == "not_running":
                 self._info("当前 frpc 未启动", "warning")
             else:
@@ -2186,12 +2194,178 @@ class TunnelConfWork(QWidget):
         self._update_state()
 
 
+# ==================== 视图 6：RDP（预留，2026-10-04 用户需求） ====================
+
+
+class RdpWork(QWidget):
+    """RDP：远程桌面专用页（预留位；3389 隧道能力落地前为说明页）
+
+    背景（2026-10-04 用户需求）：会话总览操作列里的 RDP 链接已移除——现有 frp
+    xtcp visitor 的 bindPort 固定映射远端 22（SSH/SFTP 复用），RDP 需要 3389 的
+    专门隧道（约定命名 rdp_<serverName>），该能力尚未实现、属后续功能。
+    本页先承载「当前可用入口 + 后续接入清单」；3389 隧道落地后在此列出可 RDP
+    设备，行内入口直接复用 core.frp_remote.open_session('rdp', serverName, tableId)
+    （RDPPanel 的 mstsc 嵌入/免密/看门狗已实现，无需改动）。
+    """
+
+    def __init__(self, win, hub, parent=None):
+        super().__init__(parent)
+        self.setObjectName("remoteRdpWork")
+        _transparent(self)
+        self._win = win
+        self._hub = hub
+        self._mgr = get_session_manager()
+        self._frps = get_frps_client()
+
+        body = QWidget(self)
+        body.setAutoFillBackground(False)
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 8, 20, 12)
+        lay.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.lbl_title = BodyLabel("远程桌面（RDP）—— 3389 隧道未开通", body)
+        head.addWidget(self.lbl_title)
+        head.addStretch(1)
+        btn_sessions = PushButton(FluentIcon.VIDEO, "打开会话中心", body)
+        btn_sessions.setToolTip(
+            "已打开的 RDP 会话（含主面板「远程」菜单发起的）都在会话中心里")
+        btn_sessions.clicked.connect(self._on_open_sessions)
+        head.addWidget(btn_sessions)
+        lay.addLayout(head)
+
+        strip = QHBoxLayout()
+        strip.setSpacing(12)
+        self.card_tunnels, self.num_tunnels, self.lbl_tunnels = _stat_card(
+            body, _C_ACCENT)
+        self.card_rdp, self.num_rdp, self.lbl_rdp = _stat_card(body, _C_MUTED)
+        self.card_state, self.num_state, self.lbl_state = _stat_card(
+            body, _C_WARNING)
+        for c in (self.card_tunnels, self.card_rdp, self.card_state):
+            strip.addWidget(c, 1)
+        lay.addLayout(strip)
+
+        card1 = CardWidget(body)
+        c1 = QVBoxLayout(card1)
+        c1.setContentsMargins(16, 14, 16, 14)
+        c1.setSpacing(8)
+        c1.addWidget(StrongBodyLabel("为什么操作列里没有 RDP 了", card1))
+        t1 = CaptionLabel(
+            "会话总览里的隧道由 frp xtcp visitor 提供，visitor 的 bindPort 固定"
+            "指向远端 22 端口（SSH/SFTP 复用同一端口），因此点 RDP 会连到 SSH "
+            "端口并必然失败。该链接已按需求从操作列移除；RDP 的 3389 映射需要"
+            "单独的隧道，属于后续功能。", card1)
+        t1.setWordWrap(True)
+        c1.addWidget(t1)
+        lay.addWidget(card1)
+
+        card2 = CardWidget(body)
+        c2 = QVBoxLayout(card2)
+        c2.setContentsMargins(16, 14, 16, 14)
+        c2.setSpacing(8)
+        c2.addWidget(StrongBodyLabel("现在能用什么", card2))
+        t2 = CaptionLabel(
+            "· 主面板「远程」菜单 → 远程桌面：TCP 模式下按手填 host/port 直连，"
+            "目标可达的 3389 可以正常打开；XTCP 模式下同样走 visitor bindPort"
+            "（22），不可用。\n"
+            "· 已打开的 RDP 会话由会话中心接管（标签页 + mstsc 窗口嵌入 + 免密"
+            "+ 断开/删除）。", card2)
+        t2.setWordWrap(True)
+        c2.addWidget(t2)
+        lay.addWidget(card2)
+
+        card3 = CardWidget(body)
+        c3 = QVBoxLayout(card3)
+        c3.setContentsMargins(16, 14, 16, 14)
+        c3.setSpacing(8)
+        c3.addWidget(StrongBodyLabel("后续接入清单（3389 隧道落地后）", card3))
+        t3 = CaptionLabel(
+            "1. frpc 侧为每台设备新增一个映射远端 3389 的 xtcp visitor"
+            "（约定 rdp_<serverName>）；\n"
+            "2. 注册表记录补充远端映射端口字段，本页据此列出「可 RDP」设备；\n"
+            "3. 本页行内打开入口复用 core.frp_remote.open_session('rdp', "
+            "serverName, tableId)，RDPPanel 无需改动。", card3)
+        t3.setWordWrap(True)
+        c3.addWidget(t3)
+        lay.addWidget(card3)
+
+        lay.addStretch(1)
+        self.lbl_hint = CaptionLabel("", body)
+        self.lbl_hint.setWordWrap(True)
+        lay.addWidget(self.lbl_hint)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(body)
+
+        self._mgr.visitors_changed.connect(self.refresh)
+        self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        """刷新统计卡：注册隧道总数 / 其中带 3389 映射的条数"""
+        records = self._mgr.records()
+        self.num_tunnels.setText(str(len(records)))
+        self.lbl_tunnels.setText("注册隧道（frpc xtcp visitor）")
+        ready = self._rdp_capable(records)
+        self.num_rdp.setText(str(len(ready)))
+        color = _C_SUCCESS if ready else _C_MUTED
+        self.num_rdp.setStyleSheet(
+            f"color: {color.name()}; font-size: 22px; font-weight: 700;")
+        self.lbl_rdp.setText("RDP 可用隧道（3389 映射）")
+        self.num_state.setText("已开通" if ready else "未开通")
+        self.num_state.setStyleSheet(
+            f"color: {(_C_SUCCESS if ready else _C_WARNING).name()}; "
+            "font-size: 22px; font-weight: 700;")
+        self.lbl_state.setText("RDP 隧道状态")
+        self.lbl_hint.setText(
+            "说明：本页为 RDP 预留页。会话总览操作列已移除 RDP 链接（现有隧道只穿"
+            " 22，没有 3389 映射）；RDP 能力随 3389 专用隧道一起上线。")
+
+    @staticmethod
+    def _rdp_capable(records):
+        """挑出带 3389 映射的隧道（当前注册表无远端映射字段 ⇒ 恒为空）
+
+        这是后续功能的检测位：3389 隧道落地后，只要注册记录带上远端映射端口
+        （或沿用 rdp_ 前缀命名），本页统计与列表就会自动反映真实数量，
+        不需要再改这里的口径。
+        """
+        out = []
+        for rec in records or []:
+            if str(rec.get("remotePort", "") or "").strip() == "3389":
+                out.append(rec)
+            elif str(rec.get("serverName", "")).startswith("rdp_"):
+                out.append(rec)
+        return out
+
+    def _on_open_sessions(self):
+        """打开会话中心（RDP 会话在那里以标签页承载）"""
+        fn = getattr(self._win, "_ensure_session_window", None)
+        if fn is None:
+            self._info("当前宿主窗口不支持会话中心", "warning")
+            return
+        try:
+            fn()
+        except (OSError, RuntimeError) as e:
+            self._info(f"打开会话中心失败：{e}", "error")
+
+    def _info(self, msg, kind):
+        self._win._show_info_bar(msg, kind, duration=4000)
+
+
 # ==================== RemoteHub 容器 ====================
 
 class RemoteHub(PivotPage):
-    """远程页：横排 Pivot 四视图（与会话中心单例实时联动）
+    """远程页：横排 Pivot 六视图（与会话中心单例实时联动）
 
-    二期（2026-09-21）：3→4 视图，新增「连接质量」；进入本页即启动
+    二期（2026-09-21）：3→4 视图，新增「连接质量」；2026-09-24 加「frps 代理」
+    （→5）；2026-10-04 加「RDP」预留页（→6，见 RdpWork）。进入本页即启动
     frps 在线感知（周期 GET）与本机 RTT 探测线程（幂等 start）。
     """
 
@@ -2205,12 +2379,14 @@ class RemoteHub(PivotPage):
         self.quality_work = QualityWork(self._win, self, self)
         self.frps_proxies_work = FrpsProxiesWork(self._win, self, self)
         self.tunnel_conf_work = TunnelConfWork(self._win, self, self)
+        self.rdp_work = RdpWork(self._win, self, self)
 
         self.addPage(self.session_work, "会话总览")
         self.addPage(self.visitor_work, "连接")
         self.addPage(self.quality_work, "连接质量")
         self.addPage(self.frps_proxies_work, "frps 代理")
         self.addPage(self.tunnel_conf_work, "隧道配置")
+        self.addPage(self.rdp_work, "RDP")
         self.lock_pivot_width()
         self.switchTo(self.session_work)
 

@@ -25,7 +25,12 @@ import sys
 ENC_PREFIX = "enc:"
 
 # 顶层敏感 key（密码/token 类）
-SENSITIVE_KEYS = ("ssh_pass", "upload_pass", "xtcp_secret_key")
+# deepseek_api_key 于 2026-10-04 补入：它归 credentials 域（app_settings.py:110）
+# 但此前不在本清单 → 该键**明文落盘**，而同域的 ai_api_keys 却是加密的。
+# 它是旧版仅支持 DeepSeek 时的兼容键（core/ai_providers.py:10），
+# 取值优先级 ai_api_keys[厂商] > deepseek_api_key —— 仍会被读取，故必须加密。
+# 加入后靠既有「明文自动迁移」（has_plaintext_secret → encrypt_settings）在下次写盘时加密。
+SENSITIVE_KEYS = ("ssh_pass", "upload_pass", "xtcp_secret_key", "deepseek_api_key")
 
 # 嵌套敏感路径：(顶层key, 子key...)
 NESTED_SENSITIVE_PATHS = (

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>远程页 v4 设计稿 · TCP 直连整合 + frps 代理面板联动（2026-09-24）</title>
+<style>
+  :root{
+    --accent:#2fd4de; --accent-press:#19b4be; --accent-soft:rgba(47,212,222,.14);
+    --bg:#1f2123; --surface:#282a2d; --surface2:#2e3134; --border:#3a3d41; --border2:#4a4e53;
+    --text:#e8eaed; --text2:#a3a9b3; --text3:#717883;
+    --success:#4ade80; --success-dim:rgba(74,222,128,.14);
+    --warning:#f5b04c; --warning-dim:rgba(245,176,76,.14);
+    --danger:#f2696f; --danger-dim:rgba(242,105,111,.14);
+    --info:#5ea3ff; --info-dim:rgba(94,163,255,.14);
+    --muted:#717883;
+    --radius:6px; --radius-lg:8px; --term-bg:#14161a;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#17181a;color:var(--text);padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1220px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header .meta{color:var(--text3);font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--accent-soft);color:var(--accent);margin-right:6px;}
+  .badge.p0{background:var(--danger-dim);color:var(--danger);}
+  .badge.p1{background:var(--warning-dim);color:var(--warning);}
+  .badge.g{background:var(--success-dim);color:var(--success);}
+  .badge.later{background:rgba(113,120,131,.16);color:var(--text2);}
+  .note{max-width:1220px;margin:0 auto 22px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;font-size:13px;color:var(--text2);line-height:1.85;}
+  .note b{color:var(--text);} .note code{font-family:var(--mono);background:var(--term-bg);padding:1px 6px;border-radius:4px;font-size:12px;color:var(--accent);}
+  .section-label{max-width:1220px;margin:36px auto 12px;font-size:16px;font-weight:700;}
+  .section-label span{font-weight:400;color:var(--text3);font-size:13px;margin-left:8px;}
+  .win{max-width:1220px;margin:0 auto;background:var(--bg);border-radius:10px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.55);border:1px solid #000;}
+  .titlebar{height:38px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 0 0 16px;gap:8px;}
+  .titlebar .app-ico{width:16px;height:16px;border-radius:3px;background:linear-gradient(135deg,var(--accent),#155e63);}
+  .titlebar .app-name{font-size:12px;color:var(--text2);}
+  .titlebar .tb-btns{margin-left:auto;display:flex;height:100%;}
+  .titlebar .tb-btns i{width:44px;height:100%;display:flex;align-items:center;justify-content:center;color:var(--text2);font-style:normal;font-size:13px;}
+  .app{display:flex;height:760px;}
+  .nav{width:176px;background:#242628;border-right:1px solid var(--border);padding:8px;flex-shrink:0;}
+  .nav-item{display:flex;align-items:center;gap:10px;height:36px;padding:0 12px;border-radius:var(--radius);color:var(--text2);font-size:13px;margin-bottom:2px;}
+  .nav-item.active{background:rgba(255,255,255,.06);color:var(--text);font-weight:600;position:relative;}
+  .nav-item.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:2px;background:var(--text);}
+  .nav-item.hot{color:var(--accent);}
+  .content{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+  .page-head{padding:18px 24px 2px;display:flex;align-items:flex-end;justify-content:space-between;}
+  .page-title{font-size:21px;font-weight:700;}
+  .pivot{display:flex;gap:4px;padding:10px 24px 0;border-bottom:1px solid var(--border);}
+  .pv{padding:8px 15px 10px;font-size:13.5px;color:var(--text2);border-radius:var(--radius) var(--radius) 0 0;position:relative;cursor:pointer;user-select:none;}
+  .pv:hover{color:var(--text);}
+  .pv.on{color:var(--text);font-weight:600;}
+  .pv.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:3px;border-radius:2px 2px 0 0;background:var(--accent);}
+  .pv .tag{font-size:9.5px;background:var(--danger-dim);color:var(--danger);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:1px;}
+  .view{flex:1;overflow:auto;padding:14px 24px 20px;display:none;}
+  .view.on{display:block;}
+  .row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
+  .btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 14px;border-radius:5px;font-size:13px;border:1px solid var(--border2);background:var(--surface2);color:var(--text);cursor:default;}
+  .btn.primary{background:var(--accent-press);border-color:var(--accent-press);color:#fff;font-weight:600;}
+  .btn.danger-o{border-color:var(--danger);color:var(--danger);background:transparent;}
+  .btn.sm{height:24px;padding:0 9px;font-size:12px;border-radius:4px;}
+  .btn.ghost{background:transparent;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;}
+  .card h4{font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text);}
+  .card h4 small{font-weight:400;color:var(--text3);margin-left:6px;}
+  .stat{flex:1;min-width:150px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:11px 15px;}
+  .stat .n{font-size:21px;font-weight:700;line-height:1.25;}
+  .stat .l{font-size:11.5px;color:var(--text2);}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0;}
+  .dot.g{background:var(--success);box-shadow:0 0 7px rgba(74,222,128,.55);}
+  .dot.y{background:var(--warning);}
+  .dot.r{background:var(--danger);}
+  .dot.gr{background:var(--muted);}
+  .pill{display:inline-block;font-size:11px;padding:1.5px 9px;border-radius:999px;font-weight:600;}
+  .pill.g{background:var(--success-dim);color:var(--success);}
+  .pill.y{background:var(--warning-dim);color:var(--warning);}
+  .pill.r{background:var(--danger-dim);color:var(--danger);}
+  .pill.i{background:var(--info-dim);color:var(--info);}
+  .pill.m{background:rgba(113,120,131,.16);color:var(--text2);}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{text-align:left;color:var(--text3);font-weight:600;padding:6px 10px;border-bottom:1px solid var(--border);font-size:11.5px;white-space:nowrap;}
+  td{padding:7px 10px;border-bottom:1px solid rgba(58,61,65,.5);color:var(--text2);white-space:nowrap;}
+  td code{font-family:var(--mono);font-size:11.5px;color:var(--accent);}
+  tr.hot td{background:var(--accent-soft);color:var(--text);}
+  tr:hover td{background:rgba(255,255,255,.035);color:var(--text);}
+  .field{display:inline-flex;align-items:center;gap:6px;background:var(--term-bg);border:1px solid var(--border);border-radius:5px;height:30px;padding:0 10px;color:var(--text3);font-size:12.5px;min-width:120px;}
+  .field b{color:var(--text2);font-weight:400;}
+  .seg{display:inline-flex;background:var(--term-bg);border:1px solid var(--border);border-radius:6px;padding:2px;gap:2px;}
+  .seg i{font-style:normal;font-size:12.5px;padding:4px 16px;border-radius:4px;color:var(--text2);}
+  .seg i.on{background:var(--accent-press);color:#fff;font-weight:600;}
+  .cap{font-size:12px;color:var(--text3);line-height:1.8;margin-top:8px;}
+  .arrow{color:var(--text3);}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:1220px;margin:0 auto;}
+  .plan{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;font-size:12.5px;color:var(--text2);line-height:1.8;}
+  .plan h5{font-size:13px;color:var(--text);margin-bottom:8px;}
+  .plan .rec{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-soft);}
+  .plan .rec h5{color:var(--accent);}
+  .kv{display:flex;gap:8px;margin:4px 0;}
+  .kv b{color:var(--text);font-weight:600;min-width:74px;}
+  .flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text2);}
+  .flow .node{background:var(--surface2);border:1px solid var(--border2);border-radius:5px;padding:5px 10px;}
+  .flow .node.hot{border-color:var(--accent);color:var(--accent);}
+  .flow em{font-style:normal;color:var(--text3);}
+</style>
+</head>
+<body>
+
+<div class="doc-header">
+  <h1>远程页 v4 设计稿 —— TCP 直连整合 + frps 代理面板联动</h1>
+  <div class="meta">2026-09-24 ｜ 目标文件 <code>windows/remote_session/remote_hub.py</code>（视图 2 / 视图 5）、
+  数据源复用 <code>remote_mixin.py</code> TCP 模式 ｜ 状态：<b style="color:var(--warning)">设计评审中</b></div>
+</div>
+
+<div class="note">
+<b>问题一（TCP 缺位）</b>：远程页「P2P 访客」视图只有 xtcp visitor 注册（P2P 打洞直连）；正常的 TCP 连接
+（保存的 <code>ip:port</code> 服务器列表 + <code>TCPWorker</code> 直连，不经 frpc）只在<b>主面板</b>的远程菜单里
+（<code>p2p_mode_combo</code> XTCP/TCP 双模）。两处数据源相同（settings <code>remote_sessions</code>）但入口割裂。
+<br>
+<b>问题二（frps 代理孤岛）</b>：视图 5 是纯只读清单（八页签 × Name/Port/Conns/Traffic/Version/Status），
+不能点击、不与本地注册表关联、不能发起任何动作——frps 上明明躺着全部代理信息，却帮不上连接。
+</div>
+
+<!-- ============================= 板块一 ============================= -->
+<div class="section-label">板块一 · 视图 2 升级为「连接」双模视图 <span>P2P 访客 + TCP 直连同页承载，数据与主面板同源</span></div>
+
+<div class="cols" style="margin-bottom:16px;">
+  <div class="plan rec">
+    <h5>方案 A（推荐）：视图 2 内嵌模式切换 <span class="badge g">推荐</span></h5>
+    「P2P 访客」改名「<b>连接</b>」，表单卡顶部加 <b>XTCP ｜ TCP</b> Segmented。
+    TCP 模式下表单切换为 host/port/备注，注册表区域切换为「保存的服务器」列表。
+    <br>✓ 入口统一、与主面板同语义（用户零学习成本）<br>
+    ✓ 数据源直接复用 settings <code>remote_sessions</code> 与 <code>TCPWorker</code>，双端天然同步<br>
+    ✓ 视图数量不变（Pivot 五页签不动，导航结构零改动）
+  </div>
+  <div class="plan">
+    <h5>方案 B：新增第六视图「直连」 <span class="badge later">备选</span></h5>
+    Pivot 加一页专放 TCP。✓ 隔离清晰；✗ 远程页六页签渐挤、
+    TCP 与 visitor 本是同一「连设备」意图，拆开反而不自然；✗ 导航结构变更需回归弹出窗口 nav_icons。
+  </div>
+</div>
+
+<div class="win">
+  <div class="titlebar"><div class="app-ico"></div><div class="app-name">AutoWork</div>
+    <div class="tb-btns"><i>─</i><i>□</i><i>✕</i></div></div>
+  <div class="app">
+    <div class="nav">
+      <div class="nav-item">🏠 工作台</div>
+      <div class="nav-item">🛠 运维管理</div>
+      <div class="nav-item">📋 售后</div>
+      <div class="nav-item">🎬 跑视频</div>
+      <div class="nav-item active hot">🔗 远程</div>
+      <div class="nav-item">⚙ 设置</div>
+      <div class="nav-item">ℹ 关于</div>
+    </div>
+    <div class="content">
+      <div class="page-head"><div class="page-title">远程</div></div>
+      <div class="pivot">
+        <div class="pv">会话总览</div>
+        <div class="pv on">连接 <span class="tag" style="background:var(--accent-soft);color:var(--accent);">改</span></div>
+        <div class="pv">连接质量</div>
+        <div class="pv">frps 代理 <span class="tag" style="background:var(--accent-soft);color:var(--accent);">联动</span></div>
+        <div class="pv">隧道配置</div>
+      </div>
+      <div class="view on">
+
+        <div class="card" style="margin-bottom:12px;">
+          <h4>连接方式
+            <small>主面板与远程页共享数据源，两端操作实时同步</small></h4>
+          <div class="seg" style="margin-bottom:12px;">
+            <i>XTCP 访客（P2P 打洞）</i><i class="on">TCP 直连（经 frps / 局域网）</i>
+          </div>
+          <div class="row">
+            <span style="color:var(--text3);font-size:12.5px;">主机:</span>
+            <div class="field" style="min-width:200px;"><b>192.168.1.205</b></div>
+            <span style="color:var(--text3);font-size:12.5px;">端口:</span>
+            <div class="field" style="min-width:80px;"><b>22</b></div>
+            <span style="color:var(--text3);font-size:12.5px;">名称:</span>
+            <div class="field" style="min-width:120px;"><b>球房A·5号桌</b></div>
+            <span class="btn sm primary" style="cursor:pointer;">⊕ 保存服务器</span>
+            <span class="btn sm danger-o">🗑 删除选中</span>
+          </div>
+          <div class="row" style="margin-bottom:0;">
+            <span class="btn sm primary">▸ 连接 SSH</span>
+            <span class="btn sm">▸ 连接 SFTP</span>
+            <span class="btn sm" style="color:var(--text3);">RDP 仅设备侧为 Windows 时可用</span>
+          </div>
+          <div class="cap">TCP 模式不经 frpc：<b>ip:port</b> 直接建 SSH/SFTP 会话（局域网地址或 frps 转发端口均可）；
+          连接记录进「会话总览」，质量页不采样（非隧道）。</div>
+        </div>
+
+        <div class="card">
+          <div class="row" style="margin-bottom:8px;">
+            <h4 style="margin:0;">保存的服务器 <small>settings · remote_sessions（与主面板同源）</small></h4>
+            <span style="margin-left:auto;"><span class="btn sm ghost">⟳</span></span>
+          </div>
+          <table>
+            <tr><th>名称</th><th>主机:端口</th><th>最近使用</th><th style="width:170px;">操作</th></tr>
+            <tr class="hot"><td>球房A·5号桌</td><td><code>192.168.1.205:22</code></td><td>今天 13:02</td>
+              <td><span class="btn sm primary">SSH</span> <span class="btn sm">SFTP</span> <span class="btn sm ghost">✕</span></td></tr>
+            <tr><td>frps 转发 · 7号桌</td><td><code>49.235.34.253:6022</code></td><td>昨天 21:44</td>
+              <td><span class="btn sm primary">SSH</span> <span class="btn sm">SFTP</span> <span class="btn sm ghost">✕</span></td></tr>
+            <tr><td>演示机</td><td><code>192.168.1.24:22</code></td><td>3 天前</td>
+              <td><span class="btn sm primary">SSH</span> <span class="btn sm">SFTP</span> <span class="btn sm ghost">✕</span></td></tr>
+          </table>
+          <div class="cap">点击行填充上方表单（主面板同交互）；双击行直接 SSH。球桌库搜索仅在 XTCP 模式显示。</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="note" style="margin-top:16px;">
+<b>关键设计决策</b>：① 双端同源——远程页不另建存储，直接读写 settings <code>remote_sessions</code> 与
+<code>TCPWorker</code> 路径，主面板改动零（继续可用，两处入口等价）；② 模式选择记忆到配置
+（<code>perf</code> 域 <code>remote_conn_mode</code>），下次进入保持；③ 「连接」视图的 TCP 连接成功后同样进全局
+会话窗口，会话总览 <code>sessions_on_port</code> 口径不变（TCP 会话 <code>_port</code> 即目标端口，天然兼容）。
+</div>
+
+<!-- ============================= 板块二 ============================= -->
+<div class="section-label">板块二 · frps 代理视图去孤岛 <span>本地注册表关联 + 行内动作 + 跨视图跳转</span></div>
+
+<div class="win">
+  <div class="titlebar"><div class="app-ico"></div><div class="app-name">AutoWork</div>
+    <div class="tb-btns"><i>─</i><i>□</i><i>✕</i></div></div>
+  <div class="app" style="height:640px;">
+    <div class="nav">
+      <div class="nav-item">🏠 工作台</div>
+      <div class="nav-item">🛠 运维管理</div>
+      <div class="nav-item">📋 售后</div>
+      <div class="nav-item">🎬 跑视频</div>
+      <div class="nav-item active hot">🔗 远程</div>
+      <div class="nav-item">⚙ 设置</div>
+      <div class="nav-item">ℹ 关于</div>
+    </div>
+    <div class="content">
+      <div class="page-head"><div class="page-title">远程</div></div>
+      <div class="pivot">
+        <div class="pv">会话总览</div>
+        <div class="pv">连接</div>
+        <div class="pv">连接质量</div>
+        <div class="pv on">frps 代理</div>
+        <div class="pv">隧道配置</div>
+      </div>
+      <div class="view on">
+
+        <div class="row">
+          <span style="color:var(--text2);">frps 代理清单</span>
+          <span class="seg" style="margin-left:6px;"><i class="on">TCP</i><i>UDP</i><i>HTTP</i><i>HTTPS</i><i>TCPMUX</i><i>STCP</i><i>SUDP</i><i style="border-bottom:2px solid var(--accent);">XTCP</i></span>
+          <span style="flex:1;"></span>
+          <div class="field" style="min-width:180px;">🔎 搜索代理名</div>
+          <span class="btn sm">⟳ 刷新感知</span>
+        </div>
+
+        <div class="card">
+          <table>
+            <tr><th>Name</th><th>Port / 域名</th><th>Conns</th><th>Traffic In/Out</th><th>Version</th><th>本地</th><th style="width:220px;">操作</th></tr>
+            <tr class="hot">
+              <td><code>snk_4007</code></td><td>— (P2P)</td><td>1</td><td>↓2.1G ↑0.8G</td><td>0.65.0</td>
+              <td><span class="pill g">● 已注册</span></td>
+              <td><span class="btn sm primary">SSH</span> <span class="btn sm">SFTP</span> <span class="btn sm">质量</span></td></tr>
+            <tr>
+              <td><code>snk_4012</code></td><td>— (P2P)</td><td>0</td><td>↓31M ↑9M</td><td>0.65.0</td>
+              <td><span class="pill y">○ 未注册</span></td>
+              <td><span class="btn sm">＋ 注册并连接</span> <span class="btn sm">质量</span></td></tr>
+            <tr>
+              <td><code>snk_4015</code></td><td>— (P2P)</td><td>0</td><td>↓0 ↑0</td><td>0.65.0</td>
+              <td><span class="pill m">已断开(disabled)</span></td>
+              <td><span class="btn sm primary">重连</span> <span class="btn sm">删除注册</span></td></tr>
+          </table>
+          <div class="cap">XTCP 页签：按 <code>serverName</code> 与本地注册表实时匹配——「本地」列展示
+          <b>已注册 / 未注册 / 已断开</b> 三态；行内直接 SSH/SFTP（走 <code>open_session</code> 一键直连，含打洞等待与失联提示）。</div>
+        </div>
+
+        <div class="card" style="margin-top:12px;">
+          <div class="row" style="margin-bottom:8px;"><span class="seg"><i class="on">TCP</i><i>UDP</i><i>HTTP</i><i>HTTPS</i><i>TCPMUX</i><i>STCP</i><i>SUDP</i><i>XTCP</i></span></div>
+          <table>
+            <tr><th>Name</th><th>Port / 域名</th><th>Conns</th><th>Traffic In/Out</th><th>Version</th><th>本地</th><th style="width:260px;">操作</th></tr>
+            <tr class="hot">
+              <td><code>table-7-ssh</code></td><td><code>6022</code></td><td>0</td><td>↓86M ↑12M</td><td>0.65.0</td>
+              <td><span class="pill i">已保存</span></td>
+              <td><span class="btn sm primary">直连 SSH</span> <span class="btn sm">直连 SFTP</span></td></tr>
+            <tr>
+              <td><code>cam-rtsp</code></td><td><code>8554</code></td><td>1</td><td>↓5.4G ↑0.1G</td><td>0.65.0</td>
+              <td><span class="pill m">—</span></td>
+              <td><span class="btn sm">直连 SSH</span> <span class="btn sm">⊕ 存服务器</span></td></tr>
+            <tr>
+              <td><code>web-live</code></td><td><code>live.newbv.cn</code></td><td>3</td><td>↓1.2G ↑9G</td><td>0.65.0</td>
+              <td><span class="pill m">—</span></td>
+              <td><span class="btn sm">复制域名</span> <span class="btn sm">浏览器打开</span></td></tr>
+          </table>
+          <div class="cap">TCP 页签：行内「直连」= 对 <code>frps serverAddr:remotePort</code> 发起 SSH/SFTP
+          （等价 TCP 直连模式，连接成功可选「存服务器」沉淀到保存列表）；http/https 页签提供复制/打开。</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="note" style="margin-top:16px;">
+<b>联动矩阵（按代理类型分派动作）</b>：
+xtcp → 匹配注册表三态 + SSH/SFTP/注册/重连；tcp/udp → <code>serverAddr:remotePort</code> 直连 + 存服务器；
+stcp/sudp → 提示「需添加对应 visitor（三期扩展 stcp visitor 后自动可连）」；
+http/https/tcpmux → 复制域名 / 浏览器打开。<br>
+<b>跨视图跳转</b>：行内「质量」按钮 → 切「连接质量」视图并按 snk 过滤；代理行右键菜单同操作集。
+<br><b>数据纪律</b>：全部动作复用既有单例（<code>get_session_manager</code> / <code>TCPWorker</code> / 保存列表），
+frps 代理视图仍<b>零额外请求</b>（数据来自周期感知缓存）。
+</div>
+
+<!-- ============================= 板块三 ============================= -->
+<div class="section-label">板块三 · 联动数据流 <span>三条既有通路，不新增服务端依赖</span></div>
+
+<div class="win" style="padding:20px 24px 26px;">
+  <div class="flow" style="margin-bottom:14px;">
+    <div class="node hot">frps 代理视图（只读缓存）</div><em>serverName 匹配</em>
+    <div class="node">RemoteSessionManager 注册表（TOML 权威）</div><em>已注册 →</em>
+    <div class="node hot">open_session(snk) 一键直连</div><em>＝</em>
+    <div class="node">XTCP 打洞 + 秒连预热</div>
+  </div>
+  <div class="flow" style="margin-bottom:14px;">
+    <div class="node hot">frps 代理视图 tcp 页签</div><em>remotePort</em>
+    <div class="node">TCPWorker 直连 serverAddr:port</div><em>可选 →</em>
+    <div class="node">settings remote_sessions 保存</div><em>＝ 双端服务器列表</em>
+  </div>
+  <div class="flow">
+    <div class="node hot">「连接」视图 TCP 模式</div><em>读写</em>
+    <div class="node">settings remote_sessions</div><em>⇄ 双向同步 ⇄</em>
+    <div class="node">主面板 TCP 模式（入口不变）</div>
+  </div>
+  <div class="cap" style="margin-top:14px;">
+  frps 感知缓存（<code>FrpsAdminClient.all_proxies</code>）只做「发现」：把 frps 上的代理映射为本地动作入口；
+  所有写操作（注册/断开/保存）仍走注册表 TOML 与 settings 的既有权威路径，<b>不产生新的持久化格式</b>。</div>
+</div>
+
+<!-- ============================= 板块四 ============================= -->
+<div class="section-label">板块四 · 实施拆分 <span>建议按两批落地，每批独立可回归</span></div>
+
+<div class="win" style="padding:18px 24px 24px;">
+  <table>
+    <tr><th style="width:90px;">批次</th><th style="width:300px;">内容</th><th>要点 / 风险</th></tr>
+    <tr>
+      <td><span class="badge p0">P0</span></td>
+      <td>frps 代理视图联动（xtcp 三态 + 行内 SSH/SFTP/注册/重连 + tcp 直连/存服务器）</td>
+      <td>纯只读缓存上叠加动作，不动注册表写路径（复用 <code>ensure_visitor</code>/<code>open_session</code>）；
+      风险最低、收益最直接——孤岛问题一次解决</td>
+    </tr>
+    <tr>
+      <td><span class="badge p1">P1</span></td>
+      <td>视图 2 改「连接」双模：Segmented 切换 + TCP 表单/服务器列表 + 模式记忆</td>
+      <td>表单与主面板同语义（可抽公共工厂避免两份实现漂移）；模式切换时球桌搜索显隐联动；
+      offscreen 冒烟覆盖双模切换</td>
+    </tr>
+    <tr>
+      <td><span class="badge later">后续</span></td>
+      <td>跨视图跳转（质量过滤）、stcp/sudp visitor 支持、http 域名动作</td>
+      <td>stcp visitor 需注册表扩展 <code>type</code> 字段（TOML/迁移/MySQL 对齐），单独立项</td>
+    </tr>
+  </table>
+  <div class="cap">回归口径：test_remote 相关测试 + offscreen 冒烟（8c 系列）+ 真机一次 TCP 直连 + 一次 xtcp 注册并连接。</div>
+</div>
+
+</body>
+</html>

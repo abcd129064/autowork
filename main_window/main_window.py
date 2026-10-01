@@ -373,12 +373,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                          "remoteHub": "远程面板"}.get(key, "面板")
                 # 远程/工具面板（远程 2026-09-21、工具 2026-09-22 需求）：
                 # 弹出后各视图改管理面板式左侧子导航；其余 Hub 维持内嵌 Pivot
+                # ⚠️ nav_icons 的键必须覆盖该 Hub 全部注册页（hub_popout 以
+                # len(entries) == len(meta) 判定，少一个就退回内嵌 Pivot 形态）
                 nav_icons = {
                     "remoteHub": {"会话总览": FluentIcon.HOME,
                                   "连接": FluentIcon.PEOPLE,
                                   "连接质量": FluentIcon.PIE_SINGLE,
                                   "frps 代理": FluentIcon.GLOBE,
-                                  "隧道配置": FluentIcon.SETTING},
+                                  "隧道配置": FluentIcon.SETTING,
+                                  "RDP": FluentIcon.VIDEO},
                     "toolHub": {"单杆视频": FluentIcon.VIDEO,
                                 "端口占用": FluentIcon.CONNECT,
                                 "上传清单": FluentIcon.LIBRARY,
@@ -658,6 +661,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._append_log("[数据库] 正在测试连接...")
 
     def _on_db_test_done(self, ok, msg):
+        # 显式测试成功 = 确定性恢复（2026-09-25 修复）：mark_online 注释里
+        # 「保留给设置页显式测试连接成功」的场景此前无人调用——用户点标签
+        # 测试成功后状态机仍卡 DEGRADED，标签一直显示「SQLite 兜底」，
+        # 只能等业务查询触发两次 probe（15s 节流 × 2）才自然翻回。
+        # 测试成功即回写，并同步轮询基线避免 3s 后重复弹「已恢复在线」。
+        if ok:
+            from database import backend
+            if backend.mark_online():
+                self._last_backend_state = backend.STATE_ONLINE
         self._refresh_db_status_text()
         if ok:
             self._append_log(f"[数据库] 连接成功: {msg}")

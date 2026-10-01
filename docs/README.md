@@ -39,6 +39,7 @@ docs/
 │                      大屏与超高DPI渲染性能调查报告2026-09-25.md /
 │                      硬件加速方案调研报告2026-09-28.md
 ├── 外部接口类         xqzg接口清单.md / newbv_inventory_fields.md
+├── 技术栈调研         WinUI3重构可行性调研2026-09-30.md
 └── 图表              class-diagram.mermaid / sequence-diagram.mermaid
 ```
 
@@ -99,6 +100,12 @@ docs/
 | --- | --- | --- |
 | [xqzg接口清单.md](xqzg接口清单.md) | `xqzg.newbv.cn` API 清单，来源为 OpenAPI schema + 前端 JS 提取 + 逐端点验证；探测脚本在 `tools/probe/` | 调研快照（2026-09-20） |
 | [newbv_inventory_fields.md](newbv_inventory_fields.md) | newbv 运营后台「仓库管理 → 库存查询」字段抓取记录（Struts2 + ExtJS 3 老架构） | 调研快照 |
+
+## 五之二、技术栈调研
+
+| 文档 | 摘要 | 状态 |
+| --- | --- | --- |
+| [WinUI3重构可行性调研2026-09-30.md](WinUI3重构可行性调研2026-09-30.md) | 「项目用 WinUI 3 重构的可能性与技术架构」专项：实测 115 文件/5.45 万行规模、44 个测试文件、已作废的渲染层性能资产清单；WinUI 3 生态查证（SDK 2.4 stable 2026-08、DataGrid 无第一方且 WCT 已归档、商业控件厂商撤退、unpackaged 限制）；逐层映射难度表、路线对比（维持/WPF/WinUI 3/Avalonia）、成本 3~6 个月与 P0~P2 风险登记、五阶段路径（阶段 0 UI 解耦为无悔投入）；含本机工具链阻塞实测（只有 .NET 8 运行时无 SDK） | 调研快照（2026-09-30；建议 6 个月后复核生态部分再据以决策） |
 
 ## 六、图表
 
