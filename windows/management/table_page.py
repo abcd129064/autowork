@@ -293,6 +293,10 @@ class TablePage(QWidget):
         """API 同步完成：异步保存数据到本地数据库"""
         self._save_worker = _DBQueryWorker(table_db.save_all, rows)
         self._save_worker.result_ready.connect(self._on_save_finished)
+        # 落库失败也必须恢复按钮（2026-09-25 修复）：此前 error 无人接收，
+        # MySQL 闪断窗口内 save_all 在半开连接上写失败抛错 → _on_save_finished
+        # 永不执行 →「同步数据」永卡灰色 + 文案永停「正在从服务器同步...」
+        self._save_worker.error.connect(self._on_sync_error)
         self._save_worker.start()
 
     def _on_save_finished(self, count):

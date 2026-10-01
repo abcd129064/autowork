@@ -658,6 +658,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._append_log("[数据库] 正在测试连接...")
 
     def _on_db_test_done(self, ok, msg):
+        # 显式测试成功 = 确定性恢复（2026-09-25 修复）：mark_online 注释里
+        # 「保留给设置页显式测试连接成功」的场景此前无人调用——用户点标签
+        # 测试成功后状态机仍卡 DEGRADED，标签一直显示「SQLite 兜底」，
+        # 只能等业务查询触发两次 probe（15s 节流 × 2）才自然翻回。
+        # 测试成功即回写，并同步轮询基线避免 3s 后重复弹「已恢复在线」。
+        if ok:
+            from database import backend
+            if backend.mark_online():
+                self._last_backend_state = backend.STATE_ONLINE
         self._refresh_db_status_text()
         if ok:
             self._append_log(f"[数据库] 连接成功: {msg}")
