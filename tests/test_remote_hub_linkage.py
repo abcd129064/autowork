@@ -121,10 +121,24 @@ def test_open_direct_rejects_bad_input(mgr, monkeypatch, notify_log):
 def test_open_direct_passes_host(mgr, monkeypatch, notify_log):
     monkeypatch.setattr(fr, "PARAMIKO_AVAILABLE", True)
     calls = []
-    mgr._do_open = lambda kind, snk, tid, port, notifier=None, host="x": \
-        calls.append((kind, snk, port, host))
+    # 2026-10-04 起 open_direct_session 还透传直连凭据（username/password），
+    # 未显式给出时为 None，由 _do_open 回退 settings ssh_user/ssh_pass
+    mgr._do_open = lambda kind, snk, tid, port, notifier=None, host="x", \
+        username=None, password=None: calls.append(
+            (kind, snk, port, host, username, password))
     mgr.open_direct_session("sftp", "10.0.0.1", 6000, name="mybox")
-    assert calls == [("sftp", "mybox", 6000, "10.0.0.1")]
+    assert calls == [("sftp", "mybox", 6000, "10.0.0.1", None, None)]
+
+
+def test_open_direct_forwards_credentials(mgr, monkeypatch, notify_log):
+    """远程页 TCP 卡传入的直连主机凭据必须原样透传（不落回设备凭据）"""
+    monkeypatch.setattr(fr, "PARAMIKO_AVAILABLE", True)
+    calls = []
+    mgr._do_open = lambda kind, snk, tid, port, notifier=None, host="x", \
+        username=None, password=None: calls.append((username, password))
+    mgr.open_direct_session("ssh", "10.0.0.1", 22, username="root",
+                            password="srvpw")
+    assert calls == [("root", "srvpw")]
 
 
 # ==================== _do_open host 保留（回归） ====================

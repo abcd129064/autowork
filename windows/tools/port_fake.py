@@ -12,9 +12,10 @@ import socket
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QHBoxLayout, QListWidget, QListWidgetItem,
                                QVBoxLayout, QWidget)
-from qfluentwidgets import (CaptionLabel, FluentIcon, PushButton, SpinBox,
+from qfluentwidgets import (CaptionLabel, FluentIcon, PushButton,
                             ToolButton)
 
+from core.spin_fit_patch import FittedSpinBox
 from core.utils import show_info_bar
 
 logger = logging.getLogger(__name__)
@@ -40,10 +41,9 @@ class PortFakeWidget(QWidget):
         v.addWidget(tip)
 
         row = QHBoxLayout()
-        self._spin = SpinBox(self)
+        self._spin = FittedSpinBox(self)
         self._spin.setRange(1, 65535)
         self._spin.setValue(self._random_port())
-        self._spin.setFixedWidth(140)
         btn_random = ToolButton(FluentIcon.SYNC, self)
         btn_random.setToolTip("随机可用端口")
         btn_random.clicked.connect(self._pick_random_port)

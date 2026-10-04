@@ -233,7 +233,12 @@ class FileListPanel(QWidget):
         self._lbl_title.setText(f"{self._title} · {code} · {len(self._entries)} 个")
 
     def refresh_if_visible(self):
-        """数据刷新后，若面板可见则异步重新加载当前设备的文件列表"""
+        """数据刷新后，若面板可见则异步重新加载当前设备的文件列表
+
+        数据源分派：xqzg 与 kd 分表存储，必须按当前数据源取对应表的行。
+        此前固定查 kd_status，xqzg 数据源下要么查不到该设备（面板清单一直
+        停在迁移前的条数），要么取回同名设备的 kd 行（清单串源）。
+        """
         if not self.isVisible():
             return
         code = self._row.get("device_code", "")
@@ -245,10 +250,37 @@ class FileListPanel(QWidget):
             self._query_worker.requestInterruption()
             # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
             self._query_worker.disconnect(self)
-        self._query_worker = _DBQueryWorker(
-            table_db.query_kd_by_device, code, date)
+        query_fn = (table_db.query_xqzg_by_device
+                    if self._device_page._active_source() == "xqzg"
+                    else table_db.query_kd_by_device)
+        self._query_worker = _DBQueryWorker(query_fn, code, date)
         self._query_worker.result_ready.connect(self._on_refresh_query)
         self._query_worker.start()
+
+    def apply_local_move(self, fname: str, src_cat: str, dest_cat: str) -> dict:
+        """迁移成功后本地即时生效：内存快照里把 fname 移到目标分类并重绘
+
+        迁移接口已确认成功，但静默刷新要翻页拉全接口再整分区落库（实测
+        5-10s），期间面板仍显示迁移前的条数（用户报障：原来 3 条，提示成功
+        后还是 3 条）。这里先在本地行快照上做同一动作，列表立刻反映迁移
+        结果；静默刷新回来后以服务端口径覆盖（幂等）。
+
+        Returns:
+            变更字段 → 新值（供表格行同步计数与本地快照落库）；无变更返回 {}。
+        """
+        changes = table_db.move_file_in_row(
+            self._row, FIELD_CATEGORY.get(src_cat, ""),
+            FIELD_CATEGORY.get(dest_cat, ""), fname)
+        if not changes:
+            return {}
+        # 连续迁移手感：重绘后停在原位置的下一条（清单已空则置灰按钮）
+        rows = sorted({it.row() for it in self._list.selectedItems()})
+        keep = rows[0] if rows else 0
+        self._reload_entries()
+        if self._entries:
+            self._list.selectRow(min(keep, len(self._entries) - 1))
+        self._on_selection_changed()
+        return changes
 
     def _on_refresh_query(self, fresh):
         """异步查询完成：更新文件面板"""
@@ -575,6 +607,11 @@ class DevicePage(QWidget):
         self._query_worker = None    # 异步查询 Worker
         self._full_row_seq = 0       # 完整行懒加载序号（只采纳最后一次点击的结果）
         self._save_worker = None     # 异步保存 Worker
+        # 迁移后本地快照写回 Worker（apply_file_move，仅落一行增量 UPDATE）
+        self._snapshot_worker = None
+        # 静默刷新在途标记 + 「补一次」排队标记（在途期间又有迁移时置位，
+        # 避免整分区重拉把刚迁移的条目落回原分类）
+        self._refresh_pending = False
         self._export_worker = None   # CSV 导出异步查询 Worker（B6）
         self._last_submission_id = None  # 最近一条提交台账 id，供收集完成后回填（C1）
         # C2 历史日期自动补漏状态
@@ -1376,31 +1413,141 @@ class DevicePage(QWidget):
             file_path=date, device_code=device_code, file_names=[fname],
             src_category=src_cat, dest_category=dest_cat,
             source=self._active_source())
+        # 成功回调带上源分类与设备码：本地即时回显要按同一对字段/同一台设备
+        # 做动作（迁移在途时用户可能已点开别的设备，见 _apply_local_move）
         self._migrate_worker.success.connect(
-            lambda count: self._on_migrate_ok(fname, dest_cat))
+            lambda count, s=src_cat, d=dest_cat, dev=device_code:
+            self._on_migrate_ok(fname, s, d, dev))
         self._migrate_worker.error.connect(self._on_migrate_fail)
         self._migrate_worker.start()
         show_info_bar(f"{fname} → 「{dest_cat}」...", "info",
                       title="迁移中", parent=self, duration=1500,
                       bottom_offset=self._info_raise())
 
-    def _on_migrate_ok(self, fname, dest_cat):
-        """迁移成功：提示并静默刷新；迁到精度/问题时自动写台账并收集文件"""
+    def _on_migrate_ok(self, fname, src_cat, dest_cat, device_code=""):
+        """迁移成功：本地即时生效 + 提示，随后静默刷新以服务端口径对账
+
+        静默刷新要翻页拉全接口再整分区落库（实测 5-10s），期间文件面板清单与
+        表格计数都停在迁移前的值（用户报障 2026-10-04：提示迁移成功，原来 3 条
+        还是 3 条，表格要 5-10s 后才变）。现在先在本地快照上完成同一动作立即
+        回显，_silent_refresh 回来后覆盖为服务端口径（幂等）。
+        """
         show_info_bar(f"{fname} 已移动到「{dest_cat}」", "success",
                       title="迁移成功", parent=self, duration=2500,
                       bottom_offset=self._info_raise())
+        row = self._apply_local_move(fname, src_cat, dest_cat, device_code)
         self._silent_refresh()
         # 迁移到精度/问题后自动收集对应视频/日志到 upload 目录
-        # （无需再点精度/问题单元格；数据尚未刷回，先把 fname 并入字段列表）
+        # （无需再点精度/问题单元格；本地快照已并入 fname，这里只做去重兜底）
         # 分类→收集字段由这张映射表驱动，与 CATEGORY_DIRS 的字段→服务器目录一脉相承
         field = {"精度": "accuracy_files", "问题": "already_files"}.get(dest_cat)
-        if field:
-            row = dict(getattr(self._file_panel, "_row", None) or {})
-            # 数据库还没刷回新字段，先在本地副本里把 fname 并进去，否则收集会漏掉刚迁的这张
-            row[field] = list(row.get(field) or []) + [fname]
-            # C1 台账：精度/问题迁移成功写一条（collect_ok 待收集结果回填）
-            self._log_submission(row, dest_cat, fname)
-            self._auto_collect(row, field)
+        if not field:
+            return
+        if not row:
+            # 面板已切到别的设备且当前页查不到该设备：拿不到本设备清单，
+            # 不猜着收集（否则会把别的设备的文件收进 upload）
+            show_info_bar("文件面板已切到其他设备，本次未自动收集文件", "warning",
+                          title="未收集", parent=self, duration=4000,
+                          bottom_offset=self._info_raise())
+            return
+        files = list(row.get(field) or [])
+        if fname not in files:
+            files.append(fname)
+        row[field] = files
+        # C1 台账：精度/问题迁移成功写一条（collect_ok 待收集结果回填）
+        self._log_submission(row, dest_cat, fname)
+        self._auto_collect(row, field)
+
+    def _apply_local_move(self, fname, src_cat, dest_cat, device_code=""):
+        """迁移成功即时回显：文件面板清单 + 表格行计数就地更新并异步落库
+
+        面板持有的是「点开时那台设备」的行快照：迁移在途时用户可能已点开别的
+        设备，此时不动面板（否则会把这次迁移记到别人头上），改用当前页轻量行
+        只同步计数（move_file_in_row 对无清单的行只调计数）。
+
+        Returns:
+            迁移设备本地的行快照（供精度/问题自动收集）；面板已切设备且当前页
+            查不到该设备、或本次无实际变更时返回空 dict。
+        """
+        panel = getattr(self, "_file_panel", None)
+        panel_row = getattr(panel, "_row", None) or {}
+        # device_code 为空（老调用路径）时不设防，按面板当前行处理
+        on_panel = panel is not None and (
+            not device_code
+            or str(panel_row.get("device_code") or "") == str(device_code))
+        src_field = FIELD_CATEGORY.get(src_cat, "")
+        dest_field = FIELD_CATEGORY.get(dest_cat, "")
+        if on_panel:
+            changes = panel.apply_local_move(fname, src_cat, dest_cat)
+            row = panel_row
+        else:
+            changes = {}
+            row = {}
+        row_idx = self._find_row_idx(device_code or panel_row.get("device_code"))
+        if row_idx >= 0:
+            item = self._current_rows[row_idx]
+            if not on_panel:
+                # 面板未持有该行：在列表页轻量行上补算同一动作（仅计数列生效）
+                changes = table_db.move_file_in_row(
+                    item, src_field, dest_field, fname)
+                row = item
+            elif changes:
+                # 面板行与表格行是同一设备：把新计数同步进轻量行缓存，避免随后
+                # 整表重绘（翻页/排序）又退回旧计数
+                for key in (table_db.FILE_COUNT_FIELDS.get(src_field),
+                            table_db.FILE_COUNT_FIELDS.get(dest_field)):
+                    if key and key in changes:
+                        item[key] = changes[key]
+            self._update_row_cells(row_idx, changes)
+        self._persist_local_move(device_code or panel_row.get("device_code"),
+                                 src_field, dest_field, fname)
+        return row if changes else {}
+
+    def _find_row_idx(self, device_code: str) -> int:
+        """按设备码在当前页行缓存里定位行号（迁移即时回显定位用，未命中 -1）"""
+        code = str(device_code or "").strip()
+        if not code:
+            return -1
+        for idx, item in enumerate(getattr(self, "_current_rows", None) or []):
+            if str(item.get("device_code") or "").strip() == code:
+                return idx
+        return -1
+
+    def _update_row_cells(self, row_idx: int, changes: dict):
+        """就地刷新表格某行的统计单元格（迁移即时回显，不整表重绘）
+
+        changes 里的文件清单字段不在 DEVICE_COLUMNS 内，循环里自然被跳过。
+        """
+        if not changes or not (0 <= row_idx < self._table.rowCount()):
+            return
+        for col, (key, _, _) in enumerate(DEVICE_COLUMNS):
+            if key not in changes:
+                continue
+            cell = self._table.item(row_idx, col)
+            if cell is None:
+                continue
+            text = str(changes[key] if changes[key] is not None else "")
+            cell.setText(text)
+            cell.setToolTip(text or "(空)")
+
+    def _persist_local_move(self, device_code, src_field, dest_field, fname):
+        """异步把本次迁移写回本地快照（失败仅记日志，静默刷新兜底对账）
+
+        写回后文件面板刷新（按 device_code + 日期分区查库）立即取到新清单，
+        不必等接口全量往返；只在同一行做增量 UPDATE，不触碰其他设备。
+        """
+        if (not device_code or not src_field or not dest_field
+                or src_field == dest_field):
+            return
+        table = "xqzg_status" if self._active_source() == "xqzg" else "kd_status"
+        # 数据库写入必须在工作线程（GUI 线程同步写远程 MySQL 会冻结界面）
+        worker = _DBQueryWorker(
+            table_db.apply_file_move, table, device_code,
+            self._current_date(), src_field, dest_field, fname)
+        worker.error.connect(
+            lambda msg: logger.warning("迁移本地快照写回失败: %s", msg))
+        self._snapshot_worker = worker
+        worker.start()
 
     def _log_submission(self, row: dict, category: str, fname: str):
         """C1 台账写入点：精度/问题迁移成功记录一条提交（失败静默不阻断主流程）"""
@@ -1647,11 +1794,20 @@ class DevicePage(QWidget):
                       title="上传失败", parent=self, duration=5000, bottom_offset=self._info_raise())
 
     def _silent_refresh(self):
-        """迁移后静默重新拉取当前日期数据，刷新表格与文件面板"""
+        """迁移后静默重新拉取当前日期数据，刷新表格与文件面板
+
+        在途刷新不丢弃而是记一个「补一次」标记（_refresh_pending）：整分区
+        重拉有 5-10s 往返，拿到的是**发起时刻**的服务端快照；期间又迁移的
+        条目不在其中，若直接丢弃这次刷新，落库结果会把本地已即时生效的
+        迁移又落回原分类（表现为迁过去的条目自己跑回来）。
+        在途判定用自己的标记属性，不用 isRunning（QThread 状态翻转与信号
+        投递存在微秒级竞态，可能把已结束的刷新误判为在途而永久搁置）。
+        """
         date = self._current_date()
         if not date:
             return
-        if self._refresh_worker and self._refresh_worker.isRunning():
+        if self._refresh_worker is not None:
+            self._refresh_pending = True
             return
         if self._active_source() == "xqzg":
             self._refresh_worker = SnookerOmFetchWorker(file_path=date)
@@ -1670,17 +1826,31 @@ class DevicePage(QWidget):
         else:
             self._save_worker = _DBQueryWorker(table_db.save_kd, rows, date)
         self._save_worker.result_ready.connect(self._on_refresh_save_finished)
-        self._save_worker.error.connect(self._on_save_error)
+        # 落库失败要复位在途标记（走通用「保存失败」提示），否则后续刷新
+        # 一直被误判为「已有刷新在途」而只记 pending 不执行
+        self._save_worker.error.connect(self._on_refresh_save_error)
         self._save_worker.start()
 
     def _on_refresh_save_finished(self, _count):
-        """刷新保存完成：重新加载并刷新文件面板"""
+        """刷新保存完成：重新加载并刷新文件面板；有排队则补一轮"""
         self._load_local()
         self._file_panel.refresh_if_visible()
+        self._refresh_worker = None          # 本轮结束，标记复位（先复位再补轮）
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._silent_refresh()
 
     def _on_refresh_error(self, msg):
-        """静默刷新失败：仅警告提示，不阻断当前操作"""
+        """静默刷新失败：复位在途标记，仅警告提示，不阻断当前操作"""
+        self._refresh_worker = None
+        self._refresh_pending = False
         show_info_bar(msg, "warning", title="刷新失败", parent=self, duration=3000, bottom_offset=self._info_raise())
+
+    def _on_refresh_save_error(self, msg):
+        """静默刷新落库失败：复位在途标记后走通用保存失败提示"""
+        self._refresh_worker = None
+        self._refresh_pending = False
+        self._on_save_error(msg)
 
     # ---------- 每小时定时拉取 ----------
 

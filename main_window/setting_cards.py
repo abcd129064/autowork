@@ -18,8 +18,10 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame,
                                QLabel, QSizePolicy)
 from qfluentwidgets import (CardWidget, CaptionLabel, BodyLabel,
                             SwitchButton, ComboBox, PushButton, ToolButton,
-                            SpinBox, FluentIconBase, Theme, isDarkTheme,
+                            FluentIconBase, Theme, isDarkTheme,
                             qconfig, FluentIcon, LineEdit, PasswordLineEdit)
+
+from core.spin_fit_patch import FittedSpinBox
 
 
 class SubRow(QWidget):
@@ -161,12 +163,14 @@ def make_combo(items, index, on_change, width=170):
 
 def make_spinbox(value, lo, hi, suffix="", on_change=None, width=110):
     """内联数字调节（字号等）：先 setValue 再 connect，回显不误触发。"""
-    sb = SpinBox()
+    sb = FittedSpinBox(sample=f"{hi}{suffix}")
     sb.setRange(lo, hi)
     if suffix:
         sb.setSuffix(suffix)
     sb.setValue(value)
-    sb.setFixedWidth(width)
+    # width 为设计稿定宽下限；实际取「字体算出的够宽值」与它的较大者，
+    # 否则大字号下数字会被右侧自绘按钮压住（core.spin_fit_patch 说明）
+    sb.refit(min_width=width)
     if on_change is not None:
         sb.valueChanged.connect(on_change)
     return sb

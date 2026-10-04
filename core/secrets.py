@@ -30,7 +30,10 @@ ENC_PREFIX = "enc:"
 # 它是旧版仅支持 DeepSeek 时的兼容键（core/ai_providers.py:10），
 # 取值优先级 ai_api_keys[厂商] > deepseek_api_key —— 仍会被读取，故必须加密。
 # 加入后靠既有「明文自动迁移」（has_plaintext_secret → encrypt_settings）在下次写盘时加密。
-SENSITIVE_KEYS = ("ssh_pass", "upload_pass", "xtcp_secret_key", "deepseek_api_key")
+# tcp_ssh_pass 于 2026-10-04 补入：TCP 直连凭据从隧道设备凭据（ssh_pass）拆出
+# （直连主机常是 frps 服务器 root、设备是 newbv），同属 credentials 域，必须加密。
+SENSITIVE_KEYS = ("ssh_pass", "tcp_ssh_pass", "upload_pass", "xtcp_secret_key",
+                  "deepseek_api_key")
 
 # 嵌套敏感路径：(顶层key, 子key...)
 NESTED_SENSITIVE_PATHS = (

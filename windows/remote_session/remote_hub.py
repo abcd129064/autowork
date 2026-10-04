@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QListWidget, QListWidgetItem)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, StrongBodyLabel,
                             CardWidget, LineEdit, PasswordLineEdit, PushButton,
-                            PrimaryPushButton, ComboBox, SpinBox, TableWidget,
+                            PrimaryPushButton, ComboBox, TableWidget,
                             ToolButton, MessageBox, FluentIcon, InfoBar,
                             InfoBarPosition, CheckBox, SearchLineEdit,
                             SegmentedWidget)
@@ -47,6 +47,7 @@ from core.frp_remote import (get_session_manager, SOURCE_MANUAL,
 from core.frps_admin import get_frps_client
 from core.visitor_probe import get_prober
 from core.ops_link_delegate import LINKS_ROLE, install_ops_links
+from core.spin_fit_patch import FittedSpinBox
 from database import table_db
 from workers.aftersale_worker import AftersaleDBWorker
 from windows.aftersale.common import _style_cand_list
@@ -773,9 +774,12 @@ class SessionWork(QWidget):
 class VisitorWork(QWidget):
     """连接视图（原「P2P 访客」，2026-09-24 P1 双模化）：XTCP 访客 + TCP 直连
 
-    - XTCP 模式：visitor 注册表 + 添加访客表单（写入统一 TOML 并落盘）
+    - XTCP 模式：visitor 注册表 + 添加访客表单（写入统一 TOML 并落盘），
+      含**设备** SSH 账号/密码（settings ssh_user/ssh_pass，与主面板 P2P 表单、
+      统一设置页同键同源；2026-10-04 补，此前 xtcp 侧无凭据入口）
     - TCP 模式：保存的服务器列表（settings tcp_servers，与主面板同源）
-      + host/port/凭据表单 → open_direct_session 直连（不经 frpc）
+      + host/port/凭据表单 → open_direct_session 直连（不经 frpc）；凭据独立存
+      settings tcp_ssh_user/tcp_ssh_pass，**不覆盖**设备凭据（2026-10-04 拆分）
     模式选择记忆到配置（remote_conn_mode），下次进入保持。
     """
 
@@ -786,6 +790,8 @@ class VisitorWork(QWidget):
         self._win = win
         self._hub = hub
         self._mgr = get_session_manager()
+        # SSH 账号/密码表单是否被用户改过（改过则不做回填，避免刷新冲掉输入）
+        self._cred_dirty = False
 
         body = QWidget(self)
         body.setAutoFillBackground(False)
@@ -825,19 +831,36 @@ class VisitorWork(QWidget):
         self.edit_key = PasswordLineEdit(add_card)
         self.edit_key.setPlaceholderText("secretKey（留空用默认）")
         self.edit_key.setFixedWidth(200)
-        self.spin_port = SpinBox(add_card)
+        # FittedSpinBox：端口是 4~5 位数字，qfw SpinBox 不为右侧自绘按钮预留
+        # 文本空间，固定宽度在大字号/高 DPI 下会把数字压到箭头下面（见该模块说明）
+        self.spin_port = FittedSpinBox(add_card)
         self.spin_port.setRange(0, 65535)
         self.spin_port.setValue(0)
         self.spin_port.setSpecialValueText("随机")
-        self.spin_port.setFixedWidth(130)
         self.edit_table_id = LineEdit(add_card)
         self.edit_table_id.setPlaceholderText("关联球桌号（选填）")
         self.edit_table_id.setFixedWidth(130)
+        # SSH 账号/密码（2026-10-04 用户反馈补）：xtcp 隧道的 SSH/SFTP 用的是
+        # **设备自己**的账号密码（settings ssh_user/ssh_pass，与主面板 P2P 表单、
+        # 统一设置页同键同源）。此前 xtcp 侧没有入口，只能到 TCP 直连卡里改，
+        # 一改就把隧道路径的凭据覆盖成直连主机的账号（如 root），隧道 SSH 随即
+        # 报「认证失败，请检查用户名和密码」——故在此提供并分离两侧凭据。
+        self.xtcp_user = LineEdit(add_card)
+        self.xtcp_user.setPlaceholderText("设备 SSH 账号（如 newbv）")
+        self.xtcp_user.setFixedWidth(260)
+        self.xtcp_pass = PasswordLineEdit(add_card)
+        self.xtcp_pass.setPlaceholderText("设备 SSH 密码")
+        self.xtcp_pass.setFixedWidth(200)
+        # textEdited 仅用户输入时触发（setText 不触发），不会把回填当作用户修改
+        self.xtcp_user.textEdited.connect(lambda _t: self._mark_cred_dirty(True))
+        self.xtcp_pass.textEdited.connect(lambda _t: self._mark_cred_dirty(True))
         lbl0 = BodyLabel("球桌搜索:", add_card)
         lbl1 = BodyLabel("serverName:", add_card)
         lbl2 = BodyLabel("secretKey:", add_card)
         lbl3 = BodyLabel("本地端口:", add_card)
         lbl4 = BodyLabel("关联球桌:", add_card)
+        lbl5 = BodyLabel("SSH 账号:", add_card)
+        lbl6 = BodyLabel("SSH 密码:", add_card)
         grid.addWidget(lbl0, 0, 0)
         grid.addWidget(self.edit_table_search, 0, 1)
         grid.addWidget(lbl2, 0, 2)
@@ -848,8 +871,14 @@ class VisitorWork(QWidget):
         grid.addWidget(self.spin_port, 1, 3, Qt.AlignLeft)
         grid.addWidget(lbl4, 2, 0)
         grid.addWidget(self.edit_table_id, 2, 1, Qt.AlignLeft)
+        grid.addWidget(lbl5, 3, 0)
+        grid.addWidget(self.xtcp_user, 3, 1)
+        grid.addWidget(lbl6, 3, 2)
+        grid.addWidget(self.xtcp_pass, 3, 3, Qt.AlignLeft)
         grid.setColumnStretch(4, 1)
         al.addLayout(grid)
+        # 构造期回填 settings 里的设备凭据（主面板/设置页改过的也能带出来）
+        self._load_ssh_credentials()
         # 球桌候选列表（默认隐藏，搜索命中后展示；点选带出 snk/桌号）
         self._cand_list = QListWidget(add_card)
         self._cand_list.setFixedHeight(132)
@@ -869,7 +898,9 @@ class VisitorWork(QWidget):
         al.addLayout(btns)
         cap = CaptionLabel(
             "注册仅写入 frpc_xtcp_panel.toml（不拉起 frpc）；「添加并连接」经一键直连建立隧道。"
-            "搜索球桌号可带出 serverName（snk 标识）与关联球桌。",
+            "搜索球桌号可带出 serverName（snk 标识）与关联球桌。"
+            "SSH 账号/密码是**设备凭据**（与主面板、设置页同源），TCP 直连卡里填的是"
+            "直连主机自己的凭据，两边互不覆盖。",
             add_card)
         cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         al.addWidget(cap)
@@ -887,10 +918,9 @@ class VisitorWork(QWidget):
         self.tcp_host = LineEdit(self.tcp_card)
         self.tcp_host.setPlaceholderText("主机地址（IP 或域名）")
         self.tcp_host.setFixedWidth(220)
-        self.tcp_port = SpinBox(self.tcp_card)
+        self.tcp_port = FittedSpinBox(self.tcp_card)
         self.tcp_port.setRange(1, 65535)
         self.tcp_port.setValue(22)
-        self.tcp_port.setFixedWidth(110)
         self.tcp_user = LineEdit(self.tcp_card)
         self.tcp_user.setPlaceholderText("SSH 用户名")
         self.tcp_user.setFixedWidth(150)
@@ -898,8 +928,11 @@ class VisitorWork(QWidget):
         self.tcp_pass.setPlaceholderText("SSH 密码")
         self.tcp_pass.setFixedWidth(150)
         _merged = _app_settings_merged()
-        self.tcp_user.setText(str(_merged.get("ssh_user", "") or ""))
-        self.tcp_pass.setText(str(_merged.get("ssh_pass", "") or ""))
+        # 直连凭据独立存放（tcp_ssh_user/tcp_ssh_pass，2026-10-04 拆分）：直连
+        # 主机多是 frps 服务器（root），与设备凭据（newbv）不同，与隧道共用
+        # ssh_user/ssh_pass 会互相覆盖，表现为「改过 TCP 账号后隧道 SSH 认证失败」
+        self.tcp_user.setText(str(_merged.get("tcp_ssh_user", "") or ""))
+        self.tcp_pass.setText(str(_merged.get("tcp_ssh_pass", "") or ""))
         tcp_grid.addWidget(BodyLabel("主机:", self.tcp_card), 0, 0)
         tcp_grid.addWidget(self.tcp_host, 0, 1)
         tcp_grid.addWidget(BodyLabel("端口:", self.tcp_card), 0, 2)
@@ -948,7 +981,9 @@ class VisitorWork(QWidget):
         tl.addSpacing(8)    # 表格与说明文字间距
         tcp_cap = CaptionLabel(
             "TCP 直连不经 frpc：局域网地址或 frps 转发端口（frps 代理页 tcp 页签可一键存入）。"
-            "凭据与主面板共享（ssh_user/ssh_pass），连接成功进全局会话窗口。",
+            "用户/密码是**直连主机自己**的凭据（存 tcp_ssh_user/tcp_ssh_pass，"
+            "连接时写回、下次自动带出），不会覆盖 XTCP 卡的设备凭据；"
+            "连接成功进全局会话窗口。",
             self.tcp_card)
         tcp_cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         tl.addWidget(tcp_cap)
@@ -1014,6 +1049,8 @@ class VisitorWork(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 别的入口（主面板 P2P 表单 / 统一设置页）改过凭据就同步过来
+        self._load_ssh_credentials()
         self.refresh()
 
     # ---------- 连接模式切换（P1 双模） ----------
@@ -1040,6 +1077,65 @@ class VisitorWork(QWidget):
                 pass
         if tcp:
             self._refresh_tcp_table()
+
+    # ---------- SSH 凭据：设备（XTCP）与直连（TCP）分离，2026-10-04 ----------
+
+    def _mark_cred_dirty(self, dirty: bool):
+        self._cred_dirty = bool(dirty)
+
+    def _settings_snapshot(self) -> dict:
+        """当前设置快照（优先主窗口缓存，异常回退配置门面）"""
+        try:
+            return dict(self._win._load_settings() or {})
+        except Exception:
+            return _app_settings_merged()
+
+    def _load_ssh_credentials(self, force: bool = False):
+        """把设置里的**设备**SSH 凭据回填到 XTCP 表单
+
+        force=False 且用户已改过（_cred_dirty）时不动，避免刷新冲掉输入。
+        """
+        if self._cred_dirty and not force:
+            return
+        s = self._settings_snapshot()
+        self.xtcp_user.setText(str(s.get("ssh_user", "") or ""))
+        self.xtcp_pass.setText(str(s.get("ssh_pass", "") or ""))
+        self._cred_dirty = False
+
+    def _persist_settings(self, data: dict) -> bool:
+        """写回设置：优先主窗口 _save_settings（顺带刷新其内存缓存）"""
+        if not data:
+            return False
+        saver = getattr(self._win, "_save_settings", None)
+        try:
+            if callable(saver):
+                saver(data)
+                return True
+            from core import app_settings
+            for k, v in data.items():
+                app_settings.set(k, v)
+            return True
+        except Exception:
+            return False
+
+    def _save_ssh_credentials(self) -> bool:
+        """设备凭据写回 ssh_user/ssh_pass（非空才覆盖，与主面板同语义）"""
+        data = {}
+        user = self.xtcp_user.text().strip()
+        if user:
+            data["ssh_user"] = user
+        if self.xtcp_pass.text():
+            data["ssh_pass"] = self.xtcp_pass.text()
+        if not data:
+            return False
+        changed = any(str(self._settings_snapshot().get(k, "")) != str(v)
+                      for k, v in data.items())
+        if not self._persist_settings(data):
+            return False
+        self._cred_dirty = False
+        if changed:
+            self._win._append_log("[远程] 设备 SSH 凭据已更新（ssh_user/ssh_pass）")
+        return True
 
     # ---------- TCP 直连（与主面板 TCP 模式同源同语义） ----------
 
@@ -1111,29 +1207,27 @@ class VisitorWork(QWidget):
         self._refresh_tcp_table()
 
     def _tcp_connect(self, kind: str):
-        """TCP 直连 SSH/SFTP（凭据写回 settings，与主面板共享）"""
+        """TCP 直连 SSH/SFTP（凭据独立于隧道设备凭据，2026-10-04）"""
         host = self.tcp_host.text().strip()
         if not host:
             self._win._show_info_bar("请输入主机地址", "warning")
             self.tcp_host.setFocus()
             return
-        # 凭据写回（主面板 _save_ssh_credentials 同语义：非空才覆盖）
+        # 直连凭据写回 tcp_ssh_user/tcp_ssh_pass（非空才覆盖）——**不再**写
+        # ssh_user/ssh_pass：直连主机常是 frps 服务器（root），设备是 newbv，
+        # 共用一键会互相覆盖，导致改过 TCP 后隧道 SSH 报认证失败（用户反馈）。
         data = {}
         if self.tcp_user.text().strip():
-            data["ssh_user"] = self.tcp_user.text().strip()
+            data["tcp_ssh_user"] = self.tcp_user.text().strip()
         if self.tcp_pass.text():
-            data["ssh_pass"] = self.tcp_pass.text()
-        if data:
-            try:
-                from core import app_settings
-                for k, v in data.items():
-                    app_settings.set(k, v)
-            except Exception:
-                pass  # 凭据持久化失败不阻塞连接
+            data["tcp_ssh_pass"] = self.tcp_pass.text()
+        self._persist_settings(data)     # 持久化失败不阻塞连接
         self._win._append_log(f"[远程] TCP 直连 {kind.upper()} {host}:"
                               f"{self.tcp_port.value()}")
         self._mgr.open_direct_session(
-            kind, host, self.tcp_port.value(), name=host, notifier=self._win)
+            kind, host, self.tcp_port.value(), name=host, notifier=self._win,
+            username=self.tcp_user.text().strip(),
+            password=self.tcp_pass.text())
 
     def refresh(self):
         self.table.setRowCount(0)
@@ -1271,12 +1365,15 @@ class VisitorWork(QWidget):
         return sn
 
     def _on_add(self):
+        self._save_ssh_credentials()
         sn = self._register()
         if sn:
             self._win._show_info_bar(f"已注册访客 {sn}", "success")
             self._win._append_log(f"[远程] 注册 visitor {sn}")
 
     def _on_add_connect(self):
+        # 先落设备凭据：open_session 走 _do_open 读的就是 settings ssh_user/ssh_pass
+        self._save_ssh_credentials()
         sn = self._register()
         if not sn:
             return
@@ -1837,11 +1934,10 @@ class TunnelConfWork(QWidget):
         self.edit_addr.setText(str(frpc.get("serverAddr",
                                             _FRPC_SERVER_DEFAULTS["serverAddr"])))
         self.edit_addr.setFixedWidth(200)
-        self.spin_port = SpinBox(card)
+        self.spin_port = FittedSpinBox(card)
         self.spin_port.setRange(1, 65535)
         self.spin_port.setValue(int(frpc.get("serverPort",
                                              _FRPC_SERVER_DEFAULTS["serverPort"])))
-        self.spin_port.setFixedWidth(130)
         self.combo_auth = ComboBox(card)
         self.combo_auth.addItems(["token", "none"])
         self.combo_auth.setCurrentText(

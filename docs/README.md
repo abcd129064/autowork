@@ -79,6 +79,7 @@ docs/
 | [售后面板UI改进方案.md](售后面板UI改进方案.md) | 售后面板 UI 分层改进方案，前置依赖 `core/design_tokens.py`、`core/theme_qss.py` | 设计·大部落地（09 月拆包重构随附；剩余 P2 视觉微调见文档头部核对块） |
 | [frp-source-integration.md](frp-source-integration.md) | frp Go 源码接入调研 + 落地记录（附录 E~G：二期 P0/P1、frps 概览卡、开机静默预连与预热打洞） | 调研快照 + 设计·已落地（附录） |
 | [settings_panel_redesign/统一设置面板重构设计.md](settings_panel_redesign/统一设置面板重构设计.md) | 统一设置面板重构设计，配图在 `settings_panel_redesign/assets/` | 设计·已落地（实际形态为 SegmentedWidget 7 段，见文档头部核对块；字段映射仍权威） |
+| [终端全屏应用渲染修复.md](终端全屏应用渲染修复.md) | SSH 终端里 nano/vim/less/top 全屏界面错乱的根因（CSI 行定位序列被丢弃、`\E(B` 漏字、无固定网格）与修复设计：`core/vt_screen.py` 屏幕模型分层、网格↔PTY 尺寸契约、宽字符、输入侧模式；含"序列→行为"对照表与已知边界 | 设计·已落地（2026-10-05，回归见 `tests/test_vt_screen.py`、`tests/test_ansi_terminal_render.py`、`tools/smoke/smoke_ansi_terminal_tui.py`） |
 
 ## 四、性能调查
 
@@ -100,6 +101,7 @@ docs/
 | --- | --- | --- |
 | [xqzg接口清单.md](xqzg接口清单.md) | `xqzg.newbv.cn` API 清单，来源为 OpenAPI schema + 前端 JS 提取 + 逐端点验证；探测脚本在 `tools/probe/` | 调研快照（2026-09-20） |
 | [newbv_inventory_fields.md](newbv_inventory_fields.md) | newbv 运营后台「仓库管理 → 库存查询」字段抓取记录（Struts2 + ExtJS 3 老架构） | 调研快照 |
+| [售后群消息归档可行性评估2026-10-05.md](售后群消息归档可行性评估2026-10-05.md) | 微信/企业微信售后群消息自动归档需求评估：企微会话存档（5 天窗口、edition≥2、公钥前置）为唯一合规主干，个人微信自动化路线否决（2025-04 Hook 实测封号数据），A 主干 + C 人工导出兜底 + D 机器人通知出口；含分层设计、风险登记与待拍板决策点 | 调研快照（2026-10-05） |
 
 ## 五之二、技术栈调研
 

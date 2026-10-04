@@ -23,7 +23,9 @@
 - 开机静默预连（2026-09-23）：启动 6s 后 `autostart()`（仅启用隧道、异常全吞进日志），就绪轮询后 `prewarm_async()` 串行 connect 预热打洞；预连后点 SSH 秒连。详见 [frp-source-integration.md](frp-source-integration.md) 附录 G。
 - **远程可靠性批次**（2026-09-23）：①frpc 意外退出退避自愈重启（5s/30s/2min，健康 ≥60s 清零）；②autostart 瞬态失败有界重试（60s/120s）；③质量探测冷洞首拍 3s 长超时不计失败；④会话打开/预热改 bindPort 就绪轮询（200ms 间隔/8s 上限）替代固定延时；⑤隧道失联联动已开会话面板提示条（`windows/remote_session/tunnel_notice.py`）；⑥预热成功状态列「已预热」（`prewarmedAt` 仅内存）；⑦远程页文件归口 `windows/remote_session/`（remote_hub/remote_mixin 迁入）。
 - frp 0.65 管理 API 参考手册落档：[frp-065-api-reference.md](frp-065-api-reference.md)。
+- **远程 SSH 凭据拆分：设备（XTCP）与直连主机（TCP）分开**（2026-10-04）：此前隧道路径与 TCP 直连共用 `ssh_user/ssh_pass`，而 XTCP 卡没有凭据输入口——一旦用 TCP 卡连过另一台主机（如 frps 服务器 `root`），设备凭据就被覆盖，隧道会话随即「认证失败，请检查用户名和密码」（设备账号如 `newbv`）。现：①`VisitorWork` XTCP 卡新增「SSH 账号/SSH 密码」（= `ssh_user/ssh_pass`，与主面板 P2P 表单/统一设置页同源，`textEdited` 脏标记防回填覆盖），添加并注册 / 添加并连接 SSH 时非空回写；②TCP 卡凭据改存 `tcp_ssh_user/tcp_ssh_pass`（`SENSITIVE_KEYS` 一并纳入 DPAPI），并经 `open_direct_session(..., username=, password=)` 显式传入；③`RemoteSessionManager._do_open` 凭据显式优先、`None` 才回退 settings（隧道路径行为不变）；④宿主支持 `_save_settings` 时走它写回，顺带修掉主窗口 `_settings_cache` 陈旧问题。回归 `tests/test_remote_cred_split.py`（14 例）+ `tests/test_remote_hub_linkage.py`（透传断言）。
 - **远程页操作列移除 RDP + 新增「RDP」视图**（2026-10-04）：RemoteHub 扩为**六视图**（末位新增「RDP」，`windows/remote_session/remote_hub.py::RdpWork`）；会话总览操作列不再出现 RDP 链接（现为 SSH/SFTP/断开/删除）——visitor 的 `bindPort` 只映射远端 22（SSH/SFTP 复用），RDP 需要 3389 专用隧道（约定 `rdp_<serverName>`）属后续功能，此前点 RDP 必然连到 SSH 端口。新视图承载说明与状态（注册隧道数 / RDP 可用隧道 / 状态，当前恒「未开通」）+「打开会话中心」；`_on_ops_link` 仍接受 `'rdp'`，专用隧道落地后恢复入口零改动；弹出面板 `nav_icons["remoteHub"]` 同步补齐第 6 键（缺键会静默退回内嵌 Pivot 形态）。回归 `tests/test_remote_rdp_tab.py`（10 例，含 nav_icons 覆盖校验）。
+- **SSH 终端全屏应用（nano/vim/less/top）渲染修复**（2026-10-05）：用户截图显示 nano 首屏「30 行正文塌成 1 行、每行多一个字面 `B`、光标方块显示成 `&nbsp;`、status 与快捷键行挤同一行」。根因（有真实会话字节流 + terminfo 双向证据）：自写解析器不认 ncurses 的行定位序列（`\E[<n>d` VPA / `\E[<n>E` CNL / `\E[L`/`\E[M` / 滚动区 / 擦删插字符），且 `\E(` 只吃两字节导致 `\E(B`（`sgr0` 复位字符集）漏字；另无固定网格、PTY 尺寸写死 120x40。修复：①新增 `core/vt_screen.py`（零 Qt 依赖的 VT100/xterm 屏幕模型，支持 VPA/CUP/EL/ED/IL/DL/ICH/DCH/ECH/SU/SD/DECSTBM/备用屏幕/SGR/ACS 字符集/**宽字符双宽**/回滚，可离线单测）；②`windows/remote_session/ansi_terminal.py` 重写为纯渲染/输入层（实测行高换算网格、选区与滚动位跨重渲染保持、DECCKM 应用光标键、修饰键组合、括号粘贴、SGR 鼠标上报）；③`ssh_terminal.py` 用控件实测网格开 PTY 并 `resize_pty`（120ms 去抖）、reader 线程增量 UTF-8 解码、会话日志 `\r` 归一化；④`windows/remote_session/__init__.py` 改 PEP 562 惰性导出（此前任何子模块导入都被 `qfluentwidgets` 连带）。回归 `tests/test_vt_screen.py`（40 例）+ `tests/test_ansi_terminal_render.py`（15 例）+ 冒烟 `tools/smoke/smoke_ansi_terminal_tui.py`（22 项）；设计与"序列→行为"对照表见 [终端全屏应用渲染修复.md](终端全屏应用渲染修复.md)。
 
 ### 售后 / 跑视频
 - 售后记录**连续录入模式**（2026-09-22）：提交后弹窗保持、表单清空，连续登记不关窗。
@@ -32,8 +34,10 @@
 ### 球桌 / 运维
 - 球桌管理新增 **ToDesk 远程开关列**（2026-09-20）：worker 池按设备编码并发下发开/关，权威显示口径 = `todesk_action`。
 - 导航栏新增**更新状态图标**（2026-09-20）：发现新版本才显示，位于「设置」上方。
+- **设备状态页文件迁移即时回显**（2026-10-04）：xqzg 源下点「操作」列迁移一条到「使用」时，InfoBar 提示成功但文件面板清单不刷新（原来 3 条还是 3 条）、表格计数要等 5-10s。两个缺陷：①`FileListPanel.refresh_if_visible` 固定查 `kd_status`，xqzg 设备取不到行（或取回同名设备的 kd 行）；②迁移成功后只等接口全量往返（翻页拉全 + 整分区 DELETE/INSERT）。修复：按 `_active_source()` 分派 `query_xqzg_by_device`/`query_kd_by_device`；迁移成功先本地即时回显（`move_file_in_row` 动面板清单与表格计数 + `apply_file_move` 异步单行落库）再 `_silent_refresh` 对账。回归 `tests/test_status_file_move.py`（17 例）。
 
 ### 界面 / 主题
+- **端口微调框数字被上下箭头遮挡修复**（2026-10-04）：qfw `SpinBox` 关掉 Qt 原生按钮、把自绘上下按钮叠在右侧，**Qt 因此不给文本预留空间**，而项目里普遍 `setFixedWidth(100~150)` —— 字号一大（统一设置页可运行时 `QApplication.setFont`）数字就钻到箭头下面（用户截图：TCP 端口 "9897" 只看见一半）。新增 `core/spin_fit_patch`（`spin_width_for()` + `FittedSpinBox`：按当前字体算「文本 + 间隙 + 按钮区 71px」，并在 `FontChange` 时重算），替换 7 处多位数字微调框：远程页 TCP 端口/XTCP 本地端口/隧道配置 serverPort、工具页端口占用、`windows/tools/port_fake`、售后台账周期天数、`make_spinbox`（设置页数字，原 `width` 降为下限）。实测 16pt 下旧写法文本右缘 43px > 按钮左缘 39px（复现），新写法 51 ≤ 61。回归 `tests/test_spin_fit.py`（9 例）+ 冒烟 `tools/smoke/smoke_port_spin_fit.py`。
 - **Mica 云母环境兜底**（2026-09-24）：RDP 会话 / 系统透明效果关闭（省电模式自动关）时 DWM 静默不渲染 backdrop，而 qfw 已把窗口背景置全透明——表现为"同一份产物有的电脑没云母"。启动时探测（`core/perf.py patch_mica_policy`），命中则双层短路回退纯主题色背景。判定与诊断：`mica_block_reason()`。
 
 ### 工程 / 仓库治理

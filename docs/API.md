@@ -329,6 +329,19 @@ SwitchButton 状态文本中文化补丁：qfluentwidgets SwitchButton 默认状
 
 ---
 
+### core.spin_fit_patch
+
+qfw `SpinBox` 宽度自适应补丁（2026-10-04）：qfluentwidgets 的 `SpinBox`（`InlineSpinBoxBase`）关掉 Qt 原生按钮（setButtonSymbols(NoButtons)）、把自绘上下按钮叠在控件右侧，**Qt 因此不为文本预留按钮空间**；本项目这些控件普遍写死 setFixedWidth(100~150)，放大字号（统一设置页可运行时调用 QApplication.setFont）后数字会钻到箭头下面（用户截图：TCP 端口 "9897" 只看见一半）。实测（微软雅黑）按钮区恒 71px（up 31 + down 31 + spacing 5 + 右边距 4），文本左内边距 11px ⇒ 宽度须 ≥ 文本宽 + 92。
+
+| 函数/类 | 签名 | 说明 |
+|---------|------|------|
+| `spin_width_for(spin, sample="65535")` | `(QWidget, str) -> int` | 按控件当前字体算「文本 + 间隙 + 按钮区」所需宽度（px） |
+| `FittedSpinBox` | `(parent=None, sample="65535")` | 宽度随字体自适应的 `SpinBox`；`set_fit_sample(text)` / `refit(min_width=None)`（`min_width` 作设计稿定宽下限） |
+
+已接入：`windows/remote_session/remote_hub.py`（TCP 直连端口、XTCP 本地端口、隧道配置 serverPort）、`main_window/tool_hub.py`（端口占用）、`windows/tools/port_fake.py`、`windows/aftersale/settings.py`（周期天数）、`main_window/setting_cards.py::make_spinbox`（设置页数字，`width` 参数降为下限）。回归 `tests/test_spin_fit.py`；冒烟 `tools/smoke/smoke_port_spin_fit.py`。
+
+---
+
 ### core.frp_remote
 
 frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话协调）。
@@ -351,7 +364,8 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 | 方法 | 说明 |
 |------|------|
 | `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪；受理即 InfoBar 反馈，就绪等待为**端口监听轮询**（P2-4：200ms 间隔、8s 上限）；预检 frps 缓存过期时**挂起 + `request_refresh` 后台感知，回执后经 `_on_refresh_finished_resume` 续接**（P0-1，2026-09-24，不再同步阻塞 GUI） |
-| `open_direct_session(kind, host, port, name="", notifier=None)` | **TCP 直连会话**（2026-09-24，不经 frpc）：对任意 host:port 开 SSH/SFTP 面板（远程页「连接」TCP 模式与 frps 代理 tcp 页签「直连」用）；凭据取 `settings.ssh_user/ssh_pass`，进全局会话窗口；host/port 校验失败与 paramiko 缺失走 `_notify` 拒绝 |
+| `open_direct_session(kind, host, port, name="", notifier=None, username=None, password=None)` | **TCP 直连会话**（2026-09-24，不经 frpc）：对任意 host:port 开 SSH/SFTP 面板（远程页「连接」TCP 模式与 frps 代理 tcp 页签「直连」用）；**凭据显式传入优先，`None` 才回退 `settings.ssh_user/ssh_pass`（2026-10-04）**——远程页 TCP 卡传 `tcp_ssh_user/tcp_ssh_pass` 的主机凭据，frps 代理页不传即沿用设备凭据；进全局会话窗口；host/port 校验失败与 paramiko 缺失走 `_notify` 拒绝 |
+| `_do_open(kind, snk, table_id, port, notifier=None, host="127.0.0.1", username=None, password=None)` | 会话面板的实际创建点（内部）：`username/password` 为 `None` 时回退 `settings.ssh_user/ssh_pass`；隧道路径（`open_session`）不传即设备凭据 |
 | `frps_server_addr()` | frps 服务器地址（`frpc_server.serverAddr`，缺省回退默认值）——frps 代理视图 tcp 页签直连的目标主机 |
 | `disconnect_visitor(server_name)` | 隧道面板「断开连接」：仅 frpc 运行中生效（返回 ok/not_running/not_found/error），先关相关会话再把 visitor 置 `disabled` 态并 apply 摘除隧道、释放端口；**注册与持久化保留**（记录落 `frpc_xtcp_disabled.json` 侧车，不进 frpc TOML），重新连接自动恢复启用，绝不自动启动 frpc |
 | `delete_visitor(server_name)` | 隧道面板「删除 snk」：从注册表与持久化文件（含 disabled 侧车）彻底移除，frpc 未运行时也可执行且不启动 frpc |
@@ -452,6 +466,29 @@ AI 厂商注册表：统一各厂商的 OpenAI 兼容接入参数（DeepSeek / �
 | 类 | 说明 |
 |------|------|
 | `FlowToolbarScrollArea(QScrollArea)` | 工具栏专用滚动区域：按自身宽度计算内容高度并锁定（单行=单行高，折行=多行高，超上限滚动）；视口透明无边框 |
+
+---
+
+### core.vt_screen
+
+VT100/xterm 屏幕模型（**零 Qt 依赖**，可离线单测）：固定 `cols × rows` 网格 + 光标 + 属性 + 回滚，供 `windows/remote_session/ansi_terminal.py` 渲染。设计说明见 [终端全屏应用渲染修复.md](终端全屏应用渲染修复.md)。
+
+```python
+VTScreen(cols=80, rows=24, max_scrollback=2000)
+```
+
+| 成员 | 说明 |
+|------|------|
+| `feed(text)` | 喂入终端输出（可跨调用切断转义序列，解析状态保留） |
+| `resize(cols, rows)` / `clear()` / `reset()` | 改网格尺寸 / 清屏+清回滚 / RIS 复位 |
+| `cols` `rows` `cursor_row` `cursor_col` `cursor_visible` `alt_screen` | 只读状态 |
+| `revision` / `structure_revision` / `dirty_rows()` / `clear_dirty_rows()` | 渲染侧增量依据（结构变化需全量重建） |
+| `scrollback_rows` / `total_rows()` / `cursor_display_row()` | 回滚与渲染行号（回滚行在前） |
+| `row_cells(i)` / `row_text(i)` / `row_width(i)` | 按渲染行号取单元格 / 纯文本 / 显示宽度 |
+| `app_cursor_keys` `bracketed_paste` `mouse_mode` `mouse_sgr` `focus_events` | 输入侧模式（控件据此选键序列、是否上报鼠标） |
+| `WIDE_SENTINEL`（模块常量） | 宽字符续格哨兵 `\x00`：宽字符占两格，第二格是它，渲染层据此只画一次字形 |
+
+支持：CUP/HVP/VPA/HPA/CHA/CUU/CUD/CUF/CUB/CNL/CPL/NEL/IND/RI、EL/ED、ICH/DCH/ECH、IL/DL、SU/SD、DECSTBM、SGR（16/256/真彩 + 粗体/下划线/反显）、`\E(0`/`\E(B`、SO/SI(G0/G1)、备用屏幕 1049/47/1047/1048、DECSC/DECRC、DECOM、IRM、DECAWM、DECTCEM、宽字符与组合符。未实现项见设计文档"序列→行为"对照表。
 
 ---
 
@@ -934,11 +971,25 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `get_latest_kd_status(table_id)` | 查指定球桌最近一次上报的设备状态（轻量单条 SQL，远程连接前置检查用） |
 | `get_latest_kd_status_by_code(device_code)` | 按设备码模糊匹配最新分区设备状态（球桌面板离线前置检查降级用） |
 | `query_latest_kd_full(table_id="", device_code="")` | 查指定球桌/设备码最新分区的完整 kd 行（含文件清单，取证报告用） |
-| `query_kd_by_device(device_code, file_path="")` | 按 device_code 精确查询单台设备完整信息（缺省最新分区） |
+| `query_kd_by_device(device_code, file_path="")` | 按 device_code 精确查询单台 kd 设备完整信息（含文件清单反序列化） |
+| `query_xqzg_by_device(device_code, file_path="")` | 与上者对称的 xqzg 版：文件面板刷新按当前数据源选表（2026-10-04 新增，此前固定查 kd_status） |
 | `find_kd_file_status(device_code, date, clip_base)` | 按 设备码+日期分区+文件基础名 反查所属分类（C6 文件归类迁移用） |
 | `query_kd_trend(device_code, days=30)` | 单设备近 N 天按日期的指标序列（单条 SQL，趋势折线图数据源） |
 | `query_kd_ranking(date="", top=10, by="error_rate")` | 指定日期设备指标 TOP N 排行（排序字段白名单校验） |
 | `query_kd_alerts(days=7)` | 突增预警：最新分区 error_rate > 前 N 日均值×2 的设备（单条 CTE SQL） |
+
+#### 文件迁移的本地即时对账（2026-10-04）
+
+图片迁移接口确认成功后，静默刷新要翻页拉全接口再整分区 DELETE/INSERT（xqzg 千台设备实测 5-10s），期间文件面板清单与表格计数停在旧值（用户报障：提示迁移成功但原来 3 条还是 3 条）。以下两个函数把这次迁移立刻落到本地快照，界面无需等接口往返；随后静默刷新以服务端口径覆盖（幂等）。
+
+| 函数/常量 | 说明 |
+|------|------|
+| `move_file_in_row(row, src_field, dest_field, file_name)` | 在设备行快照上就地执行一次迁移：源清单移除 + 目标清单追加（已存在不重复），对应计数列 ±1（映射见下 `FILE_COUNT_FIELDS`；空/非数字计数保持原样不臆造）；轻量行（无清单）只调计数；同分类迁移视为无变更。返回 `变更字段 → 新值`，界面据此就地重绘 |
+| `apply_file_move(table, device_code, file_path, src_field, dest_field, file_name)` | 上者的落库版（经 `_DBQueryWorker` 异步调用）：按 `device_code` + 日期分区定位单行，只 UPDATE 变更列，不触碰其他设备；未命中/无变更返回 0，表名或字段非法抛 `ValueError` |
+
+模块常量 `FILE_COUNT_FIELDS`：文件清单字段 → 计数列映射（`normal_files→normal_count`、`except_files→except_count`、`untreated_files→untreated_count`、`operation_files→operation_count`、`accuracy_files→accuracy_count`、`already_files→already_count`、`rubbish_files→rubbish_count`；`version_files` 无计数列）。
+
+**修复记录（2026-10-04）**：设备状态页文件迁移的两个缺陷——①`FileListPanel.refresh_if_visible` 固定查 `kd_status`，xqzg 数据源下刷新要么查不到该设备（清单永远停在迁移前的条数）要么取回同名设备的 kd 行（清单串源）；②迁移成功后只等接口全量往返，无本地即时回显。已修复：刷新按当前数据源（xqzg / kd）分派 `query_xqzg_by_device` / `query_kd_by_device`；`DevicePage._on_migrate_ok` 先 `_apply_local_move`（面板清单 + 表格行计数就地更新 + `apply_file_move` 异步落库）再 `_silent_refresh` 对账（在途刷新改为记「补一次」标记，不丢弃）。回归 `tests/test_status_file_move.py`（18 例）。
 
 #### 提交台账（submission_log）
 
@@ -1269,8 +1320,16 @@ SSHTerminalWindow(host, port, username, password,
 - 上下键命令历史
 - Ctrl+C/D/L 控制键
 - ANSI 彩色输出渲染
-- 全屏应用支持（nano/vim 备用屏幕切换）
+- 全屏应用支持（nano/vim/less/top：备用屏幕、滚动区、行定位序列；见 [终端全屏应用渲染修复.md](终端全屏应用渲染修复.md)）
 - 外部客户端打开（CMD / Xshell）
+
+**PTY 尺寸契约**（2026-10-05）：`invoke_shell` 的 `width/height` 取自终端控件实测网格
+（`ANSITerminalWidget.sync_grid(force=True)` → `grid_size()`），并记为"已同步尺寸"；
+控件 `grid_resized` 信号经 120ms 去抖后 `channel.resize_pty()`。禁止再写死 120x40——
+远端 ncurses 应用完全按 PTY 尺寸排版。
+
+**会话日志**：reader 线程用 `codecs` 增量解码 UTF-8（避免被 recv 切断的多字节字符变乱码）；
+备用屏幕期间写日志时把 `\r` 归一化为 `\n`（全屏应用不靠 `\n` 换行），普通 shell 保留 `\r`。
 
 **安全关闭策略**：
 - channel 设置 0.1s recv 超时
@@ -1278,6 +1337,27 @@ SSHTerminalWindow(host, port, username, password,
 - reader 线程退出后再关闭 transport
 
 **其他**：`SSHTerminalPanel(QWidget)` 可嵌入面板形态；`SshCommandEditDialog(QDialog)` 常用命令管理（增删命令写入 `ssh_commands` 配置键）；模块级 `get_session_log_dir()` 返回 SSH 会话日志目录（logs/ssh_sessions，与 conn_logger 同级机制）。
+
+---
+
+### windows.remote_session.ansi_terminal（ANSITerminalWidget 终端控件）
+
+基于 `QTextEdit` 的终端控件：屏幕语义在 [`core.vt_screen`](#corevt_screen)，本类只负责
+输入转发与"屏幕网格 → HTML"渲染。终端底色固定深色（`#1e1e1e`，不随主题变白，属业务观感）。
+
+| 成员 | 说明 |
+|------|------|
+| 信号 `key_input(str)` | 用户键盘/鼠标/粘贴产生的字节序列（上层写回 channel） |
+| 信号 `grid_resized(int, int)` | 网格 (cols, rows) 变化 → 上层 `resize_pty` |
+| `write_output(text)` / `clear_terminal()` / `set_input_enabled(bool)` | 写数据 / 清屏 / 是否接受输入 |
+| `grid_size()` / `set_grid_size(cols, rows)` / `sync_grid(force=False)` | 网格尺寸读取/显式设置/按控件尺寸对齐（连接前用 `force=True`） |
+| `screen_text(strip=True)` | 导出屏幕纯文本（调试/冒烟断言） |
+| 属性 `alt_screen` | 是否处于备用屏幕（会话日志的 `\r` 归一化据此判断） |
+
+输入能力：DECCKM 应用光标键（`\EOA..`）、修饰键组合（`\E[1;<mod>{A..D}`）、括号粘贴
+（`?2004` → `\E[200~…\E[201~`）、SGR 鼠标上报（`?1000/1002/1003` + `?1006`）、焦点事件（`?1004`）。
+渲染保证：重渲染前后保持用户选区与滚动位置（否则远端一有输出，`Ctrl+C` 会从"复制"退化成 SIGINT）；
+网格按**实测行高**计算，整屏不裁行。
 
 ---
 
@@ -1413,13 +1493,16 @@ ManagementPanelWindow(parent=None)
 
 - `总数`(pic_total) / `正常`(normal_count) / `操作`(except_count) 三列为链接色可点击单元格（`_FILE_VIEW_FIELDS`）
 - 点击后右侧滑出 `FileListPanel`（QPropertyAnimation，宽 360，需 `WA_StyledBackground` 才不透明）展示 [分类, 文件名]
-- 点击文件条目弹 RoundMenu 四选项（问题/精度/使用/废弃，`MIGRATE_DEST_OPTIONS`）→ `DevicePage.migrate_file` → `MigrateImageWorker` 迁移单文件 → 成功后 `_silent_refresh` 静默重拉刷新
+- 点击文件条目弹 RoundMenu 四选项（问题/精度/使用/废弃，`MIGRATE_DEST_OPTIONS`）→ `DevicePage.migrate_file` → `MigrateImageWorker` 迁移单文件 → 成功后**本地即时回显**（`_apply_local_move`：面板清单 + 表格计数就地更新、`apply_file_move` 异步落库）→ `_silent_refresh` 静默重拉对账（2026-10-04：此前只等接口全量往返，列表要 5-10s 才变、xqzg 源下因刷新固定查 kd 表而根本不刷新）
 
 | DevicePage 关键方法 | 说明 |
 |------|------|
 | _on_cell_clicked(row, col) | 单元格点击 → 打开文件面板 |
-| migrate_file(fname, src_cat, dest_cat) | 发起单文件迁移 |
-| _silent_refresh() | 迁移后静默重拉当前数据源 |
+| migrate_file(fname, src_cat, dest_cat) | 发起单文件迁移（成功回调带源分类 + 设备码） |
+| _apply_local_move(fname, src_cat, dest_cat, device_code) | 迁移成功即时回显：面板清单 + 表格行计数 + 本地快照落库（面板已切设备时不误改，返回该设备行快照供收集） |
+| apply_local_move(fname, src_cat, dest_cat) | `FileListPanel` 侧：内存快照移动 + 重绘（复用 `move_file_in_row`） |
+| refresh_if_visible() | 面板按当前数据源（xqzg / kd）异步重载该设备行 |
+| _silent_refresh() | 迁移后静默重拉当前数据源（服务端口径对账）；已有刷新在途时记「补一次」标记而非丢弃（整分区重拉是发起时刻的快照，丢弃会让期间迁移的条目被旧快照落回原分类） |
 
 **模块级辅助**（`windows/management_panel.py` shim 提供）：_load_settings / _save_settings（settings.json 合并读写）、_copy_table_selection（表格选中内容复制）、FILE_FIELD_CATEGORIES（文件字段 → 中文分类）。
 
@@ -1879,7 +1962,7 @@ busy 守卫共享 `_single_video_worker/_newlog_worker/_newlog_upload_worker`（
 
 #### 类 `RemoteHub`
 
-`RemoteHub(PivotPage)`：Pivot 多视图（**六视图**，2026-10-04）——工作区类 `SessionWork(QWidget)`（会话总览：统计卡 + 6 列隧道表，操作列为委托自绘文字链接（SSH/SFTP/断开/删除，`install_ops_links` + `LINKS_ROLE`；**2026-10-04 起移除 RDP 链接**——visitor 的 bindPort 只映射远端 22，3389 专用隧道未实现，点 RDP 必然连到 SSH 端口），refresh 合帧门控（同一事件循环内多次触发只重建一次，且只排到下一轮事件循环 → 断言前须跑事件循环）、SFTP 传输中二次确认）、`VisitorWork(QWidget)`（**连接**（2026-09-24 双模化，原「P2P 访客」）：顶部 XTCP│TCP Segmented 切换 + 模式记忆（`remote_conn_mode`）；XTCP 模式 = 访客注册卡（注册只 persist 不拉 frpc，球桌号搜索联动带出 serverName）+ 注册表；TCP 模式 = 直连表单（host/port/凭据预填 `ssh_user/ssh_pass`）→ `open_direct_session` + 保存服务器表（`settings.tcp_servers` 与主面板远程菜单同键同源））、`QualityWork(QWidget)`（连接质量：visitor RTT 探测样本）、`FrpsProxiesWork(QWidget)`（frps 代理清单：全类型代理表 9 列；xtcp 页签「本地」列联动注册表三态（已注册/已断开/未注册）+ 操作列委托自绘文字链接（SSH/SFTP、重连/删注册、＋注册并连）；tcp 页签 SSH/SFTP 直连（目标 frps serverAddr:remotePort）+ 存服务器；搜索 300ms 防抖）、`TunnelConfWork(QWidget)`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）、`RdpWork(QWidget)`（**RDP**（2026-10-04 新增，预留页）：三张卡=`_stat_card`（注册隧道数 / RDP 可用隧道 / RDP 隧道状态）+ 3 张说明卡（操作列为何移除 RDP、当前可用路径、3389 隧道落地后的接入清单）+「打开会话中心」按钮；`_rdp_capable(records)` 静态检测位（命中 `remotePort == "3389"` 或 `serverName` 前缀 `rdp_`），当前注册表无远端映射字段故恒为空）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例与 `core.frps_admin` 感知客户端；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
+`RemoteHub(PivotPage)`：Pivot 多视图（**六视图**，2026-10-04）——工作区类 `SessionWork(QWidget)`（会话总览：统计卡 + 6 列隧道表，操作列为委托自绘文字链接（SSH/SFTP/断开/删除，`install_ops_links` + `LINKS_ROLE`；**2026-10-04 起移除 RDP 链接**——visitor 的 bindPort 只映射远端 22，3389 专用隧道未实现，点 RDP 必然连到 SSH 端口），refresh 合帧门控（同一事件循环内多次触发只重建一次，且只排到下一轮事件循环 → 断言前须跑事件循环）、SFTP 传输中二次确认）、`VisitorWork(QWidget)`（**连接**（2026-09-24 双模化，原「P2P 访客」）：顶部 XTCP│TCP Segmented 切换 + 模式记忆（`remote_conn_mode`）；XTCP 模式 = 访客注册卡（注册只 persist 不拉 frpc，球桌号搜索联动带出 serverName；**2026-10-04 起卡内新增「SSH 账号/SSH 密码」= 设备凭据 `ssh_user/ssh_pass`**，添加并注册/添加并连接 SSH 时非空回填写入）+ 注册表；TCP 模式 = 直连表单（host/port + **主机凭据预填 `tcp_ssh_user/tcp_ssh_pass`**）→ `open_direct_session(..., username=..., password=...)` + 保存服务器表（`settings.tcp_servers` 与主面板远程菜单同键同源））、`QualityWork(QWidget)`（连接质量：visitor RTT 探测样本）、`FrpsProxiesWork(QWidget)`（frps 代理清单：全类型代理表 9 列；xtcp 页签「本地」列联动注册表三态（已注册/已断开/未注册）+ 操作列委托自绘文字链接（SSH/SFTP、重连/删注册、＋注册并连）；tcp 页签 SSH/SFTP 直连（目标 frps serverAddr:remotePort）+ 存服务器；搜索 300ms 防抖）、`TunnelConfWork(QWidget)`（隧道配置：frpc 服务器 + 进程控制 + 实时日志）、`RdpWork(QWidget)`（**RDP**（2026-10-04 新增，预留页）：三张卡=`_stat_card`（注册隧道数 / RDP 可用隧道 / RDP 隧道状态）+ 3 张说明卡（操作列为何移除 RDP、当前可用路径、3389 隧道落地后的接入清单）+「打开会话中心」按钮；`_rdp_capable(records)` 静态检测位（命中 `remotePort == "3389"` 或 `serverName` 前缀 `rdp_`），当前注册表无远端映射字段故恒为空）。后端零改动复用 `core.frp_remote.get_session_manager()` 单例与 `core.frps_admin` 感知客户端；**构造不得拉起 frpc**；手动停 frpc 保注册表（close_all_sessions → records 暂存 → 全 remove → apply() 空表即停进程 → 重新 register → persist()）。连接诊断不属本页（设置-工具行开 `ConnDiagPanel` 独立弹窗）。
 
 ⚠️ 新增视图必须同步 `main_window/main_window.py` 的 `nav_icons["remoteHub"]`：`HubPopoutWindow` 以 `len(entries) == len(meta)` 判定能否切成左侧子导航，缺任一键就静默退回内嵌 Pivot 形态（回归 `tests/test_remote_rdp_tab.py::test_popout_nav_icons_cover_all_tabs`）。
 
@@ -2066,7 +2149,8 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | ui.json | `theme_color` | str = "#00BCD4" | 主题强调色（即时生效） |
 | ui.json | `highlight_color` | [r,g,b] | 日志高亮颜色（旧字段，仅作 theme_color 兼容回退） |
 | ui.json | `log_highlight_rules` | [object] | 日志高亮规则 `[{name, pattern, color, notify}]` |
-| credentials.json 🔒 | `ssh_user` / `ssh_pass` | str | SSH 默认账号密码（密码 DPAPI 加密） |
+| credentials.json 🔒 | `ssh_user` / `ssh_pass` | str | **设备**（XTCP 隧道目标）SSH 账号密码，与主面板 P2P 表单、统一设置页同键同源（密码 DPAPI 加密） |
+| credentials.json 🔒 | `tcp_ssh_user` / `tcp_ssh_pass` | str | **直连主机**（远程页 TCP 卡 / frps 代理直连）SSH 账号密码——2026-10-04 与设备凭据拆开，避免改直连把隧道凭据一起覆盖（密码 DPAPI 加密） |
 | credentials.json 🔒 | `tcp_servers` | [str] | 保存的 TCP 服务器列表（ip:port） |
 | credentials.json 🔒 | `sftp_default_remote_path` | str | SFTP 默认远程路径 |
 | credentials.json 🔒 | `frpc_server` | object | frp 服务器配置（serverAddr/serverPort/auth_method/auth_token） |

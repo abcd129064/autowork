@@ -90,6 +90,18 @@ KD_FILE_FIELDS = (
     "rubbish_files", "version_files",
 )
 
+# 文件清单字段 → 计数列（迁移后本地即时对账用：清单进一个出一个，
+# 对应计数列 ±1）。version_files 无对应计数列（版本不计入统计），故不在表内。
+FILE_COUNT_FIELDS = {
+    "normal_files": "normal_count",
+    "except_files": "except_count",
+    "untreated_files": "untreated_count",
+    "operation_files": "operation_count",
+    "accuracy_files": "accuracy_count",
+    "already_files": "already_count",
+    "rubbish_files": "rubbish_count",
+}
+
 # kd_status 历史数据保留天数（按日期分区快照，过期自动清理，防止体积无限膨胀）
 _KD_KEEP_DAYS = 60
 
@@ -1508,23 +1520,25 @@ def query_kd_page(page_no: int, page_size: int, keyword: str = "", file_path: st
     return total, rows
 
 
-def query_kd_by_device(device_code: str, file_path: str = "") -> dict:
-    """按 device_code 精确查询单台设备完整信息（含文件清单）
+def _query_status_by_device(table: str, device_code: str,
+                            file_path: str = "") -> dict:
+    """按 device_code 精确查询单台设备完整信息（含文件清单反序列化）
 
-    供 FileListPanel 刷新使用，避免全量分页查询后 Python 侧过滤。
+    xqzg_status 与 kd_status 字段同构，实现共用一份；供 FileListPanel 刷新
+    使用（按当前数据源取对应表），避免全量分页查询后 Python 侧过滤。
     返回空 dict 表示未找到匹配记录。
     """
     conn = _get_conn()
     conds = ["device_code = ?"]
-    params = [device_code]
+    params = [str(device_code)]
     if file_path:
         conds.append("file_path = ?")
-        params.append(file_path)
+        params.append(str(file_path))
     where = " WHERE " + " AND ".join(conds)
     all_fields = ("file_path",) + STATUS_FIELDS + KD_EXTRA_FIELDS
     select_cols = "id, " + ", ".join(all_fields)
     cur = conn.execute(
-        f"SELECT {select_cols} FROM kd_status{where} LIMIT 1", params)
+        f"SELECT {select_cols} FROM {table}{where} LIMIT 1", params)
     r = cur.fetchone()
     if r is None:
         return {}
@@ -1535,6 +1549,21 @@ def query_kd_by_device(device_code: str, file_path: str = "") -> dict:
         except (json.JSONDecodeError, TypeError):
             row_dict[f] = []
     return row_dict
+
+
+def query_kd_by_device(device_code: str, file_path: str = "") -> dict:
+    """按 device_code 精确查询单台 kd 设备完整信息（含文件清单）"""
+    return _query_status_by_device("kd_status", device_code, file_path)
+
+
+def query_xqzg_by_device(device_code: str, file_path: str = "") -> dict:
+    """按 device_code 精确查询单台 xqzg 设备完整信息（含文件清单）
+
+    与 query_kd_by_device 对称。文件面板迁移后刷新必须按当前数据源取表：
+    此前固定查 kd_status，xqzg 数据源下要么取不到该设备（清单一直停在
+    迁移前的条数），要么取回同名设备的 kd 行（清单串源）。
+    """
+    return _query_status_by_device("xqzg_status", device_code, file_path)
 
 
 # 文件字段 → 中文分类名（C6 日志↔kd 双向跳转反查展示用，
@@ -1549,6 +1578,136 @@ _KD_FILE_CATEGORY_CN = {
     "rubbish_files": "废弃",
     "version_files": "版本",
 }
+
+
+def _count_or_none(value):
+    """TEXT 存储的计数列转 int；空串/None/非数字返回 None（不臆造数值）"""
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return None
+
+
+def move_file_in_row(row: dict, src_field: str, dest_field: str,
+                     file_name: str) -> dict:
+    """在设备行快照上执行一次「文件迁移」，就地更新并返回变更字段 → 新值
+
+    文件迁移接口确认成功后本地即时对账用：静默刷新要翻页拉全接口再整分区
+    落库（xqzg 千台设备 + DELETE/INSERT，实测 5-10s），期间文件面板清单与
+    表格计数都停在迁移前的值（用户报障：提示迁移成功，原来 3 条还是 3 条）。
+    先在内存行快照上做同一动作让界面立刻反映结果，静默刷新回来后以服务端
+    口径覆盖（幂等）。
+
+    规则：
+    - 文件清单：``src_field`` 移除该文件名、``dest_field`` 末尾追加（已在
+      目标清单中则不重复追加）；轻量行（列表页缓存，不含清单）只调计数。
+    - 计数列：src -1 / dest +1。计数列以 TEXT 存数字，只做增量、不用清单
+      长度覆盖，避免与接口聚合口径不一致（两者可能不等）；计数为空或非
+      数字时保持原样，不臆造，留给随后的静默刷新补正。
+    - ``src_field == dest_field``（同分类迁移，服务器侧无实际动作）视为无变更。
+
+    Args:
+        row: 设备行快照（**就地修改**；完整行或列表页轻量行均可）
+        src_field / dest_field: 文件清单字段（``KD_FILE_FIELDS`` 之一）
+        file_name: 被迁移的文件名
+
+    Returns:
+        变更字段 → 新值；无变更返回空 dict。
+    """
+    name = str(file_name or "").strip()
+    if not name or not row:
+        return {}
+    if (src_field not in KD_FILE_FIELDS or dest_field not in KD_FILE_FIELDS
+            or src_field == dest_field):
+        return {}
+    changes = {}
+    # ① 文件清单（轻量行两个字段都不是 list → 跳过，只做 ② 的计数增量）
+    if isinstance(row.get(src_field), list) or isinstance(row.get(dest_field), list):
+        src_list = [str(f) for f in (row.get(src_field) or []) if str(f) != name]
+        dest_list = [str(f) for f in (row.get(dest_field) or [])]
+        if name not in dest_list:
+            dest_list.append(name)
+        changes[src_field] = src_list
+        changes[dest_field] = dest_list
+    # ② 计数列增量
+    for field, delta in ((src_field, -1), (dest_field, 1)):
+        count_field = FILE_COUNT_FIELDS.get(field)
+        if not count_field:
+            continue
+        cur = _count_or_none(row.get(count_field))
+        if cur is None:
+            continue
+        changes[count_field] = str(max(0, cur + delta))
+    row.update(changes)
+    return changes
+
+
+def apply_file_move(table: str, device_code: str, file_path: str,
+                    src_field: str, dest_field: str, file_name: str) -> int:
+    """把一条文件迁移写回本地快照（返回受影响行数，0=未命中/无变更）
+
+    :func:`move_file_in_row` 的落库版本，迁移接口成功后由 GUI 经
+    ``_DBQueryWorker`` 异步调用：按 device_code（+ 日期分区）定位该行，做同一
+    动作，只 UPDATE 变更列（不清空未涉及字段、不触碰其他设备）。写回后文件
+    面板按库刷新即可取到新清单，不必等接口全量往返；随后静默刷新整分区重拉
+    覆盖，保证与接口最终一致。
+
+    Args:
+        table: ``"xqzg_status"`` / ``"kd_status"``
+        device_code: 设备编码
+        file_path: 日期分区（如 ``"2026/10/03"``）；为空时取最新分区
+            （与 :func:`query_kd_by_device` 口径一致）
+        src_field / dest_field: 文件清单字段
+        file_name: 被迁移的文件名
+
+    Raises:
+        ValueError: 表名或清单字段非法（编程错误，fail fast）。
+    """
+    if table not in ("xqzg_status", "kd_status"):
+        raise ValueError(f"未知设备状态表: {table!r}")
+    if src_field not in KD_FILE_FIELDS or dest_field not in KD_FILE_FIELDS:
+        raise ValueError(f"非法文件迁移字段: {src_field!r} -> {dest_field!r}")
+    if src_field == dest_field:
+        # 同分类迁移（面板在「使用」视图点「使用」按钮）：服务端无实际动作，
+        # 与 move_file_in_row 口径一致按无变更处理，不抛错
+        return 0
+    code = str(device_code or "").strip()
+    if not code:
+        return 0
+    conn = _get_conn()
+    cols = ("id", "file_path") + STATUS_FIELDS + KD_FILE_FIELDS
+    conds, params = ["device_code = ?"], [code]
+    if file_path:
+        conds.append("file_path = ?")
+        params.append(str(file_path))
+    cur = conn.execute(
+        f"SELECT {', '.join(cols)} FROM {table} WHERE {' AND '.join(conds)} "
+        "ORDER BY file_path DESC, id DESC LIMIT 1", params)
+    r = cur.fetchone()
+    if r is None:
+        return 0
+    row = dict(zip(cols, r))
+    for f in KD_FILE_FIELDS:
+        try:
+            row[f] = json.loads(row.get(f) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            row[f] = []
+    changes = move_file_in_row(row, src_field, dest_field, file_name)
+    if not changes:
+        return 0
+    sets, values = [], []
+    for field, value in changes.items():
+        sets.append(f"{field} = ?")
+        values.append(json.dumps(value, ensure_ascii=False)
+                      if isinstance(value, list) else str(value))
+    values.append(row["id"])
+    affected = conn.execute(
+        f"UPDATE {table} SET {', '.join(sets)} WHERE id = ?", values).rowcount
+    conn.commit()
+    return affected
 
 
 def _clip_base(fname: str) -> str:

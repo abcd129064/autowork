@@ -39,7 +39,7 @@
 - **原因**：`pytest.ini` 配置为 `testpaths = tests`，放在别处的 `test_*.py`
   永远不会被执行（历史上 `tools/` 根下就有一个叫 `test_frp_live_frps.py` 的真机
   回归脚本因此从未被跑过，已改名为 `tools/smoke/smoke_frp_live_frps.py`）。
-- 现状：31 个 `test_*.py`，采集基线见 §5.2。
+- 现状：51 个 `test_*.py`，采集基线见 §5.2。
 
 ### 1.2 `tools/` — 开发/运维脚本，一律不参与运行时
 
@@ -210,8 +210,8 @@ sys.path.insert(0, ROOT)
 
 1. `python tools/check_refs.py --all` → **rc=0**（新增断链必须修；
    `KNOWN_STALE` 里的既有债务不计失败，但不要把新文件加进这个白名单）。
-2. `pytest tests/ -q` → `passed` 数不低于 §5.2 基线（393），且**无新增失败项**
-   （§5.2 表里的 15 项环境既有失败除外）。
+2. `pytest tests/ -q` → `passed` 数不低于 §5.2 基线（570），且**无新增失败项**
+   （§5.2 表里的 48 项环境既有失败除外）。
 3. `python -m compileall -q tools design tests` → rc=0（语法与缩进无破坏）。
 4. `git status --porcelain -uall` → 没有预期外的新文件；临时产物都在
    `tools/_scratch/` 内；没有 `_` 前缀文件被误加。
@@ -237,33 +237,40 @@ sys.path.insert(0, ROOT)
 - conda base 激活态下 import PySide6 需要「内联引导」，写法见
   `docs/Qt内联引导说明.md`；GUI 脚本一律加 `QT_QPA_PLATFORM=offscreen`。
 
-### 5.2 测试基线（实测 2026-09-22）
+### 5.2 测试基线（实测 2026-10-05）
 
 ```bash
 # 采集
 E:\ANACONDA\python.exe -m pytest -q --collect-only
-→ 404 tests collected, 4 errors
+→ 约 620 tests collected
 
-# 全量运行（约 40s）
+# 全量运行（约 35s）
 E:\ANACONDA\python.exe -m pytest -q --continue-on-collection-errors
-→ 393 passed, 11 failed, 4 errors
+→ 570 passed, 35 failed, 4 skipped, 13 errors
 ```
 
-这 15 个非通过项**全部是环境缺依赖 / 解释器编译选项导致的既有状态，
+这 48 个非通过项**全部是环境缺依赖 / 解释器编译选项导致的既有状态，
 与代码质量无关**，不要试图「修好」它们（修环境属 §3.2 禁止行为）：
 
 | 项 | 数量 | 根因 |
 | --- | --- | --- |
-| `tests/test_health_update_worker.py` 收集失败 | 1 | 缺 `paramiko` |
-| `tests/test_management_no_sync_query.py` 收集失败 | 1 | 缺 `qfluentwidgets` |
-| `tests/test_remote_connect_port_stable.py` 收集失败 | 1 | 缺 `qfluentwidgets` |
-| `tests/test_single_shot_bar.py` 收集失败 | 1 | 缺 `cv2` |
-| `tests/test_frps_phase2.py` failed | 4 | 缺 `qfluentwidgets`（`main_window/main_window.py`） |
+| `test_health_update_worker` / `test_mica_policy` 等收集失败 | 13 | 缺 `qfluentwidgets`（`windows/remote_session/remote_hub.py`、`remote_session_window.py`、`management/common.py` 等）· 缺 `paramiko`（`workers/network_workers.py`）· 缺 `cv2` |
+| `tests/test_perf_dpi_degrade.py` failed | 11 | 缺 `qfluentwidgets`（弹窗/亚克力相关实现） |
+| `tests/test_perf_dpi_p1.py` failed | 6 | 同上 |
+| `tests/test_frps_phase2.py` failed | 6 | 缺 `qfluentwidgets`（`main_window/main_window.py`） |
+| `tests/test_state_sync_fixes.py` failed | 5 | 缺 `qfluentwidgets` |
 | `tests/test_todesk_column.py` failed | 5 | 缺 `paramiko`（`workers/network_workers.py`） |
 | `tests/test_mysql_sync_removed.py` failed | 1 | 缺 `qfluentwidgets`（`windows/management/common.py`） |
 | `tests/test_data_retention.py::test_table_size_bytes_sqlite_dbstat` failed | 1 | 该解释器的 SQLite 未编译 `dbstat` 虚表 |
 
-**判定规则**：`passed` 数下降、或出现上表之外的新失败 = 你改坏了东西。
+> 该数字会随他人未提交的工作漂移（本仓常有多会话并行改动）。**判定标准不变**：
+> `passed` 数下降、或出现上表之外的新失败 = 你改坏了东西；只增减上表内项目不算。
+> 需要严格自证时用 A/B：把改动涉及的文件换回 `HEAD` 版各跑一次全量，比较两次的
+> `passed/failed/errors`（例见 [终端全屏应用渲染修复.md](docs/终端全屏应用渲染修复.md) §二 证据 4）。
+>
+> 五个可用 `E:\ANACONDA` 直接跑的终端相关回归：`tests/test_vt_screen.py`（40 例纯逻辑）、
+> `tests/test_ansi_terminal_render.py`（15 例控件层）、`tools/smoke/smoke_ansi_terminal_tui.py`
+> （离屏冒烟，需 `QT_QPA_PLATFORM=offscreen`）。
 
 **数据安全**：`tests/` 均用 `tmp_path` + `monkeypatch`（改 `core.app_paths.get_app_dir`
 与 `table_db.DB_PATH`）隔离，全量跑完实测 `config/` `database/` **零改动**。

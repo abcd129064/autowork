@@ -16,12 +16,13 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     ScrollArea, CardWidget, MessageBox, MessageBoxBase, CheckBox,
     FluentWindow, NavigationItemPosition, MenuAnimationType,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
-    SpinBox, SegmentedWidget, ProgressBar, FlowLayout, SwitchButton)
+    SegmentedWidget, ProgressBar, FlowLayout, SwitchButton)
 
 from core.design_tokens import SEMANTIC, lighten, darken
 from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import (is_acrylic_enabled, get_table_smooth, set_table_smooth,
                        get_animation, set_animation)
+from core.spin_fit_patch import FittedSpinBox
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
 from database import aftersale_db, table_db
@@ -85,10 +86,9 @@ class CycleSettingsPage(QWidget):
         custom_lay.addWidget(self._start_picker)
         custom_lay.addSpacing(16)
         custom_lay.addWidget(QLabel("周期天数:", custom_wrap))
-        self._span_spin = SpinBox(custom_wrap)
+        self._span_spin = FittedSpinBox(custom_wrap, sample="365")
         self._span_spin.setRange(1, 365)
         self._span_spin.setValue(7)
-        self._span_spin.setFixedWidth(100)
         custom_lay.addWidget(self._span_spin)
         custom_lay.addStretch(1)
         vbox.addWidget(custom_wrap)

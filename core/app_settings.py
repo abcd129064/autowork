@@ -92,8 +92,15 @@ KEY_DOMAIN = {
     "mysql_sync": "database",
     "data_retention": "database",
     # ---- credentials（DPAPI）----
+    # ssh_user/ssh_pass = 隧道（XTCP visitor）设备凭据，与主面板 P2P 表单同键，
+    #   在远程页「连接」XTCP 卡 / 主面板 / 统一设置页三处读写；
+    # tcp_ssh_user/tcp_ssh_pass = TCP 直连主机凭据（2026-10-04 拆分）——直连
+    #   主机常是 frps 服务器（root）、设备是 newbv，共用一个键会互相覆盖，
+    #   表现为「改过 TCP 那边的账号密码后隧道 SSH 报认证失败」。
     "ssh_user": "credentials",
     "ssh_pass": "credentials",
+    "tcp_ssh_user": "credentials",
+    "tcp_ssh_pass": "credentials",
     "upload_host": "credentials",
     "upload_port": "credentials",
     "upload_remote_dir": "credentials",

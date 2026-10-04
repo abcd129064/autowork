@@ -74,7 +74,7 @@ tools/stress_test/README.md   压测套件说明
 
 ### 远程页（左侧导航「远程」，Pivot 六视图）
 - **会话总览**：frps 概览卡 + 统计卡 + 隧道表（行内一键 SSH / SFTP / 断开 / 删除；SFTP 传输中删除有二次确认；断开保留注册）
-- **连接**（原「P2P 访客」）：XTCP visitor 注册管理（基于 frp 的 P2P 内网穿透；注册只持久化不自动拉起 frpc；visitor 热重载；球桌号搜索带出 serverName）；TCP Segmented 模式直连服务器
+- **连接**（原「P2P 访客」）：XTCP visitor 注册管理（基于 frp 的 P2P 内网穿透；注册只持久化不自动拉起 frpc；visitor 热重载；球桌号搜索带出 serverName；卡内可直接维护**设备 SSH 账号/密码** `ssh_user/ssh_pass`）；TCP Segmented 模式直连服务器（**主机凭据独立存 `tcp_ssh_user/tcp_ssh_pass`**，不会覆盖设备凭据）
 - **连接质量**：frps 在线感知 + visitor 打洞质量探测（每 30s 一轮）
 - **frps 代理**：frps 网页面板 Proxies 页同源清单（TCP/UDP/HTTP/… 八页签 + 端口/连接/流量/客户端版本/状态，只读）
 - **隧道配置**：frpc 服务器配置与进程控制 + frp 总开关 + 实时日志终端
@@ -269,7 +269,7 @@ autowork/
 │   ├── TODO.md                #   ★ 待办与未来计划（P0/P1/P2）
 │   └── ...                    #   设计方案、性能调查、外部接口清单、mermaid 图表
 │
-├── tests/                     # pytest 离线单测（32 个 test_*.py，基线见 AGENTS.md §5.2）
+├── tests/                     # pytest 离线单测（51 个 test_*.py，基线见 AGENTS.md §5.2）
 ├── resource/                  # 随包资源（比分条模板/字体/头像）
 ├── design/                    # 只读设计资产（索引见 design/README.md）
 │   ├── *.html                 #   界面设计稿（售后/远程页/工具页，多版本并存）
@@ -520,7 +520,7 @@ frp 服务器配置（设置 → 远程连接）：
 - **目录边界**：`tests/` 只放能被 pytest 离线收集的 `test_*.py`；真机/GUI 冒烟放
   `tools/smoke/`，性能与视觉对比放 `tools/perf/`，接口探测放 `tools/probe/`，
   生产部署放 `tools/deploy/`；一切临时产物落 `tools/_scratch/`（已 gitignore）
-- **测试**：`pytest tests/ -q`（基线 **393 passed / 11 failed / 4 errors**，15 个
+- **测试**：`pytest tests/ -q`（基线 **570 passed / 35 failed / 13 errors**，48 个
   非通过项均为环境缺依赖的既有状态，见 AGENTS.md §5.2）；GUI 冒烟
   `python windows/tools/smoke_fluent_mainwindow.py`（offscreen）；
   真机截图 `python tools/perf/shot_fluent_mainwindow.py`

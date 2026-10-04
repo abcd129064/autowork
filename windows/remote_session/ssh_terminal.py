@@ -22,6 +22,7 @@
 - SSHTerminalWindow(QDialog)：独立窗口薄壳（向后兼容）
 """
 
+import codecs
 import json
 import os
 import re
@@ -90,10 +91,14 @@ def get_session_log_dir() -> str:
 
 
 # ANSI 转义序列剥离正则（会话日志写纯文本，便于检索）
+# 说明：CSI 的终止字节不限于字母（\E[1P / \E[@ / \E[2~ 等），
+# 字符集设计符 \E(0 / \E(B 是 3 字节序列，必须单独匹配——
+# 否则日志里会残留字面 "B"（2026-10-04 用户反馈的 nano 截图即由它造成）。
 _ANSI_RE = re.compile(
-    r'\x1b\[[0-9;?]*[a-zA-Z]'               # CSI 序列
+    r'\x1b\[[0-9;?<>=]*[ -/]*[@-~]'          # CSI 序列（参数 + 中间字节 + 终止字节）
     r'|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?'  # OSC 序列
-    r'|\x1b[@-Z\\-_]'                        # 其他两字节转义
+    r'|\x1b[()*+\-./][0-9A-Za-z]'           # 字符集设计符（\E(0 \E(B \E)0 ...）
+    r'|\x1b[ -~]'                            # 其他两字节转义（\E= \E> \E7 ...）
 )
 
 
@@ -132,7 +137,16 @@ class SSHTerminalPanel(QWidget):
         self._session_path = None
         # 用户输入命令行重组缓冲（写入会话日志带 '> ' 前缀）
         self._cmd_buf = []
-        self._cmd_esc = False
+        # 转义序列消费状态：0=正常 1=刚见 ESC 2=CSI/OSC 内部 3=三字节序列收尾
+        self._cmd_esc = 0
+        # PTY 尺寸同步：拖动窗口会连续触发网格变化，逐次 resize_pty 会让远端
+        # 全屏应用反复重绘（SIGWINCH 风暴）→ 去抖合并，并记住"已同步尺寸"
+        self._pty_timer = QTimer(self)
+        self._pty_timer.setSingleShot(True)
+        self._pty_timer.setInterval(120)
+        self._pty_timer.timeout.connect(self._apply_pty_size)
+        self._pending_pty_size = None
+        self._pty_size_sent = None
         # 断线重连状态
         self._disconnected = False
         self._reconnecting = False
@@ -184,6 +198,8 @@ class SSHTerminalPanel(QWidget):
         # ANSI 终端（既是显示区域也是输入区域）
         self._terminal = ANSITerminalWidget(self)
         self._terminal.key_input.connect(self._on_key_input)
+        # 网格尺寸变化 → 同步远端 PTY（全屏应用按 PTY 尺寸排版，尺寸不对就会错位）
+        self._terminal.grid_resized.connect(self._on_grid_resized)
         layout.addWidget(self._terminal, stretch=1)
 
         # 底部工具按钮（Fluent 风格，极简）
@@ -250,7 +266,13 @@ class SSHTerminalPanel(QWidget):
         self._client = client
         self._cleanup_connect_worker()
         try:
-            channel = client.invoke_shell(term='xterm-256color', width=120, height=40)
+            # 尺寸权威：开 PTY 之前先把网格对齐到当前视口，再把这个尺寸开给 PTY。
+            # 远端 ncurses 全屏应用（nano/vim/less）完全按 PTY 尺寸排版，
+            # 写死 120x40 会与控件可视区不符（隐藏页签/恢复会话时会立刻看出错位）。
+            self._terminal.sync_grid(force=True)
+            cols, rows = self._terminal.grid_size()
+            channel = client.invoke_shell(term='xterm-256color', width=cols, height=rows)
+            self._pty_size_sent = (cols, rows)
             channel.settimeout(0.1)  # 短超时：reader 线程可及时响应 stop 标志
             self._channel = channel
             # 启动 reader 守护线程
@@ -266,7 +288,7 @@ class SSHTerminalPanel(QWidget):
             self._disconnected = False
             self._reconnecting = False
             self._cmd_buf.clear()
-            self._cmd_esc = False
+            self._cmd_esc = 0
             self._reconnect_btn.setEnabled(True)
             self._reconnect_btn.setText("重新连接")
             self._reconnect_bar.hide()
@@ -318,6 +340,9 @@ class SSHTerminalPanel(QWidget):
         - 所有 channel 操作仅在此线程内执行，主线程绝不触碰 channel
         """
         channel = self._channel
+        # 增量解码：一个中文/emoji 字符可能被 recv 切成两块，
+        # 逐块 decode 会把它们变成 U+FFFD（nano 中文界面尤其明显）
+        decoder = codecs.getincrementaldecoder('utf-8')('replace')
         while not self._stop_event.is_set():
             try:
                 if channel.recv_ready():
@@ -326,7 +351,9 @@ class SSHTerminalPanel(QWidget):
                         if not self._closing:
                             self._output_signal.emit("\r\n[连接已断开]\r\n")
                         break
-                    self._output_signal.emit(data.decode('utf-8', errors='replace'))
+                    text = decoder.decode(data)
+                    if text:
+                        self._output_signal.emit(text)
                 else:
                     self._stop_event.wait(0.05)
             except socket.timeout:
@@ -376,6 +403,30 @@ class SSHTerminalPanel(QWidget):
             self._channel.send(data)
         except Exception:
             pass
+
+    def _on_grid_resized(self, cols: int, rows: int):
+        """终端网格尺寸变化 → 通知远端 PTY 重排（SIGWINCH，带去抖）
+
+        全屏应用（nano/vim/less/top）按 PTY 尺寸决定排版；不同步就会出现
+        内容按旧尺寸画、控件按新尺寸显示导致的错位。
+        """
+        self._pending_pty_size = (cols, rows)
+        if not self._pty_timer.isActive():
+            self._pty_timer.start()
+
+    def _apply_pty_size(self):
+        """去抖后真正下发尺寸；与"已同步尺寸"相同则不发（避免无谓重绘）"""
+        size = self._pending_pty_size
+        channel = self._channel
+        if size is None or channel is None or channel.closed:
+            return
+        if size == self._pty_size_sent:
+            return
+        try:
+            channel.resize_pty(width=size[0], height=size[1])
+            self._pty_size_sent = size
+        except Exception:
+            pass  # 尺寸同步失败不影响会话，下次变化再试
 
     # ─── 会话记录器（A4） ─────────────────────────────────────────
 
@@ -427,7 +478,13 @@ class SSHTerminalPanel(QWidget):
         if self._session_file is None:
             return
         try:
-            self._session_file.write(_strip_ansi(text))
+            stripped = _strip_ansi(text)
+            if self._terminal.alt_screen:
+                # 全屏应用（nano/vim/top）不靠 \n 换行，只有裸 \r + 定位序列；
+                # 不归一化的话整屏日志会挤成一行。普通 shell 保留 \r
+                # （进度条靠它原地刷新，不能变成一堆换行）。
+                stripped = stripped.replace('\r\n', '\n').replace('\r', '\n')
+            self._session_file.write(stripped)
             self._session_file.flush()
         except Exception:
             pass
@@ -451,18 +508,32 @@ class SSHTerminalPanel(QWidget):
     def _feed_session_input(self, data: str):
         """从键流重组命令行，回车时以 '> ' 前缀写入会话日志
 
-        处理退格/Ctrl+C/Ctrl+U 编辑行为，跳过转义序列字符，
+        处理退格/Ctrl+C/Ctrl+U 编辑行为，跳过转义序列字符（方向键/功能键不进日志），
         使日志中的命令行与用户最终确认的内容一致。
+        终止判据按 VT 规范：CSI 的终止字节是 0x40-0x7E（不只是字母），
+        否则 ``\\EOA``（应用模式方向键）会漏一个 'A' 到日志里。
         """
         buf = self._cmd_buf
         for ch in data:
-            if self._cmd_esc:
-                # 转义序列内部：消费至终止符（方向键/功能键等不入日志）
-                if ch.isalpha() or ch == '~':
-                    self._cmd_esc = False
+            if self._cmd_esc == 1:                      # ESC 之后第一个字节
+                if ch in '([)*+-./#%O':
+                    self._cmd_esc = 3                   # 字符集设计符 / SS3：再吃一字节
+                elif ch in '[]':
+                    self._cmd_esc = 2                   # CSI / OSC：吃到终止字节
+                else:
+                    self._cmd_esc = 0                   # 两字节转义，到此为止
+                continue
+            if self._cmd_esc == 2:                      # CSI / OSC 内部
+                if ch == '\x1b':
+                    self._cmd_esc = 1
+                elif ch == '\x07' or '\x40' <= ch <= '\x7e':
+                    self._cmd_esc = 0
+                continue
+            if self._cmd_esc == 3:                      # 三字节序列收尾
+                self._cmd_esc = 0
                 continue
             if ch == '\x1b':
-                self._cmd_esc = True
+                self._cmd_esc = 1
             elif ch == '\r':
                 line = ''.join(buf).strip()
                 if line:
@@ -670,6 +741,9 @@ class SSHTerminalPanel(QWidget):
         if self._closing:
             return
         self._closing = True
+        self._pty_timer.stop()
+        self._pending_pty_size = None
+        self._pty_size_sent = None
         self._terminal.set_input_enabled(False)
         # 1. 通知 reader 线程退出
         self._stop_event.set()

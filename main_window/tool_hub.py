@@ -31,10 +31,11 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QSplitter)
 from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, CardWidget,
                             LineEdit, PushButton, PrimaryPushButton, ComboBox,
-                            CompactSpinBox, SpinBox, TextEdit, TableWidget,
+                            CompactSpinBox, TextEdit, TableWidget,
                             CheckBox, ProgressBar, FluentIcon, EditableComboBox,
                             ToolButton, MessageBox)
 
+from core.spin_fit_patch import FittedSpinBox
 from main_window.pivot_page import PivotPage
 from windows.single_video_dialog import (
     _DEFAULT_SESSION_CODE, _DEFAULT_FORMAT, _DEFAULT_AVATAR_0,
@@ -631,10 +632,9 @@ class PortFakeWork(QWidget):
         # 参数行：端口 / 协议 / 绑定地址 / 随机 / 占用 / 全部释放
         prow = QHBoxLayout()
         prow.addWidget(BodyLabel("端口:", card))
-        self.spin_port = SpinBox(card)
+        self.spin_port = FittedSpinBox(card)
         self.spin_port.setRange(1, 65535)
         self.spin_port.setValue(self._random_port())
-        self.spin_port.setFixedWidth(150)
         prow.addWidget(self.spin_port)
         prow.addSpacing(10)
         prow.addWidget(BodyLabel("协议:", card))

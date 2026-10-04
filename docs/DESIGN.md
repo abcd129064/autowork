@@ -105,6 +105,11 @@
 - offscreen 验证禁在事件回调里调 `style().subElementRect()`（污染致 QTableView 崩溃）。
 - `WA_DontShowOnScreen` 预热：撤属性前必须先 `hide()` 复位，否则真 show() 空操作。
 - InfoBarManager 是单例，禁改 margin；`show_info_bar(bottom_offset=N)` 已封装抬升逻辑。
+- qfw `SpinBox` 用 `setButtonSymbols(NoButtons)` 关掉原生按钮、把自绘上下按钮叠在右侧，
+  **Qt 因此不给文本预留按钮空间**：多位数微调框（端口等）必须用
+  `core/spin_fit_patch.FittedSpinBox`（按字体自适应 + `FontChange` 重算），
+  **不要** `setFixedWidth(100~150)` —— 放大字号/高 DPI 下数字会被箭头压住
+  （2026-10-04 用户截图）。按钮区实测恒 71px，故宽度 ≥ 文本宽 + 92。
 - 单杆视频比分条：选手 1 = image_0 镜像 + 品牌贴回；禁 transpose image_1；禁 cv2 HighGUI。
 
 ## 8. 图标与品牌
