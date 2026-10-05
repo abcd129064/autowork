@@ -10,7 +10,7 @@
 AGENTS.md              作业规范（硬约束：目录边界/命名/禁改清单/验证基线）
 README.md              ← 你在这里：项目门面、功能、配置、快速开始
 docs/README.md         文档索引 + 导读（「先读哪篇」）
-docs/ARCHITECTURE.md   架构、目录结构、数据组织（分层依赖/9 张表/双后端/配置域）
+docs/ARCHITECTURE.md   架构、目录结构、数据组织（分层依赖/12 张表/双后端/配置域）
 docs/DEVELOPMENT.md    开发、测试与发布流程（解释器矩阵/测试矩阵/提交前检查）
 docs/DEPLOYMENT.md     构建、分发与生产部署（桌面端/Web v1+v2/自动更新/回滚）
 docs/DESIGN.md         设计指南、组件与视觉规范（设计令牌/QSS/组件选型/UI 陷阱）

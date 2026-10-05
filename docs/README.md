@@ -37,7 +37,9 @@ docs/
 │                      管理面板性能调查报告2026-09-25.md /
 │                      表格滚动延迟调查报告2026-09-25.md /
 │                      大屏与超高DPI渲染性能调查报告2026-09-25.md /
-│                      硬件加速方案调研报告2026-09-28.md
+│                      硬件加速方案调研报告2026-09-28.md /
+│                      表格滚动位块搬移修复2026-10-06.md /
+│                      自适应降级阈值与弹窗快照淡入2026-10-07.md
 ├── 外部接口类         xqzg接口清单.md / newbv_inventory_fields.md
 ├── 技术栈调研         WinUI3重构可行性调研2026-09-30.md
 └── 图表              class-diagram.mermaid / sequence-diagram.mermaid
@@ -53,7 +55,7 @@ docs/
 
 | 文档 | 摘要 | 状态 |
 | --- | --- | --- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 分层依赖、目录职责、9 张表数据组织、配置域路由、双后端机制、Web/frp/打包架构 | 规范 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 分层依赖、目录职责、12 张表数据组织、配置域路由、双后端机制、Web/frp/打包架构 | 规范 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 解释器矩阵、日常开发、测试矩阵（单测/冒烟/真机/压测/E2E）、提交前检查、发版流程 | 规范 |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | 生产环境一览、桌面端分发、Web v1/v2 并行部署、自动更新发布、回滚 | 规范 |
 | [DESIGN.md](DESIGN.md) | Fluent 设计语言、设计令牌、主题/QSS 规则、组件选型、布局模式、UI 陷阱清单 | 规范 |
@@ -80,6 +82,7 @@ docs/
 | [frp-source-integration.md](frp-source-integration.md) | frp Go 源码接入调研 + 落地记录（附录 E~G：二期 P0/P1、frps 概览卡、开机静默预连与预热打洞） | 调研快照 + 设计·已落地（附录） |
 | [settings_panel_redesign/统一设置面板重构设计.md](settings_panel_redesign/统一设置面板重构设计.md) | 统一设置面板重构设计，配图在 `settings_panel_redesign/assets/` | 设计·已落地（实际形态为 SegmentedWidget 7 段，见文档头部核对块；字段映射仍权威） |
 | [终端全屏应用渲染修复.md](终端全屏应用渲染修复.md) | SSH 终端里 nano/vim/less/top 全屏界面错乱的根因（CSI 行定位序列被丢弃、`\E(B` 漏字、无固定网格）与修复设计：`core/vt_screen.py` 屏幕模型分层、网格↔PTY 尺寸契约、宽字符、输入侧模式；含"序列→行为"对照表与已知边界 | 设计·已落地（2026-10-05，回归见 `tests/test_vt_screen.py`、`tests/test_ansi_terminal_render.py`、`tools/smoke/smoke_ansi_terminal_tui.py`） |
+| [大华相机工具集成调研2026-10-06.md](大华相机工具集成调研2026-10-06.md) | Desktop/Bin 大华 Demo 工具包能力盘点 + autowork 集成方式调研：推荐官方 Python NetSDK wheel 内嵌 + 工具页第 5 子页；登录/取流通路已实测（隧道 4236/4238），P0=搜索/初始化/抓图 | 调研快照（待实施） |
 
 ## 四、性能调查
 
@@ -92,8 +95,12 @@ docs/
 | [远程面板性能调查报告2026-09-24.md](远程面板性能调查报告2026-09-24.md) | 远程面板（四视图表格滚动 / 按钮反馈链路 / open_session 全链路）性能专项；harness 可复跑（`tools/perf/perf_remote_*.py`，已同步优化后口径） | 调研快照 + P0/P1/P2 已落地（2026-09-24，见报告头部核对块） |
 | [管理面板性能调查报告2026-09-25.md](管理面板性能调查报告2026-09-25.md) | 运维管理面板（构造/懒构建/填充/查询/定时刷新）专项 + 售后面板落地收益复测；harness 可复跑（`tools/perf/perf_management_panel.py`、`tools/perf/perf_aftersale_residual.py`）；增量方案 N1~N4 已实施（见报告 §七） | 调研快照 + N1~N4 已落地（2026-09-25） |
 | [表格滚动延迟调查报告2026-09-25.md](表格滚动延迟调查报告2026-09-25.md) | 售后「记录与统计」与球桌管理表滚动 150~300ms 延迟根因（性能全关 = 回退 2× 慢的 qfw 默认委托 × CJK 字体 × DPI 光栅放大）；文本层绘制缓存实测地板 -84%；harness `tools/perf/perf_scroll_latency.py` 支持 `--scale` 模拟真机 DPI；二·补充节：可见列数扫描（`--cols`）复现「列多更卡」 | 调研快照 + S2 文本层缓存已落地（2026-09-25）；**S5 整格缓存已落地**（2026-09-26，`core/lean_table_delegate.py`，35 例像素等价回归 + 全列实测 -44~-59%，勾选格 ±1 预乘微差已证明并容差化，见报告 §三 S5） |
-| [大屏与超高DPI渲染性能调查报告2026-09-25.md](大屏与超高DPI渲染性能调查报告2026-09-25.md) | 三台真机（27寸/14寸/55寸外接）卡顿与「未响应」根因：四条逐帧整窗渲染路径（弹窗 opacity/页面切换/菜单 setMask/亚克力模糊）成本 ≈ 线性于物理像素数，场景 C 为事件泵饥饿非死锁；harness `tools/perf/perf_popup_dpi.py`（新增）+ `perf_scroll_latency.py --win`；P0 三项（阈值自动降级）+ P1 四项（卡片级弹窗淡入 / dpi 叠加告警 / 菜单 FADE_IN 映射 / 大屏性能模式开关）已实施，P2-2 取消、P2-1 缓期（见 §五） | 调研快照 + P0/P1 已落地（2026-09-25，`tests/test_perf_dpi_degrade.py` 16 例 + `test_perf_dpi_p1.py` 10 例） |
+| [大屏与超高DPI渲染性能调查报告2026-09-25.md](大屏与超高DPI渲染性能调查报告2026-09-25.md) | 三台真机（27寸/14寸/55寸外接）卡顿与「未响应」根因：四条逐帧整窗渲染路径（弹窗 opacity/页面切换/菜单 setMask/亚克力模糊）成本 ≈ 线性于物理像素数，场景 C 为事件泵饥饿非死锁；harness `tools/perf/perf_popup_dpi.py`（新增）+ `perf_scroll_latency.py --win`；P0 三项（阈值自动降级）+ P1 四项（卡片级弹窗淡入 / dpi 叠加告警 / 菜单 FADE_IN 映射 / 大屏性能模式开关）已实施，P2-2 取消、P2-1 缓期（见 §五） | 调研快照 + P0/P1 已落地（2026-09-25，`tests/test_perf_dpi_degrade.py` 17 例 + `test_perf_dpi_p1.py` 10 例；阈值与弹窗降级路径已由 [自适应降级阈值与弹窗快照淡入2026-10-07.md](自适应降级阈值与弹窗快照淡入2026-10-07.md) 接管） |
 | [硬件加速方案调研报告2026-09-28.md](硬件加速方案调研报告2026-09-28.md) | 是否引入 GPU 硬件加速的决策依据：现状为 Qt Widgets raster（全仓零 GL 设置）；Qt 6 已移除 ANGLE，QWidget 系只剩 OpenGL proper 一条路；Intel/NVIDIA/AMD 驱动矩阵 + RDP 与 Mica  backdrop 两大风险场景；结论是表格热点（delegate 逐格绘制 × CJK 字体光栅化）在 GL 视口下仍在 CPU，收益有限 | 调研快照 + 勘误补充（2026-09-29，修订 dist 实测/GL 机制/引用出处等五处，见报告 §七；未改代码；P0 维持 raster，P1 试点条件与 P2 兜底观测见 §四） |
+
+| [表格滚动位块搬移修复2026-10-06.md](表格滚动位块搬移修复2026-10-06.md) | 表格滚动为什么每步都整视口重绘：qfw 给表格挂 QSS 使 `WA_OpaquePaintEvent` 被置 False（阻断 A）+ 库自绘悬浮滚动条作为表格子控件压住 viewport（阻断 B），两条各自都足以让 Qt 放弃 `QWidget::scroll()` 位块搬移；****第二轮已按「viewport 真正不透明」形态落地**：先取「表格背后的实底颜色」（**抓屏幕真实像素**：四边各 1×1，至少两点一致才采信；渲染父级只能拿到 palette 色，真机上暗色主题会填成纯黑、浅色填成灰白），每次绘制前填满暴露区域，取不到颜色则不开启；实测绘制面积 1,173,120 → 1,547 px²/步（1/758）、每步 10.0 → 1.03 ms；`tools/perf/perf_scroll_latency.py --truth [--blit on\|off]` 可 A/B | 设计·已落地（2026-10-06 第二轮；两轮真机反馈各自补齐一处：第一版只设 `WA_OpaquePaintEvent` 不画底 → 整片叠影；第二轮画底但取色源错（渲染父级）→ 底色变纯黑/灰白；现为「屏幕取色 + 画满 viewport + 失败安全 + 主题重标定」；验收改为**像素等价**，`tests/test_table_blit_patch.py` 10 例含反证与取色可信度；开关 perf 域 `perf_table_scroll_blit_v2` 默认开，UI 可即时回退） |
+
+| [自适应降级阈值与弹窗快照淡入2026-10-07.md](自适应降级阈值与弹窗快照淡入2026-10-07.md) | 2026-09-25 DPI 报告的收尾四项：**降级阈值不再写死 600 万**（改按本机半透明合成速率标定，`limit = clamp(600万 × clamp(0.298/rate, 0.25, 4.0), 120万, 2400万)`，基准机仍 600 万零回归；显式配置 > 自适应 > 静态默认）、**超阈值弹窗由「直显」改为「快照淡入」**（构建期隐遮罩显卡片、只带 `DrawChildren`、中心 alpha<250 即拒绝；`_SnapshotOverlay` 用 painter opacity 自绘、**自身不挂任何 QGraphicsEffect**；实测 overlay 每帧 0.08/0.91/0.24ms@1.0/1.5/2.0，像素平均通道差 ≤0.35；失败一律回退直显）、`TableBase` 包装重复赋值清理、位块搬移**可观测性**（applied/no_bg/hidden/off 四态 + 只在转移时写日志 + `table_blit_status_text()`，两个 UI 入口）；含「对话框自身带 effect 时 render/grab 丢全部子控件」与「`QRegion` 属 QtGui 不属 QtCore（导错会被 except 吞掉 → 快照静默失效）」两条踩坑记录 | 设计·已落地（2026-10-07，`tests/test_perf_auto_degrade.py` 14 例 + `tests/test_perf_dialog_snapshot.py` 17 例 + `test_table_blit_patch.py` 扩到 15 例 + `test_perf_dpi_degrade.py` 改写超阈值用例；同时回改 2026-09-25 报告 §4.1/P0-1/P1-1/P2-1 口径） |
 
 ## 五、外部系统接口与字段
 
@@ -102,6 +109,8 @@ docs/
 | [xqzg接口清单.md](xqzg接口清单.md) | `xqzg.newbv.cn` API 清单，来源为 OpenAPI schema + 前端 JS 提取 + 逐端点验证；探测脚本在 `tools/probe/` | 调研快照（2026-09-20） |
 | [newbv_inventory_fields.md](newbv_inventory_fields.md) | newbv 运营后台「仓库管理 → 库存查询」字段抓取记录（Struts2 + ExtJS 3 老架构） | 调研快照 |
 | [售后群消息归档可行性评估2026-10-05.md](售后群消息归档可行性评估2026-10-05.md) | 微信/企业微信售后群消息自动归档需求评估：企微会话存档（5 天窗口、edition≥2、公钥前置）为唯一合规主干，个人微信自动化路线否决（2025-04 Hook 实测封号数据），A 主干 + C 人工导出兜底 + D 机器人通知出口；含分层设计、风险登记与待拍板决策点 | 调研快照（2026-10-05） |
+| [企微RPA采集工具调研2026-10-06.md](企微RPA采集工具调研2026-10-06.md) | 上面归档需求里"没有超管权限"那条缺口的候选填法：GitHub 开源（实为闭源二进制）RPA 工具 `rpa_wxcom_chat` 的可行性判定 —— 仓库**零源码**、PyInstaller+pywinauto+OCR(PP-OCRv4) 客户端自动化、**确实不需要管理员权限**，但授权绑机器且需联网、采集数据 EC1 加密明文导出要 Pro（归档可读性锁在作者授权服务器）、被企微官方公告点名"机器人流程自动化"属外挂、独占桌面；结论：只可作一次性补历史适配器（`source="rpa"`），不可作长期归档主干 | 调研快照（2026-10-06；未运行该程序、未联网激活） |
+| [企微售后群消息归档-剪贴板采集器设计与落地2026-10-06.md](企微售后群消息归档-剪贴板采集器设计与落地2026-10-06.md) | 上面那份可行性评估里「没有超管权限 ⇒ 自动化消息入口为 0」的实际填法：**纯输入事件 + 剪贴板**的客户端采集器（拖选 → 按住左键 + PageUp + 微移鼠标 → Ctrl+C，**不用 OCR**、不注入进程、不读企微数据库），真机采全售后群历史 **35 条**（2026-08-10 ~ 2026-10-05，8 批次无漏采）；含 `win_api/wecom_clip_driver.py`（输入驱动）+ `core/wecom_clip.py`（解析器与入库管线）+ `database/chat_archive_{messages,tags,cursor}` 三张归档表 + 真机冒烟 CLI `tools/smoke/smoke_wecom_clip_collect.py`；88 项测试通过；含局限（图片/文件只有占位符）、两条既有缺陷（MySQL 模式下 SQLite 兜底库永不建表 / merge_back 不含归档表）与合规边界（内部自用可行、对外分发即「提供外挂服务」） | 设计·已落地（2026-10-06；真实入库 35 条待拍板，见文档 §九） |
 
 ## 五之二、技术栈调研
 

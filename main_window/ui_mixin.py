@@ -1620,7 +1620,10 @@ class UIMixin:
                                is_table_smooth_scroll_enabled,
                                set_table_smooth_scroll_enabled,
                                apply_table_smooth_globally,
-                               is_bigscreen_mode, set_bigscreen_mode)
+                               is_bigscreen_mode, set_bigscreen_mode,
+                               is_table_blit_enabled, set_table_blit_enabled,
+                               degrade_diagnostics_text,
+                               table_blit_status_text)
 
         class PerfOptionsDialog(MessageBoxBase):
             def __init__(self, parent):
@@ -1682,6 +1685,39 @@ class UIMixin:
                 row4.addWidget(self.sw_bigscreen)
                 self.viewLayout.addLayout(row4)
 
+                # 表格滚动加速（位块搬移，v2，2026-10-06）：先把 viewport 真正
+                # 画满（实测取表格背后的实底颜色填充），再开不透明换位块搬移。
+                # 第一版只设属性不画底，真机整片叠影，故本轮带像素等价回归。
+                row5 = QHBoxLayout()
+                lbl5 = BodyLabel("表格滚动加速", self)
+                lbl5.setToolTip(
+                    "滚动时只重绘新露出的一行（实测光栅面积降至 1/758、"
+                    "每步 10.0→1.2ms）。\n"
+                    "若表格底色或滚动观感不对，关掉即可完全回退")
+                row5.addWidget(lbl5, 1)
+                self.sw_table_blit = SwitchButton(self)
+                self.sw_table_blit.setOnText("开")
+                self.sw_table_blit.setOffText("关")
+                self.sw_table_blit.setChecked(is_table_blit_enabled())
+                row5.addWidget(self.sw_table_blit)
+                self.viewLayout.addLayout(row5)
+
+                # 渲染加速状态（只读诊断行，2026-10-06）：把两处「静默生效」
+                # 的机制摊开——自适应降级阈值（本机标定后是多少、是否被
+                # 配置/大屏模式接管）与表格滚动加速的实际命中张数。此前
+                # 两者都只在日志里留痕，用户无从判断某张表到底有没有生效。
+                status = f"{degrade_diagnostics_text()}\n{table_blit_status_text()}"
+                self.statusLabel = CaptionLabel(status, self)
+                self.statusLabel.setWordWrap(True)
+                self.statusLabel.setToolTip(
+                    "自动降级阈值：超过该物理像素数的窗口只保留最省成本\n"
+                    "的动画路径（此值按本机光栅速率自动标定，配置里显式\n"
+                    "指定 perf_dpi_degrade_pixels 则以其为准）。\n"
+                    "表格滚动加速：只有取到表格背后实底颜色（四周需有\n"
+                    "≥6px 纯色间隙、无遮挡）的表格才会生效；「已生效\n"
+                    "N/M 张」随当前打开的页面变化。")
+                self.viewLayout.addWidget(self.statusLabel)
+
         dlg = PerfOptionsDialog(self)
         dlg.yesButton.setText("完成")
         dlg.cancelButton.hide()
@@ -1713,7 +1749,13 @@ class UIMixin:
         dlg.sw_acrylic.checkedChanged.connect(_on_acrylic_toggled)
         dlg.sw_animation.checkedChanged.connect(_on_animation_toggled)
         dlg.sw_table_smooth.checkedChanged.connect(_on_table_smooth_toggled)
+        def _on_table_blit_toggled(checked):
+            set_table_blit_enabled(checked)
+            state = "开启" if checked else "关闭"
+            self._append_log(f"[性能] 表格滚动加速已{state}（即时生效）")
+
         dlg.sw_bigscreen.checkedChanged.connect(_on_bigscreen_toggled)
+        dlg.sw_table_blit.checkedChanged.connect(_on_table_blit_toggled)
         dlg.exec()
 
     # ==================== 设置应用 ====================

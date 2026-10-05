@@ -4,7 +4,9 @@
 覆盖 core/perf.py 大屏降级能力（依据 docs/大屏与超高DPI渲染性能调查报告2026-09-25.md）：
 - 阈值与物理像素换算：get_dpi_degrade_pixels（默认 600 万 / perf 域覆盖 / 0=关闭）、
   window_physical_pixels / screen_physical_pixels
-- P0-1 patch_dialog_animation：超阈值弹窗直显（无 opacity effect）+ 阴影半径 60→30；
+- P0-1 patch_dialog_animation：超阈值弹窗降级 + 阴影半径 60→30。降级默认走
+  快照淡入（整窗与卡片都不挂 effect，卡片先隐藏、由无 effect 的 overlay 播音；
+  2026-10-06 item2），显式 perf_dialog_fade_mode=direct 才是直显；
   未超阈值走 P1-1 卡片级淡入（根不挂 effect，卡片 opacity 200ms）
 - P0-2 patch_acrylic_downsample：AcrylicBrush.blurPicSize=None 时强制 (450,450)
 - P0-3 patch_switch_animation：超阈值 setCurrentIndex 直切（不启动动画）；
@@ -18,7 +20,7 @@ import sys
 import pytest
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication, QWidget
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QGraphicsOpacityEffect
 
 import core.perf as perf
@@ -97,18 +99,63 @@ def _make_mask_dialog(parent, size):
     return MaskDialogBase(parent)
 
 
-def test_dialog_over_threshold_direct_show(qapp, monkeypatch, ani_on):
+def _make_card_opaque(dlg):
+    """给中心卡片铺不透明底：裸 MaskDialogBase 的卡片本身是透明的，
+    _build_dialog_snapshot 按设计拒绝（中心 alpha < 250 → 退回直显）"""
+    w = dlg.widget
+    w.setAutoFillBackground(True)
+    pal = w.palette()
+    pal.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+    w.setPalette(pal)
+
+
+def test_dialog_over_threshold_uses_snapshot_fade(qapp, monkeypatch, ani_on):
+    """超阈值默认路径（perf_dialog_fade_mode=auto）= 快照淡入：整窗与卡片
+    都不挂 effect，卡片先隐藏交给无 effect 的 overlay，阴影 60→30"""
     perf.patch_dialog_animation()
-    monkeypatch.setattr(perf, "_dpi_degrade_pixels", 6_000_000)
+    monkeypatch.setattr(perf, "is_bigscreen_mode", lambda: False)
+    monkeypatch.setattr(perf, "_over_dpi_degrade", lambda *a, **k: True)
+    monkeypatch.setattr(perf, "get_dialog_fade_mode", lambda: "auto")
 
     parent = QWidget()
     dlg = _make_mask_dialog(parent, (3000, 2200))  # 660 万 ≥ 阈值
+    _make_card_opaque(dlg)
     parent.show()  # offscreen 下父窗口可见才同步派发 showEvent
     dlg.show()
     try:
-        # 直显：整窗不挂 opacity effect
+        qapp.processEvents()  # 快照构建走 QTimer.singleShot(0)
         assert dlg.graphicsEffect() is None
-        # 阴影降半径：60 → 30
+        # 卡片不带淡入 effect（这是降级要避免的东西），交给快照 overlay
+        assert dlg.widget.isHidden() is True
+        ov = dlg._perf_snapshot_overlay
+        assert ov.isVisible() is True
+        assert ov.graphicsEffect() is None
+        assert dlg._perf_fade_ani is not None
+        # 卡片上只剩阴影（不是 opacity effect），且半径 60 → 30
+        shadow = dlg.widget.graphicsEffect()
+        assert isinstance(shadow, QGraphicsDropShadowEffect)
+        assert shadow.blurRadius() == 30
+    finally:
+        dlg.hide()
+        dlg.deleteLater()
+
+
+def test_dialog_over_threshold_explicit_direct(qapp, monkeypatch, ani_on):
+    """显式 perf_dialog_fade_mode=direct 时超阈值仍是直显（逃生门）"""
+    perf.patch_dialog_animation()
+    monkeypatch.setattr(perf, "is_bigscreen_mode", lambda: False)
+    monkeypatch.setattr(perf, "_over_dpi_degrade", lambda *a, **k: True)
+    monkeypatch.setattr(perf, "get_dialog_fade_mode", lambda: "direct")
+
+    parent = QWidget()
+    dlg = _make_mask_dialog(parent, (3000, 2200))
+    parent.show()
+    dlg.show()
+    try:
+        qapp.processEvents()
+        assert dlg.graphicsEffect() is None
+        assert getattr(dlg, "_perf_snapshot_overlay", None) is None
+        assert dlg.widget.isVisible() is True
         shadow = dlg.widget.graphicsEffect()
         assert isinstance(shadow, QGraphicsDropShadowEffect)
         assert shadow.blurRadius() == 30
@@ -119,15 +166,16 @@ def test_dialog_over_threshold_direct_show(qapp, monkeypatch, ani_on):
 
 def test_dialog_under_threshold_uses_card_fade(qapp, monkeypatch, ani_on):
     perf.patch_dialog_animation()
-    monkeypatch.setattr(perf, "_dpi_degrade_pixels", 6_000_000)
-    monkeypatch.setattr(perf, "get_dialog_fade_mode", lambda: "card")
+    monkeypatch.setattr(perf, "is_bigscreen_mode", lambda: False)
+    monkeypatch.setattr(perf, "_over_dpi_degrade", lambda *a, **k: False)
+    monkeypatch.setattr(perf, "get_dialog_fade_mode", lambda: "auto")
 
     parent = QWidget()
     dlg = _make_mask_dialog(parent, (1600, 900))  # 144 万 < 阈值
     parent.show()  # offscreen 下父窗口可见才同步派发 showEvent
     dlg.show()
     try:
-        # P1-1 默认卡片级淡入：根（含全屏遮罩）不挂 effect，
+        # 未超阈值 + auto → P1-1 卡片级淡入：根（含全屏遮罩）不挂 effect，
         # 卡片挂 opacity effect，动画停在起点 0
         assert dlg.graphicsEffect() is None
         eff = dlg.widget.graphicsEffect()

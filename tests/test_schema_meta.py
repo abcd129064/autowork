@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """schema.py 双方言 DDL 生成等价性测试（GOLDEN 基线快照）
 
-背景：schema.py 将 8 张表的列元数据收敛为单一来源。为防止 T02 把
+背景：schema.py 将表结构（当前 12 张，2026-10-06 起含 chat_archive_* 三张）的列元数据收敛为单一来源。为防止 T02 把
 table_db._CREATE_* / backend.MYSQL_DDL 改为 schema 生成后测试失去独立
 基线，本文件在模块内**内联**了每张表 GOLDEN 期望 DDL（不含注释），
 以 **git HEAD 旧常量**（T02 改动前的 table_db.py / backend.py 源码）为
@@ -195,6 +195,51 @@ CREATE TABLE IF NOT EXISTS ledger_records (
 CREATE INDEX IF NOT EXISTS idx_ledger_category ON ledger_records(category, id);
 CREATE INDEX IF NOT EXISTS idx_ledger_signer ON ledger_records(signer);
 """,
+    # ---- 企微售后群消息归档（2026-10-06 新增，来源可插拔入站契约） ----
+    "chat_archive_messages": """
+CREATE TABLE IF NOT EXISTS chat_archive_messages (
+    msg_id TEXT PRIMARY KEY,
+    source TEXT DEFAULT '',
+    room_id TEXT DEFAULT '',
+    room_name TEXT DEFAULT '',
+    sender_id TEXT DEFAULT '',
+    sender_name TEXT DEFAULT '',
+    sender_raw TEXT DEFAULT '',
+    sender_kind TEXT DEFAULT '',
+    msg_type TEXT DEFAULT '',
+    content TEXT DEFAULT '',
+    media_count INTEGER DEFAULT 0,
+    msg_ts TEXT DEFAULT '',
+    msg_ts_inferred_year INTEGER DEFAULT 0,
+    mentions TEXT DEFAULT '',
+    pull_batch TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_chat_archive_room_ts ON chat_archive_messages(room_id, msg_ts);
+CREATE INDEX IF NOT EXISTS idx_chat_archive_source_ts ON chat_archive_messages(source, msg_ts);
+""",
+    "chat_archive_tags": """
+CREATE TABLE IF NOT EXISTS chat_archive_tags (
+    id INTEGER PRIMARY KEY,
+    msg_id TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    matched_rule TEXT DEFAULT '',
+    confidence REAL DEFAULT 0,
+    tagged_by TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_chat_tags_msg ON chat_archive_tags(msg_id);
+CREATE INDEX IF NOT EXISTS idx_chat_tags_category ON chat_archive_tags(category, id);
+""",
+    "chat_archive_cursor": """
+CREATE TABLE IF NOT EXISTS chat_archive_cursor (
+    scope TEXT PRIMARY KEY,
+    next_cursor TEXT DEFAULT '',
+    last_msg_ts TEXT DEFAULT '',
+    last_success_ts TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+""",
 }
 
 # ==================== GOLDEN 基线：MySQL DDL（复制自 backend.MYSQL_DDL） ====================
@@ -372,6 +417,51 @@ GOLDEN_MYSQL_DDL = {
             INDEX idx_ledger_signer (signer)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    # ---- 企微售后群消息归档（2026-10-06 新增） ----
+    "chat_archive_messages": """
+        CREATE TABLE IF NOT EXISTS chat_archive_messages (
+            msg_id VARCHAR(64) PRIMARY KEY,
+            source VARCHAR(32) DEFAULT '',
+            room_id VARCHAR(128) DEFAULT '',
+            room_name VARCHAR(255) DEFAULT '',
+            sender_id VARCHAR(128) DEFAULT '',
+            sender_name VARCHAR(255) DEFAULT '',
+            sender_raw VARCHAR(255) DEFAULT '',
+            sender_kind VARCHAR(32) DEFAULT '',
+            msg_type VARCHAR(32) DEFAULT '',
+            content TEXT,
+            media_count INT DEFAULT 0,
+            msg_ts VARCHAR(32) DEFAULT '',
+            msg_ts_inferred_year TINYINT DEFAULT 0,
+            mentions TEXT,
+            pull_batch VARCHAR(64) DEFAULT '',
+            created_at VARCHAR(32) DEFAULT '',
+            INDEX idx_chat_archive_room_ts (room_id, msg_ts),
+            INDEX idx_chat_archive_source_ts (source, msg_ts)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    "chat_archive_tags": """
+        CREATE TABLE IF NOT EXISTS chat_archive_tags (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            msg_id VARCHAR(64) DEFAULT '',
+            category VARCHAR(64) DEFAULT '',
+            matched_rule VARCHAR(255) DEFAULT '',
+            confidence DOUBLE DEFAULT 0,
+            tagged_by VARCHAR(32) DEFAULT '',
+            created_at VARCHAR(32) DEFAULT '',
+            INDEX idx_chat_tags_msg (msg_id),
+            INDEX idx_chat_tags_category (category)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    "chat_archive_cursor": """
+        CREATE TABLE IF NOT EXISTS chat_archive_cursor (
+            scope VARCHAR(128) PRIMARY KEY,
+            next_cursor VARCHAR(255) DEFAULT '',
+            last_msg_ts VARCHAR(32) DEFAULT '',
+            last_success_ts VARCHAR(32) DEFAULT '',
+            updated_at VARCHAR(32) DEFAULT ''
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 }
 
 
@@ -380,15 +470,18 @@ def normalize(sql: str) -> str:
     return re.sub(r"\s+", " ", sql.strip())
 
 
-def test_table_names_cover_all_nine_tables():
-    """TABLE_NAMES 覆盖全部 9 张双方言表（todesk_override 覆盖层已弃用：
+def test_table_names_cover_all_twelve_tables():
+    """TABLE_NAMES 覆盖全部 12 张双方言表（todesk_override 覆盖层已弃用：
     显示口径改用 xqzg todesk_action，与网页端一致）"""
     assert schema.TABLE_NAMES == [
         "billiard_tables", "sync_meta", "xqzg_status", "kd_status",
         "submission_log", "device_mapping", "health_alerts",
         "aftersale_records", "ledger_records",
+        "chat_archive_messages", "chat_archive_tags", "chat_archive_cursor",
     ]
     assert set(schema.TABLE_NAMES) == set(GOLDEN_SQLITE_DDL) == set(GOLDEN_MYSQL_DDL)
+    # 归档表分组常量与 TABLE_NAMES 尾部一致（table_db 建表脚本按它取表名）
+    assert tuple(schema.TABLE_NAMES[-3:]) == schema.CHAT_ARCHIVE_TABLES
 
 
 # ==================== SQLite 方言逐表等价 ====================
@@ -438,6 +531,37 @@ def test_sqlite_ddl_ledger_records():
         GOLDEN_SQLITE_DDL["ledger_records"])
 
 
+# ==================== 企微售后群消息归档表（2026-10-06 新增） ====================
+
+def test_sqlite_ddl_chat_archive_messages():
+    assert normalize(schema.to_sqlite_ddl("chat_archive_messages")) == normalize(
+        GOLDEN_SQLITE_DDL["chat_archive_messages"])
+
+
+def test_sqlite_ddl_chat_archive_tags():
+    assert normalize(schema.to_sqlite_ddl("chat_archive_tags")) == normalize(
+        GOLDEN_SQLITE_DDL["chat_archive_tags"])
+
+
+def test_sqlite_ddl_chat_archive_cursor():
+    assert normalize(schema.to_sqlite_ddl("chat_archive_cursor")) == normalize(
+        GOLDEN_SQLITE_DDL["chat_archive_cursor"])
+
+
+def test_chat_archive_msg_id_is_primary_key():
+    """msg_id 必须是双方言主键：跨批次幂等 INSERT 的去重依据"""
+    sqlite = schema.to_sqlite_ddl("chat_archive_messages")
+    mysql = schema.to_mysql_ddl("chat_archive_messages")
+    assert "msg_id TEXT PRIMARY KEY" in sqlite
+    assert "msg_id VARCHAR(64) PRIMARY KEY" in mysql
+
+
+def test_chat_archive_content_has_no_mysql_default():
+    """MySQL TEXT 列不允许 DEFAULT 子句（与 ledger_records.description 同口径）"""
+    assert "content VARCHAR" not in schema.to_mysql_ddl("chat_archive_messages")
+    assert "content TEXT," in schema.to_mysql_ddl("chat_archive_messages")
+
+
 # ==================== MySQL 方言逐表等价 ====================
 
 def test_mysql_ddl_billiard_tables():
@@ -483,6 +607,21 @@ def test_mysql_ddl_aftersale_records():
 def test_mysql_ddl_ledger_records():
     assert normalize(schema.to_mysql_ddl("ledger_records")) == normalize(
         GOLDEN_MYSQL_DDL["ledger_records"])
+
+
+def test_mysql_ddl_chat_archive_messages():
+    assert normalize(schema.to_mysql_ddl("chat_archive_messages")) == normalize(
+        GOLDEN_MYSQL_DDL["chat_archive_messages"])
+
+
+def test_mysql_ddl_chat_archive_tags():
+    assert normalize(schema.to_mysql_ddl("chat_archive_tags")) == normalize(
+        GOLDEN_MYSQL_DDL["chat_archive_tags"])
+
+
+def test_mysql_ddl_chat_archive_cursor():
+    assert normalize(schema.to_mysql_ddl("chat_archive_cursor")) == normalize(
+        GOLDEN_MYSQL_DDL["chat_archive_cursor"])
 
 
 # ==================== 漂移修复回归 ====================

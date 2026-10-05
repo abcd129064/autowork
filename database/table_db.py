@@ -235,6 +235,12 @@ _CREATE_AFTERSALE_SQL = schema.to_sqlite_ddl("aftersale_records")
 
 _CREATE_LEDGER_SQL = schema.to_sqlite_ddl("ledger_records")
 
+# ==================== 企微售后群消息归档表（来源可插拔入站契约，双后端） ====================
+
+# 表名取自 schema.CHAT_ARCHIVE_TABLES（单一来源，避免建表脚本与 DDL 漂移）
+_CREATE_CHAT_ARCHIVE_SQL = "\n".join(
+    schema.to_sqlite_ddl(t) for t in schema.CHAT_ARCHIVE_TABLES)
+
 # 列表页轻量字段（不含 8 类文件 JSON）：分页列表只展示状态/计数等，
 # 文件清单仅在点开某一行时按 id 懒加载（get_kd_row_full），避免每页
 # 反序列化大量 JSON 带来的 CPU/内存开销
@@ -290,6 +296,7 @@ def _ensure_initialized(conn):
     conn.executescript(_CREATE_HEALTH_ALERT_SQL)
     conn.executescript(_CREATE_AFTERSALE_SQL)
     conn.executescript(_CREATE_LEDGER_SQL)
+    conn.executescript(_CREATE_CHAT_ARCHIVE_SQL)
     # 迁移：旧库按 schema.MIGRATIONS 注册表补列（列级元数据单一来源）。
     # 简单补列表（aftersale_records / kd_status / xqzg_status）统一走
     # _migrate_sqlite_add_columns；billiard_tables 因带回填/FTS 副作用

@@ -11,8 +11,16 @@ tools/perf/scroll_profile.py 的 offscreen 基线仅 ~12ms/帧，量级对不上
 并验证 offscreen 是否取到 CJK 字体（旧报告注明缺字体可能低估文本排版成本）。
 
 用法：C:/Users/shen_zhe/miniconda3/python.exe tools/perf/perf_scroll_latency.py
-      [--scale 1.0] [--win 1600x900] [--steps 30] [--rounds 3]
+      [--scale 1.0] [--win 1600x900] [--steps 30] [--rounds 3] [--truth]
 产物：tools/_scratch/perf_scroll_latency_<scale>_<win>.txt（不入库）
+
+两套口径（--truth 同时报，默认只报前者）：
+  1. 强制口径（历史口径）：每步 setValue + viewport().repaint() —— 等于把
+     「整视口全量光栅」当作每步成本，是**上界**；
+  2. 自然口径（--truth）：只 setValue，用「事件 → 画面静默」等待，并统计
+     每步 paint 面积。Qt 滚动实际走 backing store 位块搬运 + 只重绘新露出
+     条带（实测 0.03~0.04 视口当量/步），与强制口径差一个量级。
+  真机体感 = 自然口径的 CPU 成本 + DWM 合成（offscreen 测不到），故两档都留。
 
 隔离措施：backend 强制 SQLite、table_db.DB_PATH/get_app_dir 重定向 scratch、
 load_cycle_mode 桩、showEvent 加载链短路（不碰真实 config/database）。
@@ -58,6 +66,14 @@ _ap.add_argument('--win', default='1600x900',
 _ap.add_argument('--cols', default='',
                  help='列数扫描模式：逗号分隔的可见列数列表（如 3,7,13），'
                       '只测 prod/lean 委托随可见列数的延迟曲线；为空则走全变体默认流程')
+_ap.add_argument('--truth', action='store_true',
+                 help='追加自然路径口径：不强制 repaint，报「事件→画面静默」延迟'
+                      '与每步绘制面积（区分整视口重绘 vs 位块搬运+条带重绘）')
+_ap.add_argument('--blit', choices=['on', 'off'], default=None,
+                 help='表格滚动位块搬移修复（core.perf.patch_table_scroll_blit）'
+                      '开/关 A/B。默认不干预：走代码当前的默认实现（开）')
+_ap.add_argument('--idle-ms', type=float, default=25.0,
+                 help='--truth 下判定「画面已静默」的空闲阈值（毫秒，默认 25）')
 _args = _ap.parse_args()
 
 _W, _H = (int(x) for x in _args.win.lower().split("x"))
@@ -80,7 +96,7 @@ import statistics
 from datetime import datetime, timedelta
 
 import core.acrylic_patch  # noqa: F401
-from PySide6.QtCore import Qt, QPoint, QRect, QObject, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, QObject, QEvent, QEventLoop
 from PySide6.QtGui import QFont, QFontInfo, QFontMetrics, QWheelEvent, QPixmap, QPainter
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPixmapCache
@@ -305,6 +321,135 @@ def _measure(table, steps, rounds):
     return ms_step, wheel, paints
 
 
+class _PaintAreaCounter(QObject):
+    """viewport paint 次数 / 绘制面积 / 最后一次 paint 时间戳
+
+    与 _PaintCounter 的差别在**面积**：整视口重绘与「位块搬移 + 只绘新露出
+    条带」的 paint 次数都是 1，只有面积能把两者分开——这正是真机滚动成本
+    与历史口径差异的全部来源。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.reset()
+
+    def reset(self):
+        self.paints = 0
+        self.area = 0
+        self.first_ts = 0.0
+        self.last_ts = 0.0
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Paint:
+            r = ev.rect()
+            now = time.perf_counter()
+            if not self.paints:
+                self.first_ts = now
+            self.paints += 1
+            self.area += r.width() * r.height()
+            self.last_ts = now
+        return False
+
+
+def _drain_until_idle(counter, idle_s, deadline_s=2.0):
+    """处理事件直到「最后一次 paint 之后静默 idle_s」
+
+    返回 (是否静默退出, 承载最后一次 paint 的 processEvents 切片耗时 ms)。
+
+    为什么返回值里要带「切片耗时」：paint 是在 processEvents 内部同步执行的，
+    事件过滤器只能拿到「事件送达」的时刻（paint 开始前），拿不到结束时刻。
+    若只用「送达时刻 + 强制空闲」当步耗时，会把整段光栅成本漏掉（曾实测
+    出现「整视口重绘却 0.36ms/步」的假象）。paint 所在的这次 processEvents
+    调用返回时，绘制必然已完成，其耗时即该帧的光栅成本下界。
+    """
+    t_end = time.perf_counter() + deadline_s
+    paint_ms = 0.0
+    while True:
+        t_a = time.perf_counter()
+        app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
+        t_b = time.perf_counter()
+        if counter.first_ts >= t_a:      # 本次切片内发生了（最后一次）paint
+            paint_ms = (t_b - t_a) * 1000
+        now = t_b
+        if counter.paints > 0 and now - counter.last_ts >= idle_s:
+            return True, paint_ms
+        if now >= t_end:
+            return False, paint_ms
+
+
+def _measure_natural(table, steps, rounds, idle_ms):
+    """自然路径口径：只 setValue，不强制 repaint
+
+    返回 dict(ms_per_step, paints_per_step, area_per_step, viewport_equiv,
+    wheel_ms)。每一步的延迟 = setValue → 最后一次 paint 之后静默 idle_ms，
+    再减去这段强制空闲（否则每步都被加上 idle_ms 的常数）。
+    """
+    sb = _prep_scroll(table)
+    idle_s = max(idle_ms, 1.0) / 1000.0
+    counter = _PaintAreaCounter()
+    vp = table.viewport()
+    vp.installEventFilter(counter)
+    try:
+        for v in (0, 2, 0, 2):          # 预热：惰性布局 / 字体 / 委托缓存
+            sb.setValue(v)
+            _drain_until_idle(counter, idle_s)  # noqa: 仅取静默
+        vp_area = max(1, vp.width() * vp.height())
+        max_v = sb.maximum()
+        lat, first, raster, paints, areas = [], [], [], [], []
+        for _ in range(rounds):
+            sb.setValue(0)
+            _drain_until_idle(counter, idle_s)
+            for v in range(1, min(steps, max_v) + 1):  # noqa: C901
+                counter.reset()
+                t0 = time.perf_counter()
+                sb.setValue(v)
+                _ok, paint_ms = _drain_until_idle(counter, idle_s)
+                lat.append((counter.first_ts - t0) * 1000 + paint_ms
+                           if counter.first_ts else float("nan"))
+                if counter.first_ts:
+                    first.append((counter.first_ts - t0) * 1000)
+                raster.append(paint_ms)
+                paints.append(counter.paints)
+                areas.append(counter.area)
+        wheel = []
+        for _ in range(max(3, rounds * 3)):
+            sb.setValue(0)
+            _drain_until_idle(counter, idle_s)  # noqa: 复位
+            pos = vp.rect().center()
+            gpos = vp.mapToGlobal(pos)
+            ev = QWheelEvent(pos, gpos, QPoint(0, 0), QPoint(0, 120),
+                             Qt.MouseButton.NoButton,
+                             Qt.KeyboardModifier.NoModifier,
+                             Qt.ScrollPhase.ScrollUpdate, False)
+            counter.reset()
+            t0 = time.perf_counter()
+            QApplication.sendEvent(vp, ev)
+            _ok, paint_ms = _drain_until_idle(counter, idle_s)
+            wheel.append((counter.first_ts - t0) * 1000 + paint_ms
+                         if counter.first_ts else float("nan"))
+        return {
+            "ms_per_step": statistics.median(lat),
+            "first_paint_ms": statistics.median(first) if first else float("nan"),
+            "raster_ms": statistics.median(raster),
+            "paints_per_step": statistics.median(paints),
+            "area_per_step": statistics.median(areas),
+            "viewport_equiv": statistics.median(areas) / vp_area,
+            "wheel_ms": statistics.median(wheel),
+        }
+    finally:
+        vp.removeEventFilter(counter)
+
+
+def _out_natural(nat, indent="          "):
+    """打印自然口径一行（与强制口径同表并列）"""
+    out(f"{indent}↳ 自然路径（不强制 repaint）：{nat['ms_per_step']:7.2f} ms/步"
+        f"（响应 {nat['first_paint_ms']:5.2f} + 光栅 {nat['raster_ms']:6.2f}）   "
+        f"滚轮单档 {nat['wheel_ms']:7.2f} ms   "
+        f"paint {nat['paints_per_step']:.2f} 次/步   "
+        f"绘制面积 {nat['area_per_step']:,.0f} px²/步"
+        f"（{nat['viewport_equiv']:.3f} 视口当量/步）")
+
+
 def _probe_font():
     out("\n== 〇、环境与 CJK 字体验证 ==")
     from PySide6.QtGui import QGuiApplication
@@ -329,12 +474,16 @@ def _measure_page(title, build_fn, populate_fn, variants, steps, rounds):
         table = page._table
         _swap_delegate(table, variant)
         populate_fn(page)
+        nat = _measure_natural(table, steps, rounds, _args.idle_ms) \
+            if _args.truth else None
         ms_step, wheel, paints = _measure(table, steps, rounds)
         page.deleteLater()
         app.processEvents()
         app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         out(f"{variant:8s} {desc:30s} {ms_step:8.2f} ms/步   滚轮单档 {wheel:8.2f} ms"
             f"   paint {paints:.1f} 次/步")
+        if nat is not None:
+            _out_natural(nat)
 
 
 def _set_visible_cols(table, n):
@@ -356,15 +505,25 @@ def _scan_cols(title, build_fn, populate_fn, cols_list, steps, rounds):
             populate_fn(page)
             _set_visible_cols(table, n)
             _swap_delegate(table, variant)
+            nat = _measure_natural(table, steps, rounds, _args.idle_ms) \
+                if _args.truth else None
             ms_step, wheel, paints = _measure(table, steps, rounds)
             page.deleteLater()
             app.processEvents()
             app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             out(f"{n:4d} {variant:8s} {ms_step:10.2f} {wheel:10.2f}   {paints:.1f}")
+            if nat is not None:
+                _out_natural(nat, indent="     ")
 
 
 def main() -> int:
     from qfluentwidgets.components.widgets.table_view import TableItemDelegate
+    if _args.blit is not None:
+        # 直接改内存开关，绝不写 config（A/B 用）
+        import core.perf as _perf
+        _perf._table_blit_enabled = (_args.blit == 'on')
+        _perf.patch_table_scroll_blit()
+        _perf.apply_table_blit_globally()
     _probe_font()
 
     # ---- 售后记录页 ----

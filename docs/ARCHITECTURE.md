@@ -61,7 +61,7 @@ autowork/
 
 ## 3. 数据组织
 
-### 3.1 数据库表（9 张，DDL 单一来源 `database/schema.py`）
+### 3.1 数据库表（12 张，DDL 单一来源 `database/schema.py`）
 
 | 表 | 内容 | 备注 |
 | --- | --- | --- |
@@ -73,8 +73,12 @@ autowork/
 | `health_alerts` | 健康度异常告警（标记已处理/一键归零） | — |
 | `aftersale_records` | 售后记录（主业务表） | 周期归属物化落库 + 覆盖索引；Web 端同库 |
 | `ledger_records` | 跑视频记录 | 与售后同一条双后端路由 |
+| `chat_archive_messages` | 企微群聊天归档消息（剪贴板采集 / 人工导入 / 官方存档 SDK） | 主键 `msg_id` 为内容指纹；按 `room_id` 分组，`room_name` 仅作展示（群改名不撕裂） |
+| `chat_archive_tags` | 归档消息的问题类型标签 | `id` 为后端本地自增，**不参与跨后端合并** |
+| `chat_archive_cursor` | 归档采集断点（`scope` 主键） | 豁免数据保留清理，供断档自愈 |
 
 - **表结构变更只改 `database/schema.py`**（`TABLE_COLUMNS` / `TABLE_INDEXES` / `MIGRATIONS`）：SQLite 侧 `_ensure_initialized` 自动补列；MySQL 侧按生成的 `ALTER TABLE` 执行（两侧均自动迁移，历史「MySQL 需手动 ALTER」的说法已过时）。
+- **归档表暂不在 `merge_back` 覆盖范围**：`chat_archive_messages` / `chat_archive_cursor` 尚未纳入 `_OPS_TABLES`/`merge_ops_tables`，MySQL 降级期间写入 SQLite 的归档数据恢复后不会自动回写（见 `docs/企微售后群消息归档-剪贴板采集器设计与落地2026-10-06.md` §九）。
 - 运行期 SQL 方言转换在 `database/backend.py::_convert_sql` 管线（占位符、INSERT OR REPLACE、ON CONFLICT、date() 函数、COLLATE、保留字）。**新增 SQLite 专有语法前必须先扩展转换器**，否则 MySQL 主库模式下原样下发会失败。
 
 ### 3.2 双后端机制（MySQL 主 + SQLite 兜底）

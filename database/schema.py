@@ -6,7 +6,7 @@
 此前 SQLite DDL（database/table_db.py 的 ``_CREATE_*`` 常量）与 MySQL DDL
 （database/backend.py 的 ``MYSQL_DDL``、以及已下线的 database/mysql_sync.py
 镜像推送 DDL）三处手工重复维护，曾出现 xqzg_status 缺 file_path 列等漂移。
-本模块将全部 8 张表的列元数据收敛为单一来源，并提供两方言 DDL 生成器：
+本模块将全部 12 张表的列元数据收敛为单一来源，并提供两方言 DDL 生成器：
 
 - ``TABLE_COLUMNS``：列定义（列名、SQLite 类型、MySQL 类型、两方言默认值、
   两方言附加子句如 PRIMARY KEY / AUTO_INCREMENT）
@@ -61,7 +61,18 @@ TABLE_NAMES: List[str] = [
     "health_alerts",
     "aftersale_records",
     "ledger_records",
+    # 企微售后群消息归档（来源可插拔入站契约，2026-10-06 剪贴板采集器落地）
+    "chat_archive_messages",
+    "chat_archive_tags",
+    "chat_archive_cursor",
 ]
+
+# 归档表分组：table_db 建表脚本与测试按此常量取表名，避免三处硬编码漂移
+CHAT_ARCHIVE_TABLES: Tuple[str, ...] = (
+    "chat_archive_messages",
+    "chat_archive_tags",
+    "chat_archive_cursor",
+)
 
 # MySQL 保留字列：生成 MySQL DDL 时列名需加反引号（与 backend 转换器
 # _quote_reserved_words 只处理 sync_meta key/value 的口径一致）
@@ -301,6 +312,68 @@ TABLE_COLUMNS = {
         ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
+    # ==================== 企微售后群消息归档（剪贴板采集器，2026-10-06） ====================
+    # 入站契约与来源可插拔：source 区分采集适配器（wecom_clip = 企微客户端剪贴板
+    # RPA / manual = 人工导出导入 / official = 官方会话存档 SDK），下游
+    # 存储→打标→报告 零分支。设计见
+    # docs/企微售后群消息归档-剪贴板采集器设计与落地2026-10-06.md
+    "chat_archive_messages": [
+        # msg_id：采集侧指纹 sha1[:20]（ContentFingerprint，刻意不含年份——
+        # 年份由采集时刻推断，含年份会让推断口径变化时去重失效）。
+        # 跨批次幂等 INSERT 的主键，同一批消息重复采集不会产生重复行。
+        ColumnDef("msg_id", "TEXT", "VARCHAR(64)",
+                  sqlite_extra="PRIMARY KEY", mysql_extra="PRIMARY KEY"),
+        ColumnDef("source", "TEXT", "VARCHAR(32)", "''", "''"),
+        # room_id 是唯一分组维度（room_name 会随群改名撕裂、重名会合并，
+        # 仅作展示；见 database/aftersale_db.py 的 TRIM(room_name) 分组教训）
+        ColumnDef("room_id", "TEXT", "VARCHAR(128)", "''", "''"),
+        ColumnDef("room_name", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("sender_id", "TEXT", "VARCHAR(128)", "''", "''"),
+        # sender_name = 剥离外部联系人后缀的显示名；
+        # sender_raw = 剪贴板原文（如「江苏~朱华国@微信@微信联系人」）
+        ColumnDef("sender_name", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("sender_raw", "TEXT", "VARCHAR(255)", "''", "''"),
+        # sender_kind：internal（企业内成员）/ external（@微信@微信联系人 后缀）
+        ColumnDef("sender_kind", "TEXT", "VARCHAR(32)", "''", "''"),
+        # msg_type：text / image / video / file / voice / link / empty / other
+        ColumnDef("msg_type", "TEXT", "VARCHAR(32)", "''", "''"),
+        # MySQL TEXT 不允许 DEFAULT（与 ledger_records.description 口径一致）
+        ColumnDef("content", "TEXT", "TEXT", "''", None),
+        # 媒体文件 P0 只存计数不拉取（设计文档 §四 R4：避免库内含客户 PII 介质）
+        ColumnDef("media_count", "INTEGER", "INT", "0", "0"),
+        # msg_ts 定长 'YYYY-MM-DD HH:MM:SS'（字符串排序即时间排序）
+        ColumnDef("msg_ts", "TEXT", "VARCHAR(32)", "''", "''"),
+        # 剪贴板时间戳只有 M/D；本列标记该条年份是否由采集时刻推断而来
+        ColumnDef("msg_ts_inferred_year", "INTEGER", "TINYINT", "0", "0"),
+        # mentions：@提及列表（TEXT + MySQL TEXT，口径同上）
+        ColumnDef("mentions", "TEXT", "TEXT", "''", None),
+        # 采集批次标识 out/<时间戳>/batch_NN，用于回溯与漏采核对
+        ColumnDef("pull_batch", "TEXT", "VARCHAR(64)", "''", "''"),
+        ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
+    ],
+    "chat_archive_tags": [
+        ColumnDef("id", "INTEGER", "INT", sqlite_extra="PRIMARY KEY",
+                  mysql_extra="AUTO_INCREMENT PRIMARY KEY"),
+        ColumnDef("msg_id", "TEXT", "VARCHAR(64)", "''", "''"),
+        ColumnDef("category", "TEXT", "VARCHAR(64)", "''", "''"),
+        ColumnDef("matched_rule", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("confidence", "REAL", "DOUBLE", "0", "0"),
+        # tagged_by：rule（规则命中）/ llm（兜底分类）/ human（人工确认）
+        ColumnDef("tagged_by", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
+    ],
+    "chat_archive_cursor": [
+        # scope：断点作用域（如 after_sales）。本表是断档自愈的唯一依据，
+        # 必须豁免 database/data_retention.py 的清理——该模块的表白名单
+        # （_SIZE_TABLES / _STATUS_TABLES）为硬编码且不含本表，
+        # 回归断言见 tests/test_chat_archive_db.py
+        ColumnDef("scope", "TEXT", "VARCHAR(128)",
+                  sqlite_extra="PRIMARY KEY", mysql_extra="PRIMARY KEY"),
+        ColumnDef("next_cursor", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("last_msg_ts", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("last_success_ts", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
+    ],
 }
 
 # ==================== 索引元数据（单一来源） ====================
@@ -332,7 +405,23 @@ TABLE_INDEXES = {
         IndexDef("idx_ledger_signer", ("signer",),
                  "idx_ledger_signer", ("signer",)),
     ],
+    "chat_archive_messages": [
+        # 报告主查询：按群 + 时间段（room_id 分组，room_name 仅展示）
+        IndexDef("idx_chat_archive_room_ts", ("room_id", "msg_ts"),
+                 "idx_chat_archive_room_ts", ("room_id", "msg_ts")),
+        # 增量采集断点探测：按来源取已归档最大 msg_ts
+        IndexDef("idx_chat_archive_source_ts", ("source", "msg_ts"),
+                 "idx_chat_archive_source_ts", ("source", "msg_ts")),
+    ],
+    "chat_archive_tags": [
+        # 报告维度：按问题类型 × id 分页；按 msg_id 回查消息
+        IndexDef("idx_chat_tags_msg", ("msg_id",),
+                 "idx_chat_tags_msg", ("msg_id",)),
+        IndexDef("idx_chat_tags_category", ("category", "id"),
+                 "idx_chat_tags_category", ("category",)),
+    ],
 }
+
 
 # ==================== 迁移注册表（列级元数据单一来源） ====================
 

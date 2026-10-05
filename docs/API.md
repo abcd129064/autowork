@@ -490,6 +490,29 @@ VTScreen(cols=80, rows=24, max_scrollback=2000)
 
 支持：CUP/HVP/VPA/HPA/CHA/CUU/CUD/CUF/CUB/CNL/CPL/NEL/IND/RI、EL/ED、ICH/DCH/ECH、IL/DL、SU/SD、DECSTBM、SGR（16/256/真彩 + 粗体/下划线/反显）、`\E(0`/`\E(B`、SO/SI(G0/G1)、备用屏幕 1049/47/1047/1048、DECSC/DECRC、DECOM、IRM、DECAWM、DECTCEM、宽字符与组合符。未实现项见设计文档"序列→行为"对照表。
 
+### core.wecom_clip
+
+企微售后群聊天记录的**剪贴板文本解析 + 归档导入**（纯函数为主，写库部分延迟导入 `database.chat_archive_db`）。输入是用户在企微客户端「拖选 → PageUp → Ctrl+C」得到的纯文本，格式为「发送人显示名 + M/D H:MM:SS」头行 + 正文，空行分隔；零第三方依赖。采集侧驱动见 `win_api.wecom_clip_driver`。
+
+| 函数/常量 | 签名 | 说明 |
+|------|------|------|
+| `ChatMessage` | dataclass | 归档入站契约：source / msg_id / room_id / sender_id / sender_name / sender_raw / sender_kind / msg_ts / msg_ts_inferred_year / msg_type / content / mentions / batch_index / line_no |
+| `ParseWarning` | dataclass | 解析告警，code ∈ no_header / leading_text / empty_body / bad_datetime / time_regression |
+| `HEADER_RE` / `EXTERNAL_SUFFIXES` / `MENTION_SEP` / `SOURCE` | 常量 | 头行正则（发送人非贪婪 + 月/日 + 时:分:秒）；外部联系人后缀；@提及分隔符 U+2005；本采集来源 `wecom_clip` |
+| `normalize_clip_text(raw)` | `(str) -> str` | 去 BOM、CRLF→LF、**只去行尾**空白（行首空白在 @提及 场景有意义） |
+| `split_sender(raw_name)` | `(str) -> (str, str)` | 拆显示名与 sender_kind（`external_wechat` / `internal`） |
+| `extract_mentions(content)` | `(str) -> list` | 提取 @ 提及（可能是显示名，也可能是 `xxx`openim` 原始 id） |
+| `classify_content(content)` | `(str) -> (str, str)` | 判定 msg_type：空正文→`empty`、`[视频]`→`video`、其余 `text` |
+| `message_fingerprint(...)` | `(room_id, sender_raw, month, day, hour, minute, second, content) -> str` | sha1[:20] 作 msg_id，**刻意不含年份**（年份靠推断，含之会让去重失效） |
+| `infer_years(dates, collected_at)` | `(list, datetime) -> list` | 头行无年份：按采集时刻与「月/日递减即跨年」推断 |
+| `parse_clip_text(raw, room_id="", collected_at=None, batch_index=0)` | `-> (list, list)` | 单批文本 → (消息, 告警) |
+| `dedup_messages(messages)` | `(list) -> list` | 按 msg_id 去重；再按「同 sender_raw + 同 msg_ts 且归一化正文互为子串」合并保留最长（修拖选截断 @ 前缀导致的重复） |
+| `parse_batches(texts, ...)` / `load_batches(out_dir)` | | 多批次解析（含统计）/ 读产物目录 `batch_*.txt` |
+| `message_to_row(msg, room_name="", pull_batch="")` | `-> dict` | 转归档行；media_count：image/video/file/voice 记 1 |
+| `import_messages(...)` / `import_clip_text(...)` / `import_batches_dir(out_dir, room_id, ...)` | `-> dict` | 写归档库并推进 `chat_archive_cursor`（返回 inserted/skipped/invalid） |
+
+CLI：`python core/wecom_clip.py <文件或目录> [--room-id X] [--json]`（只解析打印，不写库）。
+
 ---
 
 ## workers/ 后台线程层
@@ -1050,7 +1073,7 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `convert_on_conflict(sql)` | `(str) -> str` | `ON CONFLICT(col) DO UPDATE SET ...=excluded.x` → `ON DUPLICATE KEY UPDATE ...=VALUES(x)` |
 | `convert_insert_or_replace(sql)` | `(str) -> str` | `INSERT OR REPLACE` → `INSERT`（MySQL 无此语法） |
 | `escape_literal_percent(sql)` | `(str) -> str` | 字符串字面量内的单个 `%` → `%%`（pymysql 参数化执行所需） |
-| `MYSQL_DDL` | `dict` | 8 张表的 MySQL 建表语句（IF NOT EXISTS 幂等，与 SQLite DDL 一一对应） |
+| `MYSQL_DDL` | `dict` | 12 张表的 MySQL 建表语句（IF NOT EXISTS 幂等，与 SQLite DDL 一一对应） |
 
 #### 类 `MysqlConnectionAdapter`
 
@@ -1178,11 +1201,11 @@ MySQL 连接工具。镜像推送（push_all/push_table/push_aftersale 及 `_DDL
 
 ### database.schema
 
-表结构单一来源：8 张表的列元数据（`TABLE_COLUMNS`）与索引（`TABLE_INDEXES`）收敛于此，`to_sqlite_ddl(table)` / `to_mysql_ddl(table)` 生成双方言 DDL，消除 table_db/backend 的重复定义。
+表结构单一来源：12 张表的列元数据（`TABLE_COLUMNS`）与索引（`TABLE_INDEXES`）收敛于此，`to_sqlite_ddl(table)` / `to_mysql_ddl(table)` 生成双方言 DDL，消除 table_db/backend 的重复定义。
 
 | 函数/常量 | 说明 |
 |------|------|
-| `TABLE_NAMES` | 8 张表名列表 |
+| `TABLE_NAMES` | 12 张表名列表（末 3 张为 `CHAT_ARCHIVE_TABLES` 分组常量：chat_archive_messages / chat_archive_tags / chat_archive_cursor） |
 | `ColumnDef(name, sqlite_type, mysql_type, sqlite_default, mysql_default, sqlite_extra, mysql_extra)` / `IndexDef(sqlite_name, sqlite_cols, mysql_name, mysql_cols)` / `ColumnMigration(table, col, sqlite_type, sqlite_default, mysql_type, mysql_default)` | 列 / 索引 / 列级迁移定义 dataclass（两方言类型、默认值、附加子句；字段即括号内所列） |
 | `MIGRATIONS` | 列级迁移注册表（`ColumnMigration`），驱动 `table_db._migrate_sqlite_add_columns`（SQLite 自动补列）与 `_ensure_mysql_tables`（MySQL 幂等补列兜底） |
 | `sqlite_alter_sql(m)` / `mysql_alter_sql(m)` | 按注册条目生成两方言 `ALTER TABLE ADD COLUMN` |
@@ -1268,7 +1291,24 @@ MysqlSyncCard 入口判定纯函数（无 PySide6 依赖，可单测）：根据
 | 函数 | 说明 |
 |------|------|
 | `should_attempt_sync(cfg)` | 是否可执行同步操作（返回 (ok, hint)） |
-| `should_attempt_test(cfg)` | 是否可执行连接测试 |
+### database.chat_archive_db
+
+企微聊天归档数据层（`chat_archive_messages` / `chat_archive_tags` / `chat_archive_cursor` 三张表，DDL 见 `database.schema`，连接复用 `table_db` 双后端路由）。两条硬约定：**不用 `INSERT OR IGNORE`**（`backend.convert_insert_or_replace` 只转 `INSERT OR REPLACE`）→ 一律先查后插；不用 SQLite 专有函数。透视**按 room_id 分组**、room_name 仅作展示（群改名不撕裂、重名不合并）；`chat_archive_cursor` 不在 `data_retention` 的清理白名单内，天然豁免。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `SOURCE_CLIP` / `SOURCE_MANUAL` / `SOURCE_OFFICIAL` | 常量 | 来源：本仓库剪贴板采集 / 人工导出导入 / 企微官方存档 SDK |
+| `MESSAGE_FIELDS` / `TAG_FIELDS` / `UNCATEGORIZED` | 常量 | 消息 16 列清单 / 标签列清单 / 未分类标签名「未分类」 |
+| `normalize_row(row, default_room_id="", default_room_name="", default_batch="")` | `-> dict` | 补默认值、mentions list→JSON 文本、created_at 强制服务端时间 |
+| `existing_msg_ids(msg_ids)` | `-> set` | 批量查已存在 msg_id（分块 400） |
+| `insert_messages(rows, ...)` | `-> {"inserted","skipped","invalid"}` | 先查后插、多行 VALUES 分块 60；批内重复计 invalid |
+| `get_cursor(scope)` / `set_cursor(scope, next_cursor="", last_msg_ts="", last_success_ts="")` | `-> dict` / `-> None` | 断档自愈游标（不存在返回空串字典，调用方无需判 None；先 SELECT 再 UPDATE/INSERT，刻意不用 ON CONFLICT） |
+| `latest_msg_ts(source="", room_id="")` | `-> str` | 取最新 msg_ts |
+| `count_messages(...)` / `query_messages(..., limit=200, offset=0)` | `-> int` / `-> list` | 过滤维度：room_id / 日期区间（字符串比较 `msg_ts >= 'YYYY-MM-DD 00:00:00'`，吃索引）/ 关键词 / msg_type / source |
+| `stats_by_room(date_from="", date_to="", source="")` / `stats_by_day(room_id="", ...)` | `-> list` | 按群 / 按天（`substr(msg_ts,1,10)`）汇总 |
+| `query_pivot(room_id="", date_from="", date_to="", category="", source="")` | `-> list` | 群 × 时间段 × 问题类型三维透视（LEFT JOIN 标签，未打标归「未分类」；**未分类按 room_id 分行，跨群汇总需自行求和**） |
+| `delete_room(room_id)` | `-> int` | 删该群消息与标签（**保留 cursor**） |
+| `add_tag(msg_id, category, matched_rule="", confidence=0.0, tagged_by="rule")` / `tags_for(msg_id)` | `-> int` / `-> list` | 打标与查询 |
 
 ---
 
@@ -2027,7 +2067,29 @@ Windows DLL 函数 ctypes 声明（仅 Windows 平台有效）。
 | `find_rdp_session_window(log)` | 全局查找 RDP 会话窗口 |
 | `find_mstsc_pids()` | 获取所有 mstsc.exe 进程 PID |
 | `get_window_class_name(hwnd)` | 获取窗口类名 |
-| `_SetParent_err(hwnd, parent)` | SetParent（带 GetLastError 捕获） |
+### win_api.wecom_clip_driver
+
+企微客户端剪贴板采集的 Windows 输入层（纯 `ctypes`，无第三方依赖）：向 `wxwork.exe` 窗口发鼠标/键盘事件并读系统剪贴板，把消息文本切分成批次交给 `core.wecom_clip` 解析。**不注入进程、不 hook、不读进程内存、不解密本地数据库、不调非公开协议**。真机调用必须脱离文件沙箱：受限令牌下 `SendInput` 返回成功但光标不动。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `TARGET_PROC` | 常量 | 目标进程名 `wxwork.exe` |
+| `set_dpi_aware()` | `-> str` | per-monitor-v2 DPI 感知（不开则 125%/150% 缩放下拖拽坐标偏移） |
+| `screen_size()` / `to_absolute(x, y)` / `cursor_pos()` | | 像素 ↔ 0..65535 归一化坐标 |
+| `mouse_move / mouse_down / mouse_up / wheel(notches, up, per)` | | 鼠标事件（滚轮逐格发事件） |
+| `advance_up(x, y, notches)` | | 先把鼠标移到 (x,y) 再向上滚（保证滚的是消息列表） |
+| `drag_select(x, y_from, y_to, steps=24, hold=False, jiggle=14)` | | 分步拖拽建选区（一次跳到底只会被当成单击）；`hold` 用于「按住左键 + PageUp + 微移」序列 |
+| `key_tap(vk, hold_ms=15)` / `ctrl_c()` / `esc_pressed()` | | 键盘事件；`VK_PRIOR`=PageUp 翻页 |
+| `find_windows(proc)` | `-> list[dict]` | 枚举该进程可见顶层窗口（hwnd / 标题 / 矩形 / 面积） |
+| `activate(hwnd, maximize=True)` | | 经 `AttachThreadInput` 挂前台线程后再置顶+最大化（否则 `SetForegroundWindow` 被静默忽略） |
+| `window_rect(hwnd)` / `focus_info()` | | 窗口矩形 / 当前焦点窗口类名（诊断键盘事件落到了谁） |
+| `save_placement(hwnd)` / `restore_placement(hwnd, buf)` | | 采集结束还原窗口位置 |
+| `read_clipboard(retries=12)` | `-> str` | 读 CF_UNICODETEXT（剪贴板常被占用，需重试） |
+| `beep(times, freq, dur)` | | 蜂鸣提示（采集期间独占桌面，靠声音告知用户） |
+| `CollectRun` | dataclass | 采集结果：`batches`(轮次, 剪贴板原文)、`aborted`、`chars` 逐轮字符数、`texts()` |
+| `collect_stream(hwnd, *, drag_px=0, pages=40, mode="pageup", notches=4, jiggle=14, start=None, hover_delay=6.0, page_wait=0.7, copy_wait=0.45, stable=3, hold=False, pre_delay=0.0, maximize=True, log=None)` | `-> CollectRun` | 采集内核：第 0 轮拖选建选区 → 逐轮 PageUp（+按住左键微移）或滚轮翻页 + Ctrl+C → 连续 `stable` 轮不变即停 / `pages` 上限 / Esc 急停；finally 恢复鼠标与窗口。不落盘、不解析、进度经 `log` 回调 |
+
+CLI 冒烟入口：`tools/smoke/smoke_wecom_clip_collect.py`（`--selftest` / `--probe` / `--dry-run` / 真采）。
 
 ---
 

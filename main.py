@@ -53,6 +53,7 @@ from qfluentwidgets import setTheme, setThemeColor, Theme, setFontFamilies
 from core.perf import (patch_menu_animation, patch_dialog_animation,
                        patch_table_hover_repaint,
                        patch_lean_table_delegate,
+                       patch_table_scroll_blit,
                        patch_mica_policy,
                        patch_switch_animation,
                        patch_acrylic_downsample)
@@ -77,6 +78,16 @@ patch_table_hover_repaint()
 # 只把每格文本绘制从 QTextLayout 排版换成 drawText + 省略号缓存。实测滚动
 # 耗时 -49.4%（售后 60 行 × 13 列：11.9 → 6.0 ms/帧），全局表格自动生效（幂等）
 patch_lean_table_delegate()
+# 表格滚动「位块搬移」（2026-10-06）：根因与机制已查明——qfw 给表格挂 QSS +
+# 自绘悬浮滚动条压住 viewport，两条各自都足以让 Qt 放弃 QWidget::scroll()
+# 的位块搬移，导致滚动条每动一格整视口重绘（光栅面积本可省到 1/758、
+# 实测 10.0 → 1.2ms/步）。但真机验证发现该实现会让表格**整片叠影**：
+# WA_OpaquePaintEvent 让 Qt 不再代擦背景，而本项目表格底色本来是透明的
+# （QSS transparent + 单元格 2px 透明缝隙 + 行底色只有状态行才画）。
+# 故功能**已下线**（开关仅 perf 域 perf_table_scroll_blit_experimental，
+# 无 UI 入口），挂载点保留供「viewport 真正不透明」改造复用。
+# 详见 docs/表格滚动位块搬移修复2026-10-06.md
+patch_table_scroll_blit()
 # SwitchButton 状态文本统一中文「开/关」（库默认 "On"/"Off"，patch
 # __init__ 对全项目所有直接实例化处一次生效，幂等）
 from core.switch_cn_patch import patch_switch_cn_text

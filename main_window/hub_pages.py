@@ -413,7 +413,8 @@ class SettingsHubPage(QWidget):
         from core.perf import (is_acrylic_enabled, is_animation_enabled,
                                get_table_smooth, set_acrylic_enabled,
                                set_animation_enabled, set_table_smooth,
-                               is_bigscreen_mode, set_bigscreen_mode)
+                               is_bigscreen_mode, set_bigscreen_mode,
+                               is_table_blit_enabled, set_table_blit_enabled)
         # 2026-09-07 用户反馈定稿：三项 亚克力 / 动画 / 表格平滑滚动。
         # 平滑滚动方案演进：ExpandSettingCard 折叠卡（渲染挤压错乱）→
         # 范围下拉+开关（两段式操作割裂）→ 本版单一下拉控件：点开
@@ -435,6 +436,14 @@ class SettingsHubPage(QWidget):
             "4K/高缩放大屏卡顿时开启：动画自动降级保流畅"
             "（默认按分辨率智能判定，此开关强制生效）",
             make_switch(is_bigscreen_mode(), set_bigscreen_mode)))
+        # 表格滚动加速（位块搬移 v2，2026-10-06）：先画满 viewport（实测取底
+        # 色填充）再开不透明换位块搬移；第一版只设属性不画底会整片叠影，故本轮带
+        # 像素等价回归（tests/test_table_blit_patch.py）
+        g.addRow(SettingRow(
+            FluentIcon.SPEED_HIGH, "表格滚动加速",
+            "滚动只重绘新露出的一行（光栅面积降至 1/758、每步 10.0→1.2ms）；"
+            "观感不对可关掉完全回退",
+            make_switch(is_table_blit_enabled(), set_table_blit_enabled)))
 
         # 表格平滑滚动：下拉勾选各面板子选项，点击后菜单维持可连续勾选
         # （2026-09-07 用户反馈定稿）：「全部面板」为主控——勾选=全部开启
@@ -527,6 +536,34 @@ class SettingsHubPage(QWidget):
             FluentIcon.SPEED_HIGH, "表格平滑滚动",
             "下拉勾选各面板的平滑滚动，可多选；全部面板为总控",
             smooth_btn))
+
+        # 渲染加速状态（2026-10-06 可观测性）：把两处「静默生效」的机制
+        # 摊开——自适应降级阈值（本机光栅速率标定值、是否被配置/大屏模式
+        # 接管）与表格滚动加速的实际命中张数。按钮点开时实时读取，避免
+        # 静态文本随页面切换过期（命中数随当前打开的表格变化）。
+        def _show_render_status():
+            from core.perf import (degrade_diagnostics_text,
+                                   table_blit_status_text)
+            from qfluentwidgets import MessageBox
+            hint = ("自动降级阈值：超过该物理像素数的窗口只保留最省成本的\n"
+                    "动画路径。此值按本机光栅速率自动标定（基准机仍为 600\n"
+                    "万像素）；配置里显式指定 perf_dpi_degrade_pixels 则以\n"
+                    "其为准，写 0 = 关闭降级。\n\n"
+                    "表格滚动加速：只有取到表格背后实底颜色（四周需有\n"
+                    "≥6px 纯色间隙、无遮挡）的表格才会生效；「已生效 N/M\n"
+                    "张」只统计当前打开的窗口，随页面切换而变化。")
+            box = MessageBox(
+                "渲染加速状态",
+                f"{degrade_diagnostics_text()}\n\n{table_blit_status_text()}"
+                f"\n\n{hint}", parent)
+            box.yesButton.setText("关闭")
+            box.cancelButton.hide()
+            box.exec()
+
+        g.addRow(SettingRow(
+            FluentIcon.SPEED_HIGH, "渲染加速状态",
+            "查看自动降级阈值（本机标定）与表格滚动加速的实际命中情况",
+            make_button("查看", _show_render_status, width=76)))
         return g
 
     def _group_tools(self, parent):
