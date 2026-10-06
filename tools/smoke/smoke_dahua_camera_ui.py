@@ -109,8 +109,7 @@ def main() -> int:
     check("B3 初始：断开/预览/抓图禁用",
           not page._btn_disc.isEnabled() and not page._btn_play.isEnabled()
           and not page._btn_snap.isEnabled())
-    check("B4 初始：预置点按钮禁用",
-          not page._btn_preset_goto.isEnabled())
+    check("B4 初始：预置点面板隐藏", page._preset_panel.isHidden())
 
     # B2 UI 登录
     page._ed_addr.setText(CAM_ADDR)
@@ -126,8 +125,10 @@ def main() -> int:
           all(b.isEnabled() for b in page._iter_osd_buttons()))
     check("B8 PT机型：PTZ 按钮解禁",
           all(b.isEnabled() for b in page._ptz_btns.values()))
-    check("B9 PT机型：预置点按钮解禁",
-          page._btn_preset_goto.isEnabled())
+    check("B9 PT机型：预置点面板可见", page._preset_panel.isVisible())
+    ok_rows = wait_until(page, lambda: page._preset_v.count() >= 2, 15000)  # ≥1行+stretch
+    check("B9b 预置点列表从相机载入", ok_rows,
+          f"rows={max(0, page._preset_v.count() - 1)}")
     check("B10 PT机型：置灰提示隐藏", not page._ptz_note.isVisible())
     check("B11 断开按钮解禁", page._btn_disc.isEnabled())
 

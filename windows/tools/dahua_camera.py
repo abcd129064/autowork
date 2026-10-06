@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout,
-                               QVBoxLayout, QWidget)
+                               QLabel, QScrollArea, QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, CardWidget, CheckBox,
                             FluentIcon, LineEdit, PasswordLineEdit,
                             PrimaryPushButton, PushButton, SpinBox)
@@ -40,49 +41,53 @@ def _toast(widget: QWidget, msg: str, error: bool = False, duration: int = 2500)
 # ---------------------------------------------------------------- 线程助手
 
 
-class _Call(QThread):
-    """阻塞 SDK 调用线程：ok/err 双信号（都需连接，契约要求）"""
-    ok = Signal(object)
-    err = Signal(str)
+class _SerialCaller(QThread):
+    """设备 SDK 调用专用**单线程串行执行器**（FIFO）。
 
-    def __init__(self, fn, parent=None):
+    ⚠ 同一登录会话上的配置请求（GetConfig/SetConfig/NewDevConfig）并发会
+    串协议：隧道下表现为 "Protocol error it may result from network
+    timeout"（2026-10-07 真机）。所以连接后的自动 get chn + get time、
+    用户点「设置」等全部在本线程排队执行，而不是各开 QThread 并发。
+    ok/err 回调经 _done 信号回主线程，UI 触控安全。
+    """
+
+    _done = Signal(object)
+    PACING_S = 0.25  # 相邻设备调用最小间距（防隧道协议超时，配合 core 层重试）
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._fn = fn
+        import queue
+        self._q: "queue.Queue" = queue.Queue()
+        self._done.connect(self._dispatch)  # 队列连接：回调回主线程
+        self.start()
+
+    def submit(self, fn, on_ok, on_err):
+        self._q.put((fn, on_ok, on_err))
 
     def run(self):  # noqa: D102
-        try:
-            self.ok.emit(self._fn())
-        except Exception as e:  # noqa: BLE001 统一转 UI 错误提示
-            logger.warning("相机调用失败: %s", e, exc_info=True)
-            self.err.emit(str(e))
+        while True:
+            item = self._q.get()
+            if item is None:  # stop 哨兵
+                return
+            fn, on_ok, on_err = item
+            try:
+                rec = (on_ok, on_err, True, fn())
+            except Exception as e:  # noqa: BLE001 统一转 UI 错误提示
+                logger.warning("相机调用失败: %s", e, exc_info=True)
+                rec = (on_ok, on_err, False, str(e))
+            self._done.emit(rec)
+            time.sleep(self.PACING_S)  # 隧道下配置请求须留间距，背靠背会协议超时
 
+    def _dispatch(self, rec):
+        on_ok, on_err, ok, payload = rec
+        if ok:
+            on_ok(payload)
+        else:
+            on_err(payload)
 
-class _CallPool:
-    """_Call 生命周期管理：持引用防 GC，页面销毁时等待收尾"""
-
-    def __init__(self, parent_widget):
-        self._parent = parent_widget
-        self._alive: list[_Call] = []
-
-    def run(self, fn, on_ok, on_err):
-        call = _Call(fn, self._parent)
-        self._alive.append(call)
-        call.ok.connect(on_ok)
-        call.err.connect(on_err)
-        call.finished.connect(lambda c=call: self._retire(c))
-        call.start()
-
-    def _retire(self, call=None):
-        if call is None:  # 兼容：非闭包连接时兜底扫描
-            for c in [c for c in self._alive if c.isFinished()]:
-                self._alive.remove(c)
-            return
-        if call in self._alive:
-            self._alive.remove(call)
-
-    def wait_all(self, ms: int = 3000) -> None:
-        for call in list(self._alive):
-            call.wait(ms)
+    def stop(self, ms: int = 5000) -> None:
+        self._q.put(None)
+        self.wait(ms)
 
 
 # ---------------------------------------------------------------- 页面
@@ -124,7 +129,7 @@ class DahuaCameraWork(QWidget):
         super().__init__(parent)
         self._win = win
         self._client: DahuaClient | None = None
-        self._pool = _CallPool(self)
+        self._serial = _SerialCaller(self)
         self.setObjectName("dahuaCameraWork")
 
         root = QVBoxLayout(self)
@@ -234,21 +239,52 @@ class DahuaCameraWork(QWidget):
         self._ptz_note.setWordWrap(True)
         ptz.addWidget(self._ptz_note)
 
-        preset_row = QHBoxLayout()
-        self._sp_preset = SpinBox(ptz_card)
-        self._sp_preset.setRange(1, 255)
-        self._btn_preset_goto = PushButton("调用预置点", ptz_card)
-        self._btn_preset_set = PushButton("设为此处", ptz_card)
-        self._btn_preset_del = PushButton("删除", ptz_card)
-        for b in (self._btn_preset_goto, self._btn_preset_set, self._btn_preset_del):
-            b.setEnabled(False)
-        self._btn_preset_goto.clicked.connect(lambda: self._preset("goto"))
-        self._btn_preset_set.clicked.connect(lambda: self._preset("set"))
-        self._btn_preset_del.clicked.connect(lambda: self._preset("del"))
-        for w in (self._sp_preset, self._btn_preset_goto, self._btn_preset_set,
-                  self._btn_preset_del):
-            preset_row.addWidget(w)
-        ptz.addLayout(preset_row)
+        # ---- 预置点列表（设计稿形态：编号徽标 + 名称 + 调用/设为此处/删 + 新增行）----
+        self._preset_panel = QWidget(ptz_card)
+        pp = QVBoxLayout(self._preset_panel)
+        pp.setContentsMargins(0, 4, 0, 0)
+        pp.setSpacing(6)
+        phead = QHBoxLayout()
+        phead.addWidget(BodyLabel("预置点", self._preset_panel))
+        phead.addStretch(1)
+        phead.addWidget(CaptionLabel("PTZ Preset(SET/GOTO/DEL)", self._preset_panel))
+        pp.addLayout(phead)
+
+        self._preset_host = QWidget(self._preset_panel)
+        self._preset_v = QVBoxLayout(self._preset_host)
+        self._preset_v.setContentsMargins(0, 0, 0, 0)
+        self._preset_v.setSpacing(4)
+        self._preset_v.addStretch(1)
+        scroll = QScrollArea(self._preset_panel)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._preset_host)
+        scroll.setFixedHeight(118)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}"
+                             "QWidget{background:transparent;}")
+        pp.addWidget(scroll)
+
+        self._btn_preset_add = PushButton(FluentIcon.ADD, "新增预置点…",
+                                          self._preset_panel)
+        self._btn_preset_add.clicked.connect(self._on_preset_add)
+        pp.addWidget(self._btn_preset_add)
+
+        self._preset_editor = QWidget(self._preset_panel)
+        pe = QHBoxLayout(self._preset_editor)
+        pe.setContentsMargins(0, 0, 0, 0)
+        self._ed_preset_name = LineEdit(self._preset_editor)
+        self._ed_preset_name.setPlaceholderText("预置点名称（保存相机当前位置）")
+        self._btn_preset_ok = PrimaryPushButton("确定", self._preset_editor)
+        self._btn_preset_cancel = PushButton("取消", self._preset_editor)
+        pe.addWidget(self._ed_preset_name, 1)
+        pe.addWidget(self._btn_preset_ok)
+        pe.addWidget(self._btn_preset_cancel)
+        self._btn_preset_ok.clicked.connect(self._on_preset_add_confirm)
+        self._btn_preset_cancel.clicked.connect(self._on_preset_add_cancel)
+        self._preset_editor.hide()
+        pp.addWidget(self._preset_editor)
+
+        self._preset_panel.setVisible(False)
+        ptz.addWidget(self._preset_panel)
         mid.addWidget(ptz_card, 3)
         root.addLayout(mid, 1)
 
@@ -342,7 +378,7 @@ class DahuaCameraWork(QWidget):
             client = dahua_sdk.connect(addr, user, pwd)
             return client, client.ptz_supported()
 
-        self._pool.run(work, self._on_connected, self._on_conn_failed)
+        self._serial.submit(work, self._on_connected, self._on_conn_failed)
 
     def _on_connected(self, result):
         client, ptz_ok = result
@@ -352,8 +388,6 @@ class DahuaCameraWork(QWidget):
         self._btn_snap.setEnabled(True)
         for btn in self._iter_osd_buttons():
             btn.setEnabled(True)
-        for b in (self._btn_preset_goto, self._btn_preset_set, self._btn_preset_del):
-            b.setEnabled(ptz_ok)
         self._set_ptz_enabled(ptz_ok)
         self._lb_state.setText(
             f"● {client.serial or client.host}（通道 {client.chan_num}）"
@@ -361,6 +395,8 @@ class DahuaCameraWork(QWidget):
         _toast(self, f"连接成功：{client.serial}")
         self._osd_get("chn")
         self._osd_get("time")
+        if ptz_ok:
+            self._refresh_presets()
 
     def _on_conn_failed(self, msg):
         self._btn_conn.setEnabled(True)
@@ -371,15 +407,13 @@ class DahuaCameraWork(QWidget):
         self._stop_preview()
         client, self._client = self._client, None
         if client:
-            self._pool.run(client.close, lambda _r: None, lambda _m: None)
+            self._serial.submit(client.close, lambda _r: None, lambda _m: None)
         self._btn_conn.setEnabled(True)
         self._btn_disc.setEnabled(False)
         self._btn_play.setEnabled(False)
         self._btn_snap.setEnabled(False)
         for btn in self._iter_osd_buttons():
             btn.setEnabled(False)
-        for b in (self._btn_preset_goto, self._btn_preset_set, self._btn_preset_del):
-            b.setEnabled(False)
         self._set_ptz_enabled(False)
         self._lb_state.setText("未连接")
 
@@ -389,6 +423,101 @@ class DahuaCameraWork(QWidget):
         for btn in self._zf_btns:
             btn.setEnabled(on)
         self._ptz_note.setVisible(not on)
+        self._preset_panel.setVisible(on)
+
+    # ---------- 预置点列表 ----------
+
+    def _refresh_presets(self):
+        if not self._client:
+            return
+        client = self._client
+
+        def work():
+            return client.ptz_presets()
+
+        self._serial.submit(work, self._presets_loaded,
+                            lambda m: logger.info("预置点列表读取失败: %s", m))
+
+    def _presets_loaded(self, presets: list):
+        # 清空旧行（保留末尾 stretch）
+        while self._preset_v.count() > 1:
+            item = self._preset_v.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        for p in presets:
+            self._preset_v.insertWidget(self._preset_v.count() - 1,
+                                        self._preset_row(p["index"], p["name"]))
+
+    def _preset_row(self, idx: int, name: str) -> QWidget:
+        row = QWidget(self._preset_host)
+        row.setStyleSheet("QWidget{background:#232838;border-radius:6px;}")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 5, 10, 5)
+        h.setSpacing(8)
+        badge = QLabel(str(idx), row)
+        badge.setFixedSize(20, 20)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet("background:#4f8cff;color:#fff;border-radius:10px;"
+                            "font-size:11px;font-weight:600;")
+        h.addWidget(badge)
+        name_lb = BodyLabel(name, row)
+        name_lb.setTextInteractionFlags(Qt.NoTextInteraction)
+        h.addWidget(name_lb, 1)
+        for text, route, color in (("调用", f"goto:{idx}", "#4f8cff"),
+                                   ("设为此处", f"set:{idx}", "#4f8cff"),
+                                   ("删", f"del:{idx}", "#e05555")):
+            link = QLabel(f'<a style="color:{color};text-decoration:none;" '
+                          f'href="{route}">{text}</a>', row)
+            link.setTextFormat(Qt.RichText)
+            link.setCursor(Qt.PointingHandCursor)
+            link.linkActivated.connect(self._on_preset_link)
+            h.addWidget(link)
+        return row
+
+    def _on_preset_link(self, route: str):
+        kind, _, s_idx = route.partition(":")
+        idx = int(s_idx)
+        if not self._client:
+            return
+        client = self._client
+
+        def work():
+            client.ptz_preset(kind, idx)
+            return kind
+
+        done = (lambda _r: self._refresh_presets() if kind in ("set", "del")
+                else None)
+        self._serial.submit(work, done, lambda m: _toast(
+            self, m, error=True, duration=3500))
+
+    def _on_preset_add(self):
+        self._btn_preset_add.hide()
+        self._ed_preset_name.clear()
+        self._preset_editor.show()
+        self._ed_preset_name.setFocus()
+
+    def _on_preset_add_cancel(self):
+        self._preset_editor.hide()
+        self._btn_preset_add.show()
+
+    def _on_preset_add_confirm(self):
+        if not self._client:
+            return
+        name = self._ed_preset_name.text().strip()
+        client = self._client
+
+        def work():
+            existing = {p["index"] for p in client.ptz_presets()}
+            idx = next(i for i in range(1, 301) if i not in existing)
+            client.ptz_preset("set", idx)  # 保存相机当前位置到新编号
+            if name:
+                client.set_preset_alias(idx, name)
+            return client.ptz_presets()
+
+        self._serial.submit(work, self._presets_loaded,
+                            lambda m: _toast(self, m, error=True, duration=3500))
+        self._on_preset_add_cancel()
 
     # ---------- 预览 / 抓图 ----------
 
@@ -405,7 +534,7 @@ class DahuaCameraWork(QWidget):
         def work():
             client.realplay_start(hwnd, channel=0, sub_stream=True)
 
-        self._pool.run(work, lambda _r: self._preview_on(),
+        self._serial.submit(work, lambda _r: self._preview_on(),
                        lambda m: (self._btn_play.setEnabled(True),
                                   _toast(self, m, error=True, duration=3500)))
 
@@ -418,7 +547,7 @@ class DahuaCameraWork(QWidget):
     def _stop_preview(self):
         if not self._client:
             return
-        self._pool.run(self._client.realplay_stop,
+        self._serial.submit(self._client.realplay_stop,
                        lambda _r: self._preview_off(),
                        lambda _m: self._preview_off())
 
@@ -441,7 +570,7 @@ class DahuaCameraWork(QWidget):
         def work():
             return client.snap_to_file(path)
 
-        self._pool.run(work, self._snap_done,
+        self._serial.submit(work, self._snap_done,
                        lambda m: (self._btn_snap.setEnabled(True),
                                   _toast(self, m, error=True, duration=3500)))
 
@@ -462,22 +591,8 @@ class DahuaCameraWork(QWidget):
             client.ptz(command, speed=speed, stop=stop)
 
         # 云台指令高频：失败静默落日志（按钮已按能力位过滤）
-        self._pool.run(work, lambda _r: None,
+        self._serial.submit(work, lambda _r: None,
                        lambda m: logger.info("PTZ %s: %s", command, m))
-
-    def _preset(self, action: str):
-        if not self._client:
-            return
-        index = self._sp_preset.value()
-        client = self._client
-
-        def work():
-            client.ptz_preset(action, index)
-
-        self._pool.run(work,
-                       lambda _r: _toast(self, f"预置点 {action} #{index} 成功",
-                                         duration=1800),
-                       lambda m: _toast(self, m, error=True, duration=3500))
 
     # ---------- OSD 读写 ----------
 
@@ -505,7 +620,7 @@ class DahuaCameraWork(QWidget):
             meta["edits"]["y"].setText(str(y))
             _toast(self, "OSD 配置已读取", duration=1500)
 
-        self._pool.run(work, done,
+        self._serial.submit(work, done,
                        lambda m: _toast(self, m, error=True, duration=3500))
 
     def _osd_set(self, key: str):
@@ -531,13 +646,13 @@ class DahuaCameraWork(QWidget):
             else:
                 client.osd_custom_text(0, text or "", show, pos)
 
-        self._pool.run(work,
+        self._serial.submit(work,
                        lambda _r: _toast(self, "OSD 设置成功", duration=1800),
                        lambda m: _toast(self, m, error=True, duration=3500))
 
     # ---------- 收尾 ----------
 
     def _teardown(self):
-        self._pool.wait_all()
+        self._serial.stop()
         if self._client:
             self._client.close()

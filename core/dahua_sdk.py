@@ -228,6 +228,60 @@ class DahuaClient:
         if not self._sdk.PTZControlEx2(self._login_id, 0, cmd, 0, int(index), 0, False):
             raise DahuaSdkError(f"预置点 {action}#{index} 失败：{self._sdk.GetLastErrorMessage()}")
 
+    # ---------- 预置点列表 ----------
+
+    _PRESET_MAX = 300
+
+    def ptz_presets(self) -> list:
+        """读取相机内预置点列表，返回 [{'index': int, 'name': str}] 按 index 升序。
+
+        走 QueryDevState(PTZ_PRESET_LIST=0x57)（老通道，该固件支持；
+        新版 CLIENT_PTZGetPreset 报 "device not found com interface"）。
+        设备名为空或默认名时回退本地别名（UI 命名存 app_settings，
+        因该固件无名称写入接口）。
+        """
+        m = self._m
+        arr = (m.NET_PTZ_PRESET * self._PRESET_MAX)()
+        lst = m.NET_PTZ_PRESET_LIST()
+        lst.dwSize = m.sizeof(lst)
+        lst.dwMaxPresetNum = self._PRESET_MAX
+        lst.pstuPtzPorsetList = m.cast(arr, m.POINTER(m.NET_PTZ_PRESET))
+        try:
+            st = int(m.EM_QUERY_DEV_STATE_TYPE.PTZ_PRESET_LIST)  # 0x0057
+        except AttributeError:
+            st = 0x57
+        if not self._sdk.QueryDevState(self._login_id, st, lst,
+                                       m.sizeof(lst), 0, 2000):
+            raise DahuaSdkError(
+                f"读取预置点列表失败：{self._sdk.GetLastErrorMessage()}")
+        aliases = self.preset_aliases()
+        out = []
+        for i in range(int(lst.dwRetPresetNum)):
+            it = arr[i]
+            raw = it.szNameEx if it.bSetNameEx else it.szName
+            name = bytes(raw).split(b"\x00")[0].decode("gbk",
+                                                       errors="replace").strip()
+            idx = int(it.nIndex)
+            if not name or name == f"预置点{idx}":
+                name = aliases.get(str(idx)) or name or f"预置点{idx}"
+            out.append({"index": idx, "name": name})
+        out.sort(key=lambda p: p["index"])
+        return out
+
+    def preset_aliases(self) -> dict:
+        """本地预置点别名 {str(index): name}（按设备序列隔离，存 app_settings）"""
+        from core import app_settings
+        return (app_settings.get("dahua_preset_alias", {}) or {}).get(
+            self.serial, {})
+
+    def set_preset_alias(self, index: int, name: str) -> None:
+        from core import app_settings
+        all_map = app_settings.get("dahua_preset_alias", {}) or {}
+        dev = dict(all_map.get(self.serial, {}))
+        dev[str(int(index))] = name
+        all_map[self.serial] = dev
+        app_settings.set("dahua_preset_alias", all_map)
+
     def ptz_supported(self, channel: int = 0) -> bool:
         """云台能力探测。
 
@@ -261,25 +315,44 @@ class DahuaClient:
 
     def _osd_cfg(self, cfg_id: int, channel: int, struct_obj=None, read: bool = False):
         m = self._m
-        if read:
-            # ⚠ GetConfig 的 out 缓冲也要求预填 dwSize（SDK 校验入参完整性），
-            #   零填充缓冲会报 "dwSize is not initialized"
-            size = m.sizeof(struct_obj)
-            buf = m.create_string_buffer(size)
-            m.memmove(buf, m.byref(struct_obj), size)
-            ok = self._sdk.GetConfig(self._login_id, cfg_id, channel, buf,
-                                     size, 2000, None)
-            if not ok:
-                raise DahuaSdkError(f"读取 OSD 配置({cfg_id})失败：{self._sdk.GetLastErrorMessage()}")
-            out = struct_obj.__class__.from_buffer_copy(buf)
-            return out
-        # ⚠ 官方包装 SetConfig 内部已做 byref(szInBuffer)，这里必须传结构体实例，
-        #   再 byref 会炸 TypeError（byref argument must be a ctypes instance）
-        ok = self._sdk.SetConfig(self._login_id, cfg_id, channel,
-                                 struct_obj, m.sizeof(struct_obj),
-                                 2000, 0, None)
-        if not ok:
-            raise DahuaSdkError(f"写入 OSD 配置({cfg_id})失败：{self._sdk.GetLastErrorMessage()}")
+
+        def _call():
+            if read:
+                # ⚠ GetConfig 的 out 缓冲也要求预填 dwSize（SDK 校验入参完整性），
+                #   零填充缓冲会报 "dwSize is not initialized"
+                size = m.sizeof(struct_obj)
+                buf = m.create_string_buffer(size)
+                m.memmove(buf, m.byref(struct_obj), size)
+                if not self._sdk.GetConfig(self._login_id, cfg_id, channel, buf,
+                                           size, 2000, None):
+                    raise DahuaSdkError(
+                        f"读取 OSD 配置({cfg_id})失败：{self._sdk.GetLastErrorMessage()}")
+                return struct_obj.__class__.from_buffer_copy(buf)
+            # ⚠ 官方包装 SetConfig 内部已做 byref(szInBuffer)，这里必须传结构体实例，
+            #   再 byref 会炸 TypeError（byref argument must be a ctypes instance）
+            if not self._sdk.SetConfig(self._login_id, cfg_id, channel,
+                                       struct_obj, m.sizeof(struct_obj),
+                                       2000, 0, None):
+                raise DahuaSdkError(
+                    f"写入 OSD 配置({cfg_id})失败：{self._sdk.GetLastErrorMessage()}")
+
+        return self._with_retry(_call)
+
+    def _with_retry(self, fn, retries: int = 1, pause: float = 0.4):
+        """隧道下配置请求背靠背会 "Protocol error/timeout"（2026-10-07 实测：
+        无间距 24 请求挂 4，300ms 间距 0 挂）。执行层另有节流，这里兜底重试。"""
+        import time as _t
+        last: Exception | None = None
+        for _ in range(retries + 1):
+            try:
+                return fn()
+            except DahuaSdkError as e:
+                msg = str(e)
+                last = e
+                if "Protocol error" not in msg and "timeout" not in msg.lower():
+                    raise
+                _t.sleep(pause)
+        raise last
 
     def _read_osd(self, cfg_id: int, channel: int, cls):
         """读 OSD 配置的标准模板：dwSize + emOsdBlendType=MAIN 均为必填读取键，
@@ -397,8 +470,9 @@ class DahuaClient:
         payload = self._build_channel_name_payload(self._get_channel_name(channel), text)
         err = m.c_int(0)
         data = payload.encode()
+        # ⚠ 官方包装 SetNewDevConfig 无 reserve 尾参：(login,cmd,ch,buf,len,err,restart,waittime)
         ok = self._sdk.SetNewDevConfig(self._login_id, "ChannelTitle", channel,
-                                       data, len(data), err, 0, 2000, None)
+                                       data, len(data), err, 0, 2000)
         if not ok:
             raise DahuaSdkError(f"设置通道名称失败：{self._sdk.GetLastErrorMessage()}")
 

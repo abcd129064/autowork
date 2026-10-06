@@ -15,7 +15,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from windows.tools import dahua_camera as cam_mod
-from windows.tools.dahua_camera import DahuaCameraWork, _CallPool
+from windows.tools.dahua_camera import DahuaCameraWork, _SerialCaller
 
 
 @pytest.fixture
@@ -41,6 +41,9 @@ class _FakeClient:
 
     def ptz_supported(self, channel=0):
         return self._ptz
+
+    def ptz_presets(self):
+        return [{"index": 1, "name": "预置点1"}]
 
     def realplay_stop(self):
         pass
@@ -78,9 +81,9 @@ def test_initial_all_grayed(page):
     assert not any(b.isEnabled() for b in page._ptz_btns.values())
     assert not any(b.isEnabled() for b in page._zf_btns)
     assert not any(b.isEnabled() for b in page._iter_osd_buttons())
-    for b in (page._btn_preset_goto, page._btn_preset_set, page._btn_preset_del,
-              page._btn_play, page._btn_snap, page._btn_disc):
+    for b in (page._btn_play, page._btn_snap, page._btn_disc):
         assert not b.isEnabled()
+    assert page._preset_panel.isHidden()  # 预置点面板连接前隐藏
 
 
 # ---- 连接（固定镜头 vs PT 机型） ---------------------------------------------
@@ -98,7 +101,7 @@ def test_connect_fixed_lens_grays_ptz(page, qapp, monkeypatch):
     # OSD 可用，PTZ/预置点保持置灰
     assert all(b.isEnabled() for b in page._iter_osd_buttons())
     assert not any(b.isEnabled() for b in page._ptz_btns.values())
-    assert not page._btn_preset_goto.isEnabled()
+    assert page._preset_panel.isHidden()
     assert page._ptz_note.isVisible()
 
 
@@ -113,7 +116,7 @@ def test_connect_ptz_model_enables_controls(page, qapp, monkeypatch):
     assert _wait(qapp, lambda: "PT机型" in page._lb_state.text())
     assert all(b.isEnabled() for b in page._ptz_btns.values())
     assert all(b.isEnabled() for b in page._zf_btns)
-    assert page._btn_preset_goto.isEnabled()
+    assert page._preset_panel.isVisible()
     assert not page._ptz_note.isVisible()  # PT 机型不需要置灰提示
 
 
@@ -137,6 +140,8 @@ def test_osd_get_populates_fields(page, qapp, monkeypatch):
     page._ed_addr.setText("1.2.3.4:4238")
     page._connect()
     assert _wait(qapp, lambda: page._card_chn["edits"]["x"].text() != "")
+    # 串行队列 + 250ms 节流：time 回填晚于 chn，需等待而非立即断言
+    assert _wait(qapp, lambda: page._card_time["edits"]["x"].text() != "")
     assert page._card_chn["edits"]["text"].text() == "前台"
     assert page._card_chn["edits"]["x"].text() == "100"
     assert page._card_chn["show"].isChecked() is True
@@ -166,31 +171,37 @@ def test_disconnect_resets(page, qapp, monkeypatch):
 
 # ---- _CallPool 生命周期 -------------------------------------------------------
 
-def test_call_pool_retire_on_finish(qapp):
-    """sender() 依赖回归：闭包捕获 retire，线程结束后池内引用被清除"""
-    pool = _CallPool(None)
-    done = []
+def test_serial_caller_fifo_order(qapp):
+    """同一登录会话的配置请求必须串行（防协议串扰）：FIFO 执行顺序锁"""
+    pool = _SerialCaller()
+    order = []
 
-    def work():
-        time.sleep(0.05)
-        return 1
+    def job(n):
+        def f():
+            if n == 0:
+                time.sleep(0.05)  # 让首个 job 故意慢，后续不得插队
+            return n
+        return f
 
-    pool.run(work, lambda r: done.append(r), lambda m: None)
-    assert _wait(qapp, lambda: not pool._alive and bool(done), 5000)
-    assert done == [1]
+    for n in range(3):
+        pool.submit(job(n), order.append, lambda m: None)
+    assert _wait(qapp, lambda: len(order) == 3, 5000)
+    assert order == [0, 1, 2]
+    pool.stop()
 
 
-def test_call_pool_err_signal_reached(qapp):
+def test_serial_caller_err_signal_reached(qapp):
     """Worker 信号契约：err 必须有落点且能送达主线程"""
-    pool = _CallPool(None)
+    pool = _SerialCaller()
     errs = []
 
     def work():
         raise ValueError("mock 失败")
 
-    pool.run(work, lambda r: None, lambda m: errs.append(m))
+    pool.submit(work, lambda r: None, lambda m: errs.append(m))
     assert _wait(qapp, lambda: errs, 5000)
     assert "mock 失败" in errs[0]
+    pool.stop()
 
 
 # ---- core 层：SetConfig 双重 byref 回归（2026-10-07 真机报错） ----------------
