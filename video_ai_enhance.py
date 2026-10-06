@@ -12,19 +12,19 @@ video_ai_enhance.py — 视频 AI 画质增强一键脚本
 
 用法示例：
   # 最常用：压到 100MB，70% AI 混合，双卡并行
-  python tools/video_ai_enhance.py "D:/video/input.mp4" --target-size-mb 100 --blend 0.7
+  python video_ai_enhance.py "D:/video/input.mp4" --target-size-mb 100 --blend 0.7
 
   # 质量优先：不控体积，CRF 16，全 AI 无混合
-  python tools/video_ai_enhance.py "D:/video/input.mp4" --crf 16 --blend 1.0
+  python video_ai_enhance.py "D:/video/input.mp4" --crf 16 --blend 1.0
 
   # 只看执行计划不实际跑
-  python tools/video_ai_enhance.py "D:/video/input.mp4" --target-size-mb 100 --dry-run
+  python video_ai_enhance.py "D:/video/input.mp4" --target-size-mb 100 --dry-run
 
   # 指定 GPU（Vulkan 设备号）与速度权重、保留中间文件
-  python tools/video_ai_enhance.py "D:/video/input.mp4" --gpus 0,2 --gpu-weights 7.4,1 --keep-temp
+  python video_ai_enhance.py "D:/video/input.mp4" --gpus 0,2 --gpu-weights 7.4,1 --keep-temp
 
   # 输出降采样到指定高度（默认 = 超分后原始高度，如 4x 后的 2168）
-  python tools/video_ai_enhance.py "D:/video/input.mp4" --crf 16 --out-height 1084
+  python video_ai_enhance.py "D:/video/input.mp4" --crf 16 --out-height 1084
 """
 
 import argparse

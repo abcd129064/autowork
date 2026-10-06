@@ -513,6 +513,50 @@ VTScreen(cols=80, rows=24, max_scrollback=2000)
 
 CLI：`python core/wecom_clip.py <文件或目录> [--room-id X] [--json]`（只解析打印，不写库）。
 
+### core.credentials
+
+远程会话凭据的**来源解析与落盘策略**（零 Qt、零 I/O，纯函数 + 一个进程级会话表）：回答"这次连接用的账号密码从哪来、会不会被写进配置文件"。三处 UI（远程页 XTCP 卡 / TCP 卡、主面板 P2P 表单）与三条消费路径（SFTP / SSH / 会话恢复）都走这里。设计说明见 [远程会话凭据与传输可靠性.md](远程会话凭据与传输可靠性.md)。
+
+| 成员 | 说明 |
+|------|------|
+| `KIND_DEVICE` / `KIND_DIRECT` | 凭据类别：设备（XTCP 隧道主机）→ `ssh_user`/`ssh_pass`；直连主机 → `tcp_ssh_user`/`tcp_ssh_pass` |
+| `credential_keys(kind)` | 该类别的 `(user_key, pass_key)`；未知 kind 抛 `ValueError` |
+| `SOURCE_FORM` `SOURCE_SESSION` `SOURCE_SAVED` `SOURCE_NONE` | 来源：表单刚输入 / 本次会话未落盘 / 已保存（DPAPI 加密）/ 未填写 |
+| `Credentials(username, password, source)` | 冻结 dataclass：`has_user` `has_password` `is_complete` `source_text` `source_persisted` `describe()`（**describe 绝不含密码明文**） |
+| `resolve_credentials(kind, *, form_username, form_password, settings, session)` | 逐字段取「表单 > 会话表 > 设置」，`source` 以密码来源为准 |
+| `credential_patch(kind, username, password, remember=True)` | 生成设置补丁；**`remember=False` 时构造上不含密码键**（不覆盖已存密码） |
+| `clear_patch(kind, *, include_username=False)` | 清零补丁：默认只 `{pass_key: ""}`（空串即清除，见 `core.secrets`） |
+| `source_hint(kind, creds)` | 状态条文案："凭据来源：… · ssh_pass 已落盘/未落盘/不会写入配置文件" |
+| `SessionCredentialStore` / `get_session_store()` / `reset_session_store()` | 进程级"仅本次运行"凭据表（加锁；不落盘；可在测试里重置） |
+
+### core.transfer_queue
+
+SFTP **未完成传输队列的持久化**（纯 stdlib）：关标签/重启后还能把"排队中/传输中/已暂停"的任务捞回来。只存"怎么重做"（操作 + 两端路径 + 名称 + 大小），**不存密码**。设计说明见 [远程会话凭据与传输可靠性.md](远程会话凭据与传输可靠性.md)。
+
+| 成员 | 说明 |
+|------|------|
+| `QUEUE_KEY` | 设置键 `sftp_pending_queue`（域 `remote` → `config/remote.json`） |
+| `PENDING_STATES` | 视为"未完成"的状态：`queued` / `running` / `paused`（与 sftp_window 的 `info['state']` 对齐） |
+| `VALID_OPS` / `OP_LABELS` | `upload` `download` `upload_dir` `download_dir` 及中文标签 |
+| `target_key(host, port)` | 按目标隔离的键：`"host:port"` |
+| `build_record(op, local_path, remote_path, name="", size=0)` | 造一条记录（非法 op 抛 `ValueError`）；`normalize_record(raw)` 只保留这 5 个键，容忍手改配置 |
+| `load_target` / `save_target` / `clear_target` | 读/写/清某个目标的记录（空列表即删键、超 `MAX_RECORDS_PER_TARGET` 截断、保 FIFO 序） |
+| `total_pending(store)` / `describe_pending(records)` | 汇总数量 / 文案（"N 个未完成的传输任务（上传 2 · 下载 1）"） |
+| `prune_store(store, max_targets=50)` | 目标数上限（`-> (store, dropped)`） |
+
+### core.transfer_verify
+
+SFTP 传输**两侧大小校验**（零 Qt/零 paramiko/零磁盘）：上传/下载结束后比对本地与远端字节数，不一致即判失败——此前"文件被截断"也会 emit `success`，用户看到"已完成"却在远端拿到半个文件。设计说明见 [远程会话凭据与传输可靠性.md](远程会话凭据与传输可靠性.md)。
+
+| 成员 | 说明 |
+|------|------|
+| `DIRECTION_UPLOAD` / `DIRECTION_DOWNLOAD` | 方向（决定默认"哪一侧被截断"文案） |
+| `TransferSizeMismatch(name, expected, actual, *, direction, side="")` | 异常：`delta` `truncated` `hint()` `message()`；`unreadable()` 类方法用于"读不到大小"（不谎报差值） |
+| `check_transfer_size(expected, actual, name, *, direction)` | 一致则静默返回，不一致抛 `TransferSizeMismatch` |
+| `describe_size(num)` | 人类可读大小（文案用） |
+
+调用侧：`workers.network_workers.SFTPOperationWorker` 的 `verify_size=True`（默认）在 `success.emit` 之前校验；目录传输 `SFTPDirTransferWorker` 逐文件校验、不一致计入"部分失败"。
+
 ---
 
 ## workers/ 后台线程层

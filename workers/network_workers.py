@@ -12,6 +12,9 @@ from PySide6.QtCore import QThread, Signal
 import paramiko
 
 from core.conn_logger import conn_logger
+from core.transfer_verify import (
+    DIRECTION_DOWNLOAD, DIRECTION_UPLOAD, TransferSizeMismatch, check_transfer_size,
+)
 from core.utils import (
     classify_conn_error, safe_close_transport,
     RETRYABLE_KEYWORDS, RETRY_MAX, RETRY_DELAY,
@@ -122,13 +125,17 @@ class SFTPOperationWorker(QThread):
     error = Signal(str)
     progress = Signal(int, int)  # (transferred_bytes, total_bytes)
 
-    def __init__(self, conn_params, operation, local_path='', remote_path='', file_size=0):
+    def __init__(self, conn_params, operation, local_path='', remote_path='', file_size=0,
+                 verify_size=True):
         super().__init__()
         self.conn_params = conn_params  # (host, port, username, password)
         self.operation = operation
         self.local_path = local_path
         self.remote_path = remote_path
         self.file_size = file_size
+        # 传输完成后按两侧字节数校验（P2-2 步骤 1）：远端写满/中途断开时
+        # paramiko 不报错，旧版会显示"已上传"而文件其实是截断的
+        self.verify_size = verify_size
         # 暂停/停止控制
         self._pause_event = threading.Event()  # set=运行, clear=暂停
         self._pause_event.set()
@@ -157,6 +164,55 @@ class SFTPOperationWorker(QThread):
         self._pause_event.wait()
         self.progress.emit(transferred, total)
 
+    # ---------------- 传输完整性校验（P2-2 步骤 1） ----------------
+    def _local_size(self):
+        """本地文件字节数；取不到返回 -1（表示本次无法校验，而不是判失败）"""
+        try:
+            return int(os.path.getsize(self.local_path))
+        except OSError:
+            return -1
+
+    @staticmethod
+    def _remote_size(sftp, path):
+        """远端文件字节数；stat 失败返回 -1"""
+        try:
+            return int(sftp.stat(path).st_size)
+        except Exception:
+            return -1
+
+    def _verify_upload(self, sftp, expected):
+        """上传后核对：远端 stat 大小 == 传输前本地大小，不一致即抛错判失败"""
+        if not self.verify_size:
+            return
+        name = os.path.basename(self.local_path)
+        if expected < 0:
+            conn_logger.info('SFTP', '跳过上传大小校验：读不到本地文件大小',
+                             host=self.conn_params[0], port=self.conn_params[1])
+            return
+        actual = self._remote_size(sftp, self.remote_path)
+        if actual < 0:
+            raise TransferSizeMismatch.unreadable(name, expected,
+                                                 direction=DIRECTION_UPLOAD)
+        check_transfer_size(expected, actual, name, direction=DIRECTION_UPLOAD)
+
+    def _verify_download(self, sftp):
+        """下载后核对：本地大小 == 远端 stat 大小，不一致即抛错判失败"""
+        if not self.verify_size:
+            return
+        name = os.path.basename(self.remote_path)
+        expected = self._remote_size(sftp, self.remote_path)
+        actual = self._local_size()
+        if expected < 0:
+            # get() 内部本身就 stat 远端取大小，这里 stat 不到说明文件已被移走/权限变更
+            raise TransferSizeMismatch.unreadable(name, self.file_size or 0,
+                                                  direction=DIRECTION_DOWNLOAD,
+                                                  side="远端")
+        if actual < 0:
+            raise TransferSizeMismatch.unreadable(name, expected,
+                                                  direction=DIRECTION_DOWNLOAD,
+                                                  side="本地")
+        check_transfer_size(expected, actual, name, direction=DIRECTION_DOWNLOAD)
+
     def run(self):
         transport = None
         sftp = None
@@ -169,10 +225,13 @@ class SFTPOperationWorker(QThread):
             transport.connect(username=username, password=password)
             sftp = paramiko.SFTPClient.from_transport(transport)
             if self.operation == 'upload':
+                expected = self._local_size()      # 传输前的本地大小 = 校验基准
                 sftp.put(self.local_path, self.remote_path, callback=self._progress_cb)
+                self._verify_upload(sftp, expected)
                 self.success.emit(f"已上传: {os.path.basename(self.local_path)}")
             elif self.operation == 'download':
                 sftp.get(self.remote_path, self.local_path, callback=self._progress_cb)
+                self._verify_download(sftp)
                 self.success.emit(f"已下载: {os.path.basename(self.remote_path)}")
             elif self.operation == 'delete':
                 sftp.remove(self.remote_path)
@@ -218,13 +277,15 @@ class SFTPDirTransferWorker(QThread):
     error = Signal(str)
     progress = Signal(int, int)  # (transferred_bytes, total_bytes)
 
-    def __init__(self, conn_params, operation, local_dir='', remote_dir='', dir_name=''):
+    def __init__(self, conn_params, operation, local_dir='', remote_dir='', dir_name='',
+                 verify_size=True):
         super().__init__()
         self.conn_params = conn_params  # (host, port, username, password)
         self.operation = operation  # 'upload_dir' or 'download_dir'
         self.local_dir = local_dir
         self.remote_dir = remote_dir
         self.dir_name = dir_name
+        self.verify_size = verify_size    # 逐文件比对两侧字节数（P2-2 步骤 1）
         # 暂停/停止控制
         self._pause_event = threading.Event()
         self._pause_event.set()
@@ -314,7 +375,12 @@ class SFTPDirTransferWorker(QThread):
             try:
                 file_size = os.path.getsize(fpath)
                 sftp.put(fpath, remote_file)
+                self._verify_dir_file(sftp, remote_file, file_size, rel,
+                                      direction=DIRECTION_UPLOAD)
                 transferred += file_size
+                self.progress.emit(transferred, total_size)
+            except TransferSizeMismatch as e:
+                errors.append(str(e))
                 self.progress.emit(transferred, total_size)
             except PermissionError as e:
                 errors.append(f"权限不足: {rel} ({e})")
@@ -357,7 +423,16 @@ class SFTPDirTransferWorker(QThread):
             try:
                 os.makedirs(local_sub_dir, exist_ok=True)
                 sftp.get(remote_file, local_file)
+                try:
+                    local_now = os.path.getsize(local_file)
+                except OSError:
+                    local_now = -1
+                self._verify_dir_file(sftp, remote_file, local_now, rel,
+                                      direction=DIRECTION_DOWNLOAD)
                 transferred += sz
+                self.progress.emit(transferred, total_size)
+            except TransferSizeMismatch as e:
+                errors.append(str(e))
                 self.progress.emit(transferred, total_size)
             except PermissionError as e:
                 errors.append(f"权限不足: {rel} ({e})")
@@ -373,6 +448,32 @@ class SFTPDirTransferWorker(QThread):
             self.error.emit(f"目录下载部分失败 [{self.dir_name}]: {err_summary}")
         else:
             self.success.emit(f"已下载目录: {self.dir_name} ({len(file_list)} 个文件)")
+
+    @staticmethod
+    def _remote_stat_size(sftp, path):
+        """远端文件字节数；stat 失败返回 -1"""
+        try:
+            return int(sftp.stat(path).st_size)
+        except Exception:
+            return -1
+
+    def _verify_dir_file(self, sftp, remote_file, local_size, rel, *, direction):
+        """目录传输逐文件校验（P2-2 步骤 1）
+
+        不一致时抛 TransferSizeMismatch，由调用方记进 errors 汇总成"部分失败"，
+        不让单个截断文件被算成成功。local_size<0 或远端 stat 失败时跳过校验。
+        """
+        if not self.verify_size:
+            return
+        remote_size = self._remote_stat_size(sftp, remote_file)
+        if remote_size < 0 or int(local_size) < 0:
+            conn_logger.info('SFTP', f'跳过大小校验: {rel}',
+                             host=self.conn_params[0], port=self.conn_params[1])
+            return
+        if direction == DIRECTION_UPLOAD:
+            check_transfer_size(local_size, remote_size, rel, direction=direction)
+        else:
+            check_transfer_size(remote_size, local_size, rel, direction=direction)
 
     def _collect_remote_files(self, sftp, remote_base, rel_prefix, file_list):
         """递归收集远程目录下的所有文件"""

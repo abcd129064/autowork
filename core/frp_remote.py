@@ -1404,7 +1404,8 @@ class RemoteSessionManager(QObject):
                 from windows.remote_session.ssh_terminal import SSHTerminalPanel
                 panel = SSHTerminalPanel(
                     host, port, username, password,
-                    log_callback=lambda msg: None,
+                    # P0-3：会话中心入口的日志转发到全局日志（此前完全静默）
+                    log_callback=self.log_message.emit,
                     server_name=title_snk,
                 )
             elif kind == "sftp":
@@ -1417,21 +1418,65 @@ class RemoteSessionManager(QObject):
                 panel = SFTPPanel(
                     host, port, username, password,
                     server_name=title_snk,
-                    log_callback=lambda msg: None,
+                    log_callback=self.log_message.emit,
                     default_remote_path=settings.get("sftp_default_remote_path") or None,
                     default_local_path=local_dir,
                 )
+                # P1-1：SFTP「终端」按钮 → 同目标开终端标签并注入当前目录
+                panel.open_terminal_here.connect(
+                    lambda path, _t=(host, port, username, password, title_snk):
+                        self._open_terminal_from_sftp(_t, path))
             else:  # rdp
                 from windows.remote_session.rdp_window import RDPPanel
                 panel = RDPPanel(
                     host, port, username, password,
                     server_name=title_snk,
-                    log_callback=lambda msg: None,
+                    log_callback=self.log_message.emit,
                 )
         except Exception as e:
             self._notify("打开会话失败", str(e), error=True, notifier=notifier)
             return
-        self.ensure_session_window().add_session(panel)
+        self.ensure_session_window().add_session(panel, icon=self._session_icon(kind))
+
+    def _open_terminal_from_sftp(self, target, start_dir=''):
+        """P1-1：SFTP 面板「终端」按钮的接收侧——同目标开 SSH 终端标签
+
+        target = (host, port, username, password, server_name)，
+        start_dir 由信号携带（SFTP 当前远程目录）。
+        """
+        host, port, username, password, server_name = target
+        try:
+            from windows.remote_session.ssh_terminal import SSHTerminalPanel
+            panel = SSHTerminalPanel(
+                host, port, username, password,
+                log_callback=self.log_message.emit,
+                server_name=server_name,
+                start_dir=start_dir,
+            )
+        except Exception as e:
+            self._notify("打开终端失败", str(e), error=True)
+            return
+        self.log_message.emit(
+            f"[远程会话] 在终端中打开目录 {start_dir or '~'}"
+            f"（{server_name or f'{host}:{port}'}）")
+        self.ensure_session_window().add_session(
+            panel, icon=self._session_icon("ssh"))
+
+    @staticmethod
+    def _session_icon(kind):
+        """P0-4：会话标签图标（与 windows/management/table_page.py 口径一致；
+        qicon() 而非 icon()——深色模式下 icon() 会固化黑色图标看不清）"""
+        try:
+            from qfluentwidgets import FluentIcon
+            if kind == "ssh":
+                return FluentIcon.COMMAND_PROMPT.qicon()
+            if kind == "sftp":
+                return FluentIcon.FOLDER.qicon()
+            if kind == "rdp":
+                return FluentIcon.VIDEO.qicon()
+        except Exception:
+            pass
+        return None
 
     # ---------- 会话联动（隧道断开时同步处理已打开的 SSH/SFTP/RDP 会话） ----------
 
@@ -1468,16 +1513,33 @@ class RemoteSessionManager(QObject):
                 continue
         return panels
 
-    def is_transferring_on_port(self, port) -> bool:
-        """指定端口上的 SFTP 会话是否有文件传输进行中（含暂停未结束的任务）"""
+    def is_busy_on_port(self, port) -> bool:
+        """指定端口上的会话是否有任务进行中（P0-1：SFTP 在途传输 + SSH 取证）"""
         for p in self.sessions_on_port(port):
-            if type(p).__name__ != "SFTPPanel":
-                continue
-            for info in getattr(p, "_transfer_workers", {}).values():
-                worker = info.get("worker") if isinstance(info, dict) else None
-                if worker is not None and worker.isRunning():
-                    return True
+            state = None
+            fn = getattr(p, 'busy_state', None)
+            if callable(fn):
+                try:
+                    state = fn()
+                except Exception:
+                    state = None
+            if isinstance(state, tuple) and state and state[0]:
+                return True
+            # 兜底：无 busy_state 契约的面板/替身，退回传输 worker 判定
+            if type(p).__name__ == "SFTPPanel":
+                for info in getattr(p, "_transfer_workers", {}).values():
+                    state = info.get("state") if isinstance(info, dict) else None
+                    # P2-1 起状态机判定（排队任务关标签同样会丢）
+                    if state in ("running", "paused", "queued"):
+                        return True
+                    worker = info.get("worker") if isinstance(info, dict) else None
+                    if worker is not None and worker.isRunning():
+                        return True
         return False
+
+    def is_transferring_on_port(self, port) -> bool:
+        """向后兼容别名：旧调用口径（现按 is_busy_on_port 判定，含 SSH 取证）"""
+        return self.is_busy_on_port(port)
 
     def close_sessions_on_port(self, port, reason: str = "") -> int:
         """优雅关闭指定本地端口上的全部会话面板（panel.shutdown() 释放资源），

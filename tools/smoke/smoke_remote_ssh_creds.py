@@ -11,8 +11,11 @@ tcp 那边的账号密码，隧道这边就会显示账号密码错误」——�
   2. TCP 卡预填直连凭据（tcp_ssh_user/tcp_ssh_pass），两卡初值互不相同；
   3. `_save_ssh_credentials()` 只写 ssh_user/ssh_pass（不碰 tcp_ssh_*）；
   4. `_tcp_connect()` 只写 tcp_ssh_user/tcp_ssh_pass（不碰 ssh_*），并把表单
-     凭据显式传给 open_direct_session(username=/password=)。
-并截图两张到 tools/_scratch/ 作为验收证据。
+     凭据显式传给 open_direct_session(username=/password=)；
+  5. P1-8 阶段 1：取消「记住密码」后密码只进本次会话（内存），设置里
+     的 ssh_pass/tcp_ssh_pass 不被覆盖；来源提示如实标注且不含密码明文；
+     「清除已保存凭据」写空串并清掉表单与会话表。
+并截图三张到 tools/_scratch/ 作为验收证据。
 
 运行（唯一全依赖解释器）：
     QT_QPA_PLATFORM=offscreen python tools/smoke/smoke_remote_ssh_creds.py
@@ -210,11 +213,75 @@ assert _as.KEY_DOMAIN.get("tcp_ssh_user") == "credentials"
 assert _as.KEY_DOMAIN.get("tcp_ssh_pass") == "credentials"
 print("[4] 敏感键 =", _sec.SENSITIVE_KEYS)
 
+# 6) P1-8 阶段 1：取消「记住密码」→ 密码只进本次会话，不写 ssh_pass
+from core import credentials as _cred                            # noqa: E402
+
+_cred.reset_session_store()
+_visitor_store = _cred.get_session_store()
+assert visitor.xtcp_remember.isChecked(), "设备凭据开关默认应为勾选（保持原行为）"
+assert visitor.tcp_remember.isChecked(), "直连凭据开关默认应为勾选"
+assert "凭据来源" in visitor.xtcp_cred_hint.text(), visitor.xtcp_cred_hint.text()
+assert "已保存" in visitor.xtcp_cred_hint.text(), visitor.xtcp_cred_hint.text()
+assert "devpw" not in visitor.xtcp_cred_hint.text(), "来源提示泄露了密码明文"
+
+visitor.xtcp_user.setText("tmpdev")
+visitor.xtcp_pass.setText("tmppw")
+visitor.xtcp_remember.setChecked(False)
+visitor._mark_cred_dirty(True)
+_pass_before = host.settings["ssh_pass"]          # 上一步刚写过 newbv2/devpw2
+assert visitor._save_ssh_credentials() is True
+assert host.saved[-1] == {"ssh_user": "tmpdev"}, host.saved[-1]
+assert host.settings["ssh_pass"] == _pass_before, "取消记住密码后仍写入了 ssh_pass！"
+assert "tmppw" not in str(host.saved[-1]), "密码明文进了设置补丁"
+assert any("仅用于本次会话" in m for m in host.logs), host.logs[-2:]
+print("[5] 未勾选记住密码 → 写回 =", host.saved[-1],
+      "· settings['ssh_pass'] 仍为", host.settings["ssh_pass"])
+# 7) 来源提示如实反映「本次输入」；表单清空后仍能从会话表解析出密码
+_hint = visitor.xtcp_cred_hint.text()
+assert "凭据来源" in _hint and "已取消" in _hint, _hint
+assert "tmppw" not in _hint, _hint
+visitor.xtcp_pass.setText("")
+_sess = _cred.resolve_credentials(_cred.KIND_DEVICE, form_username="tmpdev",
+                                  form_password="", settings=host.settings,
+                                  session=_visitor_store)
+assert _sess.password == "tmppw", _sess
+assert _sess.source == _cred.SOURCE_SESSION, _sess.source
+print("[6] 来源提示 =", _hint, "· 解析来源 =", _sess.source_text)
+
+# 8) 清除已保存凭据：写空串 + 清表单密码 + 清会话（账号保留）
+visitor._confirm_clear_credentials = lambda kind: True
+visitor._clear_credentials(_cred.KIND_DEVICE)
+assert host.saved[-1] == {"ssh_pass": ""}, host.saved[-1]
+assert host.settings["ssh_pass"] == ""
+assert visitor.xtcp_pass.text() == "", "清除后表单里还留着旧密码"
+assert _visitor_store.get(_cred.KIND_DEVICE) is None, "清除后会话表仍有设备密码"
+assert any("已清除" in m for m in host.logs), host.logs[-2:]
+print("[7] 清除已保存设备密码 →", host.saved[-1],
+      "· ssh_user 保留 =", host.settings["ssh_user"])
+
+# 9) 直连卡对称：取消勾选后 tcp_ssh_pass 不被覆盖，密码只进会话表
+visitor.tcp_remember.setChecked(False)
+visitor.tcp_pass.setText("tmp_srvpw")
+_tcp_pass_before = host.settings["tcp_ssh_pass"]   # 上一步刚写过 root2/srvpw2
+visitor._tcp_connect("ssh")
+assert host.saved[-1] == {"tcp_ssh_user": "root2"}, host.saved[-1]
+assert host.settings["tcp_ssh_pass"] == _tcp_pass_before, \
+    "取消记住密码后仍覆盖了 tcp_ssh_pass！"
+assert _visitor_store.get(_cred.KIND_DIRECT).password == "tmp_srvpw"
+_direct = _cred.resolve_credentials(_cred.KIND_DIRECT, settings=host.settings,
+                                    session=_visitor_store)
+assert _direct.password == "tmp_srvpw" and _direct.is_complete, _direct
+print("[8] 直连卡取消记住密码 → 写回 =", host.saved[-1],
+      "· 本次会话解析 =", _direct.describe())
+
+snap3 = os.path.join(_SCRATCH, "smoke_remote_ssh_creds_session.png")
+host.grab().save(snap3)      # TCP 模式 + 未勾选记住密码的提示
+
 print("SMOKE_OK",
       f"xtcp={visitor.xtcp_user.text()}/{visitor.xtcp_pass.text()}",
       f"tcp={host.settings['tcp_ssh_user']}/{host.settings['tcp_ssh_pass']}",
       f"device_creds_intact={_dev_before == (host.settings['ssh_user'], host.settings['ssh_pass'])}",
-      f"shots={os.path.basename(snap1)},{os.path.basename(snap2)}")
+      f"shots={os.path.basename(snap1)},{os.path.basename(snap2)},{os.path.basename(snap3)}")
 sys.stdout.flush()
 
 # 显式收尾：offscreen 下直接退出解释器时 Qt 静态析构偶发 0xC0000005

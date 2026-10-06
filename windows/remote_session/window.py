@@ -182,11 +182,15 @@ class TunnelPanelWindow(FramelessWindow):
                      if r.get("serverName") == server_name), {})
 
     def _confirm_interrupt_transfer(self, server_name: str) -> bool:
-        """SFTP 传输中二次确认：取消保持当前连接与传输不变，确认才允许断开"""
+        """会话任务进行中二次确认：取消保持当前连接与任务不变，确认才允许断开
+
+        P0-1：口径从"仅 SFTP 传输"扩展为"文件传输 / 终端会话"
+        （is_busy_on_port 现同时识别 SFTP 在途传输与 SSH 取证任务）。
+        """
         dlg = MessageBox(
-            "文件传输进行中",
-            f"隧道「{server_name}」上有 SFTP 文件传输正在进行。\n"
-            "继续操作将立即中断当前文件传输，并关闭该隧道上的\n"
+            "会话任务进行中",
+            f"隧道「{server_name}」上有文件传输 / 终端会话任务正在进行。\n"
+            "继续操作将立即中断当前任务，并关闭该隧道上的\n"
             "SSH / SFTP 会话。\n\n确定要继续吗？",
             self)
         dlg.yesButton.setText("仍然断开")
@@ -215,9 +219,9 @@ class TunnelPanelWindow(FramelessWindow):
             show_info_bar("当前 frpc 未启动，隧道未建立，无需断开",
                           "warning", title="无法断开", parent=self, duration=3500)
             return
-        # 2. 通过状态门控后再查传输：有 SFTP 在传就先警告会中断传输，
+        # 2. 通过状态门控后再查任务：有文件传输/终端取证在跑就先警告会中断，
         #    用户确认才继续，取消则什么都不动
-        if mgr.is_transferring_on_port(rec.get("bindPort", 0)) \
+        if mgr.is_busy_on_port(rec.get("bindPort", 0)) \
                 and not self._confirm_interrupt_transfer(server_name):
             return
         # 3. 关会话/移除/apply 全委托 manager，保证「先关会话再释放端口」；
@@ -247,13 +251,14 @@ class TunnelPanelWindow(FramelessWindow):
         if not rec:
             self.refresh()
             return
-        # frpc 未运行时不存在活动会话与传输，传输中警告只针对运行中的情况
+        # frpc 未运行时不存在活动会话与传输，任务中警告只针对运行中的情况
         transferring = mgr.is_running() and \
-            mgr.is_transferring_on_port(rec.get("bindPort", 0))
+            mgr.is_busy_on_port(rec.get("bindPort", 0))
         msg = (f"确定删除 snk 隧道「{server_name}」吗？\n"
                "删除后将从隧道列表与持久化配置中移除，下次启动不再恢复。")
         if transferring:
-            msg += "\n\n注意：该隧道上有 SFTP 文件传输正在进行，\n删除将立即中断当前文件传输并关闭相关会话！"
+            msg += ("\n\n注意：该隧道上有文件传输 / 终端会话任务正在进行，\n"
+                    "删除将立即中断当前任务并关闭相关会话！")
         dlg = MessageBox("删除 snk 隧道", msg, self)
         dlg.yesButton.setText("删除")
         dlg.cancelButton.setText("取消")
@@ -287,7 +292,7 @@ class TunnelPanelWindow(FramelessWindow):
             show_info_bar("当前 frpc 未启动，无活跃隧道可断开",
                           "warning", title="无法断开", parent=self, duration=3500)
             return
-        if any(mgr.is_transferring_on_port(r.get("bindPort", 0))
+        if any(mgr.is_busy_on_port(r.get("bindPort", 0))
                for r in records) \
                 and not self._confirm_interrupt_transfer("全部隧道"):
             return

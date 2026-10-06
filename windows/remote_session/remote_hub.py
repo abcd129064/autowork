@@ -42,6 +42,7 @@ from qfluentwidgets import (TitleLabel, CaptionLabel, BodyLabel, StrongBodyLabel
 
 from main_window.pivot_page import PivotPage
 from main_window.tool_hub import _transparent, _make_terminal
+from core import credentials as cred
 from core.frp_remote import (get_session_manager, SOURCE_MANUAL,
                              SOURCE_SNK, _FRPC_SERVER_DEFAULTS)
 from core.frps_admin import get_frps_client
@@ -705,16 +706,17 @@ class SessionWork(QWidget):
         self._win._append_log(f"[远程] 经隧道 {sn} 打开 {kind.upper()} 会话")
 
     def _confirm_transfer(self, sn):
+        """会话任务进行中二次确认（P0-1：口径含 SFTP 传输与 SSH 取证）"""
         rec = next((r for r in self._mgr.records()
                     if r.get("serverName") == sn), None)
         if rec is None:
             return False
-        if not self._mgr.is_transferring_on_port(rec.get("bindPort", 0)):
+        if not self._mgr.is_busy_on_port(rec.get("bindPort", 0)):
             return True
         dlg = MessageBox(
-            "文件传输进行中",
-            f"隧道「{sn}」上有 SFTP 文件传输正在进行。\n"
-            "继续将立即中断传输并关闭相关会话。确定吗？", self)
+            "会话任务进行中",
+            f"隧道「{sn}」上有文件传输 / 终端会话任务正在进行。\n"
+            "继续将立即中断任务并关闭相关会话。确定吗？", self)
         dlg.yesButton.setText("继续")
         dlg.cancelButton.setText("取消")
         return bool(dlg.exec())
@@ -854,6 +856,22 @@ class VisitorWork(QWidget):
         # textEdited 仅用户输入时触发（setText 不触发），不会把回填当作用户修改
         self.xtcp_user.textEdited.connect(lambda _t: self._mark_cred_dirty(True))
         self.xtcp_pass.textEdited.connect(lambda _t: self._mark_cred_dirty(True))
+        # P1-8 阶段 1（2026-10-05）：来源显式化 + 「记住密码」开关 + 显式清除入口。
+        # 此前任何一次连接都会把表单值写回 credentials.json：用户为试一次临时密码
+        # 敲进去的值，会在毫不知情时永久替换掉已保存的密码，且没有任何清除入口。
+        # 现在默认行为不变（勾选=原语义），取消勾选后密码只进内存会话表。
+        self.xtcp_remember = CheckBox("记住密码", add_card)
+        self.xtcp_remember.setChecked(True)
+        self.xtcp_remember.setToolTip(
+            "勾选：连接/注册后把设备账号密码写入 config/credentials.json"
+            "（DPAPI 加密，重启后仍在）\n"
+            "取消：只用于本次运行，关闭应用即丢失，不改动已保存的密码")
+        self.xtcp_pass.textEdited.connect(
+            lambda _t: self._refresh_cred_hint(cred.KIND_DEVICE))
+        self.xtcp_remember.toggled.connect(
+            lambda _c: self._refresh_cred_hint(cred.KIND_DEVICE))
+        self.xtcp_cred_hint = CaptionLabel("", add_card)
+        self.xtcp_cred_hint.setTextColor(_C_MUTED, _C_MUTED)
         lbl0 = BodyLabel("球桌搜索:", add_card)
         lbl1 = BodyLabel("serverName:", add_card)
         lbl2 = BodyLabel("secretKey:", add_card)
@@ -875,8 +893,10 @@ class VisitorWork(QWidget):
         grid.addWidget(self.xtcp_user, 3, 1)
         grid.addWidget(lbl6, 3, 2)
         grid.addWidget(self.xtcp_pass, 3, 3, Qt.AlignLeft)
+        grid.addWidget(self.xtcp_remember, 4, 1, Qt.AlignLeft)
         grid.setColumnStretch(4, 1)
         al.addLayout(grid)
+        al.addWidget(self.xtcp_cred_hint)
         # 构造期回填 settings 里的设备凭据（主面板/设置页改过的也能带出来）
         self._load_ssh_credentials()
         # 球桌候选列表（默认隐藏，搜索命中后展示；点选带出 snk/桌号）
@@ -895,12 +915,21 @@ class VisitorWork(QWidget):
         self.btn_add_connect.clicked.connect(self._on_add_connect)
         btns.addWidget(self.btn_add_connect)
         btns.addStretch(1)
+        # P1-8 阶段 1：显式清除入口（此前只能靠「输入新密码覆盖」，忘不掉也清不了）
+        self.btn_xtcp_clear = PushButton(FluentIcon.DELETE, "清除已保存凭据",
+                                         add_card)
+        self.btn_xtcp_clear.setToolTip(
+            "清空 config/credentials.json 里保存的设备 SSH 密码（ssh_pass），"
+            "账号保留")
+        self.btn_xtcp_clear.clicked.connect(
+            lambda: self._clear_credentials(cred.KIND_DEVICE))
+        btns.addWidget(self.btn_xtcp_clear)
         al.addLayout(btns)
         cap = CaptionLabel(
             "注册仅写入 frpc_xtcp_panel.toml（不拉起 frpc）；「添加并连接」经一键直连建立隧道。"
             "搜索球桌号可带出 serverName（snk 标识）与关联球桌。"
             "SSH 账号/密码是**设备凭据**（与主面板、设置页同源），TCP 直连卡里填的是"
-            "直连主机自己的凭据，两边互不覆盖。",
+            "直连主机自己的凭据，两边互不覆盖。取消「记住密码」可只对本次运行生效。",
             add_card)
         cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         al.addWidget(cap)
@@ -933,6 +962,21 @@ class VisitorWork(QWidget):
         # ssh_user/ssh_pass 会互相覆盖，表现为「改过 TCP 账号后隧道 SSH 认证失败」
         self.tcp_user.setText(str(_merged.get("tcp_ssh_user", "") or ""))
         self.tcp_pass.setText(str(_merged.get("tcp_ssh_pass", "") or ""))
+        # P1-8 阶段 1：与 XTCP 卡同口径（默认勾选=原语义；取消则只对本次运行生效）
+        self.tcp_remember = CheckBox("记住密码", self.tcp_card)
+        self.tcp_remember.setChecked(True)
+        self.tcp_remember.setToolTip(
+            "勾选：连接后把直连主机账号密码写入 config/credentials.json"
+            "（DPAPI 加密，重启后仍在）\n"
+            "取消：只用于本次运行，关闭应用即丢失")
+        self.tcp_pass.textEdited.connect(
+            lambda _t: self._refresh_cred_hint(cred.KIND_DIRECT))
+        self.tcp_user.textEdited.connect(
+            lambda _t: self._refresh_cred_hint(cred.KIND_DIRECT))
+        self.tcp_remember.toggled.connect(
+            lambda _c: self._refresh_cred_hint(cred.KIND_DIRECT))
+        self.tcp_cred_hint = CaptionLabel("", self.tcp_card)
+        self.tcp_cred_hint.setTextColor(_C_MUTED, _C_MUTED)
         tcp_grid.addWidget(BodyLabel("主机:", self.tcp_card), 0, 0)
         tcp_grid.addWidget(self.tcp_host, 0, 1)
         tcp_grid.addWidget(BodyLabel("端口:", self.tcp_card), 0, 2)
@@ -941,11 +985,15 @@ class VisitorWork(QWidget):
         tcp_grid.addWidget(self.tcp_user, 1, 1)
         tcp_grid.addWidget(BodyLabel("密码:", self.tcp_card), 1, 2)
         tcp_grid.addWidget(self.tcp_pass, 1, 3, Qt.AlignLeft)
+        tcp_grid.addWidget(self.tcp_remember, 2, 1, Qt.AlignLeft)
         tcp_grid.setColumnStretch(4, 1)
         tl.addLayout(tcp_grid)
+        tl.addWidget(self.tcp_cred_hint)
         tcp_btns = QHBoxLayout()
         tcp_btns.setSpacing(8)
-        self.btn_tcp_ssh = PrimaryPushButton(FluentIcon.CONNECT, "连接 SSH", self.tcp_card)
+        # P0-4：图标口径与 windows/management/table_page.py 统一
+        # （SSH=COMMAND_PROMPT，SFTP=FOLDER）
+        self.btn_tcp_ssh = PrimaryPushButton(FluentIcon.COMMAND_PROMPT, "连接 SSH", self.tcp_card)
         self.btn_tcp_ssh.clicked.connect(lambda: self._tcp_connect("ssh"))
         tcp_btns.addWidget(self.btn_tcp_ssh)
         self.btn_tcp_sftp = PushButton(FluentIcon.FOLDER, "连接 SFTP", self.tcp_card)
@@ -959,6 +1007,14 @@ class VisitorWork(QWidget):
         btn_del.clicked.connect(self._tcp_delete_selected)
         tcp_btns.addWidget(btn_del)
         tcp_btns.addStretch(1)
+        self.btn_tcp_clear = PushButton(FluentIcon.DELETE, "清除已保存凭据",
+                                       self.tcp_card)
+        self.btn_tcp_clear.setToolTip(
+            "清空 config/credentials.json 里保存的直连主机 SSH 密码"
+            "（tcp_ssh_pass），账号保留")
+        self.btn_tcp_clear.clicked.connect(
+            lambda: self._clear_credentials(cred.KIND_DIRECT))
+        tcp_btns.addWidget(self.btn_tcp_clear)
         tl.addLayout(tcp_btns)
         # 保存的服务器表（settings tcp_servers，与主面板完全同源）
         tl.addSpacing(12)   # 按钮行与「保存的服务器」分段留白（卡片被拉伸时多余高度沉底，不均摊进控件间隙）
@@ -983,7 +1039,7 @@ class VisitorWork(QWidget):
             "TCP 直连不经 frpc：局域网地址或 frps 转发端口（frps 代理页 tcp 页签可一键存入）。"
             "用户/密码是**直连主机自己**的凭据（存 tcp_ssh_user/tcp_ssh_pass，"
             "连接时写回、下次自动带出），不会覆盖 XTCP 卡的设备凭据；"
-            "连接成功进全局会话窗口。",
+            "连接成功进全局会话窗口。取消「记住密码」可只对本次运行生效。",
             self.tcp_card)
         tcp_cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         tl.addWidget(tcp_cap)
@@ -1098,9 +1154,11 @@ class VisitorWork(QWidget):
         if self._cred_dirty and not force:
             return
         s = self._settings_snapshot()
-        self.xtcp_user.setText(str(s.get("ssh_user", "") or ""))
-        self.xtcp_pass.setText(str(s.get("ssh_pass", "") or ""))
+        user_key, pass_key = cred.credential_keys(cred.KIND_DEVICE)
+        self.xtcp_user.setText(str(s.get(user_key, "") or ""))
+        self.xtcp_pass.setText(str(s.get(pass_key, "") or ""))
         self._cred_dirty = False
+        self._refresh_cred_hint(cred.KIND_DEVICE)
 
     def _persist_settings(self, data: dict) -> bool:
         """写回设置：优先主窗口 _save_settings（顺带刷新其内存缓存）"""
@@ -1119,13 +1177,20 @@ class VisitorWork(QWidget):
             return False
 
     def _save_ssh_credentials(self) -> bool:
-        """设备凭据写回 ssh_user/ssh_pass（非空才覆盖，与主面板同语义）"""
-        data = {}
+        """设备凭据写回 ssh_user/ssh_pass（非空才覆盖，与主面板同语义）
+
+        P1-8 阶段 1：取消「记住密码」时**不写密码键**（构造上不可能落盘），
+        密码只进 ``core.credentials`` 的进程内会话表，本次运行内仍然可用。
+        """
         user = self.xtcp_user.text().strip()
-        if user:
-            data["ssh_user"] = user
-        if self.xtcp_pass.text():
-            data["ssh_pass"] = self.xtcp_pass.text()
+        password = self.xtcp_pass.text()
+        remember = self.xtcp_remember.isChecked()
+        if password and not remember:
+            cred.get_session_store().set(cred.KIND_DEVICE, user, password)
+            self._win._append_log(
+                "[远程] 设备 SSH 凭据仅用于本次会话（未勾选记住密码，未写入 ssh_pass）")
+        data = cred.credential_patch(cred.KIND_DEVICE, user, password,
+                                    remember=remember)
         if not data:
             return False
         changed = any(str(self._settings_snapshot().get(k, "")) != str(v)
@@ -1135,7 +1200,78 @@ class VisitorWork(QWidget):
         self._cred_dirty = False
         if changed:
             self._win._append_log("[远程] 设备 SSH 凭据已更新（ssh_user/ssh_pass）")
+        self._refresh_cred_hint(cred.KIND_DEVICE)
         return True
+
+    def _refresh_cred_hint(self, kind: str):
+        """刷新「凭据来源」提示（P1-8 阶段 1）
+
+        来源口径 = 表单 > 本次会话 > 已保存（``core.credentials.resolve_credentials``），
+        文案不含量明文，只说明来自哪里、是否已落盘。
+        """
+        hint = (getattr(self, "xtcp_cred_hint", None) if kind == cred.KIND_DEVICE
+                else getattr(self, "tcp_cred_hint", None))
+        if hint is None:      # 构造未完成（部分测试替身）时静默跳过
+            return
+        if kind == cred.KIND_DEVICE:
+            user, pwd = self.xtcp_user.text(), self.xtcp_pass.text()
+            remember = self.xtcp_remember.isChecked()
+        else:
+            user, pwd = self.tcp_user.text(), self.tcp_pass.text()
+            remember = self.tcp_remember.isChecked()
+        settings = self._settings_snapshot()
+        user_key, pass_key = cred.credential_keys(kind)
+        # 逐字段判定「表单值是不是用户自己敲的」：与已保存值相同的回填不算输入，
+        # 否则卡片一打开（值来自 settings）就会显示成「本次输入」而误导用户。
+        creds = cred.resolve_credentials(
+            kind,
+            form_username=user if user != str(settings.get(user_key, "") or "") else "",
+            form_password=pwd if pwd != str(settings.get(pass_key, "") or "") else "",
+            settings=settings, session=cred.get_session_store())
+        text = cred.source_hint(kind, creds)
+        if creds.has_password and not remember:
+            text += " · 已取消「记住密码」"
+        hint.setText(text)
+
+    def _clear_credentials(self, kind: str):
+        """清除已保存的凭据密码（P1-8 阶段 1：显式清除入口）
+
+        写空串即等于清除（``secrets.encrypt_secret("")`` 原样返回空串，读取侧对
+        空值按「未配置」处理）；同时清掉表单与本次会话里的值，避免下次连接又把
+        刚清除的密码原样写回去。
+        """
+        if not self._confirm_clear_credentials(kind):
+            return
+        user_key, pass_key = cred.credential_keys(kind)
+        ok = self._persist_settings(cred.clear_patch(kind))
+        cred.get_session_store().clear(kind)
+        if kind == cred.KIND_DEVICE:
+            self.xtcp_pass.setText("")
+            self._cred_dirty = False
+        else:
+            self.tcp_pass.setText("")
+        if ok:
+            self._win._append_log(
+                f"[远程] 已清除保存的{cred.kind_label(kind)}凭据（{pass_key} 已置空，"
+                f"{user_key} 保留）")
+            self._win._show_info_bar(
+                f"已清除保存的{cred.kind_label(kind)}密码，下次连接需重新输入",
+                "success")
+        else:
+            self._win._show_info_bar("清除失败：无法写入配置文件", "error")
+        self._refresh_cred_hint(kind)
+
+    def _confirm_clear_credentials(self, kind: str) -> bool:
+        """清除前的二次确认（与删除远程文件的确认口径一致）"""
+        user_key, _pass_key = cred.credential_keys(kind)
+        dlg = MessageBox(
+            "确认清除凭据",
+            f"将清空配置文件里保存的{cred.kind_label(kind)} SSH 密码，"
+            f"账号（{user_key}）保留。\n清除后下次连接需要重新输入密码，是否继续？",
+            self)
+        dlg.yesButton.setText("清除")
+        dlg.cancelButton.setText("取消")
+        return bool(dlg.exec())
 
     # ---------- TCP 直连（与主面板 TCP 模式同源同语义） ----------
 
@@ -1216,18 +1352,27 @@ class VisitorWork(QWidget):
         # 直连凭据写回 tcp_ssh_user/tcp_ssh_pass（非空才覆盖）——**不再**写
         # ssh_user/ssh_pass：直连主机常是 frps 服务器（root），设备是 newbv，
         # 共用一键会互相覆盖，导致改过 TCP 后隧道 SSH 报认证失败（用户反馈）。
-        data = {}
-        if self.tcp_user.text().strip():
-            data["tcp_ssh_user"] = self.tcp_user.text().strip()
-        if self.tcp_pass.text():
-            data["tcp_ssh_pass"] = self.tcp_pass.text()
-        self._persist_settings(data)     # 持久化失败不阻塞连接
+        # P1-8 阶段 1：取消「记住密码」时不写密码键，只留在本次运行的内存会话表。
+        remember = self.tcp_remember.isChecked()
+        password = self.tcp_pass.text()
+        if password and not remember:
+            cred.get_session_store().set(cred.KIND_DIRECT, self.tcp_user.text(),
+                                         password)
+            self._win._append_log(
+                "[远程] 直连凭据仅用于本次会话（未勾选记住密码，未写入 tcp_ssh_pass）")
+        self._persist_settings(cred.credential_patch(
+            cred.KIND_DIRECT, self.tcp_user.text(), password, remember=remember))
+        self._refresh_cred_hint(cred.KIND_DIRECT)
+        # 表单为空时回退已保存/会话凭据（此前会拿空账号去认证）
+        creds = cred.resolve_credentials(
+            cred.KIND_DIRECT, form_username=self.tcp_user.text(),
+            form_password=password, settings=self._settings_snapshot(),
+            session=cred.get_session_store())
         self._win._append_log(f"[远程] TCP 直连 {kind.upper()} {host}:"
                               f"{self.tcp_port.value()}")
         self._mgr.open_direct_session(
             kind, host, self.tcp_port.value(), name=host, notifier=self._win,
-            username=self.tcp_user.text().strip(),
-            password=self.tcp_pass.text())
+            username=creds.username, password=creds.password)
 
     def refresh(self):
         self.table.setRowCount(0)

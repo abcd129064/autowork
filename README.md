@@ -269,7 +269,7 @@ autowork/
 │   ├── TODO.md                #   ★ 待办与未来计划（P0/P1/P2）
 │   └── ...                    #   设计方案、性能调查、外部接口清单、mermaid 图表
 │
-├── tests/                     # pytest 离线单测（51 个 test_*.py，基线见 AGENTS.md §5.2）
+├── tests/                     # pytest 离线单测（59 个 test_*.py，基线见 AGENTS.md §5.2）
 ├── resource/                  # 随包资源（比分条模板/字体/头像）
 ├── design/                    # 只读设计资产（索引见 design/README.md）
 │   ├── *.html                 #   界面设计稿（售后/远程页/工具页，多版本并存）
@@ -520,7 +520,7 @@ frp 服务器配置（设置 → 远程连接）：
 - **目录边界**：`tests/` 只放能被 pytest 离线收集的 `test_*.py`；真机/GUI 冒烟放
   `tools/smoke/`，性能与视觉对比放 `tools/perf/`，接口探测放 `tools/probe/`，
   生产部署放 `tools/deploy/`；一切临时产物落 `tools/_scratch/`（已 gitignore）
-- **测试**：`pytest tests/ -q`（基线 **570 passed / 35 failed / 13 errors**，48 个
+- **测试**：`pytest tests/ -q`（基线 **744 passed / 36 failed / 13 errors**，49 个
   非通过项均为环境缺依赖的既有状态，见 AGENTS.md §5.2）；GUI 冒烟
   `python windows/tools/smoke_fluent_mainwindow.py`（offscreen）；
   真机截图 `python tools/perf/shot_fluent_mainwindow.py`

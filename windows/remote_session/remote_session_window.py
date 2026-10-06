@@ -12,8 +12,8 @@
 """
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QVBoxLayout
-from qfluentwidgets import TabWidget
+from PySide6.QtWidgets import QApplication, QVBoxLayout
+from qfluentwidgets import MessageBox, TabWidget
 from qfluentwidgets.window.fluent_window import FluentTitleBar
 from qframelesswindow import FramelessWindow
 
@@ -80,12 +80,57 @@ class RemoteSessionWindow(FramelessWindow):
     def add_session(self, panel, title: str = '', icon=None):
         if not title:
             title = getattr(panel, 'tab_title', '会话')
+        # P1-6：同目标重复标签聚焦已有而非新建（按住 Ctrl 强制新建，
+        # 兼容"对同一目标开两个不同目录的 SFTP"这类用法）
+        if not (QApplication.queryKeyboardModifiers()
+                & Qt.KeyboardModifier.ControlModifier):
+            existing = self._find_same_target(panel)
+            if existing is not None:
+                idx = self._index_of_panel(existing)
+                if idx is not None:
+                    self._tab_widget.setCurrentIndex(idx)
+                self._bring_to_front()
+                # 丢弃新面板（先 shutdown 释放它可能已建立的资源）
+                self._shutdown_panel(panel)
+                panel.deleteLater()
+                return
         self._panels.append(panel)
         idx = self._tab_widget.addTab(panel, title, icon)
         self._tab_widget.setCurrentIndex(idx)
         # 新会话添加后延迟一帧置顶：标签页插入/重绘完成后窗口回到最前。
         # 覆盖异步打开（frp 隧道就绪回调）等时序下窗口被主窗口压住的场景
         QTimer.singleShot(0, self._bring_to_front)
+
+    @staticmethod
+    def _session_key(panel):
+        """会话身份键：(面板类型, host, port, server_name)——P1-6 去重判据"""
+        try:
+            port = int(getattr(panel, '_port', 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return (type(panel).__name__,
+                str(getattr(panel, '_host', '') or ''),
+                port,
+                str(getattr(panel, '_server_name', '') or ''))
+
+    def _find_same_target(self, panel):
+        """查找同目标的已有面板（跳过 C++ 对象已销毁的残留引用）"""
+        key = self._session_key(panel)
+        for p in self._panels:
+            if self._session_key(p) == key:
+                try:
+                    p.isVisible()  # 探测 C++ 对象是否已销毁
+                    return p
+                except RuntimeError:
+                    continue
+        return None
+
+    def _index_of_panel(self, panel):
+        """面板 → 标签索引（不在容器中返回 None）"""
+        for i in range(self._tab_widget.stackedWidget.count()):
+            if self._tab_widget.stackedWidget.widget(i) is panel:
+                return i
+        return None
 
     def _bring_to_front(self):
         """置顶并激活窗口（show + raise + activate，多入口统一）"""
@@ -116,10 +161,43 @@ class RemoteSessionWindow(FramelessWindow):
 
     def _on_tab_close_requested(self, index: int):
         """用户点击标签关闭按钮
+
         qfluentwidgets TabWidget 的 tabCloseRequested 信号直接发出标签索引（int），
         而非 routeKey，因此直接按索引移除即可。
+
+        P0-1：busy 会话（SFTP 在途传输 / SSH 取证运行中）先二次确认，
+        避免关标签无提示地杀掉在途任务。
         """
+        widget = self._tab_widget.stackedWidget.widget(index)
+        if widget is not None:
+            busy, desc = self._panel_busy_state(widget)
+            if busy and not self._confirm_close_busy(widget, desc):
+                return
         self._remove_tab_at(index)
+
+    @staticmethod
+    def _panel_busy_state(panel):
+        """读取面板 busy_state() 契约（无实现的面板视为不忙）"""
+        fn = getattr(panel, 'busy_state', None)
+        if callable(fn):
+            try:
+                result = fn()
+                if isinstance(result, tuple) and len(result) == 2:
+                    return bool(result[0]), str(result[1])
+            except Exception:
+                pass
+        return False, ''
+
+    def _confirm_close_busy(self, panel, desc: str) -> bool:
+        """关闭 busy 会话前的二次确认（P0-1）"""
+        title = getattr(panel, 'tab_title', '会话')
+        dlg = MessageBox(
+            '会话任务进行中',
+            f"「{title}」有{desc}。\n"
+            "关闭标签将立即中断任务，确定要关闭吗？", self)
+        dlg.yesButton.setText('关闭')
+        dlg.cancelButton.setText('取消')
+        return bool(dlg.exec())
 
     def _remove_tab_at(self, index: int):
         """移除指定索引的标签页并关闭对应面板"""

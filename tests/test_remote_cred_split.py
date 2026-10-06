@@ -180,9 +180,11 @@ def mgr(monkeypatch, tmp_path):
     m = fr.RemoteSessionManager()
     m.log_message.connect(lambda _msg: None)
     m._panels = []
+    # add_session 替身与真实容器签名对齐（P0-4 起带 icon 关键字参数）
     monkeypatch.setattr(
         m, "ensure_session_window",
-        lambda: SimpleNamespace(add_session=m._panels.append))
+        lambda: SimpleNamespace(
+            add_session=lambda p, icon=None: m._panels.append(p)))
     return m
 
 

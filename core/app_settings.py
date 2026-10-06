@@ -146,8 +146,13 @@ KEY_DOMAIN = {
     # ---- remote ----
     "remote_sessions": "remote",
     "restore_remote_sessions": "remote",
+    # SFTP 未完成传输队列（2026-10-06 P2-2 步骤 1）：值为 {host:port: [记录...]}，
+    # 只存操作类型与路径，重启/重连后由面板提示是否恢复
+    "sftp_pending_queue": "remote",
     # ---- misc ----
     "web_port": "misc",
+    # SFTP 并行传输闸门（P2-1）：历史实现按未登记键落在 misc，登记于此仅为语义显式
+    "sftp_max_concurrent_transfers": "misc",
     # 自动更新（2026-09-20 S1-S5）：更新源 base_url（nginx 静态目录，
     # 下含 latest.json / AutoWork-*.zip / files/ 增量文件）
     "update_base_url": "misc",

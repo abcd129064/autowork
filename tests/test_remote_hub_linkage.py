@@ -155,8 +155,10 @@ def test_do_open_keeps_direct_host(mgr, monkeypatch):
     fake_mod.SSHTerminalPanel = FakePanel
     monkeypatch.setitem(sys.modules, "windows.remote_session.ssh_terminal",
                         fake_mod)
+    # add_session 替身与真实容器签名对齐（P0-4 起带 icon 关键字参数）
     monkeypatch.setattr(mgr, "ensure_session_window",
-                        lambda: SimpleNamespace(add_session=lambda p: None))
+                        lambda: SimpleNamespace(
+                            add_session=lambda p, icon=None: None))
     monkeypatch.setattr(fr, "_load_settings", lambda: {"ssh_user": "u",
                                                        "ssh_pass": "p"})
     mgr._do_open("ssh", "mybox", "", 22, host="10.0.0.9")
@@ -176,7 +178,8 @@ def test_do_open_defaults_localhost(mgr, monkeypatch):
     monkeypatch.setitem(sys.modules, "windows.remote_session.ssh_terminal",
                         fake_mod)
     monkeypatch.setattr(mgr, "ensure_session_window",
-                        lambda: SimpleNamespace(add_session=lambda p: None))
+                        lambda: SimpleNamespace(
+                            add_session=lambda p, icon=None: None))
     monkeypatch.setattr(fr, "_load_settings", lambda: {})
     mgr._do_open("ssh", "snk_01", "T1", 37991)
     assert captured["host"] == "127.0.0.1"

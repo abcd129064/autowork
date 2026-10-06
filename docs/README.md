@@ -82,6 +82,7 @@ docs/
 | [frp-source-integration.md](frp-source-integration.md) | frp Go 源码接入调研 + 落地记录（附录 E~G：二期 P0/P1、frps 概览卡、开机静默预连与预热打洞） | 调研快照 + 设计·已落地（附录） |
 | [settings_panel_redesign/统一设置面板重构设计.md](settings_panel_redesign/统一设置面板重构设计.md) | 统一设置面板重构设计，配图在 `settings_panel_redesign/assets/` | 设计·已落地（实际形态为 SegmentedWidget 7 段，见文档头部核对块；字段映射仍权威） |
 | [终端全屏应用渲染修复.md](终端全屏应用渲染修复.md) | SSH 终端里 nano/vim/less/top 全屏界面错乱的根因（CSI 行定位序列被丢弃、`\E(B` 漏字、无固定网格）与修复设计：`core/vt_screen.py` 屏幕模型分层、网格↔PTY 尺寸契约、宽字符、输入侧模式；含"序列→行为"对照表与已知边界 | 设计·已落地（2026-10-05，回归见 `tests/test_vt_screen.py`、`tests/test_ansi_terminal_render.py`、`tools/smoke/smoke_ansi_terminal_tui.py`） |
+| [远程会话凭据与传输可靠性.md](远程会话凭据与传输可靠性.md) | 远程会话（SFTP/SSH）三项加固：凭据**来源**显式化与「仅本次运行」策略（`core/credentials.py`）、未完成传输队列落盘 + 两侧大小校验（`core/transfer_queue.py` / `core/transfer_verify.py`）、终端 OSC 7 远端工作目录与 SFTP↔终端互跳；含共享 Transport 的测量结论（30 任务 = 30 次认证） | 设计·已落地（2026-10-06，回归见 `tests/test_credentials.py`、`tests/test_transfer_queue.py`、`tests/test_transfer_verify.py`、`tools/smoke/smoke_remote_ssh_creds.py`） |
 | [大华相机工具集成调研2026-10-06.md](大华相机工具集成调研2026-10-06.md) | Desktop/Bin 大华 Demo 工具包能力盘点 + autowork 集成方式调研：推荐官方 Python NetSDK wheel 内嵌 + 工具页第 5 子页；登录/取流通路已实测（隧道 4236/4238），P0=搜索/初始化/抓图 | 调研快照（待实施） |
 
 ## 四、性能调查

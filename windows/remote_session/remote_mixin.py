@@ -6,6 +6,7 @@ windows/remote_session/；main_window.main_window 按新路径导入，无 shim�
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ from windows.remote_session.ssh_terminal import SSHTerminalPanel
 from windows.remote_session.rdp_window import RDPPanel
 from windows.remote_session.remote_session_window import RemoteSessionWindow
 from p2p import generate_random_port
+from core import credentials as cred
 from core.frp_remote import get_session_manager, SOURCE_MANUAL, SOURCE_TABLE
 from database import table_db
 
@@ -1100,9 +1102,14 @@ class RemoteMixin:
             return
         port = self.ui.p2p_ssh_port.value()
         self._save_ssh_credentials()
+        creds = cred.resolve_credentials(
+            cred.KIND_DEVICE,
+            form_username=self.ui.p2p_ssh_user.text(),
+            form_password=self.ui.p2p_ssh_pass.text(),
+            settings=self._credential_settings(),
+            session=cred.get_session_store())
         self._tcp_worker = TCPWorker(
-            host, port,
-            self.ui.p2p_ssh_user.text(), self.ui.p2p_ssh_pass.text()
+            host, port, creds.username, creds.password
         )
         self._tcp_worker.result_ready.connect(self._on_tcp_finished)
         self._tcp_worker.error.connect(self._on_tcp_error)
@@ -1191,15 +1198,42 @@ class RemoteMixin:
             except (RuntimeError, OSError):
                 pass
 
+    def _remember_device_credentials(self) -> bool:
+        """主面板「记住密码」是否勾选（控件缺失时视为勾选 = 原行为）"""
+        box = getattr(self.ui, "p2p_ssh_remember", None)
+        if box is None:
+            return True
+        try:
+            return bool(box.isChecked())
+        except RuntimeError:      # C++ 对象已销毁
+            return True
+
+    def _credential_settings(self) -> dict:
+        """凭据解析用的设置快照（读不到时返回空 dict，绝不阻塞连接）"""
+        loader = getattr(self, "_load_settings", None)
+        if callable(loader):
+            try:
+                return dict(loader() or {})
+            except Exception:
+                pass
+        return {}
+
     def _save_ssh_credentials(self):
-        """将当前 SSH 账号/密码保存到 settings.json"""
+        """将当前 SSH 账号/密码保存到 settings.json
+
+        P1-8 阶段 1：取消「记住密码」时**不写密码键**（``core.credentials``
+        构造上保证），密码只进本次运行的内存会话表——临时试用的密码不再静默
+        覆盖已保存的密码，且本次运行内后续连接/恢复会话仍可用。
+        """
         username = self.ui.p2p_ssh_user.text().strip()
         password = self.ui.p2p_ssh_pass.text()
-        data = {}
-        if username:
-            data["ssh_user"] = username
-        if password:
-            data["ssh_pass"] = password
+        remember = self._remember_device_credentials()
+        if password and not remember:
+            cred.get_session_store().set(cred.KIND_DEVICE, username, password)
+            self._append_log("[远程] 设备 SSH 凭据仅用于本次会话"
+                             "（未勾选记住密码，未写入 ssh_pass）")
+        data = cred.credential_patch(cred.KIND_DEVICE, username, password,
+                                    remember=remember)
         if data:
             self._save_settings(data)
 
@@ -1237,7 +1271,13 @@ class RemoteMixin:
         if not host:
             self._append_log(f"[{tag}] 主机地址不能为空")
             return None
-        return host, port, server_name, username, password
+        # P1-8 阶段 1：表单 > 本次会话 > 已保存（取消「记住密码」后本次运行
+        # 仍能连上；表单被清空但设置里存过凭据时也不再拿空账号去认证）
+        creds = cred.resolve_credentials(
+            cred.KIND_DEVICE, form_username=username, form_password=password,
+            settings=self._credential_settings(),
+            session=cred.get_session_store())
+        return host, port, server_name, creds.username, creds.password
 
     def _ensure_session_window(self) -> RemoteSessionWindow:
         """获取或创建远程会话标签容器窗口（单例复用）"""
@@ -1265,6 +1305,21 @@ class RemoteMixin:
 
     # ------------------------------------------------------------------ 远程窗口按钮
 
+    @staticmethod
+    def _session_icon(kind):
+        """P0-4：会话标签图标（与 windows/management/table_page.py 口径一致；
+        qicon() 而非 icon()——深色模式下 icon() 会固化黑色图标看不清）"""
+        try:
+            if kind == "ssh":
+                return FluentIcon.COMMAND_PROMPT.qicon()
+            if kind == "sftp":
+                return FluentIcon.FOLDER.qicon()
+            if kind == "rdp":
+                return FluentIcon.VIDEO.qicon()
+        except Exception:
+            pass
+        return None
+
     def _on_sftp_btn_clicked(self):
         """打开 SFTP 文件管理标签页"""
         if not PARAMIKO_AVAILABLE:
@@ -1277,14 +1332,101 @@ class RemoteMixin:
         self._save_ssh_credentials()
         # 从配置读取默认远程路径（如 /home/newbv/snooker）
         default_path = self._load_settings().get("sftp_default_remote_path", "")
+        # P2-5：本地初始目录对齐 snk 会话入口（core/frp_remote._do_open 同口径）：
+        # server_name 形如 "A01（snk_001）" 时按 videos_dir/{球桌号} 落地，
+        # 消除两条入口的本地目录不一致（桌面 vs 球桌号目录）
+        local_dir = None
+        videos_dir = str(self._load_settings().get("videos_dir") or "").strip()
+        sn_name = str(server_name or '')
+        table_id = ''
+        for sep in ('（', '('):
+            if sep in sn_name:
+                table_id = sn_name.split(sep, 1)[0].strip()
+                break
+        if table_id and videos_dir and os.path.isdir(videos_dir):
+            local_dir = os.path.join(videos_dir, table_id)
         self._append_log(f"[SFTP] 打开文件管理: {server_name or host}:{port}")
         panel = SFTPPanel(
             host, port, username, password,
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
             default_remote_path=default_path or None,
+            default_local_path=local_dir,
         )
-        self._ensure_session_window().add_session(panel)
+        # P1-1：SFTP「终端」按钮 → 同目标开终端标签并注入当前远程目录
+        panel.open_terminal_here.connect(
+            lambda path, _t=(host, port, username, password, server_name):
+                self._open_terminal_at(_t, path))
+        self._ensure_session_window().add_session(
+            panel, icon=self._session_icon("sftp"))
+
+    def _open_terminal_at(self, target, start_dir=''):
+        """P1-1：在指定目标打开 SSH 终端标签（SFTP「终端」按钮的接收侧）
+
+        target = (host, port, username, password, server_name)，
+        start_dir 由信号携带（SFTP 当前远程目录），连接建立后注入 cd。
+        """
+        if not PARAMIKO_AVAILABLE:
+            self._append_log("[SSH] paramiko 未安装")
+            return
+        host, port, username, password, server_name = target
+        self._append_log(
+            f"[SSH] 打开终端: {server_name or host}:{port}"
+            f"（起始目录 {start_dir or '~'}）")
+        panel = SSHTerminalPanel(
+            host, port, username, password,
+            log_callback=lambda msg: self._append_log(msg),
+            server_name=server_name,
+            start_dir=start_dir,
+        )
+        self._wire_sftp_reverse_jump(panel, target)
+        self._ensure_session_window().add_session(
+            panel, icon=self._session_icon("ssh"))
+
+    def _wire_sftp_reverse_jump(self, panel, target):
+        """P1-2：接上「终端 → 同目录 SFTP」反向跳转（与 SFTP 的「终端」按钮对称）
+
+        target = (host, port, username, password, server_name)；目录来自 OSC 7。
+        面板若没有该信号（旧版/其它面板类型）则静默跳过。
+        """
+        try:
+            panel.open_sftp_here.connect(
+                lambda path, _t=target: self._open_sftp_at(_t, path))
+        except AttributeError:
+            pass
+
+    def _open_sftp_at(self, target, start_dir=''):
+        """P1-2：在指定目标打开 SFTP 标签并定位到远端目录（终端 cwd 的接收侧）"""
+        if not PARAMIKO_AVAILABLE:
+            self._append_log("[SFTP] paramiko 未安装")
+            return
+        host, port, username, password, server_name = target
+        self._append_log(
+            f"[SFTP] 打开文件管理: {server_name or host}:{port}"
+            f"（目录 {start_dir or '默认'}）")
+        default_path = start_dir or self._load_settings().get(
+            "sftp_default_remote_path", "")
+        local_dir = None
+        videos_dir = str(self._load_settings().get("videos_dir") or "").strip()
+        sn_name = str(server_name or '')
+        table_id = ''
+        for sep in ('（', '('):
+            if sep in sn_name:
+                table_id = sn_name.split(sep, 1)[0].strip()
+                break
+        if table_id and videos_dir and os.path.isdir(videos_dir):
+            local_dir = os.path.join(videos_dir, table_id)
+        panel = SFTPPanel(
+            host, port, username, password,
+            server_name=server_name,
+            log_callback=lambda msg: self._append_log(msg),
+            default_remote_path=default_path or None,
+            default_local_path=local_dir,
+        )
+        panel.open_terminal_here.connect(
+            lambda path, _t=target: self._open_terminal_at(_t, path))
+        self._ensure_session_window().add_session(
+            panel, icon=self._session_icon("sftp"))
 
     def _on_ssh_terminal_btn_clicked(self):
         """打开 SSH 终端标签页"""
@@ -1302,7 +1444,10 @@ class RemoteMixin:
             log_callback=lambda msg: self._append_log(msg),
             server_name=server_name,
         )
-        self._ensure_session_window().add_session(panel)
+        self._wire_sftp_reverse_jump(
+            panel, (host, port, username, password, server_name))
+        self._ensure_session_window().add_session(
+            panel, icon=self._session_icon("ssh"))
 
     def _on_rdp_btn_clicked(self):
         """打开远程桌面标签页（嵌入 mstsc.exe）"""
@@ -1320,7 +1465,8 @@ class RemoteMixin:
             server_name=server_name,
             log_callback=lambda msg: self._append_log(msg),
         )
-        self._ensure_session_window().add_session(panel)
+        self._ensure_session_window().add_session(
+            panel, icon=self._session_icon("rdp"))
 
     # ------------------------------------------------------------------ 会话恢复
 
@@ -1343,7 +1489,11 @@ class RemoteMixin:
         self._save_settings({"remote_sessions": sessions})
 
     def _extract_session_info(self, panel):
-        """从面板提取会话信息（类型/主机/端口/用户名/服务器名/当前路径）"""
+        """从面板提取会话信息（类型/主机/端口/用户名/服务器名/当前路径）
+
+        P2-5：SFTP 同时存档本地目录（恢复时作 default_local_path），
+        不再让重启后的 SFTP 本地侧回到桌面、丢掉用户翻到的目录。
+        """
         panel_type = type(panel).__name__
         if panel_type == 'SFTPPanel':
             return {
@@ -1353,6 +1503,7 @@ class RemoteMixin:
                 'username': panel._username,
                 'server_name': panel._server_name,
                 'remote_path': panel._remote_path,
+                'local_path': getattr(panel, '_local_path', ''),
             }
         elif panel_type == 'SSHTerminalPanel':
             return {
@@ -1361,6 +1512,8 @@ class RemoteMixin:
                 'port': getattr(panel, '_port', 0),
                 'username': getattr(panel, '_username', ''),
                 'server_name': getattr(panel, '_server_name', ''),
+                # P1-2：记住上次所在目录（OSC 7 上报；恢复时作 start_dir）
+                'remote_path': getattr(panel, 'remote_path', ''),
             }
         elif panel_type == 'RDPPanel':
             return {
@@ -1383,12 +1536,26 @@ class RemoteMixin:
             return
         if not PARAMIKO_AVAILABLE:
             return
-        password = self.ui.p2p_ssh_pass.text()
-        QTimer.singleShot(1000, lambda: self._do_restore_sessions(sessions, password))
+        QTimer.singleShot(1000, lambda: self._do_restore_sessions(
+            sessions, self._device_password_for_restore()))
+
+    def _device_password_for_restore(self) -> str:
+        """恢复会话用的设备密码（P1-8 阶段 1：表单 > 本次会话 > 已保存）
+
+        在 1s 定时器内取值而非调度时取值：启动阶段主窗口的设定值回填可能还没跑完。
+        """
+        creds = cred.resolve_credentials(
+            cred.KIND_DEVICE,
+            form_username=self.ui.p2p_ssh_user.text(),
+            form_password=self.ui.p2p_ssh_pass.text(),
+            settings=self._credential_settings(),
+            session=cred.get_session_store())
+        return creds.password
 
     def _do_restore_sessions(self, sessions, password):
-        """实际执行会话恢复"""
+        """实际执行会话恢复（P2-5：SFTP 恢复本地目录；P2-6：恢复后延迟体检）"""
         restored = 0
+        restored_panels = []
         for s in sessions:
             try:
                 stype = s.get('type', '')
@@ -1404,26 +1571,63 @@ class RemoteMixin:
                         server_name=server_name,
                         log_callback=lambda msg: self._append_log(msg),
                         default_remote_path=s.get('remote_path', ''),
+                        # P2-5：本地目录随档恢复（旧档无此键时回退默认桌面）
+                        default_local_path=(s.get('local_path', '') or None),
                     )
-                    self._ensure_session_window().add_session(panel)
+                    # P1-1：恢复的 SFTP 同样接上「终端」跳转
+                    panel.open_terminal_here.connect(
+                        lambda path, _t=(host, port, username, password, server_name):
+                            self._open_terminal_at(_t, path))
+                    self._ensure_session_window().add_session(
+                        panel, icon=self._session_icon("sftp"))
                     restored += 1
+                    restored_panels.append(panel)
                 elif stype == 'ssh':
                     panel = SSHTerminalPanel(
                         host, port, username, password,
                         log_callback=lambda msg: self._append_log(msg),
                         server_name=server_name,
+                        # P1-2：回到上次所在目录（旧档无此键时为空 → 行为不变）
+                        start_dir=(s.get('remote_path', '') or ''),
                     )
-                    self._ensure_session_window().add_session(panel)
+                    self._wire_sftp_reverse_jump(
+                        panel, (host, port, username, password, server_name))
+                    self._ensure_session_window().add_session(
+                        panel, icon=self._session_icon("ssh"))
                     restored += 1
+                    restored_panels.append(panel)
                 elif stype == 'rdp' and sys.platform == 'win32':
                     panel = RDPPanel(
                         host, port, username, password,
                         server_name=server_name,
                         log_callback=lambda msg: self._append_log(msg),
                     )
-                    self._ensure_session_window().add_session(panel)
+                    self._ensure_session_window().add_session(
+                        panel, icon=self._session_icon("rdp"))
                     restored += 1
             except Exception as e:
                 self._append_log(f"[会话恢复] 失败: {e}")
         if restored:
             self._append_log(f"[会话恢复] 已恢复 {restored} 个远程会话")
+            # P2-6：延迟 5s 检查各恢复面板连通性——认证失败被面板内部消化，
+            # 只体现为标签页里的一行小字/一块橙条；此处汇总成主窗口 toast
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(
+                5000, lambda: self._check_restored_sessions_health(restored_panels))
+
+    def _check_restored_sessions_health(self, panels):
+        """P2-6：恢复面板延迟体检——失败的汇总提示（密码变更/设备离线等）"""
+        failed = []
+        for p in panels:
+            try:
+                if not p.is_connected:
+                    failed.append(p)
+            except (AttributeError, RuntimeError):
+                # RuntimeError：用户已手动关标签（C++ 对象销毁）；
+                # AttributeError：面板类型无 is_connected 探针（如 RDP）
+                continue
+        if failed:
+            self._show_info_bar(
+                f"{len(failed)} 个会话恢复失败（密码可能已变更，请检查各标签页）",
+                "warning", title="会话恢复", duration=5000)
+            self._append_log(f"[会话恢复] {len(failed)} 个会话连接失败")

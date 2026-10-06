@@ -24,6 +24,7 @@ from qfluentwidgets import (
     ToggleButton,
     CalendarPicker,
     RadioButton,
+    CheckBox,
     ListWidget,
     PlainTextEdit as FluentPlainTextEdit,
     TextEdit as FluentTextEdit,
@@ -711,6 +712,15 @@ class Ui_MainWindow(object):
         self.p2p_ssh_pass.setObjectName(u"p2p_ssh_pass")
         # 密码不在此硬编码，由 _init_p2p_panel 从 settings.json 的 ssh_pass 读取填充
         self.p2p_ssh_pass.setPlaceholderText("请输入密码")
+        # P1-8 阶段 1：与远程页 XTCP 卡同口径的「记住密码」开关（默认勾选 = 原行为）。
+        # 默认勾选时连接/注册会把账号密码写回 credentials.json；取消后只进本次运行的
+        # 内存会话表，临时密码不再静默覆盖已保存的密码（core/credentials.py）。
+        self.p2p_ssh_remember = CheckBox("记住密码", self.p2p_panel)
+        self.p2p_ssh_remember.setObjectName(u"p2p_ssh_remember")
+        self.p2p_ssh_remember.setChecked(True)
+        self.p2p_ssh_remember.setToolTip(
+            "勾选：连接后把设备账号密码写入 config/credentials.json（DPAPI 加密）\n"
+            "取消：只用于本次运行，关闭应用即丢失，不改动已保存的密码")
 
         self.p2p_ssh_form = QFormLayout()
         self.p2p_ssh_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -718,6 +728,7 @@ class Ui_MainWindow(object):
         self.p2p_ssh_form.addRow("port:", self.p2p_ssh_port)
         self.p2p_ssh_form.addRow("账号:", self.p2p_ssh_user)
         self.p2p_ssh_form.addRow("密码:", self.p2p_ssh_pass)
+        self.p2p_ssh_form.addRow("", self.p2p_ssh_remember)
         p2p_main_layout.addLayout(self.p2p_ssh_form)
 
         # host/port 随模式切换显隐（账号/密码始终可见）

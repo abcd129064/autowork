@@ -406,3 +406,81 @@ def test_nano_fullscreen_layout_is_not_collapsed():
     assert "B" not in "".join(rendered), "sgr0 的 \\E(B 又漏成字面 B 了"
     # 光标落在网格内（nano 把光标放在编辑区，这里只要求不越界）
     assert 0 <= screen.cursor_row < 40
+
+
+# ── OSC 7：远端工作目录（只消费不注入） ──────────────────────────────────
+
+def test_osc7_bel_terminated():
+    """bash/zsh 的 PROMPT_COMMAND 上报格式：OSC 7 ; file://host/path BEL。"""
+    screen = make(data="\x1b]7;file://localhost/home/newbv\x07$ ")
+    assert screen.cwd == "/home/newbv"
+    assert screen.cwd_host == "localhost"
+    assert lines(screen)[0] == "$"                     # 序列本身不上屏（行尾空白被 rstrip）
+
+
+def test_osc7_st_terminated():
+    """xterm 风格用 ST(\\E\\\\) 结束，同样要认。"""
+    screen = make(data="\x1b]7;file://box/var/log\x1b\\done")
+    assert screen.cwd == "/var/log"
+    assert lines(screen)[0] == "done"
+
+
+def test_osc7_percent_decoding():
+    """路径里的空格/中文由 shell 百分号编码，消费时要解码回真实路径。"""
+    screen = make(data="\x1b]7;file://h/home/my%20dir%2Fsub\x07")
+    assert screen.cwd == "/home/my dir/sub"
+
+
+def test_osc7_updates_to_latest():
+    screen = make(data="\x1b]7;file://h/a\x07\x1b]7;file://h/a/b\x07\x1b]7;file://h/b\x07")
+    assert screen.cwd == "/b"
+
+
+def test_osc7_ignores_root_and_empty():
+    assert make(data="\x1b]7;file://h/\x07").cwd == ""
+    assert make(data="\x1b]7;file://h\x07").cwd == ""
+    assert make(data="\x1b]7;\x07").cwd == ""
+    assert make(data="\x1b]7;notauri\x07").cwd == ""
+
+
+def test_osc_other_numbers_are_still_ignored():
+    """标题(0/2)、超链接(8)、改色(10/11) 不得影响屏幕，也不得写成 cwd。"""
+    screen = make(data="\x1b]0;my title\x07\x1b]8;;http://x/\x07ok\x1b]8;;\x07\x1b]10;#fff\x07")
+    assert screen.cwd == ""
+    assert "my title" not in "".join(lines(screen))
+    assert "http" not in "".join(lines(screen))
+    assert lines(screen)[0].startswith("ok")
+
+
+def test_osc7_survives_clear_and_alt_screen():
+    """清屏/进 vim（备用屏幕）不该丢掉 shell 的 cwd。"""
+    screen = make(data="\x1b]7;file://h/srv/app\x07")
+    screen.clear()
+    assert screen.cwd == "/srv/app"
+    screen.feed("\x1b[?1049h")
+    assert screen.alt_screen and screen.cwd == "/srv/app"
+    screen.feed("\x1b[?1049l")
+    assert screen.cwd == "/srv/app"
+
+
+def test_osc7_cleared_by_reset():
+    """RIS 整屏复位语义：尺寸保留、上报的 cwd 清空（shell 会重新报）。"""
+    screen = make(data="\x1b]7;file://h/tmp\x07")
+    screen.reset()
+    assert screen.cwd == "" and screen.cwd_host == ""
+
+
+def test_osc7_overflow_is_dropped_not_truncated():
+    """超长 OSC：截断的路径比"没有"更糟，必须整条丢弃。"""
+    long_path = "/" + ("d" * 2000)
+    screen = make(data=f"\x1b]7;file://h{long_path}\x07")
+    assert screen.cwd == ""
+
+
+def test_osc7_incremental_feed_split_across_chunks():
+    """真实 PTY 会把一条 OSC 7 拆到多次 read 里。"""
+    screen = VTScreen(cols=40, rows=4)
+    for chunk in ("\x1b]7;file://", "h/opt/", "app\x07$"):
+        screen.feed(chunk)
+    assert screen.cwd == "/opt/app"
+    assert lines(screen)[0] == "$"

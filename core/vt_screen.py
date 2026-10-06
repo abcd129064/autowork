@@ -30,6 +30,7 @@
 
 import unicodedata
 from collections import deque
+from urllib.parse import unquote as _url_unquote
 
 # ── 标准终端 16 色调色板 ────────────────────────────────────────────────
 COLORS = [
@@ -53,7 +54,10 @@ ACS_MAP = {
 }
 
 _TAB_WIDTH = 8
-_MAX_OSC = 256
+# OSC 缓冲上限：要放得下 OSC 7 的长路径，同时仍是有界缓冲
+_MAX_OSC = 1024
+# OSC 7 的路径长度上限：超过视为异常上报（防畸形数据把状态条撑爆）
+_MAX_OSC_PATH = 1024
 _MAX_CSI = 64
 # 宽字符的续格哨兵：C0 里的 NUL 不会出现在正常终端输出里，
 # 用它做标记可以让 _freeze/_thaw（回滚行的压缩表示）原样保真列结构。
@@ -100,6 +104,10 @@ class VTScreen:
         self._tab_stops = self._default_tab_stops()
         self._last_char = None        # REP(\\E[b) 用
         self._charset_kind = "("
+        # OSC 7 上报的工作目录（远端 shell 主动发，仅消费不注入）
+        self._cwd = ""
+        self._cwd_host = ""
+        self._osc_overflow = False
         # 输入侧模式（控件要按这些状态选键序列 / 是否上报鼠标）
         self._app_cursor_keys = False   # ?1h  DECCKM：方向键改发 \\EOA..D
         self._bracketed_paste = False   # ?2004h 括号粘贴
@@ -174,6 +182,19 @@ class VTScreen:
     def scrollback_rows(self):
         """回滚行数（主屏才有；备用屏幕恒为 0）。"""
         return len(self._scrollback)
+
+    @property
+    def cwd(self):
+        """远端 shell 最近一次上报的工作目录（OSC 7）；未上报过为空串。
+
+        只消费不注入：shell 不发 OSC 7 时这里一直是空串，终端行为不受影响。
+        """
+        return self._cwd
+
+    @property
+    def cwd_host(self):
+        """OSC 7 里的主机名部分（多数 shell 发 hostname，用于判断是否本机）。"""
+        return self._cwd_host
 
     @property
     def app_cursor_keys(self):
@@ -999,6 +1020,8 @@ class VTScreen:
             return
         self._osc.append(ch)
         if len(self._osc) > _MAX_OSC:
+            # 超长序列按截断丢弃：截断的 OSC 7 会给出错误路径，宁可不认
+            self._osc_overflow = True
             self._finish_osc()
 
     def _handle_osc_esc(self, ch):
@@ -1011,8 +1034,42 @@ class VTScreen:
 
     def _finish_osc(self):
         # 标题/超链接等 OSC 对屏幕无影响，仅消费掉（含 sgr0 里的 \\E(B 之外的转义）
+        payload = "".join(self._osc).rstrip("\x1b")
+        overflow = self._osc_overflow
         self._osc = []
+        self._osc_overflow = False
         self._state = "normal"
+        if payload and not overflow:
+            self._consume_osc(payload)
+
+    def _consume_osc(self, payload):
+        """识别有副作用的 OSC；其余（标题/超链接/改色）一律丢弃，屏幕不受影响。
+
+        目前只处理 OSC 7（工作目录上报），用于状态条显示远端 cwd 与
+        "在 SFTP 中打开此目录"这类联动。
+        """
+        if payload.startswith("7;"):
+            self._apply_osc_cwd(payload[2:])
+
+    def _apply_osc_cwd(self, uri):
+        """``OSC 7 ; file://HOST/PATH ST`` → 记录远端工作目录（PATH 为百分号编码）。"""
+        uri = uri.strip()
+        if not uri.startswith("file://"):
+            return                                  # 非标准写法（如直接给路径）忽略
+        rest = uri[len("file://"):]
+        host, sep, path = rest.partition("/")
+        if not sep or not path:
+            return
+        # partition 吃掉了分隔符，这里补回绝对路径的开头
+        path = "/" + _url_unquote(path)
+        if len(path) > _MAX_OSC_PATH:
+            return
+        if path == self._cwd and host == self._cwd_host:
+            return
+        self._cwd = path
+        self._cwd_host = host
+        # cwd 不影响屏幕内容，但要让渲染层有机会把变化传给状态条
+        self._revision += 1
 
     # ── 脏行/结构记账 ─────────────────────────────────────────────────
 

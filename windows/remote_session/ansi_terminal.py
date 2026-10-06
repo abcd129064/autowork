@@ -74,6 +74,8 @@ class ANSITerminalWidget(QTextEdit):
     key_input = Signal(str)
     # 网格尺寸变化 → 上层应同步远端 PTY（paramiko channel.resize_pty）
     grid_resized = Signal(int, int)
+    # 远端工作目录变化（shell 上报 OSC 7）→ 状态条显示 / "在 SFTP 中打开此目录"
+    cwd_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,10 +112,20 @@ class ANSITerminalWidget(QTextEdit):
         self._rendered_structure = -1
         self._rendered_cursor_row = None
         self._cached_html = ""
+        # 上一次上报的远端工作目录（OSC 7）——变化时发 cwd_changed
+        self._last_cwd = ""
         # 首帧按当前控件尺寸对齐网格
         self._sync_grid()
 
     # ─── 公开接口 ─────────────────────────────────────────────────────────
+
+    @property
+    def cwd(self):
+        """远端 shell 最近上报的工作目录（OSC 7）；未上报过为空串。
+
+        只消费不注入：远端不发 OSC 7 时这里始终是空串。
+        """
+        return self._screen.cwd
 
     def set_input_enabled(self, enabled: bool):
         """设置是否允许键盘输入（连接成功后启用）"""
@@ -465,6 +477,42 @@ class ANSITerminalWidget(QTextEdit):
             text = '\x1b[200~' + text + '\x1b[201~'
         self.key_input.emit(text)
 
+    # ─── 拖放（P1-5：拖本地文件进终端 = 以括号粘贴规则发送路径） ────────────
+
+    def dragEnterEvent(self, event):
+        """拖入本地文件：接受并提示可放置（只拦 urls，纯文本拖放留给基类）"""
+        if self._input_enabled and event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        """放置本地文件：路径作为参数发送到远端 shell（不自动回车，用户可见回显后自行执行）"""
+        if self._input_enabled and event.mimeData().hasUrls():
+            paths = [u.toLocalFile() for u in event.mimeData().urls()]
+            paths = [p for p in paths if p]
+            if paths:
+                self._send_paths_to_remote(paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+    def _send_paths_to_remote(self, paths):
+        """本地路径拼接为命令参数发送（含空白/引号的路径加单引号，bash 语义）
+
+        与 _paste_from_clipboard 相同的括号粘贴规则（?2004h 时包 200~/201~），
+        只复用不重写；不追加回车——误拖不会执行任何命令。
+        """
+        parts = []
+        for p in paths:
+            if any(c in p for c in " \t'\""):
+                p = "'" + p.replace("'", "'\\''") + "'"
+            parts.append(p)
+        text = ' '.join(parts)
+        if self._screen.bracketed_paste:
+            text = '\x1b[200~' + text + '\x1b[201~'
+        self.key_input.emit(text)
+
     def focusNextPrevChild(self, next_: bool) -> bool:
         """禁止 Tab/Shift+Tab 触发焦点导航，确保 Tab 作为普通按键处理"""
         return False
@@ -508,6 +556,12 @@ class ANSITerminalWidget(QTextEdit):
         self._rendered_revision = screen.revision
         self._rendered_structure = screen.structure_revision
         self._rendered_cursor_row = cursor_row
+
+        # 远端 cwd（OSC 7）：只在变化时通知上层。屏幕模型自身不含 Qt，
+        # 所以信号由渲染帧顺带发出（OSC 7 会 bump revision，保证走到这里）。
+        if screen.cwd != self._last_cwd:
+            self._last_cwd = screen.cwd
+            self.cwd_changed.emit(screen.cwd)
 
         html = '<pre style="%s">%s</pre>' % (
             _PRE_STYLE, '<br>'.join(h or '&nbsp;' for h in self._row_html_cache))

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import socket
+import threading
 from datetime import datetime
 
 from PySide6.QtCore import QThread, Signal
@@ -376,6 +377,7 @@ class ForensicWorker(QThread):
     progress = Signal(int, int, str)
     report_ready = Signal(str)   # 报告文件路径
     failed = Signal(str)         # 致命错误（报告未能生成）
+    cancelled = Signal()         # P2-3：用户主动取消（非错误，不生成报告）
 
     def __init__(self, client, host, port, username,
                  server_name='', session_log_path=None, parent=None):
@@ -386,6 +388,12 @@ class ForensicWorker(QThread):
         self._username = username
         self._server_name = server_name
         self._session_log_path = session_log_path
+        # P2-3：取消标志——当前命令执行完（或超时）后停止后续命令，不生成报告
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        """请求取消取证（与 network_workers 的 _stop_flag 同构语义）"""
+        self._cancel_event.set()
 
     # ── 命令执行 ──────────────────────────────────────────────────────
 
@@ -415,6 +423,13 @@ class ForensicWorker(QThread):
             total = len(FORENSIC_COMMANDS)
             cmd_results = []
             for idx, (title, cmd) in enumerate(FORENSIC_COMMANDS, 1):
+                # P2-3：取消检查点——命令粒度取消（不打断进行中的命令）
+                if self._cancel_event.is_set():
+                    conn_logger.info('FORENSIC', '取证已取消',
+                                     host=self._host, port=self._port,
+                                     user=self._username)
+                    self.cancelled.emit()
+                    return
                 self.progress.emit(idx, total, title)
                 ok, output = self._exec_one(cmd)
                 cmd_results.append((title, cmd, ok, output))

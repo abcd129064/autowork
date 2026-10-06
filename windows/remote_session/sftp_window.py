@@ -8,19 +8,20 @@ import subprocess
 import threading
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
-    QWidget, QTreeWidgetItem,
+    QWidget, QTreeWidgetItem, QFrame, QLabel,
     QHeaderView, QSplitter,
     QTableWidgetItem, QAbstractItemView, QApplication, QPushButton)
 from PySide6.QtCore import QObject, QTimer, Qt, QEvent, QThread, Signal
 from PySide6.QtGui import QShortcut, QKeySequence, QFont
-from qfluentwidgets import (PushButton, BodyLabel, CaptionLabel, LineEdit,
-    SearchLineEdit, setFont, TreeWidget, TableWidget, ProgressBar,
+from qfluentwidgets import (PushButton, PrimaryPushButton, BodyLabel, CaptionLabel,
+    LineEdit, SearchLineEdit, setFont, TreeWidget, TableWidget, ProgressBar,
     RoundMenu, Action, FluentIcon, MenuAnimationType,
     MessageBox, MessageBoxBase)
 
 from core.conn_logger import conn_logger
 from core.perf import is_animation_enabled
 from core.theme_qss import apply_window_qss
+from core import transfer_queue as _tq
 from core.utils import safe_close_transport
 from workers.network_workers import (
     SFTPConnectWorker, SFTPListWorker, SFTPOperationWorker, SFTPDirTransferWorker,
@@ -86,6 +87,13 @@ def _popup_ani_type():
     远程面板中菜单下一次弹出即同步生效，新打开的会话同样读取当前值。"""
     return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
             else MenuAnimationType.NONE)
+
+
+# P1-9：快速操作（删除/新建/重命名）入传输队列后的行标签
+_QUICK_OP_LABELS = {
+    'delete': '删除', 'rmdir': '删除目录', 'mkdir': '新建目录',
+    'rename': '重命名', 'create_file': '新建文件',
+}
 
 
 class _SortableTreeItem(QTreeWidgetItem):
@@ -299,6 +307,10 @@ class SFTPPanel(QWidget):
     资源清理统一由 shutdown() 方法负责，容器关闭标签时调用。
     """
 
+    # P1-1：请求在当前远程目录打开终端标签（参数=远程目录路径），
+    # 由创建方（remote_mixin / frp_remote）连接后用同目标参数建 SSHTerminalPanel
+    open_terminal_here = Signal(str)
+
     def __init__(self, host, port, username, password, server_name='', log_callback=None, default_remote_path=None, default_local_path=None, parent=None):
         super().__init__(parent)
         self._host = host
@@ -329,9 +341,27 @@ class SFTPPanel(QWidget):
         self._pending_remote_path = None
         self._transfer_workers = {}
         self._next_transfer_id = 0
+        # P2-1：批量传输并发闸门——运行中（含暂停）任务数达上限后新任务排队
+        # （状态列"排队中"），有空位按 FIFO 启动；避免多选 N 个文件 = N 条并发
+        # SSH 连接（服务端 MaxStartups 拒连 → 部分文件莫名失败 + auth 日志被刷）
+        self._max_concurrent_transfers = self._load_max_concurrent_transfers()
+        self._queued_transfers = []  # 排队 tid 的 FIFO
         self._drag_source_row = -1
         self._closing = False
         self._health_worker = None
+        # P1-10：传输完成后的按需刷新（400ms 去抖合并，只在任务目标目录
+        # == 当前浏览目录时刷新，不再打断用户正在翻的目录/搜索）
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(400)
+        self._refresh_timer.timeout.connect(self._flush_pending_refresh)
+        self._pending_refresh = set()  # {'remote', 'local'}
+        # P2-2 步骤 1：未完成传输队列落盘（800ms 去抖合并，状态变化时才写盘）
+        self._pending_save_timer = QTimer(self)
+        self._pending_save_timer.setSingleShot(True)
+        self._pending_save_timer.setInterval(800)
+        self._pending_save_timer.timeout.connect(self._flush_pending_queue)
+        self._pending_restore_offered = False
         self._init_ui()
         # P2-2（2026-09-24）：清理挪后台线程——_sftp_temp 积压大量文件时
         # listdir+rmtree 会拖慢窗口构建；清理逻辑只碰文件系统，线程安全。
@@ -343,31 +373,270 @@ class SFTPPanel(QWidget):
 
     @property
     def tab_title(self) -> str:
-        """返回适合标签页显示的标题"""
+        """返回适合标签页显示的标题（P0-4：始终带 host:port，同目标多标签可区分）"""
         if self._server_name:
-            return f"SFTP - {self._server_name}"
+            return f"SFTP - {self._server_name}（{self._host}:{self._port}）"
         return f"SFTP - {self._host}:{self._port}"
+
+    @property
+    def is_connected(self) -> bool:
+        """P2-6：只读连通探针（会话恢复后延迟体检用；连接中/断开均为 False）"""
+        try:
+            return bool(self._transport is not None and self._transport.is_active())
+        except Exception:
+            return False
+
+    def busy_state(self):
+        """(busy, 描述)——P0-1 统一契约：有运行中/暂停中/排队中的传输任务即 busy
+
+        供标签容器（关闭前确认）与 core.frp_remote.is_busy_on_port（断隧道前
+        确认）查询；返回元组而非布尔，让确认弹窗能告诉用户具体在忙什么。
+        P2-1 起排队任务也计入（关标签同样会丢掉它们）。
+        """
+        running = 0
+        for info in self._transfer_workers.values():
+            if not isinstance(info, dict):
+                continue
+            state = info.get('state')
+            worker = info.get('worker')
+            if state in ('running', 'paused', 'queued') or (
+                    state is None and worker is not None and worker.isRunning()):
+                running += 1
+        if running:
+            return True, f'{running} 个传输任务进行中'
+        return False, ''
+
+    @staticmethod
+    def _load_max_concurrent_transfers() -> int:
+        """读设置 sftp_max_concurrent_transfers（默认 3；非法/越界回退默认）"""
+        try:
+            from core import app_settings
+            val = int(app_settings.get("sftp_max_concurrent_transfers", 3))
+        except Exception:
+            val = 3
+        return val if val >= 1 else 3
+
+    def _active_transfer_count(self) -> int:
+        """占用并发槽位的任务数（运行中+暂停中：暂停仍持有线程与连接）"""
+        return sum(1 for info in self._transfer_workers.values()
+                   if isinstance(info, dict)
+                   and info.get('state') in ('running', 'paused'))
+
+    def _launch_or_queue_transfer(self, tid):
+        """P2-1：有空位立即启动（状态列"传输中"），否则排队（"排队中"）"""
+        info = self._transfer_workers.get(tid)
+        if info is None:
+            return
+        status_item = self._transfer_table.item(info.get('row', -1), 3)
+        if self._active_transfer_count() >= self._max_concurrent_transfers:
+            info['state'] = 'queued'
+            if tid not in self._queued_transfers:
+                self._queued_transfers.append(tid)
+            if status_item:
+                status_item.setText('排队中')
+            # P2-2：排队态也要落盘（否则退出即丢）
+            self._schedule_pending_save()
+            return
+        info['state'] = 'running'
+        info['start_time'] = time.time()
+        info['last_time'] = time.time()
+        if status_item:
+            status_item.setText('传输中')
+        info['worker'].start()
+        self._schedule_pending_save()
+
+    def _pump_transfer_queue(self):
+        """P2-1：任务结束/删除后排空队列（FIFO 启动直到占满并发位）"""
+        while (self._queued_transfers
+               and self._active_transfer_count() < self._max_concurrent_transfers):
+            tid = self._queued_transfers.pop(0)
+            info = self._transfer_workers.get(tid)
+            if info is None or info.get('state') != 'queued':
+                continue  # 行已被删除或已在别处启动
+            self._launch_or_queue_transfer(tid)
+
+    # ------------------------------------------------- 未完成传输队列落盘（P2-2 步骤 1）
+    def _pending_records(self):
+        """内存中未完成（排队中/传输中/已暂停）的任务 → 可落盘记录列表
+
+        只取 params 快照里的操作类型与两端路径：不落盘密码（连接凭据另走
+        core.credentials 解析链），也不落盘进度偏移（步骤 3 真断点续传才做）。
+        """
+        records = []
+        for info in self._transfer_workers.values():
+            if not isinstance(info, dict) or info.get('state') not in _tq.PENDING_STATES:
+                continue
+            params = info.get('params')
+            if not params or len(params) < 4:
+                continue
+            _conn, op, local_path, remote_path = params[0], params[1], params[2], params[3]
+            if op not in _tq.VALID_OPS or not local_path or not remote_path:
+                continue
+            name_item = self._transfer_table.item(info.get('row', -1), 0)
+            name = name_item.text() if name_item else ''
+            size = 0
+            if op == 'upload':
+                try:
+                    size = os.path.getsize(local_path)
+                except OSError:
+                    size = 0
+            records.append({
+                'op': op, 'name': name, 'local_path': local_path,
+                'remote_path': remote_path, 'size': size,
+            })
+        return records
+
+    def _schedule_pending_save(self):
+        """状态变化后延迟合并写盘（进度回调频繁，不能每次都写设置文件）"""
+        timer = getattr(self, '_pending_save_timer', None)
+        if timer is not None and not self._closing:
+            timer.start()
+
+    @staticmethod
+    def _load_pending_store() -> dict:
+        """读设置里的未完成队列整表（损坏/缺失返回 {}）"""
+        try:
+            from core import app_settings
+            store = app_settings.get(_tq.QUEUE_KEY, {})
+        except Exception:
+            return {}
+        return store if isinstance(store, dict) else {}
+
+    @staticmethod
+    def _write_pending_store(store: dict) -> bool:
+        try:
+            from core import app_settings
+            app_settings.set(_tq.QUEUE_KEY, store)
+            return True
+        except Exception:
+            return False
+
+    def _flush_pending_queue(self):
+        """立即把未完成任务快照写进设置文件（去抖超时 / shutdown 调用）"""
+        store, dropped = _tq.prune_store(self._load_pending_store(), max_targets=50)
+        if dropped:
+            self._log(f'[SFTP] 未完成队列目标过多，已丢弃 {dropped} 个最早的目标')
+        new_store = _tq.save_target(store, self._host, self._port, self._pending_records())
+        if not self._write_pending_store(new_store):
+            self._log('[SFTP] 保存未完成传输队列失败（设置写入异常）')
+
+    def _clear_pending_queue(self):
+        """清除本目标的未完成快照（恢复提示只提示一次，避免反复打扰）"""
+        store = _tq.clear_target(self._load_pending_store(), self._host, self._port)
+        self._write_pending_store(store)
+
+    def _restore_pending_queue(self, records) -> int:
+        """把落盘记录重新入队（统一走 _start_transfer_op，仍受并发闸门约束）"""
+        started = 0
+        for rec in records:
+            op = rec.get('op')
+            local_path = rec.get('local_path') or ''
+            remote_path = rec.get('remote_path') or ''
+            name = rec.get('name') or os.path.basename(local_path or remote_path)
+            if op in ('upload', 'upload_dir') and not os.path.exists(local_path):
+                self._log(f'[SFTP] 跳过已不存在的本地路径: {local_path}')
+                continue
+            if op in ('upload', 'upload_dir'):
+                if op == 'upload_dir':
+                    worker = SFTPDirTransferWorker(
+                        self._conn_params, op, local_dir=local_path, remote_dir=remote_path,
+                        dir_name=os.path.basename(local_path.rstrip('/\\')))
+                    size, label = 0, '上传'
+                else:
+                    size = rec.get('size', 0) or 0
+                    worker = SFTPOperationWorker(
+                        self._conn_params, op, local_path, remote_path, file_size=size)
+                    label = '上传'
+            else:
+                size = rec.get('size', 0) or 0
+                if op == 'download_dir':
+                    worker = SFTPDirTransferWorker(
+                        self._conn_params, op, local_dir=local_path, remote_dir=remote_path,
+                        dir_name=os.path.basename(remote_path.rstrip('/')))
+                    size, label = 0, '下载'
+                else:
+                    worker = SFTPOperationWorker(
+                        self._conn_params, op, local_path, remote_path, file_size=size)
+                    label = '下载'
+            self._start_transfer_op(worker, name, label, size,
+                                    op=op, local_path=local_path, remote_path=remote_path)
+            started += 1
+        return started
+
+    def _offer_pending_restore(self):
+        """连接成功后：若本目标有上次未完成的传输，询问是否恢复（P2-2 步骤 1）
+
+        无论选"恢复"还是"忽略"都会消费掉快照：同一个提示不会每次重连都弹。
+        """
+        if getattr(self, '_pending_restore_offered', False):
+            return
+        self._pending_restore_offered = True
+        records = _tq.load_target(self._load_pending_store(), self._host, self._port)
+        if not records:
+            return
+        self._clear_pending_queue()
+        if self._closing:
+            return
+        summary = _tq.describe_pending(records)
+        msg = (f'{summary}。\n\n'
+               '"恢复"按原路径重新加入传输队列（已传部分从头重传）；\n'
+               '"忽略"则丢弃这份记录。')
+        dlg = MessageBox('恢复未完成的传输', msg, self)
+        dlg.yesButton.setText('恢复')
+        dlg.cancelButton.setText('忽略')
+        try:
+            accepted = bool(dlg.exec())
+        except Exception:
+            accepted = False
+        if not accepted:
+            self._log(f'[SFTP] 已忽略上次未完成的传输（{summary}）')
+            return
+        started = self._restore_pending_queue(records)
+        self._log(f'[SFTP] 已恢复 {started} 个未完成的传输任务（从头传输）')
 
     # ------------------------------------------------------------------ UI 构建
     def _init_ui(self):
         """搭建双栏文件面板 + 传输队列 + 按钮栏，预构建右键菜单"""
         root = QVBoxLayout(self)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
-    
+
         self._build_local_panel()
         self._build_remote_panel()
-    
+
         self._splitter.addWidget(self._left_panel)
         self._splitter.addWidget(self._right_panel)
         self._splitter.setStretchFactor(0, 1)  # 【左右比例】本地面板拉伸因子
         self._splitter.setStretchFactor(1, 1)  # 【左右比例】远程面板拉伸因子（1:1 等分）
-    
+
         self._build_transfer_queue()
+        # P1-3：断线重连条（置顶，默认隐藏；连接失败/断开时显示）
+        self._build_reconnect_bar(root)
         self._build_button_bar(root)
         self._bind_shortcuts()
-    
+
         # 预构建右键菜单（Action/图标/信号仅创建一次，后续右键零开销弹出）
         self._build_context_menus()
+
+    def _build_reconnect_bar(self, root):
+        """断线重连条（与 SSH 终端同构样式，默认隐藏）"""
+        self._reconnect_bar = QFrame(self)
+        self._reconnect_bar.setStyleSheet(
+            "QFrame { background-color: rgba(255, 152, 0, 0.15);"
+            " border: 1px solid #ff9800; border-radius: 4px; }"
+        )
+        bar_layout = QHBoxLayout(self._reconnect_bar)
+        bar_layout.setContentsMargins(8, 2, 8, 2)
+        bar_layout.setSpacing(6)
+        self._reconnect_label = QLabel('连接已断开')
+        bar_layout.addWidget(self._reconnect_label)
+        bar_layout.addStretch()
+        self._reconnect_btn = PrimaryPushButton('重新连接')
+        self._reconnect_btn.setFocusPolicy(Qt.NoFocus)
+        self._reconnect_btn.setFixedWidth(96)
+        self._reconnect_btn.clicked.connect(self._reconnect_clicked)
+        bar_layout.addWidget(self._reconnect_btn)
+        self._reconnect_bar.hide()
+        root.addWidget(self._reconnect_bar)
     
     def _build_local_panel(self):
         """构建本地面板（树控件、路径栏、搜索框）"""
@@ -506,6 +775,10 @@ class SFTPPanel(QWidget):
         self._transfer_table.setDragEnabled(False)
         self._transfer_table.setAcceptDrops(False)
         self._transfer_table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        # P1-5：拖文件到队列表 = 上传到当前远程目录（顺序在 NoDragDrop 之后，
+        # 显式重开 acceptDrops，事件经 eventFilter 拦截处理，不走内置 drop 逻辑）
+        self._transfer_table.setAcceptDrops(True)
+        self._transfer_table.installEventFilter(self)
         self._transfer_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
     
         # 垂直 Splitter：文件区域（上） + 传输队列（下），支持上下拖拽调节
@@ -536,10 +809,17 @@ class SFTPPanel(QWidget):
         self._btn_mkdir = PushButton('新建目录')
         self._btn_mkdir.clicked.connect(self._create_directory)
         btn_row.addWidget(self._btn_mkdir)
+        # P1-1：在当前远程目录打开终端标签（单向跳转，复用同目标连接参数）
+        self._btn_terminal = PushButton('终端')
+        self._btn_terminal.setToolTip('在当前远程目录打开 SSH 终端标签页')
+        self._btn_terminal.clicked.connect(self._open_terminal_here)
+        btn_row.addWidget(self._btn_terminal)
         self._btn_xftp = PushButton('Xftp')
         self._btn_xftp.clicked.connect(self._open_in_xftp)
         btn_row.addWidget(self._btn_xftp)
         btn_row.addStretch()
+        # P0-2：删除按钮文案随远程侧选中数变化（与右键"传输（上传N 项）"同口径）
+        self._tree.itemSelectionChanged.connect(self._update_delete_btn_text)
         # 连接健康指示器（状态圆点 + 延迟）
         self._lbl_health = BodyLabel('●')
         self._lbl_health.setStyleSheet('color: gray; font-size: 14px;')
@@ -562,7 +842,12 @@ class SFTPPanel(QWidget):
         sc.activated.connect(self._on_search_shortcut)
         esc = QShortcut(QKeySequence('Escape'), self)
         esc.activated.connect(self._hide_search_boxes)
-    
+        # ---- P1-4：Ctrl+C = 复制选中项全路径（与右键"复制路径"同语义）
+        # 焦点在路径框/搜索框（QLineEdit）时 Qt 会让输入框自身处理复制
+        # （QLineEdit accept ShortcutOverride），不会落到这里，无键位冲突
+        sc_copy = QShortcut(QKeySequence('Ctrl+C'), self)
+        sc_copy.activated.connect(self._copy_selected_paths)
+
         # 修复误触发"上级"默认按钮，把本地目录推到上一级
         for _btn in self.findChildren(QPushButton):
             _btn.setAutoDefault(False)
@@ -583,14 +868,64 @@ class SFTPPanel(QWidget):
         self._transport = transport
         self._log(f'[SFTP] 已连接到 {self._host}:{self._port}')
         self._lbl_status.setText('已连接')
+        self._reconnect_bar.hide()
         self._list_remote(self._remote_path)
+        # P1-3：断线重连成功后自动重试此前失败的任务（批量）
+        self._retry_failed_transfers()
+        # P2-2 步骤 1：恢复上次未完成的传输（每目标只提示一次）
+        self._offer_pending_restore()
         self._cleanup_connect_worker()
 
     def _on_sftp_connect_error(self, error):
-        """连接失败：状态栏展示原因（重连需重新打开会话）"""
+        """连接失败：状态栏展示原因 + 重连条（P1-3：不再需要关标签重开）"""
         self._log(f'[SFTP] 连接失败: {error}')
         self._lbl_status.setText(f'连接失败: {error}')
+        self._show_reconnect_bar(f'连接失败: {error}')
         self._cleanup_connect_worker()
+
+    def _show_reconnect_bar(self, text: str = '连接已断开'):
+        """显示断线重连条（P1-3，与 SSH 终端同构）"""
+        self._reconnect_label.setText(text)
+        self._reconnect_btn.setEnabled(True)
+        self._reconnect_btn.setText('重新连接')
+        self._reconnect_bar.show()
+
+    def _reconnect_clicked(self):
+        """一键重连：清理已失效的 transport，复用现有连接路径重建"""
+        if self._closing:
+            return
+        self._reconnect_btn.setEnabled(False)
+        self._reconnect_btn.setText('重连中...')
+        self._lbl_status.setText('正在重新连接...')
+        self._log(f'[SFTP] 正在重新连接 {self._host}:{self._port} ...')
+        self._cleanup_dead_transport()
+        self._connect_and_list()
+
+    def _cleanup_dead_transport(self):
+        """关闭已失效的 transport（重连前/列目录发现失效时清理）"""
+        if self._transport is not None:
+            try:
+                safe_close_transport(self._transport)
+            except Exception:
+                pass
+            self._transport = None
+
+    def _retry_failed_transfers(self):
+        """重连成功后批量重试队列表中状态为失败的任务（P1-3）"""
+        retried = 0
+        for row in range(self._transfer_table.rowCount()):
+            status_item = self._transfer_table.item(row, 3)
+            if status_item and status_item.text().startswith('失败'):
+                self._transfer_retry_row(row)
+                retried += 1
+        if retried:
+            self._log(f'[SFTP] 已自动重新开始 {retried} 个失败任务（均从头传输）')
+
+    def _open_terminal_here(self):
+        """P1-1：请求在同一目标的终端标签中打开当前远程目录"""
+        path = self._remote_path or '/'
+        self.open_terminal_here.emit(path)
+        self._log(f'[SFTP] 请求在终端中打开目录: {path}')
 
     def _cleanup_connect_worker(self):
         """非阻塞释放连接 worker：运行中先 abort 再挂强引用防 GC 崩溃"""
@@ -675,12 +1010,13 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 远程列目录
     def _list_remote(self, path):
-        """列远程目录：transport 失效直接置断连态；串行互斥（进行中记待办）"""
+        """列远程目录：transport 失效直接置断连态（P1-3：弹重连条）；串行互斥（进行中记待办）"""
         if self._transport is None or not self._transport.is_active():
             if self._transport is not None:
                 self._lbl_status.setText('连接已断开')
-                self._log('[SFTP] Transport 已失效，请重新打开窗口')
-                self._transport = None
+                self._log('[SFTP] Transport 已失效')
+                self._cleanup_dead_transport()
+                self._show_reconnect_bar('连接已断开')
             return
         if self._listing:
             self._pending_remote_path = path
@@ -951,8 +1287,12 @@ class SFTPPanel(QWidget):
 
     # ------------------------------------------------------------------ 拖拽上传
     def eventFilter(self, obj, event):
-        """远程文件列表拖放事件：从资源管理器拖入文件/目录即上传到当前远程目录"""
-        if obj is self._tree:
+        """远程文件列表/传输队列表拖放事件：从资源管理器拖入文件/目录即上传到当前远程目录
+
+        P1-5：队列表同样接收拖入（用户自然会把文件拖向"传输队列"，
+        与拖到远程树等价，均上传到当前远程目录）。
+        """
+        if obj is self._tree or obj is self._transfer_table:
             etype = event.type()
             if etype == QEvent.Type.DragEnter:
                 if event.mimeData().hasUrls():
@@ -983,6 +1323,9 @@ class SFTPPanel(QWidget):
         for c in range(col_count):
             item = table.item(from_row, c)
             items_data.append(item.text() if item else '')
+        # P2-7：tid 存于 UserRole，随行重建搬运（丢了行映射就断了）
+        src_item = table.item(from_row, 0)
+        row_tid = src_item.data(Qt.ItemDataRole.UserRole) if src_item else None
         # 保存进度条值
         pb_widget = table.cellWidget(from_row, 1)
         pb_value = pb_widget.value() if pb_widget else 0
@@ -997,7 +1340,10 @@ class SFTPPanel(QWidget):
         table.insertRow(to_row)
 
         # 4. 恢复数据到新行
-        table.setItem(to_row, 0, QTableWidgetItem(items_data[0]))
+        name_item = QTableWidgetItem(items_data[0])
+        if row_tid is not None:
+            name_item.setData(Qt.ItemDataRole.UserRole, row_tid)  # P2-7
+        table.setItem(to_row, 0, name_item)
         pb = ProgressBar()
         pb.setRange(0, 100)
         pb.setValue(pb_value)
@@ -1009,27 +1355,19 @@ class SFTPPanel(QWidget):
         self._rebuild_transfer_row_map()
 
     def _rebuild_transfer_row_map(self):
-        """根据文件名重建 _transfer_workers 中的 row 映射"""
-        # row 是进度回调定位进度条的坐标，拖拽调序后所有行号整体位移，
-        # 必须重建映射，否则进度/状态会写串到别的行
-        # 构建“文件名 -> tid”的映射
-        name_to_tid = {}
-        for tid, info in self._transfer_workers.items():
-            worker = info.get('worker')
-            if worker:
-                fname = getattr(worker, '_filename', '') or getattr(worker, '_dir_name', '')
-                if fname:
-                    name_to_tid[fname] = tid
-        # 遍历表格行，更新 row 映射
+        """拖拽调序后重建 _transfer_workers 中的 row 映射
+
+        P2-7：直接读第 0 列 item 的 UserRole 里存的 tid（建行时写入），
+        不再用"文件名是否出现在行文本里"的子串匹配启发式——
+        同时传 a.txt 与 aa.txt（或名字互相包含的目录）时会串行。
+        """
         for row in range(self._transfer_table.rowCount()):
             item = self._transfer_table.item(row, 0)
             if not item:
                 continue
-            text = item.text()
-            for fname, tid in name_to_tid.items():
-                if fname in text:
-                    self._transfer_workers[tid]['row'] = row
-                    break
+            tid = item.data(Qt.ItemDataRole.UserRole)
+            if tid is not None and tid in self._transfer_workers:
+                self._transfer_workers[tid]['row'] = row
 
     def _handle_drop_files(self, event):
         """解析拖入的 QUrl 列表，逐个触发上传到当前远程目录"""
@@ -1149,23 +1487,28 @@ class SFTPPanel(QWidget):
         self._next_transfer_id += 1
         row = self._transfer_table.rowCount()
         self._transfer_table.insertRow(row)
-        self._transfer_table.setItem(row, 0, QTableWidgetItem(f'{op_label}: {filename}'))
+        name_item = QTableWidgetItem(f'{op_label}: {filename}')
+        # P2-7：tid 写入第 0 列 UserRole——拖拽调序后行映射直读，
+        # 不再用"文件名是否出现在行文本里"的子串匹配（a.txt/aa.txt 会串行）
+        name_item.setData(Qt.ItemDataRole.UserRole, tid)
+        self._transfer_table.setItem(row, 0, name_item)
         pb = ProgressBar()
         pb.setRange(0, 100)
         pb.setValue(0)
         self._transfer_table.setCellWidget(row, 1, pb)
         self._transfer_table.setItem(row, 2, QTableWidgetItem('0 B/s'))
-        self._transfer_table.setItem(row, 3, QTableWidgetItem('传输中'))
+        self._transfer_table.setItem(row, 3, QTableWidgetItem('排队中'))
         now = time.time()
         info = {'worker': worker, 'row': row, 'start_time': now,
-                'last_bytes': 0, 'last_time': now, 'speed': 0.0,
+                'last_bytes': 0, 'last_time': now, 'speed': 0.0, 'state': 'queued',
                 # 重试所需参数快照：(conn_params, op, local_path, remote_path)
                 'params': (self._conn_params, op, local_path, remote_path)}
         self._transfer_workers[tid] = info
         worker.progress.connect(lambda t, tot, _tid=tid: self._on_transfer_progress(_tid, t, tot))
         worker.success.connect(lambda msg, _tid=tid: self._on_transfer_success(_tid, msg))
         worker.error.connect(lambda err, _tid=tid: self._on_transfer_error(_tid, err))
-        worker.start()
+        # P2-1：经并发闸门启动（满载时排队，有空位再启动）
+        self._launch_or_queue_transfer(tid)
 
     def _on_transfer_progress(self, tid, transferred, total):
         """字节进度 → 进度条百分比 + 限速显示（≥ 0.5s 采样一次）"""
@@ -1189,9 +1532,12 @@ class SFTPPanel(QWidget):
             speed_item.setText(f'{self._format_size(info["speed"])}/s')
 
     def _on_transfer_success(self, tid, msg):
-        """传输完成：置 100%/完成态；下载额外发全局信号联动主窗口刷视频列表"""
+        """传输完成：置 100%/完成态；P1-10 按需刷新（仅目标目录==当前浏览目录，
+        400ms 去抖合并），不再无条件重列两侧目录打断用户浏览"""
         info = self._transfer_workers.get(tid)
         if info:
+            info['state'] = 'done'  # P2-1：释放并发槽位
+            self._schedule_pending_save()  # P2-2：任务完成即从落盘队列移除
             row = info['row']
             pb = self._transfer_table.cellWidget(row, 1)
             if pb:
@@ -1206,22 +1552,71 @@ class SFTPPanel(QWidget):
                 if local_path:
                     GLOBAL_SIGNALS.file_downloaded.emit(
                         _videos_top_dir(local_path), local_path, 1)
+            # P1-10：按任务类型计算受影响目录，与当前浏览目录一致才列入待刷新
+            if params:
+                self._schedule_refresh_for(params)
         # 注意：不在此处删除 info，保留 params 供"打开所在文件夹"使用；
         # worker 线程已结束，行被删除/清空/关闭时统一释放
+        self._pump_transfer_queue()  # P2-1：空出一个并发位，启动排队任务
         self._lbl_status.setText(msg)
         self._log(f'[SFTP] {msg}')
-        self._list_remote(self._remote_path)
-        self._list_local(self._local_path)
+
+    def _schedule_refresh_for(self, params):
+        """P1-10：根据任务参数决定刷新哪一侧（去抖合并，到期时再校验当前目录）"""
+        _conn, op, local_path, remote_path = params
+        if op in ('upload', 'upload_dir'):
+            # 上传影响远程侧目标目录
+            if self._same_remote_dir(self._posix_dirname(remote_path)):
+                self._pending_refresh.add('remote')
+        elif op in ('download', 'download_dir'):
+            target = os.path.dirname(os.path.normpath(local_path or ''))
+            if target and self._same_local_dir(target):
+                self._pending_refresh.add('local')
+        else:
+            # 快速操作（delete/mkdir/rename/create_file）都在当前远程目录
+            if self._same_remote_dir(self._posix_dirname(remote_path)):
+                self._pending_refresh.add('remote')
+        if self._pending_refresh and not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    @staticmethod
+    def _posix_dirname(path):
+        """POSIX 风格取父目录（远程路径用，root 的父仍是 root）"""
+        p = (path or '').rstrip('/')
+        return p.rsplit('/', 1)[0] if '/' in p else '/'
+
+    def _same_remote_dir(self, target) -> bool:
+        cur = (self._remote_path or '').rstrip('/') or '/'
+        return (target or '').rstrip('/') == cur
+
+    def _same_local_dir(self, target) -> bool:
+        try:
+            return (os.path.normcase(os.path.normpath(target))
+                    == os.path.normcase(os.path.normpath(self._local_path)))
+        except Exception:
+            return False
+
+    def _flush_pending_refresh(self):
+        """去抖到期：执行挂起的目录刷新（此刻再取当前目录，保留代际号机制）"""
+        pending = self._pending_refresh
+        self._pending_refresh = set()
+        if 'remote' in pending:
+            self._list_remote(self._remote_path)
+        if 'local' in pending:
+            self._list_local(self._local_path)
 
     def _on_transfer_error(self, tid, error):
-        """传输失败：行内置失败原因；info 保留供右键重试"""
+        """传输失败：行内置失败原因；info 保留供右键"重新开始" """
         info = self._transfer_workers.get(tid)
         if info:
+            info['state'] = 'failed'  # P2-1：释放并发槽位
+            self._schedule_pending_save()  # P2-2：失败任务不留在待恢复队列里（避免开机就问）
             row = info['row']
             status_item = self._transfer_table.item(row, 3)
             if status_item:
                 status_item.setText(f'失败: {error}')
-        # 保留 info（含 params）供右键"重试"使用，行删除时统一释放 worker
+        # 保留 info（含 params）供右键"重新开始"使用，行删除时统一释放 worker
+        self._pump_transfer_queue()  # P2-1：空出一个并发位，启动排队任务
         self._lbl_status.setText(f'操作失败: {error}')
         self._log(f'[SFTP] 操作失败: {error}')
 
@@ -1251,7 +1646,9 @@ class SFTPPanel(QWidget):
         self._act_t_delete_all.triggered.connect(self._transfer_delete_all)
         menu.addAction(self._act_t_delete_all)
         menu.addSeparator()
-        self._act_t_retry = Action(FluentIcon.SYNC, '重试', self)
+        # P2-2：文案改"重新开始"——重传是从头开始而非断点续传，
+        # "重试"会让用户误以为能续传省流量（2GB 传到 99% 重试又从 0 开始）
+        self._act_t_retry = Action(FluentIcon.SYNC, '重新开始', self)
         self._act_t_retry.triggered.connect(lambda: self._transfer_retry_row(self._ctx_transfer_row))
         menu.addAction(self._act_t_retry)
         self._act_t_open_folder = Action(FluentIcon.FOLDER, '打开所在文件夹', self)
@@ -1379,30 +1776,37 @@ class SFTPPanel(QWidget):
         return None
 
     def _transfer_pause_row(self, row):
-        """暂停指定行任务（下次进度回调处阻塞生效）"""
+        """暂停指定行任务（下次进度回调处阻塞生效）；P2-1 起按状态机判定"""
         tid = self._find_tid_by_row(row)
         if tid is None:
             return
         info = self._transfer_workers[tid]
+        if info.get('state') != 'running':
+            return
         worker = info['worker']
         if hasattr(worker, 'pause'):
             worker.pause()
+        info['state'] = 'paused'
         status_item = self._transfer_table.item(row, 3)
         if status_item:
             status_item.setText('已暂停')
         name_item = self._transfer_table.item(row, 0)
         name = name_item.text() if name_item else f'任务{tid}'
         self._log(f'[SFTP] 已暂停传输: {name}')
+        self._schedule_pending_save()
 
     def _transfer_resume_row(self, row):
-        """恢复指定行任务并重置速度采样基准"""
+        """恢复指定行任务并重置速度采样基准；P2-1 起按状态机判定"""
         tid = self._find_tid_by_row(row)
         if tid is None:
             return
         info = self._transfer_workers[tid]
+        if info.get('state') != 'paused':
+            return
         worker = info['worker']
         if hasattr(worker, 'resume'):
             worker.resume()
+        info['state'] = 'running'
         info['last_time'] = time.time()
         info['speed'] = 0.0
         status_item = self._transfer_table.item(row, 3)
@@ -1411,63 +1815,76 @@ class SFTPPanel(QWidget):
         name_item = self._transfer_table.item(row, 0)
         name = name_item.text() if name_item else f'任务{tid}'
         self._log(f'[SFTP] 已继续传输: {name}')
+        self._schedule_pending_save()
 
     def _transfer_pause_all(self):
-        """暂停全部传输中任务"""
+        """暂停全部传输中任务（P2-1 起按状态机判定，排队中任务不受影响）"""
         count = 0
         for tid, info in list(self._transfer_workers.items()):
-            row = info['row']
-            if row < 0:
+            if info.get('state') != 'running':
                 continue
+            row = info['row']
             status_item = self._transfer_table.item(row, 3)
-            if status_item and status_item.text() == '传输中':
-                worker = info['worker']
-                if hasattr(worker, 'pause'):
-                    worker.pause()
+            worker = info['worker']
+            if hasattr(worker, 'pause'):
+                worker.pause()
+            info['state'] = 'paused'
+            if status_item:
                 status_item.setText('已暂停')
-                count += 1
+            count += 1
         if count:
             self._log(f'[SFTP] 已暂停全部传输 ({count} 个任务)')
+            self._schedule_pending_save()
 
     def _transfer_resume_all(self):
         """恢复全部已暂停任务"""
         count = 0
         for tid, info in list(self._transfer_workers.items()):
-            row = info['row']
-            if row < 0:
+            if info.get('state') != 'paused':
                 continue
+            row = info['row']
             status_item = self._transfer_table.item(row, 3)
-            if status_item and status_item.text() == '已暂停':
-                worker = info['worker']
-                if hasattr(worker, 'resume'):
-                    worker.resume()
-                info['last_time'] = time.time()
-                info['speed'] = 0.0
+            worker = info['worker']
+            if hasattr(worker, 'resume'):
+                worker.resume()
+            info['state'] = 'running'
+            info['last_time'] = time.time()
+            info['speed'] = 0.0
+            if status_item:
                 status_item.setText('传输中')
-                count += 1
+            count += 1
         if count:
             self._log(f'[SFTP] 已继续全部传输 ({count} 个任务)')
+            self._schedule_pending_save()
 
     def _transfer_delete_row(self, row):
-        """删除指定行任务：运行中先 stop，删行后修正后续行的行号映射"""
+        """删除指定行任务：运行中先 stop，删行后修正后续行的行号映射；
+        P2-1：排队任务出队，删的是占位任务时泵队列补位"""
         tid = self._find_tid_by_row(row)
         name_item = self._transfer_table.item(row, 0)
         name = name_item.text() if name_item else f'任务{row}'
         if tid is not None:
             info = self._transfer_workers.get(tid)
             if info:
+                was_active = info.get('state') in ('running', 'paused')
+                if tid in self._queued_transfers:
+                    self._queued_transfers.remove(tid)
                 worker = info['worker']
                 if hasattr(worker, 'stop'):
                     worker.stop()
                 self._safe_delete_transfer_worker(tid)
+                if was_active:
+                    self._pump_transfer_queue()
         self._transfer_table.removeRow(row)
         for t, inf in self._transfer_workers.items():
             if inf['row'] > row:
                 inf['row'] -= 1
         self._log(f'[SFTP] 已删除传输: {name}')
+        self._schedule_pending_save()
 
     def _transfer_delete_all(self):
-        """清空传输队列（逐个 stop 后释放 worker）"""
+        """清空传输队列（逐个 stop 后释放 worker；P2-1：排队表一并清空）"""
+        self._queued_transfers = []
         for tid in list(self._transfer_workers.keys()):
             info = self._transfer_workers.get(tid)
             if info:
@@ -1477,16 +1894,21 @@ class SFTPPanel(QWidget):
                 self._safe_delete_transfer_worker(tid)
         self._transfer_table.setRowCount(0)
         self._log('[SFTP] 已清空传输队列')
+        self._schedule_pending_save()
 
     def _transfer_retry_row(self, row):
-        """失败任务一键重试：从 info['params'] 取参数重建 worker 发起传输"""
+        """失败任务重新开始：从 info['params'] 取参数重建 worker 发起传输
+
+        P2-2：重传从头开始（非断点续传），日志/文案明确"从头传输"；
+        P2-1：重建任务经并发闸门（满载时排队而非立即起第 N+1 条连接）。
+        """
         tid = self._find_tid_by_row(row)
         if tid is None:
             return
         info = self._transfer_workers.get(tid)
         params = info.get('params') if info else None
         if not params or not params[1]:
-            self._log('[SFTP] 该任务缺少重试参数，无法重试')
+            self._log('[SFTP] 该任务缺少重试参数，无法重新开始')
             return
         conn_params, op, local_path, remote_path = params
         if op == 'upload_dir':
@@ -1518,16 +1940,14 @@ class SFTPPanel(QWidget):
         speed_item = self._transfer_table.item(row, 2)
         if speed_item:
             speed_item.setText('0 B/s')
-        status_item = self._transfer_table.item(row, 3)
-        if status_item:
-            status_item.setText('传输中')
         worker.progress.connect(lambda t, tot, _tid=tid: self._on_transfer_progress(_tid, t, tot))
         worker.success.connect(lambda msg, _tid=tid: self._on_transfer_success(_tid, msg))
         worker.error.connect(lambda err, _tid=tid: self._on_transfer_error(_tid, err))
-        worker.start()
+        # P2-1：经并发闸门（状态列随启动/排队更新）
+        self._launch_or_queue_transfer(tid)
         name_item = self._transfer_table.item(row, 0)
         name = name_item.text() if name_item else f'任务{tid}'
-        self._log(f'[SFTP] 重试传输: {name}')
+        self._log(f'[SFTP] 重新开始传输（从头传输）: {name}')
 
     def _transfer_open_folder(self, row):
         """完成行：在资源管理器中定位本地文件（下载用目标路径，上传用源路径，均为 local_path）"""
@@ -1565,33 +1985,67 @@ class SFTPPanel(QWidget):
                     inf['row'] -= 1
         if done_rows:
             self._log(f'[SFTP] 已清除 {len(done_rows)} 个完成的传输记录')
+            self._schedule_pending_save()
 
     # ------------------------------------------------------------------ 删除 / 新建目录
     def _run_quick_op(self, op, remote_path, log_msg, local_path=''):
-        """执行快速操作的通用模板（创建 worker → 注册 → 启动）"""
+        """快速操作入传输队列（P1-9：产生队列表行与状态，失败可右键重试）
+
+        与上传/下载同一套 _start_transfer_op 通道（params 快照齐全），
+        进度条对零字节操作无意义但状态列可见（传输中→完成/失败）。
+        """
         self._log(log_msg)
         worker = SFTPOperationWorker(self._conn_params, op, local_path, remote_path)
-        worker.success.connect(self._on_quick_op_success)
-        worker.error.connect(self._on_quick_op_error)
-        tid = self._next_transfer_id
-        self._next_transfer_id += 1
-        self._transfer_workers[tid] = {'worker': worker, 'row': -1, 'start_time': time.time()}
-        worker.success.connect(lambda msg, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.error.connect(lambda err, _tid=tid: self._safe_delete_transfer_worker(_tid))
-        worker.start()
+        label = _QUICK_OP_LABELS.get(op, op)
+        self._start_transfer_op(worker, os.path.basename(remote_path.rstrip('/')),
+                                label, 0, op=op, local_path=local_path,
+                                remote_path=remote_path)
+
+    def _selected_remote_entries(self):
+        """右侧远程面板选中项（含 currentItem 兜底；空列表表示无选中）"""
+        items = self._tree.selectedItems()
+        if not items:
+            item = self._tree.currentItem()
+            if item is not None:
+                items = [item]
+        entries = [it.data(0, Qt.ItemDataRole.UserRole) for it in items]
+        return [e for e in entries if e]
+
+    def _confirm_delete_remote(self, entries) -> bool:
+        """删除远程条目前的二次确认（P0-2：工具栏按钮与右键菜单共用口径）"""
+        if not entries:
+            return False
+        if len(entries) == 1:
+            e = entries[0]
+            if e['is_dir']:
+                msg = f'确定要删除远程目录 "{e["name"]}" 吗？\n注意：仅能删除空目录。'
+            else:
+                msg = f'确定要删除远程文件 "{e["name"]}" 吗？'
+        else:
+            msg = (f'确定要删除选中的 {len(entries)} 个远程文件/目录吗？\n'
+                   '注意：目录仅能删除空目录。')
+        dlg = MessageBox('确认删除', msg, self)
+        dlg.yesButton.setText('删除')
+        dlg.cancelButton.setText('取消')
+        return bool(dlg.exec())
+
+    def _update_delete_btn_text(self):
+        """P0-2：删除按钮文案随远程侧选中数变化（与右键"传输（上传N 项）"同口径）"""
+        n = len(self._tree.selectedItems())
+        self._btn_delete.setText(f'删除（{n} 项）' if n > 1 else '删除')
 
     def _delete_selected(self):
-        """删除远程当前选中项（目录走 rmdir，仅能删空目录）"""
-        item = self._tree.currentItem()
-        if not item:
+        """删除远程选中项（P0-2：支持多选批量；二次确认与右键菜单同口径）"""
+        entries = self._selected_remote_entries()
+        if not entries:
             self._log('[SFTP] 请先在右侧远程面板选择要删除的文件或目录')
             return
-        entry = item.data(0, Qt.ItemDataRole.UserRole)
-        if not entry:
+        if not self._confirm_delete_remote(entries):
             return
-        remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
-        op = 'rmdir' if entry['is_dir'] else 'delete'
-        self._run_quick_op(op, remote_path, f'[SFTP] 删除: {remote_path}')
+        for entry in entries:
+            remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
+            op = 'rmdir' if entry['is_dir'] else 'delete'
+            self._run_quick_op(op, remote_path, f'[SFTP] 删除: {remote_path}')
 
     def _create_directory(self):
         """在当前远程目录新建目录（输入名后走 mkdir 任务）"""
@@ -1624,16 +2078,8 @@ class SFTPPanel(QWidget):
             dlg.exec()
 
     # ------------------------------------------------------------------ 回调
-    def _on_quick_op_success(self, msg):
-        """快速操作（删除/新建/重命名）成功：状态栏提示并重列当前目录"""
-        self._lbl_status.setText(msg)
-        self._log(f'[SFTP] {msg}')
-        self._list_remote(self._remote_path)
-
-    def _on_quick_op_error(self, error):
-        """快速操作失败：仅状态栏与日志提示"""
-        self._lbl_status.setText(f'操作失败: {error}')
-        self._log(f'[SFTP] 操作失败: {error}')
+    # （P1-9 后快速操作统一走传输队列回调 _on_transfer_success/_on_transfer_error，
+    #  旧 _on_quick_op_success/_on_quick_op_error 已移除）
 
     # ------------------------------------------------------------------ 工具
     def _ask_name(self, title, label, default=''):
@@ -1705,6 +2151,31 @@ class SFTPPanel(QWidget):
             return [it.data(0, Qt.ItemDataRole.UserRole) for it in items
                     if it.data(0, Qt.ItemDataRole.UserRole)]
         return [fallback]
+
+    def _copy_selected_paths(self):
+        """P1-4：Ctrl+C 复制选中项全路径（优先远程侧，其次本地侧；多选换行分隔）
+
+        焦点在 QLineEdit（路径框/搜索框）时由输入框自身处理复制
+        （QLineEdit accept ShortcutOverride），本回调不会被触发。
+        """
+        focus_widget = self.focusWidget()
+        if (focus_widget is not None and self._right_panel is not None
+                and self._right_panel.isAncestorOf(focus_widget)):
+            entries = self._selected_remote_entries()
+            paths = [self._remote_path.rstrip('/') + '/' + e['name']
+                     for e in entries]
+            if paths:
+                QApplication.clipboard().setText('\n'.join(paths))
+                self._log(f'[SFTP] 已复制 {len(paths)} 个远程路径')
+            return
+        if (focus_widget is not None and self._left_panel is not None
+                and self._left_panel.isAncestorOf(focus_widget)):
+            items = self._local_tree.selectedItems()
+            datas = [it.data(0, Qt.ItemDataRole.UserRole) for it in items]
+            paths = [d['path'] for d in datas if d]
+            if paths:
+                QApplication.clipboard().setText('\n'.join(paths))
+                self._log(f'[SFTP] 已复制 {len(paths)} 个本地路径')
 
     def _upload_items(self, items):
         """批量上传（右键多选传输入口）：逐项调用单文件上传逻辑，目录走目录传输"""
@@ -1823,15 +2294,8 @@ class SFTPPanel(QWidget):
             self._log(f'[SFTP] 删除失败: {e}')
 
     def _ctx_delete_remote(self, entry):
-        """远程文件删除（二次确认；目录仅能删空目录）"""
-        if entry['is_dir']:
-            msg = f'确定要删除远程目录 "{entry["name"]}" 吗？\n注意：仅能删除空目录。'
-        else:
-            msg = f'确定要删除远程文件 "{entry["name"]}" 吗？'
-        dlg = MessageBox('确认删除', msg, self)
-        dlg.yesButton.setText('删除')
-        dlg.cancelButton.setText('取消')
-        if not dlg.exec():
+        """远程文件删除（二次确认；目录仅能删空目录）——P0-2：与工具栏删除共用确认口径"""
+        if not self._confirm_delete_remote([entry]):
             return
         remote_path = self._remote_path.rstrip('/') + '/' + entry['name']
         op = 'rmdir' if entry['is_dir'] else 'delete'
@@ -1892,9 +2356,20 @@ class SFTPPanel(QWidget):
         if self._closing:
             return
         self._closing = True
-        # 停止健康检测定时器
+        # P2-2 步骤 1：关标签/退应用前先把未完成任务快照写盘（必须在下面清空
+        # _queued_transfers 与释放 worker 之前，否则队列已经空了）
+        pending_timer = getattr(self, '_pending_save_timer', None)
+        if pending_timer is not None:
+            pending_timer.stop()
+        self._flush_pending_queue()
+        # 停止健康检测定时器与待刷新定时器（P1-10）
         if hasattr(self, '_health_timer'):
             self._health_timer.stop()
+        if hasattr(self, '_refresh_timer'):
+            self._refresh_timer.stop()
+        self._pending_refresh = set()
+        # P2-1：排队任务不再启动（worker 未 start，仅置停标志后销毁）
+        self._queued_transfers = []
         # 等待健康检测 worker 完成
         if self._health_worker and self._health_worker.isRunning():
             self._health_worker.wait(1000)
