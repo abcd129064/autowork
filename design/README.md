@@ -28,6 +28,7 @@ design/
 | [remote_page_v3.html](remote_page_v3.html) | 远程页 · 二期设计稿（RemoteHub v3 · 连接感知） | `windows/remote_session/remote_hub.py` |
 | [remote_page_v3_065.html](remote_page_v3_065.html) | 远程页 v3 变体 · 锁定 frps 0.65 口径 | `windows/remote_session/remote_hub.py`（**当前生效版本**） |
 | [remote_session_v2.html](remote_session_v2.html) | 远程会话页 · 二期设计稿（Remote Session v2） | `windows/remote_session/` |
+| [dahua_camera_tool.html](dahua_camera_tool.html) | 工具页第 5 子页「相机工具」设计稿 v1（云台预览 + OSD 叠加 + 批量下发，控件↔SDK API 标注齐全） | 待实施（调研见 `docs/大华相机工具集成调研2026-10-06.md`） |
 
 同一页面的多个版本**全部保留**，用于回溯设计演进；判断当前生效版本看上表最后一列。
 

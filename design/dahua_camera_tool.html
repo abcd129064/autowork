@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>相机工具页 设计稿 v1 — autowork 工具页第 5 子页</title>
+<style>
+  :root{
+    --bg:#1b1e26; --panel:#242836; --panel2:#2b3040; --line:#3a4056;
+    --txt:#e8eaf2; --txt2:#9aa1b5; --accent:#5b8cff; --accent2:#3f6ae0;
+    --ok:#3fbf7f; --warn:#e8a33d; --err:#e05c5c; --mono:'Consolas',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:14px/1.6 'Microsoft YaHei',sans-serif;padding:24px;max-width:1440px;margin:0 auto}
+  h1{font-size:20px;margin-bottom:4px}
+  .meta{color:var(--txt2);font-size:12px;margin-bottom:20px}
+  .meta b{color:var(--accent)}
+  .page{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;box-shadow:0 8px 32px rgba(0,0,0,.35)}
+  /* 顶部 Pivot 标签 */
+  .pivot{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .pivot .tab{padding:8px 18px;color:var(--txt2);font-size:13px;cursor:pointer;border-bottom:2px solid transparent}
+  .pivot .tab.on{color:var(--txt);border-bottom-color:var(--accent);font-weight:600}
+  .grid{display:grid;grid-template-columns:1fr 320px;gap:14px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .card h3{font-size:13px;color:var(--txt2);font-weight:600;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+  .tag{font-size:10px;padding:1px 8px;border-radius:8px;background:rgba(91,140,255,.15);color:var(--accent)}
+  .tag.warn{background:rgba(232,163,61,.15);color:var(--warn)}
+  /* 登录行 */
+  .loginrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .field{display:flex;flex-direction:column;gap:2px}
+  .field label{font-size:10px;color:var(--txt2)}
+  .inp{background:#1e2230;border:1px solid var(--line);border-radius:6px;color:var(--txt);padding:6px 10px;font-size:13px;min-width:130px;font-family:var(--mono)}
+  .btn{background:var(--accent2);border:none;border-radius:6px;color:#fff;padding:7px 18px;font-size:13px;cursor:pointer}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--txt2)}
+  .btn.ok{background:var(--ok)}
+  .badge{font-size:11px;padding:2px 10px;border-radius:10px}
+  .badge.on{background:rgba(63,191,127,.15);color:var(--ok)}
+  .badge.off{background:rgba(224,92,92,.15);color:var(--err)}
+  /* 预览区 */
+  .preview{position:relative;background:linear-gradient(160deg,#2e4636 0%,#22331f 45%,#1c2a1c 100%);border-radius:8px;aspect-ratio:16/9;overflow:hidden;border:1px solid var(--line)}
+  .preview .osd-ch{position:absolute;top:12px;left:14px;color:#fff;font-size:15px;text-shadow:0 1px 3px #000;opacity:.92}
+  .preview .osd-time{position:absolute;bottom:12px;right:16px;color:#fff;font-size:14px;font-family:var(--mono);text-shadow:0 1px 3px #000;opacity:.92}
+  .preview .osd-custom{position:absolute;top:44%;left:38%;color:#ffd75e;font-size:13px;text-shadow:0 1px 3px #000;opacity:.95}
+  .preview .hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--txt2);font-size:12px}
+  .ptbar{display:flex;gap:8px;margin-top:10px}
+  .ptbar .btn{padding:6px 14px;font-size:12px}
+  .ptbar .sp{flex:1}
+  /* PTZ 方向盘 */
+  .dpad{display:grid;grid-template-columns:repeat(3,56px);gap:6px;justify-content:center;margin:8px 0}
+  .dpad .k{height:40px;border-radius:7px;background:#333a4e;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--txt);cursor:pointer;user-select:none}
+  .dpad .k:active{background:var(--accent2)}
+  .dpad .k.dis{opacity:.32;cursor:not-allowed}
+  .dpad .k span{opacity:.7;font-size:10px}
+  .zoomrow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
+  .zoomrow .zg{background:#1e2230;border:1px solid var(--line);border-radius:7px;padding:5px;text-align:center}
+  .zoomrow .zg .t{font-size:10px;color:var(--txt2);margin-bottom:4px}
+  .zoomrow .zg .bs{display:flex;gap:4px}
+  .zoomrow .zg .b{flex:1;background:#333a4e;border-radius:5px;padding:3px 0;font-size:12px;cursor:pointer}
+  .speed{display:flex;align-items:center;gap:8px;margin:6px 0 2px;font-size:12px;color:var(--txt2)}
+  .slider{flex:1;height:4px;background:var(--line);border-radius:2px;position:relative}
+  .slider i{position:absolute;left:0;top:0;height:100%;width:40%;background:var(--accent);border-radius:2px}
+  .slider b{position:absolute;left:40%;top:50%;width:12px;height:12px;background:#fff;border-radius:50%;transform:translate(-50%,-50%)}
+  /* 预置点 */
+  .presets{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+  .prow{display:flex;gap:6px;align-items:center;background:#1e2230;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:12px}
+  .prow .no{width:22px;height:22px;border-radius:50%;background:var(--accent2);display:flex;align-items:center;justify-content:center;font-size:11px}
+  .prow .nm{flex:1;color:var(--txt)}
+  .prow .a{color:var(--accent);cursor:pointer;font-size:11px;margin-left:4px}
+  .prow .a.d{color:var(--err)}
+  /* OSD 表单 */
+  .osd{margin-top:14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  .osd .card{min-height:190px}
+  .osd label.cb{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--txt);margin:3px 0}
+  .cb i{width:13px;height:13px;border-radius:3px;border:1px solid var(--line);display:inline-block;background:#1e2230}
+  .cb i.on{background:var(--accent);border-color:var(--accent);position:relative}
+  .cb i.on:after{content:'✓';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;font-style:normal}
+  .frm{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-top:8px}
+  .frm .inp{min-width:0;width:100%;padding:4px 8px;font-size:12px}
+  .frm .full{grid-column:1/-1}
+  .mini{display:flex;gap:8px;margin-top:10px}
+  .mini .btn{padding:5px 16px;font-size:12px}
+  .note{font-size:11px;color:var(--txt2);margin-top:8px;line-height:1.7}
+  .note code{font-family:var(--mono);color:var(--accent);font-size:10px}
+  /* 底部标注 */
+  .legend{margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:6px 28px;font-size:12px;color:var(--txt2)}
+  .legend b{color:var(--txt);font-weight:600}
+  .legend code{font-family:var(--mono);color:#8ab0ff;font-size:11px}
+</style>
+</head>
+<body>
+
+<h1>autowork · 工具页 →「相机工具」设计稿 v1</h1>
+<div class="meta">
+  归属 <b>main_window/tool_hub.py · ToolHub 第 5 子页</b>（同 单杆视频/端口占用/上传清单 模式）｜
+  参考 UI：大华 RealPlayAndPTZControl（云台）+ TestOSD（OSD 叠加），两窗口合并为一页双卡｜
+  实现路径：<b>官方 Python NetSDK</b>（登录/预览/PTZControlEx2/GetConfig·SetConfig）
+</div>
+
+<div class="page">
+  <!-- Pivot -->
+  <div class="pivot">
+    <div class="tab on">🎥 云台与预览</div>
+    <div class="tab">🔤 OSD 叠加</div>
+    <div class="tab">📤 批量下发（P2）</div>
+  </div>
+
+  <!-- 登录行 -->
+  <div class="loginrow">
+    <div class="field"><label>设备地址（支持隧道 host:port）</label><input class="inp" value="49.235.34.253 : 4238"></div>
+    <div class="field"><label>用户名</label><input class="inp" value="admin" style="min-width:90px"></div>
+    <div class="field"><label>密码（DPAPI 存储）</label><input class="inp" type="password" value="••••••••" style="min-width:110px"></div>
+    <button class="btn">连 接</button>
+    <button class="btn ghost">断 开</button>
+    <span class="badge on">● 已连接 · 010020030001481</span>
+    <span class="badge off">固定镜头机型</span>
+  </div>
+
+  <div class="grid">
+    <!-- 左：预览 -->
+    <div class="card">
+      <h3>实时预览 <span class="tag">RealPlayEx + SetRealDataCallBackEx2(RAW_DATA)</span></h3>
+      <div class="preview">
+        <div class="osd-ch">台球厅-A01</div>
+        <div class="osd-custom">⚠ 8号桌维修中</div>
+        <div class="osd-time">2026-10-06 23:59:07</div>
+      </div>
+      <div class="ptbar">
+        <button class="btn ok">▶ 开始预览</button>
+        <button class="btn ghost">■ 停止</button>
+        <span class="sp"></span>
+        <button class="btn ghost">📷 抓图存档</button>
+        <button class="btn ghost">⤢ 全屏</button>
+        <span class="badge off">辅码流(预览用,省带宽)</span>
+      </div>
+    </div>
+
+    <!-- 右：云台 + 预置点 -->
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card">
+        <h3>云台控制 <span class="tag">PTZControlEx2 · 按住发 Start / 松开发 Stop</span></h3>
+        <div class="speed">速度 <div class="slider"><i></i><b></b></div> 4</div>
+        <div class="dpad">
+          <div class="k dis">↖</div><div class="k dis">↑</div><div class="k dis">↗</div>
+          <div class="k dis">←</div><div class="k" style="opacity:.5"><span>巡航</span></div><div class="k dis">→</div>
+          <div class="k dis">↙</div><div class="k dis">↓</div><div class="k dis">↘</div>
+        </div>
+        <div class="zoomrow">
+          <div class="zg"><div class="t">变倍 Zoom</div><div class="bs"><div class="b">−</div><div class="b">＋</div></div></div>
+          <div class="zg"><div class="t">聚焦 Focus</div><div class="bs"><div class="b">−</div><div class="b">＋</div></div></div>
+          <div class="zg"><div class="t">光圈 Iris</div><div class="bs"><div class="b">−</div><div class="b">＋</div></div></div>
+        </div>
+        <div class="note">⚠ 方向键仅 PT 机型可用；固定镜头半球（5443DC 等）连接时<b style="color:var(--warn)">自动置灰</b>并提示，Zoom/Focus 仅电动镜头生效——按 GetCaps 能力位动态启用。</div>
+      </div>
+
+      <div class="card">
+        <h3>预置点 <span class="tag">PTZ Preset(SET/GOTO/DEL)</span></h3>
+        <div class="presets">
+          <div class="prow"><span class="no">1</span><span class="nm">全场全景</span><span class="a">调用</span><span class="a">设为此处</span><span class="a d">删</span></div>
+          <div class="prow"><span class="no">2</span><span class="nm">8号桌特写</span><span class="a">调用</span><span class="a">设为此处</span><span class="a d">删</span></div>
+          <div class="prow"><span class="no" style="background:#3a4056">+</span><span class="nm" style="color:var(--txt2)">新增预置点…</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OSD 三卡 -->
+  <div class="osd">
+    <div class="card">
+      <h3>通道标题 <span class="tag">GetConfig/SetConfig · CFG_CHANNELTITLE(1000)</span></h3>
+      <label class="cb"><i class="on"></i>叠加到主码流</label>
+      <label class="cb"><i class="on"></i>叠加到预览码流</label>
+      <div class="frm">
+        <div class="full"><input class="inp" value="台球厅-A01"></div>
+        <div class="field"><label>前景色 RGBA</label><input class="inp" value="255·255·255·0"></div>
+        <div class="field"><label>背景色 RGBA</label><input class="inp" value="0·0·0·0"></div>
+        <div class="field"><label>区域 X</label><input class="inp" value="12"></div>
+        <div class="field"><label>区域 Y</label><input class="inp" value="10"></div>
+      </div>
+      <div class="mini"><button class="btn ghost">获取</button><button class="btn">设 置</button></div>
+    </div>
+
+    <div class="card">
+      <h3>时间标题 <span class="tag">CFG_TIMETITLE(1001)</span></h3>
+      <label class="cb"><i class="on"></i>叠加到主码流</label>
+      <label class="cb"><i></i>显示"周"</label>
+      <div class="frm">
+        <div class="field"><label>前景色 RGBA</label><input class="inp" value="255·255·255·0"></div>
+        <div class="field"><label>背景色 RGBA</label><input class="inp" value="0·0·0·0"></div>
+        <div class="field"><label>区域 X</label><input class="inp" value="420"></div>
+        <div class="field"><label>区域 Y</label><input class="inp" value="260"></div>
+      </div>
+      <div class="mini"><button class="btn ghost">获取</button><button class="btn">设 置</button></div>
+    </div>
+
+    <div class="card">
+      <h3>自定义文字 + 批量 <span class="tag">CustomTitle / 多机下发</span></h3>
+      <label class="cb"><i class="on"></i>启用自定义文字（如「⚠ 8号桌维修中」）</label>
+      <div class="frm"><div class="full"><input class="inp" value="⚠ 8号桌维修中，预计 10-08 恢复"></div></div>
+      <div class="frm">
+        <div class="field"><label>生效时段</label><input class="inp" value="立即 · 长期"></div>
+        <div class="field"><label>应用到</label><input class="inp" value="已连接的 3 台"></div>
+      </div>
+      <div class="mini"><button class="btn ghost">保存为模板</button><button class="btn">批量下发</button></div>
+      <div class="note">售后场景：多台相机统一命名（台号）、临时告示一键上屏/撤屏。模板存 <code>config/camera_osd_templates.json</code>，凭据走 <code>core/secrets.py</code> DPAPI。</div>
+    </div>
+  </div>
+
+  <!-- 控件→API 映射 -->
+  <div class="legend">
+    <div><b>登录</b>：<code>LoginWithHighLevelSecurity</code>（结构体须填 dwSize，10-06 坑）</div>
+    <div><b>预览</b>：<code>RealPlayEx(辅码流)</code> + 回调挂 <b>playID</b>、dwFlag=RAW_DATA</div>
+    <div><b>云台</b>：<code>PTZControlEx2</code>，SDK_PTZ_ControlType 枚举（UP/DOWN/…/ZOOM_FOCUS）；能力探测用 <code>QueryDevState(PTZ_LOCATION)</code></div>
+    <div><b>OSD</b>：<code>GetConfig/SetConfig</code>，CFG_CHANNELTITLE(1000) / CFG_TIMETITLE(1001)，结构体 NET_OSD_CHANNEL_TITLE / NET_OSD_TIME_TITLE（官方封装 SDK_Struct.py:12530 已带）</div>
+    <div><b>抓图</b>：<code>SnapPictureEx</code> + fSnapRev 回调（P0 备选：直接存回调码流帧）</div>
+    <div><b>线程契约</b>：SDK 回调在 SDK 内部线程 → Qt 信号转发，禁直触控件；worker result/error 双落点</div>
+  </div>
+</div>
+
+</body>
+</html>
