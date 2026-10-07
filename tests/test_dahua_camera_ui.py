@@ -76,6 +76,17 @@ def test_construct_and_default_user(page):
     assert page._lb_state.text() == "未连接"
 
 
+def test_preview_canvas_playing_gate(page):
+    """残留画面回归（2026-10-07）：非播放态必须由 Qt 填暗底；
+    WA_PaintOnScreen 下 Qt 从不清屏，无门控会残留其它窗口像素"""
+    cv = page._preview
+    assert cv.playing is False  # 初始非播放 → paintEvent 填暗底
+    cv.set_playing(True)
+    assert cv.playing is True
+    cv.set_playing(False)
+    assert cv.playing is False
+
+
 def test_initial_all_grayed(page):
     """连接前：PTZ 方向/变倍/OSD/预置点/预览/抓图/断开全部禁用"""
     assert not any(b.isEnabled() for b in page._ptz_btns.values())

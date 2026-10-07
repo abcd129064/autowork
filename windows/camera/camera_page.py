@@ -94,24 +94,40 @@ class _SerialCaller(QThread):
 
 
 class _PreviewCanvas(QWidget):
-    """SDK 直渲 HWND 的画布：Qt 侧零绘制，防「重绘盖帧」闪烁。
+    """SDK 直渲 HWND 的画布：播放时 Qt 零绘制，非播放时主动填暗底。
 
     根因：若预览区是普通 QWidget/QLabel（哪怕带 WA_NativeWindow），
     任何 Qt 重绘（InfoBar、状态标签、resize、主题刷新）都会先用背景色
     填掉 SDK 画好的帧，下一帧视频再盖回来 → 时不时闪一下。
-    - WA_PaintOnScreen：绕过 Qt backing store，不再往该 HWND 写任何像素；
-    - paintEvent 置空：重绘事件什么都不画；
-    - WA_NoSystemBackground / WA_OpaquePaintEvent：不发擦除、不做透明合成。
+    - WA_PaintOnScreen：绕过 Qt backing store，不与 SDK 抢同一 HWND 的绘制权；
+    - 播放中 paintEvent 置空：重绘事件什么都不画，绘制权全在 SDK；
+    - 非播放时 paintEvent 主动填暗底：WA_PaintOnScreen 下 Qt 从不清屏，
+      HWND 表面会残留其它窗口像素垃圾（2026-10-07 用户截图：工作台页残影），
+      停止预览后最后一帧也会永久冻结——所以按 playing 门控。
     """
+
+    BG = "#10141c"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_PaintOnScreen, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.playing = False
 
-    def paintEvent(self, event):  # noqa: N802 故意空实现，绘制权全在 SDK
-        pass
+    def set_playing(self, on: bool):
+        """切换播放态；停止时主动重绘一次，擦掉冻结的最后一帧"""
+        self.playing = bool(on)
+        if not self.playing:
+            self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        if self.playing:
+            return  # 播放中：绘制权全在 SDK，Qt 一个像素都不画
+        from PySide6.QtGui import QPainter, QColor
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(self.BG))
+        p.end()
 
 
 
@@ -541,6 +557,7 @@ class DahuaCameraWork(QWidget):
     def _preview_on(self):
         self._btn_play.setEnabled(False)
         self._btn_stop_play.setEnabled(True)
+        self._preview.set_playing(True)  # 播放中：Qt 停止绘制，SDK 独占
         self._lb_pv_hint.hide()
         _toast(self, "预览已开启（辅码流）", duration=1800)
 
@@ -554,6 +571,7 @@ class DahuaCameraWork(QWidget):
     def _preview_off(self):
         self._btn_play.setEnabled(True)
         self._btn_stop_play.setEnabled(False)
+        self._preview.set_playing(False)  # 停止：填暗底，擦掉冻结帧
         self._lb_pv_hint.show()
 
     def _snap(self):
