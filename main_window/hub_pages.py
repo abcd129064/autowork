@@ -971,6 +971,7 @@ class SettingsHubPage(QWidget):
             ("售后", "aftersaleHub"),
             ("跑视频", "ledgerHub"),
             ("远程", "remoteHub"),
+            ("相机", "cameraHub"),
             ("工具", "toolHub"),
         ]
         valid = {obj for _label, obj in items}

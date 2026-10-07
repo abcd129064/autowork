@@ -1518,20 +1518,11 @@ class ToolHub(PivotPage):
         self.port_fake_work = PortFakeWork(self._win, self)
         self.upload_list_work = UploadListWork(self._win, self)
         self.newlog_work = NewLogWork(self._win, self)
-        try:
-            # 延迟导入：NetSDK 缺失（如未随包分发 vendor/dahua）时不拖垮整个工具页
-            from windows.tools.dahua_camera import DahuaCameraWork
-            self.dahua_camera_work = DahuaCameraWork(self._win, self)
-        except Exception as e:  # noqa: BLE001
-            import logging
-            logging.getLogger(__name__).warning("相机工具页加载失败（已跳过）: %s", e)
-            self.dahua_camera_work = None
+        # 相机工具 2026-10-07 升级为面板级「相机」（windows/camera/，见 main_window）
 
         self.addPage(self.single_video_work, "单杆视频")
         self.addPage(self.port_fake_work, "端口占用")
         self.addPage(self.upload_list_work, "上传清单")
         self.addPage(self.newlog_work, "视频与日志批量整理")
-        if self.dahua_camera_work is not None:
-            self.addPage(self.dahua_camera_work, "相机工具")
         self.lock_pivot_width()
         self.switchTo(self.single_video_work)

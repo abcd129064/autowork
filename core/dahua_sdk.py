@@ -6,7 +6,7 @@
 - SDK 全局生命周期（InitEx / Cleanup 全进程只做一次，dhnetsdk 不支持多实例）；
 - 单设备会话：登录 / 预览(渲染到 HWND) / 抓图 / 云台 / OSD 读写；
 - 本层**不 import Qt**：回调经调用方注入的纯 Python callable 转交，
-  Qt 信号桥由 UI 层（windows/tools/dahua_camera.py）负责。
+  Qt 信号桥由 UI 层（windows/camera/camera_page.py）负责。
 
 签名依据：官方 wheel NetSDK-2.0.0.1（vendor/dahua/NetSDK），已实测坑：
 - LoginWithHighLevelSecurity 的 in/out 结构体必须显式填 dwSize，否则 0ms 秒败；
@@ -404,9 +404,21 @@ class DahuaClient:
                 self._apply_front_rgb(st, front_rgb)
             for st_i in self._fill_blend(st, show, pos):
                 self._osd_cfg(cfg_id, channel, st_i)
+        name_applied: Optional[bool] = None
         if text is not None:
-            self._set_channel_name(channel, text)
-        return self.osd_channel_title_read(channel)
+            try:
+                self._set_channel_name(channel, text)
+                name_applied = True
+            except DahuaSdkError as e:
+                # 4238 固件实测：SetNewDevConfig 6 种载荷形态（table/JSON×
+                # id+params/params/table × utf-8/ascii 转义）+ SetNewDevConfigForWeb
+                # 全部拒绝写通道名称 → 降级：保留设备原名称，其余 OSD 照常应用
+                logger.warning("通道名称写入被固件拒绝（保留原名称）: %s", e)
+                name_applied = False
+        result = self.osd_channel_title_read(channel)
+        if name_applied is not None:
+            result["name_applied"] = name_applied
+        return result
 
     def osd_channel_title_read(self, channel: int = 0) -> dict:
         m = self._m
@@ -452,9 +464,55 @@ class DahuaClient:
         item.stuRect.nRight, item.stuRect.nBottom = pos
         self._osd_cfg(1002, channel, st)
 
-    # ---------- 通道名称文字（NewDevConfig 字符串表） ----------
+    # ---------- 通道名称文字 ----------
+    # 首选 GetConfig/SetConfig(ENCODE_CHANNELTITLE=1108, NET_ENCODE_CHANNELTITLE_INFO
+    # 的 szChannelName)——4238 固件实测双向可用（ConfigTool 同款路径）；
+    # NewDevConfig("ChannelTitle") 仅作老固件兜底（新固件 GET 回 JSON 但 SET 被拒）。
+
+    _CFG_ENCODE_CHANNELTITLE = 1108
 
     def _get_channel_name(self, channel: int) -> str:
+        m = self._m
+        st = m.NET_ENCODE_CHANNELTITLE_INFO()
+        st.dwSize = m.sizeof(st)
+        buf = m.create_string_buffer(m.sizeof(st))
+        m.memmove(buf, m.byref(st), m.sizeof(st))
+        if self._sdk.GetConfig(self._login_id, self._CFG_ENCODE_CHANNELTITLE,
+                               channel, buf, m.sizeof(st), 2000, None):
+            got = m.NET_ENCODE_CHANNELTITLE_INFO.from_buffer_copy(buf)
+            return bytes(got.szChannelName).split(b"\x00")[0].decode(
+                "gbk", errors="replace").strip()
+        return self._extract_channel_name_field(self._get_channel_name_raw(channel))
+
+    def _set_channel_name(self, channel: int, text: str) -> None:
+        m = self._m
+        st = m.NET_ENCODE_CHANNELTITLE_INFO()
+        st.dwSize = m.sizeof(st)
+        st.szChannelName = text.encode("gbk", errors="replace")[:255]
+        if self._sdk.SetConfig(self._login_id, self._CFG_ENCODE_CHANNELTITLE,
+                               channel, st, m.sizeof(st), 2000, 0, None):
+            return
+        # 老固件兜底：NewDevConfig（按 GET 回包格式选 JSON / table）
+        raw = self._get_channel_name_raw(channel)
+        if raw.lstrip().startswith("{"):
+            import json
+            payload = json.dumps({"table": {"Name": text}},
+                                 ensure_ascii=False)
+            enc = "utf-8"
+        else:
+            payload = self._build_channel_name_payload(
+                self._extract_channel_name_field(raw), text)
+            enc = "gbk"
+        err = m.c_int(0)
+        # ⚠ 官方包装 SetNewDevConfig 内部对 szInBuffer 做 pointer()——必须传 ctypes
+        #   缓冲，传 Python bytes 会炸 TypeError("_type_ must have storage info")
+        data = m.create_string_buffer(payload.encode(enc))
+        ok = self._sdk.SetNewDevConfig(self._login_id, "ChannelTitle", channel,
+                                       data, len(payload), err, 0, 2000)
+        if not ok:
+            raise DahuaSdkError(f"设置通道名称失败：{self._sdk.GetLastErrorMessage()}")
+
+    def _get_channel_name_raw(self, channel: int) -> str:
         m = self._m
         buf = m.create_string_buffer(4096)
         err = m.c_int(0)
@@ -462,23 +520,20 @@ class DahuaClient:
                                        buf, 4096, err, 2000, None)
         if not ok:
             return ""
-        raw = buf.value.decode(errors="replace")
-        return self._extract_channel_name_field(raw)
-
-    def _set_channel_name(self, channel: int, text: str) -> None:
-        m = self._m
-        payload = self._build_channel_name_payload(self._get_channel_name(channel), text)
-        err = m.c_int(0)
-        data = payload.encode()
-        # ⚠ 官方包装 SetNewDevConfig 无 reserve 尾参：(login,cmd,ch,buf,len,err,restart,waittime)
-        ok = self._sdk.SetNewDevConfig(self._login_id, "ChannelTitle", channel,
-                                       data, len(data), err, 0, 2000)
-        if not ok:
-            raise DahuaSdkError(f"设置通道名称失败：{self._sdk.GetLastErrorMessage()}")
+        return buf.value.decode(errors="replace")
 
     @staticmethod
     def _extract_channel_name_field(raw: str) -> str:
-        """NewDevConfig 返回大华 table 格式，提取 ChannelName[0].Name 的值"""
+        """通道名称提取：新固件 JSON（{"params":{"table":{"Name":..}}}），
+        老固件 table 格式（ChannelName[0].Name=..）。"""
+        s = raw.strip()
+        if s.startswith("{"):
+            try:
+                import json
+                obj = json.loads(s)
+                return str(obj.get("params", {}).get("table", {}).get("Name", "") or "")
+            except ValueError:
+                return ""
         for line in raw.splitlines():
             if line.strip().lower().startswith("channelname[0].name"):
                 return line.split("=", 1)[1].strip() if "=" in line else ""
@@ -486,7 +541,7 @@ class DahuaClient:
 
     @staticmethod
     def _build_channel_name_payload(existing: str, text: str) -> str:
-        """拼 table 格式；无既有内容时给最小载荷"""
+        """老固件 table 格式载荷；无既有内容时给最小载荷"""
         if existing:
             return f"ChannelName[0].Name={text}"
         return (f"ChannelTitle\r\nSectionCount=1\r\n"

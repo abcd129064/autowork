@@ -14,8 +14,8 @@ import pytest
 
 from PySide6.QtWidgets import QApplication
 
-from windows.tools import dahua_camera as cam_mod
-from windows.tools.dahua_camera import DahuaCameraWork, _SerialCaller
+from windows.camera import camera_page as cam_mod
+from windows.camera.camera_page import DahuaCameraWork, _SerialCaller
 
 
 @pytest.fixture

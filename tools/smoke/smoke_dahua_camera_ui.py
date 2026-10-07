@@ -72,28 +72,27 @@ def wait_until(page, cond, timeout_ms: int) -> bool:
 def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
 
-    # ---------- A. ToolHub 集成 ----------
-    from main_window.tool_hub import ToolHub
+    # ---------- A. CameraHub 面板集成（2026-10-07 升级为面板级） ----------
+    from windows.camera import CameraHub
 
     class _StubWin(QWidget):
-        """ToolHub 子页构造期只需要读设置（_show_info_bar 等仅动作期触发）"""
+        """Hub 子页构造期只需要读设置（_show_info_bar 等仅动作期触发）"""
         def _load_settings(self):
             return {}
 
         def _save_settings(self, _d):
             pass
 
-    hub = ToolHub(_StubWin())
-    check("A1 ToolHub 离屏构造成功", hub is not None)
-    check("A2 相机页注册且未触发降级",
-          getattr(hub, "dahua_camera_work", None) is not None)
-    if hub.dahua_camera_work is not None:
+    hub = CameraHub(_StubWin())
+    check("A1 CameraHub 离屏构造成功", hub is not None)
+    check("A2 相机页注册", hub.camera_page is not None)
+    if hub.camera_page is not None:
         # qfw Pivot 会把页面 reparent 进内部 stackedWidget，用层级查找断言
-        check("A3 相机页挂在 ToolHub 视图层级",
-              hub.dahua_camera_work in hub.findChildren(QWidget))
+        check("A3 相机页挂在 CameraHub 视图层级",
+              hub.camera_page in hub.findChildren(QWidget))
 
     # ---------- B. 页面全流程（真机） ----------
-    from windows.tools.dahua_camera import DahuaCameraWork
+    from windows.camera.camera_page import DahuaCameraWork
 
     page = DahuaCameraWork(None)
     page.show()

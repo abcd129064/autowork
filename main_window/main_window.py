@@ -225,6 +225,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                                            LedgerHub, SettingsHubPage, AboutPage)
         from main_window.tool_hub import ToolHub
         from windows.remote_session.remote_hub import RemoteHub
+        try:
+            # 延迟导入：NetSDK 缺失（如未随包分发 vendor/dahua）时不拖垮主窗口
+            from windows.camera import CameraHub
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning("相机面板加载失败（已跳过）: %s", e)
+            CameraHub = None
 
         # 页面通过 getattr(self.window(), "_remote_bridge", None) 取远程会话中心
         # （全局单例，与球桌面板/主窗口远程面板共享同一 frpc 进程）
@@ -234,6 +241,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self.aftersale_hub = AftersaleHub(self)
         self.ledger_hub = LedgerHub(self)
         self.remote_hub = RemoteHub(self)
+        self.camera_hub = CameraHub(self) if CameraHub is not None else None
         self.tool_hub = ToolHub(self)
         self.settings_hub = SettingsHubPage(self)
         self.about_page = AboutPage(self)
@@ -259,8 +267,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 # 二期（2026-09-07）：远程会话中心（design/remote_page_v2.html），
                 # qfw 1.11.x 无 FluentIcon.REMOTE，用 LINK 代替
                 (self.remote_hub, FluentIcon.LINK, "远程"),
+                # 相机面板（2026-10-07）：从工具页签升级为面板级导航
+                (self.camera_hub, FluentIcon.CAMERA, "相机"),
                 # 二期（2026-09-07）：工具独立工作页（design/tools_page_v2.html）
                 (self.tool_hub, FluentIcon.DEVELOPER_TOOLS, "工具")):
+            if hub is None:  # 相机面板加载失败时跳过（NetSDK 缺失等）
+                continue
             self.addSubInterface(hub, icon, text)
 
         self.navigationInterface.addSeparator()
@@ -287,6 +299,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 "aftersaleHub": self.aftersale_hub,
                 "ledgerHub": self.ledger_hub,
                 "remoteHub": self.remote_hub,
+                "cameraHub": self.camera_hub,
                 "toolHub": self.tool_hub,
             }
             target = pages.get(key)
@@ -370,7 +383,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 from main_window.hub_popout import HubPopoutWindow
                 from qfluentwidgets import FluentIcon
                 title = {"toolHub": "工具面板",
-                         "remoteHub": "远程面板"}.get(key, "面板")
+                         "remoteHub": "远程面板",
+                         "cameraHub": "相机面板"}.get(key, "面板")
                 # 远程/工具面板（远程 2026-09-21、工具 2026-09-22 需求）：
                 # 弹出后各视图改管理面板式左侧子导航；其余 Hub 维持内嵌 Pivot
                 # ⚠️ nav_icons 的键必须覆盖该 Hub 全部注册页（hub_popout 以
