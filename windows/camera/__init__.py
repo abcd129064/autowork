@@ -6,5 +6,6 @@
 """
 from windows.camera.camera_hub import CameraHub
 from windows.camera.camera_page import DahuaCameraWork
+from windows.camera.encode_page import EncodePage
 
-__all__ = ["CameraHub", "DahuaCameraWork"]
+__all__ = ["CameraHub", "DahuaCameraWork", "EncodePage"]

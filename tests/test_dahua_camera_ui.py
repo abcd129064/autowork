@@ -12,7 +12,8 @@ import time
 
 import pytest
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
+from qfluentwidgets import CardWidget
 
 from windows.camera import camera_page as cam_mod
 from windows.camera.camera_page import DahuaCameraWork, _SerialCaller
@@ -47,6 +48,22 @@ class _FakeClient:
 
     def realplay_stop(self):
         pass
+
+    # ---- 编码配置（P1 编码页数据源，v2 双卡） ----
+    def encode_video(self, stream=1):
+        base = {"enable": True, "compression": 7, "bitrate_control": 1,
+                "framerate": 25.0, "iframe_interval": 50, "image_quality": 5}
+        if stream == 1:
+            base.update(width=1920, height=1080, bitrate=4096)
+        else:
+            base.update(width=640, height=360, bitrate=512)
+        return base
+
+    def set_encode_video(self, stream=1, **kw):
+        if not hasattr(self, "encode_calls"):
+            self.encode_calls = []
+        self.encode_calls.append((stream, kw))
+        return {**self.encode_video(stream), **kw}
 
     def close(self):
         self.closed = True
@@ -213,6 +230,156 @@ def test_serial_caller_err_signal_reached(qapp):
     assert _wait(qapp, lambda: errs, 5000)
     assert "mock 失败" in errs[0]
     pool.stop()
+
+
+# ---- 编码配置页（P1） ---------------------------------------------------------
+
+def _make_encode_page(qapp, monkeypatch):
+    """连接好的相机工具页 + 编码配置页"""
+    from windows.camera.encode_page import EncodePage
+    fake = _FakeClient(ptz=False)
+    monkeypatch.setattr(cam_mod.dahua_sdk, "connect", lambda a, u, p: fake)
+    page = DahuaCameraWork(None)
+    ep = EncodePage(None, page)
+    page.show()
+    ep.show()
+    qapp.processEvents()
+    page._ed_addr.setText("1.2.3.4:4238")
+    page._connect()
+    assert _wait(qapp, lambda: page._client is not None)
+    return page, ep, fake
+
+
+def test_encode_page_read_fills(qapp, monkeypatch):
+    """v2 双卡：读取后主/辅码流各控件按设备现值回填"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
+    main, extra = ep._cards[1], ep._cards[4]
+    # 主码流 1080P@4096 VBR H.264
+    assert main["cmb_res"].currentData() == (1920, 1080)
+    assert main["cmb_comp"].currentData() == 7
+    assert main["cmb_brc"].currentData() == 1
+    assert main["cmb_bitrate"].currentData() == 4096
+    assert main["sld_q"].value() == 5            # 80%
+    # 辅码流 360P@512
+    assert extra["cmb_res"].currentData() == (640, 360)
+    assert extra["cmb_bitrate"].currentData() == 512
+
+
+def test_encode_page_apply_calls_set(qapp, monkeypatch):
+    """应用到设备：两条码流各一次 RMW 写，参数取自卡片控件"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
+    main = ep._cards[1]
+    _set_combo(main["cmb_bitrate"], 2048)
+    _set_combo(main["cmb_comp"], 8)              # H.265
+    ep._on_apply()
+    assert _wait(qapp, lambda: len(getattr(fake, "encode_calls", [])) >= 2)
+    calls = dict(fake.encode_calls)
+    assert calls[1]["bitrate"] == 2048
+    assert calls[1]["compression"] == 8
+    assert calls[4]["bitrate"] == 512            # 辅码流原值照写（RMW 全字段）
+
+
+def _set_combo(combo, data):
+    for i in range(combo.count()):
+        if combo.itemData(i) == data:
+            combo.setCurrentIndex(i)
+            return
+    raise AssertionError(f"combo 无项 {data}")
+
+
+# ---- frps 相机隧道（内嵌登录卡下方隧道条） -----------------------------------
+
+def test_collect_cam_proxies_filters_and_sorts():
+    """名称**包含** _cam 即收（真机形态：147_cam1/apex_cam01/ly_cam15_sdk），
+    按 _cam 前缀排序；含 cam 但无下划线的（campus_rdp）排除"""
+    from windows.camera.camera_page import collect_cam_proxies
+    proxies = {
+        "tcp": [{"name": "campus_rdp", "status": "online",   # cam 无下划线 → 排除
+                 "conf": {"remotePort": 33890}, "curConns": 1},
+                {"name": "147_cam1", "status": "online",     # _cam 带尾号 → 收
+                 "conf": {"remotePort": 4238}, "curConns": 0,
+                 "user": "u1"},
+                {"name": "apex_cam01", "status": "online",
+                 "conf": {"remotePort": 4239}, "curConns": 0}],
+        "xtcp": [{"name": "jp_cam2_rtsp", "status": "offline",  # _cam 带用途后缀 → 收
+                  "conf": {}, "curConns": 0}],
+    }
+    out = collect_cam_proxies(proxies)
+    assert [p["name"] for p in out] == ["147_cam1", "apex_cam01", "jp_cam2_rtsp"]
+    assert out[0]["remotePort"] == 4238
+    assert out[0]["status"] == "online"
+    assert out[2]["remotePort"] is None      # 无 conf.remotePort → None
+
+
+def test_frps_tunnel_bar_chips_search_and_use(qapp, monkeypatch):
+    """隧道条：过滤 *_cam、搜索联动、选用预填地址、离线置灰"""
+
+    class _FakeFrps:
+        class _Sig:
+            def connect(self, *a):  # 信号连接桩
+                pass
+
+        all_proxies_changed = _Sig()
+
+        def all_proxies(self):
+            return {"tcp": [{"name": "01_cam", "status": "online",
+                             "conf": {"remotePort": 4238}, "curConns": 2,
+                             "user": "site1"},
+                            {"name": "store_cam", "status": "offline",
+                             "conf": {"remotePort": 4239}, "curConns": 0},
+                            {"name": "other", "status": "online",
+                             "conf": {"remotePort": 1}, "curConns": 0}]}
+
+        def request_refresh(self):
+            pass
+
+        def snapshot(self):
+            return {"state": "ok"}
+
+    monkeypatch.setattr("windows.camera.camera_page.get_frps_client",
+                        lambda: _FakeFrps())
+    page = DahuaCameraWork(None)
+    page.show()
+    qapp.processEvents()
+
+    def chip_texts():
+        h = page._frps_v
+        out = []
+        for i in range(h.count()):
+            w = h.itemAt(i).widget()
+            labels = w.findChildren(QLabel) if w else []
+            if labels:
+                out.append("|".join(lb.text() for lb in labels))
+        return out
+
+    # 默认：两条 *_cam（other 被过滤），计数 2
+    texts = chip_texts()
+    assert len(texts) == 2
+    assert any("01_cam" in t for t in texts)
+    assert any("store_cam" in t for t in texts)
+    assert page._lb_frps_cnt.text() == "2"
+
+    # 搜索 "01" → 只剩 01_cam，计数 1/2
+    page._ed_frps_search.setText("01")
+    qapp.processEvents()
+    texts = chip_texts()
+    assert len(texts) == 1 and "01_cam" in texts[0]
+    assert page._lb_frps_cnt.text() == "1/2"
+
+    # 搜索无匹配 → 空态提示
+    page._ed_frps_search.setText("zzz")
+    qapp.processEvents()
+    assert page._lb_frps_cnt.text() == "0/2"
+
+    # 清空搜索 + 选用 01_cam → 预填 frps 地址
+    page._ed_frps_search.setText("")
+    qapp.processEvents()
+    page._frps_use({"name": "01_cam", "remotePort": 4238})
+    assert page._ed_addr.text().endswith(":4238")
 
 
 # ---- core 层：SetConfig 双重 byref 回归（2026-10-07 真机报错） ----------------

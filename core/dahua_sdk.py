@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""大华设备网络 SDK（官方 Python NetSDK）封装——进程内单例
+"""大华设备网络 SDK 封装——进程内单例
 
 职责边界：
 - 定位并加载 vendor/dahua/NetSDK（开发态 / PyInstaller frozen 双路径）；
@@ -463,6 +463,73 @@ class DahuaClient:
         item.stuRect.nLeft, item.stuRect.nTop = pos
         item.stuRect.nRight, item.stuRect.nBottom = pos
         self._osd_cfg(1002, channel, st)
+
+    # ---------- 编码配置（码流/分辨率/帧率/码率，ConfigTool「编码配置」同源） ----------
+
+    STREAM_MAIN = 1    # EM_A_NET_EM_FORMAT_TYPE.EM_FORMAT_MAIN_NORMAL
+    STREAM_EXTRA1 = 4  # EM_FORMAT_EXTRA1
+
+    def _encode_video_struct(self, stream: int):
+        """GetConfig(ENCODE_VIDEO=1100) 读指定码流的完整结构体（RMW 基线）"""
+        m = self._m
+        st = m.NET_ENCODE_VIDEO_INFO()
+        st.dwSize = m.sizeof(st)
+        st.emFormatType = int(stream)
+        buf = m.create_string_buffer(m.sizeof(st))
+        m.memmove(buf, m.byref(st), m.sizeof(st))
+        if not self._sdk.GetConfig(self._login_id, 1100, 0, buf,
+                                   m.sizeof(st), 2000, None):
+            raise DahuaSdkError(f"读取编码配置失败：{self._sdk.GetLastErrorMessage()}")
+        return m.NET_ENCODE_VIDEO_INFO.from_buffer_copy(buf)
+
+    def encode_video(self, stream: int = STREAM_MAIN) -> dict:
+        """读码流视频参数。stream: 1=主码流, 4=辅码流1"""
+        g = self._with_retry(lambda: self._encode_video_struct(stream))
+        return {"enable": bool(g.bVideoEnable),
+                "compression": int(g.emCompression),
+                "width": int(g.nWidth), "height": int(g.nHeight),
+                "bitrate_control": int(g.emBitRateControl),
+                "bitrate": int(g.nBitRate),
+                "framerate": float(g.nFrameRate),
+                "iframe_interval": int(g.nIFrameInterval),
+                "image_quality": int(g.emImageQuality)}
+
+    def set_encode_video(self, stream: int = STREAM_MAIN, *, enable=None,
+                         compression=None, width=None, height=None,
+                         bitrate=None, bitrate_control=None, framerate=None,
+                         iframe_interval=None, image_quality=None) -> dict:
+        """RMW 写码流参数：只改给定字段，其余保留设备现值；写后返回新读。
+        compression: 7=H.264 8=H.265；bitrate_control: 0=CBR 1=VBR；
+        bitrate 单位 kbps；image_quality: 1-6（10%~100%，VBR 下生效）。"""
+        m = self._m
+
+        def _apply():
+            g = self._encode_video_struct(stream)
+            if enable is not None:
+                g.bVideoEnable = bool(enable)
+            if compression is not None:
+                g.emCompression = int(compression)
+            if width is not None:
+                g.nWidth = int(width)
+            if height is not None:
+                g.nHeight = int(height)
+            if bitrate is not None:
+                g.nBitRate = int(bitrate)
+            if bitrate_control is not None:
+                g.emBitRateControl = int(bitrate_control)
+            if framerate is not None:
+                g.nFrameRate = float(framerate)
+            if iframe_interval is not None:
+                g.nIFrameInterval = int(iframe_interval)
+            if image_quality is not None:
+                g.emImageQuality = int(image_quality)
+            if not self._sdk.SetConfig(self._login_id, 1100, 0, g,
+                                       m.sizeof(g), 2000, 0, None):
+                raise DahuaSdkError(
+                    f"写入编码配置失败：{self._sdk.GetLastErrorMessage()}")
+
+        self._with_retry(_apply)
+        return self.encode_video(stream)
 
     # ---------- 通道名称文字 ----------
     # 首选 GetConfig/SetConfig(ENCODE_CHANNELTITLE=1108, NET_ENCODE_CHANNELTITLE_INFO

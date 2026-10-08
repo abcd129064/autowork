@@ -10,10 +10,15 @@ from qfluentwidgets import FluentIcon
 
 from main_window.pivot_page import PivotPage
 from windows.camera.camera_page import DahuaCameraWork
+from windows.camera.encode_page import EncodePage
 
 
 class CameraHub(PivotPage):
-    """相机面板：子页签 = 相机工具"""
+    """相机面板：子页签 = 相机工具 | 编码配置
+
+    frps 相机隧道（*_cam）内嵌在相机工具页登录卡底部（2026-10-09），
+    不单开页签。
+    """
 
     def __init__(self, win=None, parent=None):
         super().__init__(parent)
@@ -21,5 +26,7 @@ class CameraHub(PivotPage):
         self._win = win
 
         self.camera_page = DahuaCameraWork(self._win, self)
+        self.encode_page = EncodePage(self._win, self.camera_page, self)
         self.addPage(self.camera_page, "相机工具", FluentIcon.CAMERA)
+        self.addPage(self.encode_page, "编码配置", FluentIcon.SETTING)
         self.lock_pivot_width()

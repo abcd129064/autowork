@@ -90,6 +90,9 @@ def main() -> int:
         # qfw Pivot 会把页面 reparent 进内部 stackedWidget，用层级查找断言
         check("A3 相机页挂在 CameraHub 视图层级",
               hub.camera_page in hub.findChildren(QWidget))
+    check("A4 编码配置页双卡注册（主/辅码流）",
+          getattr(hub, "encode_page", None) is not None
+          and set(hub.encode_page._cards) == {1, 4})
 
     # ---------- B. 页面全流程（真机） ----------
     from windows.camera.camera_page import DahuaCameraWork
@@ -163,6 +166,18 @@ def main() -> int:
             head = f.read(3)
         check("B17 抓图为有效 JPEG", head == b"\xff\xd8\xff",
               f"{os.path.getsize(snap_path)} 字节")
+
+    # C. 编码配置 RMW 回环（真机，P1）
+    try:
+        ev = page._client.encode_video(1)
+        page._client.set_encode_video(1, bitrate=ev["bitrate"],
+                                      framerate=ev["framerate"])
+        ev2 = page._client.encode_video(1)
+        check("B22 编码配置 RMW 回环一致", ev2 == ev,
+              f"{ev2['width']}x{ev2['height']}@{ev2['framerate']}fps "
+              f"{ev2['bitrate']}kbps")
+    except Exception as e:  # noqa: BLE001
+        check("B22 编码配置 RMW 回环一致", False, str(e))
 
     # B6 断开复位
     page._disconnect()
