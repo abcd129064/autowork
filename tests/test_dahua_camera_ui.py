@@ -48,6 +48,22 @@ class _FakeClient:
     def realplay_stop(self):
         pass
 
+    # ---- 编码配置（P1 编码页数据源，v2 双卡） ----
+    def encode_video(self, stream=1):
+        base = {"enable": True, "compression": 7, "bitrate_control": 1,
+                "framerate": 25.0, "iframe_interval": 50, "image_quality": 5}
+        if stream == 1:
+            base.update(width=1920, height=1080, bitrate=4096)
+        else:
+            base.update(width=640, height=360, bitrate=512)
+        return base
+
+    def set_encode_video(self, stream=1, **kw):
+        if not hasattr(self, "encode_calls"):
+            self.encode_calls = []
+        self.encode_calls.append((stream, kw))
+        return {**self.encode_video(stream), **kw}
+
     def close(self):
         self.closed = True
 
@@ -213,6 +229,65 @@ def test_serial_caller_err_signal_reached(qapp):
     assert _wait(qapp, lambda: errs, 5000)
     assert "mock 失败" in errs[0]
     pool.stop()
+
+
+# ---- 编码配置页（P1） ---------------------------------------------------------
+
+def _make_encode_page(qapp, monkeypatch):
+    """连接好的相机工具页 + 编码配置页"""
+    from windows.camera.encode_page import EncodePage
+    fake = _FakeClient(ptz=False)
+    monkeypatch.setattr(cam_mod.dahua_sdk, "connect", lambda a, u, p: fake)
+    page = DahuaCameraWork(None)
+    ep = EncodePage(None, page)
+    page.show()
+    ep.show()
+    qapp.processEvents()
+    page._ed_addr.setText("1.2.3.4:4238")
+    page._connect()
+    assert _wait(qapp, lambda: page._client is not None)
+    return page, ep, fake
+
+
+def test_encode_page_read_fills(qapp, monkeypatch):
+    """v2 双卡：读取后主/辅码流各控件按设备现值回填"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
+    main, extra = ep._cards[1], ep._cards[4]
+    # 主码流 1080P@4096 VBR H.264
+    assert main["cmb_res"].currentData() == (1920, 1080)
+    assert main["cmb_comp"].currentData() == 7
+    assert main["cmb_brc"].currentData() == 1
+    assert main["cmb_bitrate"].currentData() == 4096
+    assert main["sld_q"].value() == 5            # 80%
+    # 辅码流 360P@512
+    assert extra["cmb_res"].currentData() == (640, 360)
+    assert extra["cmb_bitrate"].currentData() == 512
+
+
+def test_encode_page_apply_calls_set(qapp, monkeypatch):
+    """应用到设备：两条码流各一次 RMW 写，参数取自卡片控件"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
+    main = ep._cards[1]
+    _set_combo(main["cmb_bitrate"], 2048)
+    _set_combo(main["cmb_comp"], 8)              # H.265
+    ep._on_apply()
+    assert _wait(qapp, lambda: len(getattr(fake, "encode_calls", [])) >= 2)
+    calls = dict(fake.encode_calls)
+    assert calls[1]["bitrate"] == 2048
+    assert calls[1]["compression"] == 8
+    assert calls[4]["bitrate"] == 512            # 辅码流原值照写（RMW 全字段）
+
+
+def _set_combo(combo, data):
+    for i in range(combo.count()):
+        if combo.itemData(i) == data:
+            combo.setCurrentIndex(i)
+            return
+    raise AssertionError(f"combo 无项 {data}")
 
 
 # ---- core 层：SetConfig 双重 byref 回归（2026-10-07 真机报错） ----------------

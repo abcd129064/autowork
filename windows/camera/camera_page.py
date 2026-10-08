@@ -157,7 +157,7 @@ class DahuaCameraWork(QWidget):
         lv = QHBoxLayout(login_card)
         lv.setContentsMargins(14, 10, 14, 10)
         self._ed_addr = LineEdit(login_card)
-        self._ed_addr.setPlaceholderText("设备地址，支持隧道 host:port（如 49.235.34.253:4238）")
+        self._ed_addr.setPlaceholderText("设备地址，支持隧道 host:port")
         self._ed_addr.setFixedWidth(280)
         self._ed_user = LineEdit(login_card)
         self._ed_user.setText("admin")
@@ -185,7 +185,7 @@ class DahuaCameraWork(QWidget):
         self._preview.setMinimumSize(560, 315)
         pv.addWidget(self._preview, 1)
         self._lb_pv_hint = CaptionLabel(
-            "连接后点击「开始预览」（SDK 直接渲染辅码流到上方画布）", preview_card)
+            "连接后点击「开始预览」", preview_card)
         pv.addWidget(self._lb_pv_hint)
         pbar = QHBoxLayout()
         self._btn_play = PrimaryPushButton(FluentIcon.VIDEO, "开始预览", preview_card)
@@ -251,7 +251,7 @@ class DahuaCameraWork(QWidget):
         ptz.addLayout(zf)
 
         self._ptz_note = CaptionLabel(
-            "⚠ 方向/预置点仅 PT 机型有效；固定镜头机型此区自动置灰。", ptz_card)
+            "方向/预置点仅 PT 机型有效；固定镜头机型此区域置灰。", ptz_card)
         self._ptz_note.setWordWrap(True)
         ptz.addWidget(self._ptz_note)
 
@@ -288,7 +288,7 @@ class DahuaCameraWork(QWidget):
         pe = QHBoxLayout(self._preset_editor)
         pe.setContentsMargins(0, 0, 0, 0)
         self._ed_preset_name = LineEdit(self._preset_editor)
-        self._ed_preset_name.setPlaceholderText("预置点名称（保存相机当前位置）")
+        self._ed_preset_name.setPlaceholderText("预置点名称")
         self._btn_preset_ok = PrimaryPushButton("确定", self._preset_editor)
         self._btn_preset_cancel = PushButton("取消", self._preset_editor)
         pe.addWidget(self._ed_preset_name, 1)
@@ -308,12 +308,12 @@ class DahuaCameraWork(QWidget):
         osd_row = QHBoxLayout()
         osd_row.setSpacing(10)
         self._card_chn = self._build_osd_card(
-            osd_row, "chn", "通道标题", text_hint="叠加文字（相机名称）", has_pos=True)
+            osd_row, "chn", "通道标题", text_hint="叠加文字", has_pos=True)
         self._card_time = self._build_osd_card(
             osd_row, "time", "时间标题", text_hint=None, has_pos=True, has_week=True)
         self._card_custom = self._build_osd_card(
             osd_row, "custom", "自定义文字告示",
-            text_hint="告示文字（如：⚠ 8号桌维修中）", has_pos=True)
+            text_hint="告示文字", has_pos=True)
         root.addLayout(osd_row)
 
         self._btn_conn.clicked.connect(self._connect)
@@ -668,7 +668,7 @@ class DahuaCameraWork(QWidget):
 
         def done(result):
             if isinstance(result, dict) and result.get("name_applied") is False:
-                _toast(self, "该固件不支持修改通道名称（已保留设备原名），"
+                _toast(self, "该固件不支持修改通道名称"
                              "开关/位置已应用", duration=4000)
             else:
                 _toast(self, "OSD 设置成功", duration=1800)
