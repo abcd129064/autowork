@@ -29,11 +29,13 @@ from main_window.setting_cards import (SettingGroup, SettingRow, make_switch,
 # ==================== 运维管理 ====================
 
 class ManagementHub(PivotPage):
-    """运维管理：五页 Pivot（球桌/设备/健康度/组件测试/小游戏）
+    """运维管理：六页 Pivot（球桌/安装清单/设备/健康度/组件测试/小游戏）
 
     「管理设置」页已迁入统一设置界面（2026-09-06）；本类保留表格平滑
     滚动的刷新方法，由主窗口把统一设置页的开关信号转发到这里。
     「健康趋势」页原面板即注释隐藏（window.py L94），保持一致不迁。
+    安装清单页（2026-10-11）与弹出面板 ManagementPanelWindow 双宿主
+    注册（各自实例化，同组件）。
     """
 
     def __init__(self, parent=None):
@@ -41,6 +43,7 @@ class ManagementHub(PivotPage):
         self.setObjectName("managementHub")
 
         from windows.management.table_page import TablePage
+        from windows.management.install_page import InstallPage
         from windows.management.device_page import DevicePage
         from windows.management.health_page import HealthPage
         from windows.management.moyu_page import GamePage
@@ -48,6 +51,9 @@ class ManagementHub(PivotPage):
 
         self.table_page = TablePage(self)
         self.table_page.setObjectName("tablePage")
+        # 安装清单页（球桌 createTime 视角，2026-10-11）
+        self.install_page = InstallPage(self)
+        self.install_page.setObjectName("installPage")
         self.device_page = DevicePage(self)
         self.device_page.setObjectName("devicePage")
         self.health_page = HealthPage(self)
@@ -58,6 +64,7 @@ class ManagementHub(PivotPage):
         self.game_page.setObjectName("gamePage")
 
         self.addPage(self.table_page, "球桌管理", FluentIcon.LIBRARY)
+        self.addPage(self.install_page, "安装清单", FluentIcon.CALENDAR)
         self.addPage(self.device_page, "设备状态", FluentIcon.IOT)
         self.addPage(self.health_page, "设备健康度", FluentIcon.PIE_SINGLE)
         self.addPage(self.test_page, "组件测试", FluentIcon.VIEW)
@@ -66,7 +73,8 @@ class ManagementHub(PivotPage):
 
     def _apply_table_smooth_all(self):
         """刷新各子页表格滚动模式（按 覆盖→全局 生效）"""
-        for page in (self.table_page, self.device_page, self.health_page):
+        for page in (self.table_page, self.install_page, self.device_page,
+                     self.health_page):
             fn = getattr(page, "_apply_smooth_mode", None)
             if fn is not None:
                 try:

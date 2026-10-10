@@ -64,8 +64,9 @@ def test_migrations_dialect_column_sets_match():
         for m in migs:
             assert m.table == table  # 注册条目表名与键一致
             assert m.sqlite_type and m.mysql_type
-            # LONGTEXT 不允许 DEFAULT，其余列应有默认值
-            if m.mysql_type == "LONGTEXT":
+            # MySQL TEXT/LONGTEXT 不允许字面量 DEFAULT（与 ColumnDef/
+            # schema 头注释口径一致），其余列应有默认值
+            if m.mysql_type in ("TEXT", "LONGTEXT"):
                 assert m.mysql_default is None
             else:
                 assert m.mysql_default is not None

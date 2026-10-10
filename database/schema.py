@@ -145,6 +145,17 @@ TABLE_COLUMNS = {
         ColumnDef("deviceVersion", "TEXT", "VARCHAR(255)", "''", "''"),
         # 设备状态（wechat listext status：0=正常启动 2=退单，TEXT 存储）
         ColumnDef("status", "TEXT", "VARCHAR(16)", "''", "''"),
+        # 安装时间（wechat listext createTime 'YYYY-MM-DD HH:MM:SS'，安装
+        # 清单页数据源。2026-10-11 实测：9 月接口 createTime 台子数 143 与
+        # 人工清单《球房安装清单202609.xlsx》143 行逐台日期吻合）
+        ColumnDef("createTime", "TEXT", "VARCHAR(32)", "''", "''"),
+        # 球房地址（wechat listext roomAddress；安装清单导出「球房地址」列）
+        ColumnDef("roomAddress", "TEXT", "TEXT", "''", None),
+        # 销售（wechat listext sales；安装清单「销售-归属/销售-催款」同源）
+        ColumnDef("sales", "TEXT", "VARCHAR(255)", "''", "''"),
+        # 销售转移（xqzg status/ 接口 sales_transfer，如 "谢正钱 → 贾高阳"；
+        # listext 无此字段——由 save_xqzg 回填，save_all 全量替换时保护旧值）
+        ColumnDef("sales_transfer", "TEXT", "VARCHAR(255)", "''", "''"),
     ],
     "sync_meta": [
         ColumnDef("key", "TEXT", "VARCHAR(128)", sqlite_extra="PRIMARY KEY",
@@ -474,6 +485,18 @@ MIGRATIONS: dict = {
                         "VARCHAR(255)", "''"),
         ColumnMigration("billiard_tables", "status", "TEXT", "''",
                         "VARCHAR(16)", "''"),
+        # 安装清单三列（2026-10-11 安装清单页）：SQLite 侧由
+        # _migrate_sqlite_add_columns 自动补列；MySQL 侧上线时人工 ALTER，
+        # 此处登记幂等兜底（与既有部署约定一致）
+        ColumnMigration("billiard_tables", "createTime", "TEXT", "''",
+                        "VARCHAR(32)", "''"),
+        ColumnMigration("billiard_tables", "roomAddress", "TEXT", "''",
+                        "TEXT", None),
+        ColumnMigration("billiard_tables", "sales", "TEXT", "''",
+                        "VARCHAR(255)", "''"),
+        # 销售转移（xqzg status/ 回填，2026-10-11 二期）
+        ColumnMigration("billiard_tables", "sales_transfer", "TEXT", "''",
+                        "VARCHAR(255)", "''"),
     ],
     "health_alerts": [
         # 旧库补 device_code（xqzg update_health 接口入参，见 TABLE_COLUMNS）

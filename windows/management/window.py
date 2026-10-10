@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 from windows.management.common import *  # noqa: F401,F403
 from windows.management.table_page import TablePage
+from windows.management.install_page import InstallPage
 from windows.management.device_page import FileListPanel, DevicePage
 from windows.management.settings_page import AdminSettingsPage
 from windows.management.health_page import TrendPage, HealthPage
@@ -74,6 +75,10 @@ class ManagementPanelWindow(FluentWindow):
         # 创建子页面
         self.table_page = TablePage(self)
         self.table_page.setObjectName("tablePage")
+        # 安装清单页（球桌 createTime 视角，2026-10-11）：与球桌管理共用
+        # billiard_tables 同步链路，零独立存储
+        self.install_page = InstallPage(self)
+        self.install_page.setObjectName("installPage")
         self.device_page = DevicePage(self)
         self.device_page.setObjectName("devicePage")
         self.trend_page = TrendPage(self)
@@ -89,6 +94,7 @@ class ManagementPanelWindow(FluentWindow):
 
         # 注册导航
         self.addSubInterface(self.table_page, FluentIcon.LIBRARY, "球桌管理")
+        self.addSubInterface(self.install_page, FluentIcon.CALENDAR, "安装清单")
         self.addSubInterface(self.device_page, FluentIcon.IOT, "设备状态")
         # 隐藏「健康趋势」页导航入口，恢复时取消下行注释即可
         # self.addSubInterface(self.trend_page, FluentIcon.CHECKBOX, "健康趋势")
@@ -115,7 +121,8 @@ class ManagementPanelWindow(FluentWindow):
 
     def _apply_table_smooth_all(self):
         """刷新管理面板所有已构建子页的表格滚动模式（按 覆盖→全局 生效）"""
-        for page in (self.table_page, self.device_page, self.health_page):
+        for page in (self.table_page, self.install_page, self.device_page,
+                     self.health_page):
             fn = getattr(page, "_apply_smooth_mode", None)
             if fn is not None:
                 try:
@@ -194,7 +201,7 @@ class ManagementPanelWindow(FluentWindow):
             except RuntimeError:
                 pass
 
-        for page in (self.table_page, dev, self.trend_page,
+        for page in (self.table_page, self.install_page, dev, self.trend_page,
                      self.health_page, self.settings_page):
             for attr in ("_worker", "_migrate_worker", "_refresh_worker",
                          "_test_worker", "_upload_worker", "_query_worker",
@@ -202,7 +209,8 @@ class ManagementPanelWindow(FluentWindow):
                          "_time_worker", "_backfill_worker", "_backfill_save_worker",
                          "_alerts_worker", "_cand_worker", "_trend_worker",
                          "_rank_worker", "_hourly_worker", "_fetch_worker",
-                         "_health_worker", "_mark_worker", "_sync_worker"):
+                         "_health_worker", "_mark_worker", "_sync_worker",
+                         "_options_worker"):
                 _detach(getattr(page, attr, None))
         # 收集 Worker（不同设备可并行，列表管理）
         for worker in list(getattr(dev, "_collect_workers", [])):

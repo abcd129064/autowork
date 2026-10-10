@@ -648,12 +648,23 @@ def save_all(rows: list) -> int:
             val = str(snk or "").strip()
             if key and val:
                 old_snk[key] = val
+        # 销售转移（xqzg 回填值）同样保护：listext 行不含该字段，
+        # 全量替换不得把回填值清空（模式同 old_snk）
+        old_transfer = {}
+        for name, tr in conn.execute(
+                "SELECT name, sales_transfer FROM billiard_tables"):
+            key = str(name or "").strip()
+            val = str(tr or "").strip()
+            if key and val:
+                old_transfer[key] = val
         conn.execute("DELETE FROM billiard_tables")
         data = []
         for item in rows:
             remark = str(item.get("remark") or "")
             name = str(item.get("name") or "")
             snk = parse_snk_code(remark) or old_snk.get(name.strip(), "")
+            transfer = (str(item.get("sales_transfer") or "").strip()
+                        or old_transfer.get(name.strip(), ""))
             data.append((
                 item.get("id") or 0,
                 name,
@@ -667,12 +678,17 @@ def save_all(rows: list) -> int:
                 # 设备版本（如 "200070-20061-100836"）与状态（0=正常 2=退单）
                 str(item.get("deviceVersion") or ""),
                 str(item.get("status") if item.get("status") is not None else ""),
+                # 安装清单三列（2026-10-11）：安装时间/球房地址/销售
+                str(item.get("createTime") or ""),
+                str(item.get("roomAddress") or ""),
+                str(item.get("sales") or ""),
+                transfer,
             ))
         conn.executemany(
             "INSERT OR REPLACE INTO billiard_tables "
             "(id, name, roomName, onlineStatusName, remark, cameraPassExt, snk_code, code, city, "
-            "deviceVersion, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+            "deviceVersion, status, createTime, roomAddress, sales, sales_transfer) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # 同步时间戳：双后端兼容 upsert（MySQL 下 INSERT 已存在 key 会 1062）
         _upsert_sync_meta(conn, "last_sync", now)
@@ -1330,7 +1346,47 @@ def save_xqzg(rows: list, file_path: str = "") -> int:
         # 同步时间戳：双后端兼容 upsert，按日期分区避免固定键 1062
         meta_key = f"last_sync_xqzg_{file_path.replace('/', '')}" if file_path else "last_sync_xqzg"
         _upsert_sync_meta(conn, meta_key, now)
+        # 销售转移回填（2026-10-11）：xqzg status/ 行的 sales_transfer 按
+        # table_id ↔ 球桌号 合并进 billiard_tables（安装清单页数据源），
+        # 随本事务一并提交
+        _apply_sales_transfer(conn, rows)
     return len(data)
+
+
+def _apply_sales_transfer(conn, rows: list) -> int:
+    """按 xqzg status/ 行回填 billiard_tables.sales_transfer（无 commit，
+    由调用方的事务管理；返回处理行数）
+
+    匹配键：xqzg ``table_id`` ↔ billiard_tables ``name``（TRIM 后相等）。
+    仅回填**非空**值——宁缺勿回退：浏览历史分区快照同步时，旧数据不会
+    把新转移记录冲掉；撤销转移由下一次实时行（file_path=''）同步生效。
+    """
+    data = []
+    for item in rows or []:
+        tid = str(item.get("table_id") or "").strip()
+        val = str(item.get("sales_transfer") or "").strip()
+        if tid and val:
+            data.append((val, tid))
+    if not data:
+        return 0
+    try:
+        conn.executemany(
+            "UPDATE billiard_tables SET sales_transfer = ? "
+            "WHERE TRIM(name) = ?", data)
+    except Exception:
+        # 旧库尚未补列等异常：不阻断 xqzg 主数据落库（billiard_tables
+        # 迁移在 _ensure_initialized，正常链路不会走到这里）
+        return 0
+    return len(data)
+
+
+def update_sales_transfer_from_xqzg(rows: list) -> int:
+    """独立回填入口：把 xqzg status/ 行的 sales_transfer 合并进
+    billiard_tables（save_xqzg 已内置同款逻辑，本函数供测试与外部调用）"""
+    conn = _get_conn()
+    n = _apply_sales_transfer(conn, rows)
+    conn.commit()
+    return n
 
 
 def query_xqzg_page(page_no: int, page_size: int, keyword: str = "",
@@ -2310,3 +2366,234 @@ def _query_status_page(table_name: str, page_no: int, page_size: int, keyword: s
                     row_dict[f] = []
         rows.append(row_dict)
     return total, rows
+
+
+# ==================== 安装清单视图（球桌 createTime 视角，2026-10-11） ====================
+#
+# 数据源：wechat listext 接口的 createTime（安装时间）/ roomAddress（球房
+# 地址）/ sales（销售）三字段，随球桌同步链路落 billiard_tables。2026-10-11
+# 实测：接口 2026-09 当月 createTime 台子数 143，与人工样例
+# 《球房安装清单202609.xlsx》143 行逐台日期吻合，无需独立台账表。
+#
+# 「本月安装数量」不落库：恒等于该球房当月台子行数，GROUP BY 动态算，
+# 避免导入/删除时的冗余漂移（与样例「本月安装数量」合并列同口径）。
+
+# 安装清单关键词模糊匹配列
+_INSTALL_SEARCH_FIELDS = ("name", "roomName", "roomAddress", "sales",
+                          "sales_transfer", "code")
+
+# 同球房同月分组的两个关联子查询（room_count / 组内最晚安装时间）。
+# 排序口径复刻人工样例：球房分组聚合、组按最晚安装日期倒序、组内相邻
+#（样例实测 74 组中 6 组日期不一致但全部组内相邻，非纯日期排序）。
+_INSTALL_ROOM_COUNT_SQL = (
+    "(SELECT COUNT(*) FROM billiard_tables t2 "
+    "WHERE TRIM(t2.roomName) = TRIM(b.roomName) "
+    "AND substr(COALESCE(t2.createTime, ''), 1, 7) = "
+    "substr(COALESCE(b.createTime, ''), 1, 7))")
+_INSTALL_GROUP_MAX_SQL = (
+    "(SELECT MAX(COALESCE(t3.createTime, '')) FROM billiard_tables t3 "
+    "WHERE TRIM(t3.roomName) = TRIM(b.roomName) "
+    "AND substr(COALESCE(t3.createTime, ''), 1, 7) = "
+    "substr(COALESCE(b.createTime, ''), 1, 7))")
+
+# 安装清单导出表头/列宽：前 7 列与人工样例《球房安装清单202609.xlsx》
+# 实测一致；第 8 列「销售转移」为接口增量信息（xqzg sales_transfer）
+_INSTALL_EXPORT_HEADERS = ("球房名字", "球房地址", "本月安装数量", "球桌编号",
+                           "安装时间", "销售-归属", "销售-催款", "销售转移")
+_INSTALL_COL_WIDTHS = (30, 67, 14.4, 18.2, 32, 14, 14, 20)
+
+
+def _build_install_where(keyword: str = "", ym: str = "", sales: str = "",
+                         include_test: bool = False,
+                         include_manual: bool = True,
+                         include_tuidan: bool = True) -> tuple:
+    """构造安装清单 WHERE 子句与参数（SQLite 占位符，MySQL 自动转换）
+
+    与 query_page 的过滤口径对齐，默认值差异：手动版本/退单设备默认
+    包含——安装台账记录安装事实（人工样例含 @s 设备）；公司测试球房
+    默认排除（非真实安装）。
+    """
+    conds, params = [], []
+    if not include_test:
+        conds.append("TRIM(roomName) NOT IN (?, ?, ?)")
+        params.extend(TEST_ROOM_NAMES)
+    if not include_manual:
+        conds.append("(name NOT LIKE ? AND roomName NOT LIKE ?)")
+        params.extend([f"%{MANUAL_DEVICE_FLAG}%", f"%{MANUAL_DEVICE_FLAG}%"])
+    if not include_tuidan:
+        conds.append("IFNULL(status, '') != ?")
+        params.append(TUIDAN_STATUS)
+    ym = str(ym or "").strip()
+    if ym:
+        conds.append("substr(COALESCE(createTime, ''), 1, 7) = ?")
+        params.append(ym)
+    sales_kw = str(sales or "").strip()
+    if sales_kw:
+        conds.append("sales = ?")
+        params.append(sales_kw)
+    kw = str(keyword or "").strip()
+    if kw:
+        like = f"%{kw}%"
+        kw_cond = " OR ".join(f"{f} LIKE ?" for f in _INSTALL_SEARCH_FIELDS)
+        conds.append(f"({kw_cond})")
+        params.extend([like] * len(_INSTALL_SEARCH_FIELDS))
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    return where, params
+
+
+def query_install_page(page_no: int, page_size: int, keyword: str = "",
+                       ym: str = "", sales: str = "",
+                       include_test: bool = False,
+                       include_manual: bool = True,
+                       include_tuidan: bool = True) -> tuple:
+    """安装清单分页查询（球桌 createTime 视角），返回 (total, rows)
+
+    rows 每行：id/name/roomName/roomAddress/createTime/sales/code +
+    room_count（该球房当月安装数量，子查询动态算）。排序：球房分组聚合、
+    组按最晚安装时间倒序、组内安装时间倒序 + 桌号（同球房多桌天然相邻，
+    导出时按此合并 A/B/C 列，与人工样例排序一致）。
+    """
+    conn = _get_conn()
+    where, params = _build_install_where(keyword, ym, sales,
+                                         include_test, include_manual,
+                                         include_tuidan)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM billiard_tables b{where}",
+        params).fetchone()[0]
+    offset = max(0, int(page_no) - 1) * int(page_size)
+    cursor = conn.execute(
+        f"SELECT b.id, b.name, b.roomName, b.roomAddress, b.createTime, "
+        f"b.sales, b.sales_transfer, b.code, "
+        f"{_INSTALL_ROOM_COUNT_SQL} AS room_count "
+        f"FROM billiard_tables b{where} "
+        f"ORDER BY {_INSTALL_GROUP_MAX_SQL} DESC, b.roomName, "
+        f"b.createTime DESC, b.name "
+        f"LIMIT ? OFFSET ?",
+        params + [int(page_size), offset])
+    cols = [d[0] for d in cursor.description]
+    return int(total or 0), [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+
+def install_month_options() -> list:
+    """安装月份候选（'YYYY-MM' 倒序；createTime 非空行去重）"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT substr(COALESCE(createTime, ''), 1, 7) AS ym "
+            "FROM billiard_tables WHERE TRIM(COALESCE(createTime, '')) != '' "
+            "ORDER BY ym DESC").fetchall()
+    except Exception:
+        return []
+    return [str(r[0]) for r in rows if r[0]]
+
+
+def install_sales_options() -> list:
+    """销售候选（sales 非空去重，升序）"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT sales FROM billiard_tables "
+            "WHERE TRIM(COALESCE(sales, '')) != '' ORDER BY sales").fetchall()
+    except Exception:
+        return []
+    return [str(r[0]) for r in rows if r[0]]
+
+
+def _install_export_sheet_name(ym: str) -> str:
+    """导出 sheet 名：'2026-09' → 球房安装清单9月（与样例命名一致）"""
+    ym = str(ym or "").strip()
+    if len(ym) >= 7 and ym[4] == "-":
+        try:
+            return f"球房安装清单{int(ym[5:7])}月"
+        except ValueError:
+            pass
+    return "球房安装清单"
+
+
+def _install_parse_date(value) -> object:
+    """createTime 'YYYY-MM-DD[ HH:MM:SS]' → datetime.date；解析失败返回 None"""
+    s = str(value or "").strip()
+    if len(s) >= 10:
+        try:
+            return datetime.strptime(s[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    return None
+
+
+def export_install_xlsx(path: str, keyword: str = "", ym: str = "",
+                        sales: str = "", include_test: bool = False,
+                        include_manual: bool = True,
+                        include_tuidan: bool = True) -> int:
+    """按当前筛选导出安装清单 xlsx（格式与人工样例一致），返回导出行数
+
+    复刻要点（样例《球房安装清单202609.xlsx》实测）：
+    - 前 7 列与样例一致：球房名字/球房地址/本月安装数量/球桌编号/
+      安装时间/销售-归属/销售-催款（归属/催款同源 sales，样例两列恒等）；
+      第 8 列「销售转移」为接口增量信息（xqzg sales_transfer，可空）
+    - 同球房（同月）连续行 A/B/C 三列纵向合并
+    - 列宽 A=30/B=67/C=14.4/D=18.2/E=32/F=14/G=14/H=20；D 列文本格式
+      '@'（防 290-00 这类编号被 Excel 改格式）；E 列写 date 值 + mm-dd-yy
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+
+    conn = _get_conn()
+    where, params = _build_install_where(keyword, ym, sales,
+                                         include_test, include_manual,
+                                         include_tuidan)
+    rows = conn.execute(
+        f"SELECT b.name, b.roomName, b.roomAddress, b.createTime, b.sales, "
+        f"b.sales_transfer, {_INSTALL_ROOM_COUNT_SQL} AS room_count "
+        f"FROM billiard_tables b{where} "
+        f"ORDER BY {_INSTALL_GROUP_MAX_SQL} DESC, b.roomName, "
+        f"b.createTime DESC, b.name",
+        params).fetchall()
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet(_install_export_sheet_name(ym))
+    ws.append(list(_INSTALL_EXPORT_HEADERS))
+    for i, w in enumerate(_INSTALL_COL_WIDTHS, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    center = Alignment(horizontal="center", vertical="center")
+
+    for name, room, addr, create_time, sales_v, transfer, room_count in rows:
+        room = str(room or "").strip()
+        install_date = _install_parse_date(create_time)
+        ws.append([room, str(addr or ""), int(room_count or 0),
+                   str(name or ""), install_date or str(create_time or ""),
+                   str(sales_v or ""), str(sales_v or ""),
+                   str(transfer or "")])
+        row_idx = ws.max_row
+        # D 列文本格式（球桌编号保持原样）；E 列日期显示格式（样例 mm-dd-yy）
+        ws.cell(row=row_idx, column=4).number_format = "@"
+        if install_date is not None:
+            ws.cell(row=row_idx, column=5).number_format = "mm-dd-yy"
+        for col in (1, 2, 3):
+            ws.cell(row=row_idx, column=col).alignment = center
+
+    # A/B/C 纵向合并：排序保证同球房（同月）连续，逐组 merge_cells
+    #（数据行号 = 序号 + 1，表头占第 1 行）
+    start = 2
+    group_key = None
+    for i, r in enumerate(rows):
+        room = str(r[1] or "").strip()
+        month = str(r[3] or "")[:7]
+        key = (room, month)
+        if key != group_key:
+            if group_key is not None and (i + 1) - start >= 1:
+                end = i + 1
+                for col_letter in ("A", "B", "C"):
+                    ws.merge_cells(f"{col_letter}{start}:{col_letter}{end}")
+            group_key = key
+            start = i + 2
+    # 收尾：最后一组
+    if group_key is not None and (len(rows) + 1) - start >= 1:
+        end = len(rows) + 1
+        for col_letter in ("A", "B", "C"):
+            ws.merge_cells(f"{col_letter}{start}:{col_letter}{end}")
+
+    wb.save(path)
+    return len(rows)
