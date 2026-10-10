@@ -22,12 +22,10 @@ from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout,
                                QLabel, QScrollArea, QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, CardWidget, CheckBox,
                             FluentIcon, LineEdit, PasswordLineEdit,
-                            PrimaryPushButton, PushButton, SearchLineEdit,
-                            SpinBox, ToolButton)
+                            PrimaryPushButton, PushButton, SpinBox)
 
 from core import dahua_sdk
 from core.dahua_sdk import DahuaClient
-from core.frps_admin import get_frps_client
 from core.utils import show_info_bar
 
 logger = logging.getLogger(__name__)
@@ -139,31 +137,6 @@ _DIR_KEYS = [  # 九宫格 → SDK_PTZ_ControlType 命令名
     ("LEFTDOWN", "↙"), ("DOWN_CONTROL", "↓"), ("RIGHTDOWN", "↘"),
 ]
 
-# ---- frps 相机隧道（*_cam 快速选用，2026-10-09） ----
-# ⚠ 匹配规则是「包含 _cam」而非后缀：真机名单有 147_cam1 / apex_cam01 /
-#   ly_cam15_sdk / jp_cam2_rtsp 等形态（_cam 后还带编号/用途后缀）
-_CAM_MARK = "_cam"
-_CAM_STATUS = {"online": ("在线", "#70d49c"), "offline": ("离线", "#e05555")}
-
-
-def collect_cam_proxies(all_proxies: dict) -> list:
-    """从 frps all_proxies() {type: [proxy,…]} 提取名称含 _cam 的相机隧道，按名称排序。
-
-    proxy 字段见 core/frps_admin._parse_proxy_list（conf.remotePort =
-    frps 侧监听端口）。"""
-    out = []
-    for proxies in (all_proxies or {}).values():
-        for p in proxies or []:
-            name = str(p.get("name") or "")
-            if _CAM_MARK in name.lower():
-                conf = p.get("conf") or {}
-                out.append({"name": name, "user": str(p.get("user") or ""),
-                            "status": str(p.get("status") or "").lower(),
-                            "curConns": int(p.get("curConns") or 0),
-                            "remotePort": conf.get("remotePort")})
-    out.sort(key=lambda p: p["name"])
-    return out
-
 
 class DahuaCameraWork(QWidget):
     """相机工具：登录 → 预览 → 云台（能力位自适应） → OSD 叠加"""
@@ -179,90 +152,31 @@ class DahuaCameraWork(QWidget):
         root.setContentsMargins(12, 10, 12, 12)
         root.setSpacing(10)
 
-        # ---- 三列布局：登录卡(含 frps 隧道) | 预览 | 云台（设计稿 camera_tool_frps_v2.html）----
-        cols = QHBoxLayout()
-        cols.setSpacing(10)
-
+        # ---- 登录条 ----
         login_card = CardWidget(self)
-        login_card.setFixedWidth(300)
-        lv = QVBoxLayout(login_card)
-        lv.setContentsMargins(14, 12, 14, 12)
-        lv.setSpacing(6)
-        lv.addWidget(BodyLabel("设备登录", login_card))
-
-        def _field(label_text: str, widget: QWidget):
-            box = QWidget(login_card)
-            fv = QVBoxLayout(box)
-            fv.setContentsMargins(0, 0, 0, 0)
-            fv.setSpacing(2)
-            cap = CaptionLabel(label_text, box)
-            cap.setStyleSheet("color:#9aa1b5;")
-            fv.addWidget(cap)
-            fv.addWidget(widget)
-            lv.addWidget(box)
-
+        lv = QHBoxLayout(login_card)
+        lv.setContentsMargins(14, 10, 14, 10)
         self._ed_addr = LineEdit(login_card)
-        self._ed_addr.setPlaceholderText("设备地址，支持隧道 host:port")
-        _field("服务器地址", self._ed_addr)
+        self._ed_addr.setPlaceholderText("设备地址，支持隧道 host:port（如 49.235.34.253:4238）")
+        self._ed_addr.setFixedWidth(280)
         self._ed_user = LineEdit(login_card)
         self._ed_user.setText("admin")
-        _field("账号", self._ed_user)
+        self._ed_user.setFixedWidth(90)
         self._ed_pwd = PasswordLineEdit(login_card)
-        _field("密码", self._ed_pwd)
-        btns = QHBoxLayout()
+        self._ed_pwd.setFixedWidth(120)
         self._btn_conn = PrimaryPushButton(FluentIcon.LINK, "连接", login_card)
         self._btn_disc = PushButton(FluentIcon.CLOSE, "断开", login_card)
         self._btn_disc.setEnabled(False)
-        btns.addWidget(self._btn_conn)
-        btns.addWidget(self._btn_disc)
-        btns.addStretch(1)
-        lv.addLayout(btns)
         self._lb_state = BodyLabel("未连接", login_card)
-        self._lb_state.setStyleSheet("color:#9aa1b5;")
-        lv.addWidget(self._lb_state)
-
-        # ---- frps 相机隧道（登录卡底部，*_cam 快速选用 + 搜索，2026-10-09） ----
-        lv.addSpacing(6)
-        fh = QHBoxLayout()
-        fh.setSpacing(6)
-        self._lb_frps = BodyLabel("📡 frps 相机隧道", login_card)
-        self._lb_frps_cnt = CaptionLabel("", login_card)
-        self._lb_frps_cnt.setStyleSheet("color:#4f8cff;")
-        self._btn_frps_refresh = ToolButton(FluentIcon.SYNC, login_card)
-        self._btn_frps_refresh.setToolTip("立即拉取 frps 代理名单")
-        self._btn_frps_refresh.clicked.connect(self._frps_refresh)
-        fh.addWidget(self._lb_frps)
-        fh.addWidget(self._lb_frps_cnt)
-        fh.addStretch(1)
-        fh.addWidget(self._btn_frps_refresh)
-        lv.addLayout(fh)
-        self._ed_frps_search = SearchLineEdit(login_card)
-        self._ed_frps_search.setPlaceholderText("搜索隧道名…")
-        self._ed_frps_search.setClearButtonEnabled(True)
-        self._ed_frps_search.textChanged.connect(self._frps_rebuild)
-        lv.addWidget(self._ed_frps_search)
-        self._frps_rows = QWidget(login_card)
-        self._frps_v = QVBoxLayout(self._frps_rows)
-        self._frps_v.setContentsMargins(0, 0, 0, 0)
-        self._frps_v.setSpacing(4)
-        self._frps_v.addStretch(1)
-        self._frps_scroll = QScrollArea(login_card)
-        self._frps_scroll.setWidgetResizable(True)
-        self._frps_scroll.setWidget(self._frps_rows)
-        self._frps_scroll.setFixedHeight(108)
-        self._frps_scroll.setStyleSheet(
-            "QScrollArea{border:none;background:transparent;}"
-            "QWidget{background:transparent;}")
-        lv.addWidget(self._frps_scroll)
+        for w in (self._ed_addr, self._ed_user, self._ed_pwd,
+                  self._btn_conn, self._btn_disc, self._lb_state):
+            lv.addWidget(w)
         lv.addStretch(1)
-        cols.addWidget(login_card)
-        # frps 感知自动刷新（定时器在 frps_admin 单例内）→ 隧道列表跟随重建
-        get_frps_client().all_proxies_changed.connect(
-            lambda _d: self._frps_rebuild())
-        self._frps_rebuild()
+        root.addWidget(login_card)
 
         # ---- 中区：预览 + 云台 ----
-        mid = cols
+        mid = QHBoxLayout()
+        mid.setSpacing(10)
 
         preview_card = CardWidget(self)
         pv = QVBoxLayout(preview_card)
@@ -271,7 +185,7 @@ class DahuaCameraWork(QWidget):
         self._preview.setMinimumSize(560, 315)
         pv.addWidget(self._preview, 1)
         self._lb_pv_hint = CaptionLabel(
-            "连接后点击「开始预览」", preview_card)
+            "连接后点击「开始预览」（SDK 直接渲染辅码流到上方画布）", preview_card)
         pv.addWidget(self._lb_pv_hint)
         pbar = QHBoxLayout()
         self._btn_play = PrimaryPushButton(FluentIcon.VIDEO, "开始预览", preview_card)
@@ -289,8 +203,6 @@ class DahuaCameraWork(QWidget):
         mid.addWidget(preview_card, 5)
 
         ptz_card = CardWidget(self)
-        ptz_card.setMaximumWidth(430)
-
         ptz = QVBoxLayout(ptz_card)
         ptz.setContentsMargins(12, 10, 12, 12)
         ptz_h = QHBoxLayout()
@@ -339,10 +251,10 @@ class DahuaCameraWork(QWidget):
         ptz.addLayout(zf)
 
         self._ptz_note = CaptionLabel(
-            "方向/预置点仅 PT 机型有效；固定镜头机型此区域置灰。", ptz_card)
+            "⚠ 方向/预置点仅 PT 机型有效；固定镜头机型此区自动置灰。", ptz_card)
         self._ptz_note.setWordWrap(True)
         ptz.addWidget(self._ptz_note)
-        ptz.addStretch(1)
+
         # ---- 预置点列表（设计稿形态：编号徽标 + 名称 + 调用/设为此处/删 + 新增行）----
         self._preset_panel = QWidget(ptz_card)
         pp = QVBoxLayout(self._preset_panel)
@@ -376,7 +288,7 @@ class DahuaCameraWork(QWidget):
         pe = QHBoxLayout(self._preset_editor)
         pe.setContentsMargins(0, 0, 0, 0)
         self._ed_preset_name = LineEdit(self._preset_editor)
-        self._ed_preset_name.setPlaceholderText("预置点名称")
+        self._ed_preset_name.setPlaceholderText("预置点名称（保存相机当前位置）")
         self._btn_preset_ok = PrimaryPushButton("确定", self._preset_editor)
         self._btn_preset_cancel = PushButton("取消", self._preset_editor)
         pe.addWidget(self._ed_preset_name, 1)
@@ -396,12 +308,12 @@ class DahuaCameraWork(QWidget):
         osd_row = QHBoxLayout()
         osd_row.setSpacing(10)
         self._card_chn = self._build_osd_card(
-            osd_row, "chn", "通道标题", text_hint="叠加文字", has_pos=True)
+            osd_row, "chn", "通道标题", text_hint="叠加文字（相机名称）", has_pos=True)
         self._card_time = self._build_osd_card(
             osd_row, "time", "时间标题", text_hint=None, has_pos=True, has_week=True)
         self._card_custom = self._build_osd_card(
             osd_row, "custom", "自定义文字告示",
-            text_hint="告示文字", has_pos=True)
+            text_hint="告示文字（如：⚠ 8号桌维修中）", has_pos=True)
         root.addLayout(osd_row)
 
         self._btn_conn.clicked.connect(self._connect)
@@ -506,89 +418,6 @@ class DahuaCameraWork(QWidget):
         self._btn_conn.setEnabled(True)
         self._lb_state.setText("✕ 连接失败")
         _toast(self, msg, error=True, duration=4000)
-
-    def set_address(self, addr: str):
-        """预填登录地址（frps 隧道「选用」一键带参）"""
-        self._ed_addr.setText(addr)
-        self._ed_pwd.setFocus()
-
-    # ---------- frps 相机隧道 ----------
-
-    def _frps_rebuild(self):
-        """按当前搜索词重建隧道行（数据源 frps 感知缓存，登录卡内竖列）"""
-        v = self._frps_v
-        while v.count() > 1:  # 保留末尾 stretch
-            item = v.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        proxies = collect_cam_proxies(get_frps_client().all_proxies())
-        kw = self._ed_frps_search.text().strip().lower()
-        shown = [p for p in proxies
-                 if not kw or kw in p["name"].lower()] if proxies else []
-        if not proxies:
-            hint = CaptionLabel("暂无 _cam 相机隧道（frps 未配置/不可达，"
-                                "去 远程 → frps 代理 页配置凭据）", self._frps_rows)
-            hint.setStyleSheet("color:#9aa1b5;")
-            hint.setWordWrap(True)
-            v.insertWidget(0, hint)
-            self._lb_frps_cnt.setText("")
-            return
-        self._lb_frps_cnt.setText(
-            f"{len(shown)}/{len(proxies)}" if kw else str(len(proxies)))
-        if not shown:
-            hint = CaptionLabel("无匹配隧道", self._frps_rows)
-            hint.setStyleSheet("color:#9aa1b5;")
-            v.insertWidget(0, hint)
-            return
-        for p in shown:
-            v.insertWidget(v.count() - 1, self._frps_row(p))
-
-    def _frps_row(self, p: dict) -> QWidget:
-        row = QWidget(self._frps_rows)
-        row.setStyleSheet("QWidget{background:#1f2534;border:1px solid #3a4056;"
-                          "border-radius:7px;}")
-        rh = QHBoxLayout(row)
-        rh.setContentsMargins(10, 4, 10, 4)
-        rh.setSpacing(6)
-        status, color = _CAM_STATUS.get(p["status"], ("未知", "#9aa1b5"))
-        dot = QLabel("●", row)
-        dot.setStyleSheet(f"color:{color};font-size:12px;background:transparent;"
-                          "border:none;")
-        rh.addWidget(dot)
-        nm = BodyLabel(p["name"], row)
-        nm.setStyleSheet("background:transparent;border:none;")
-        rh.addWidget(nm)
-        meta = CaptionLabel(f"{status} · {p['remotePort'] or '-'}", row)
-        meta.setStyleSheet("color:#9aa1b5;background:transparent;border:none;")
-        rh.addWidget(meta)
-        rh.addStretch(1)
-        btn = PushButton("选用", row)
-        btn.setFixedHeight(26)
-        btn.setEnabled(p["status"] == "online" and bool(p["remotePort"]))
-        btn.clicked.connect(lambda _=False, pr=p: self._frps_use(pr))
-        rh.addWidget(btn)
-        return row
-
-    def _frps_use(self, p: dict):
-        addr = f"{self._frps_host()}:{p['remotePort']}"
-        self.set_address(addr)
-        logger.info("frps 相机隧道 %s → 选用 %s", p["name"], addr)
-
-    def _frps_refresh(self):
-        cl = get_frps_client()
-        cl.request_refresh()
-        if cl.snapshot().get("state") != "ok":
-            _toast(self, "frps 感知未就绪（远程 → frps 代理 页配置凭据）",
-                   duration=3500)
-
-    def _frps_host(self) -> str:
-        try:
-            from core.frp_remote import get_session_manager
-            return get_session_manager().frps_server_addr()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("取 frps 地址失败: %s", e)
-            return ""
 
     def _disconnect(self):
         self._stop_preview()
@@ -839,7 +668,7 @@ class DahuaCameraWork(QWidget):
 
         def done(result):
             if isinstance(result, dict) and result.get("name_applied") is False:
-                _toast(self, "该固件不支持修改通道名称"
+                _toast(self, "该固件不支持修改通道名称（已保留设备原名），"
                              "开关/位置已应用", duration=4000)
             else:
                 _toast(self, "OSD 设置成功", duration=1800)

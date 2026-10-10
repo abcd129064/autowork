@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS billiard_tables (
     code    TEXT DEFAULT '',
     city    TEXT DEFAULT '',
     deviceVersion TEXT DEFAULT '',
-    status  TEXT DEFAULT ''
+    status  TEXT DEFAULT '',
+    createTime TEXT DEFAULT '',
+    roomAddress TEXT DEFAULT '',
+    sales TEXT DEFAULT ''
 );
 """,
     "sync_meta": """
@@ -257,7 +260,10 @@ GOLDEN_MYSQL_DDL = {
             code             VARCHAR(255) DEFAULT '',
             city             VARCHAR(255) DEFAULT '',
             deviceVersion    VARCHAR(255) DEFAULT '',
-            status           VARCHAR(16) DEFAULT ''
+            status           VARCHAR(16) DEFAULT '',
+            createTime       VARCHAR(32) DEFAULT '',
+            roomAddress      TEXT,
+            sales            VARCHAR(255) DEFAULT ''
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     "sync_meta": """

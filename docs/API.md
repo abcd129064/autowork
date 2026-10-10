@@ -987,6 +987,19 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 
 球桌表字段（`FIELDS`）：`name`、`roomName`、`onlineStatusName`、`remark`、`cameraPassExt`、`snk_code`（SNK 标识，手动维护）、`code`（设备编码，接口同步）。旧库自动惰性迁移：首次连接时 `ALTER TABLE ADD COLUMN` 补列并重建 FTS 索引，数据无损。
 
+#### 安装清单视图（createTime 视角，2026-10-11）
+
+数据源：wechat listext 接口 `createTime`（安装时间）/ `roomAddress`（球房地址）/ `sales`（销售）三列随球桌同步链路落 `billiard_tables`（2026-10-11 实测：接口 2026-09 当月 createTime 台子数 143，与人工样例《球房安装清单202609.xlsx》143 行逐台日期吻合，无需独立台账表；「本月安装数量」由 room+month 分组动态计算，不落库）。
+
+| 函数 | 说明 |
+|------|------|
+| `query_install_page(page_no, page_size, keyword="", ym="", sales="", include_test=False, include_manual=True, include_tuidan=True)` | `-> (total, rows)` 安装清单分页查询；`ym`='YYYY-MM' 按安装月份过滤，keyword 模糊匹配 name/roomName/roomAddress/sales/code；rows 每行含 `room_count`（该球房当月安装数量）；排序=球房分组聚合、组按最晚安装时间倒序（同球房相邻，导出按此合并单元格）；手动版本/退单默认包含（安装台账语义），公司测试默认排除 |
+| `install_month_options()` | `-> list` 安装月份候选（'YYYY-MM' 倒序，createTime 非空行去重） |
+| `install_sales_options()` | `-> list` 销售候选（非空去重升序） |
+| `export_install_xlsx(path, keyword="", ym="", sales="", include_test=False, include_manual=True, include_tuidan=True)` | `-> int` 按当前筛选导出 xlsx，返回导出行数；格式复刻人工样例：表头 7 列（销售-归属/销售-催款同源 sales）、同球房（同月）连续行 A/B/C 纵向合并、列宽 30/67/14.4/18.2/32/14/14、D 列 '@' 文本格式、E 列 date 值 + mm-dd-yy |
+
+UI 层入口：`windows/management/install_page.py` 的 `InstallPage`（管理面板「安装清单」页，objectName=`installPage`）。
+
 **全文搜索（FTS5）**：三张表均建 trigram 虚拟表 + 触发器增量同步（external content 模式）；关键词 ≥3 字符走 FTS 子串匹配，短关键词或 SQLite 缺 FTS5 支持时自动回退多列 `LIKE`。排序列名经白名单校验，数值字段（TEXT 存储）自动 `CAST AS REAL` 防字典序错误。
 
 #### 健康度告警（health_alerts）
