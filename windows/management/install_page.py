@@ -456,7 +456,7 @@ class InstallPage(QWidget):
         self._xqzg_sync_worker.result_ready.connect(self._on_xqzg_live_done)
         self._xqzg_sync_worker.error.connect(
             lambda msg: logger.warning(
-                "xqzg 实时行同步失败（不影响安装清单主数据）: %s", msg))
+                "xqzg 实时行同步失败: %s", msg))
         self._xqzg_sync_worker.start()
 
     def _on_xqzg_live_done(self, rows):
