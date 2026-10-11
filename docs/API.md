@@ -989,16 +989,17 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 
 #### 安装清单视图（createTime 视角，2026-10-11）
 
-数据源：wechat listext 接口 `createTime`（安装时间）/ `roomAddress`（球房地址）/ `sales`（销售）三列随球桌同步链路落 `billiard_tables`（2026-10-11 实测：接口 2026-09 当月 createTime 台子数 143，与人工样例《球房安装清单202609.xlsx》143 行逐台日期吻合，无需独立台账表；「本月安装数量」由 room+month 分组动态计算，不落库）。
+数据源：wechat listext 接口 `createTime`（安装时间）/ `roomAddress`（球房地址）/ `sales`（销售）三列随球桌同步链路落 `billiard_tables`（2026-10-11 实测：接口 2026-09 当月 createTime 台子数 143，与人工样例《球房安装清单202609.xlsx》143 行逐台日期吻合，无需独立台账表；「本月安装数量」由 room+month 分组动态计算，不落库）。`sales_transfer`（销售转移，如 "谢正钱 → 贾高阳"）仅 xqzg `status/` 接口返回，由 `save_xqzg` 落库时按 `table_id ↔ name` 回填 `billiard_tables`（仅回填非空值，宁缺勿回退；`save_all` 全量替换保护回填值不被清空）。
 
 | 函数 | 说明 |
 |------|------|
-| `query_install_page(page_no, page_size, keyword="", ym="", sales="", include_test=False, include_manual=True, include_tuidan=True)` | `-> (total, rows)` 安装清单分页查询；`ym`='YYYY-MM' 按安装月份过滤，keyword 模糊匹配 name/roomName/roomAddress/sales/code；rows 每行含 `room_count`（该球房当月安装数量）；排序=球房分组聚合、组按最晚安装时间倒序（同球房相邻，导出按此合并单元格）；手动版本/退单默认包含（安装台账语义），公司测试默认排除 |
+| `query_install_page(page_no, page_size, keyword="", ym="", sales="", include_test=False, include_manual=True, include_tuidan=True)` | `-> (total, rows)` 安装清单分页查询；`ym`='YYYY-MM' 按安装月份过滤，keyword 模糊匹配 name/roomName/roomAddress/sales/sales_transfer/code；rows 每行含 `room_count`（该球房当月安装数量）与 `sales_transfer`；排序=球房分组聚合、组按最晚安装时间倒序（同球房相邻，导出按此合并单元格）；手动版本/退单默认包含（安装台账语义），公司测试默认排除 |
 | `install_month_options()` | `-> list` 安装月份候选（'YYYY-MM' 倒序，createTime 非空行去重） |
 | `install_sales_options()` | `-> list` 销售候选（非空去重升序） |
-| `export_install_xlsx(path, keyword="", ym="", sales="", include_test=False, include_manual=True, include_tuidan=True)` | `-> int` 按当前筛选导出 xlsx，返回导出行数；格式复刻人工样例：表头 7 列（销售-归属/销售-催款同源 sales）、同球房（同月）连续行 A/B/C 纵向合并、列宽 30/67/14.4/18.2/32/14/14、D 列 '@' 文本格式、E 列 date 值 + mm-dd-yy |
+| `export_install_xlsx(path, keyword="", ym="", sales="", include_test=False, include_manual=True, include_tuidan=True)` | `-> int` 按当前筛选导出 xlsx，返回导出行数；格式复刻人工样例：前 7 列（球房名字/球房地址/本月安装数量/球桌编号/安装时间/销售-归属/销售-催款）+ 第 8 列「销售转移」增量信息；同球房（同月）连续行 A/B/C 纵向合并、列宽 30/67/14.4/18.2/32/14/14/20、D 列 '@' 文本格式、E 列 date 值 + mm-dd-yy |
+| `update_sales_transfer_from_xqzg(rows)` | `-> int` 独立回填入口：xqzg status/ 行的 sales_transfer 按 `table_id ↔ TRIM(name)` 合并进 billiard_tables（仅非空值；save_xqzg 已内置同款逻辑随事务提交） |
 
-UI 层入口：`windows/management/install_page.py` 的 `InstallPage`（管理面板「安装清单」页，objectName=`installPage`）。
+UI 层入口：`windows/management/install_page.py` 的 `InstallPage`（主窗口 ManagementHub「安装清单」页签 + 弹出面板 ManagementPanelWindow 双宿主；「同步数据」= listext 全量 + xqzg 实时行追加回填销售转移）。
 
 **全文搜索（FTS5）**：三张表均建 trigram 虚拟表 + 触发器增量同步（external content 模式）；关键词 ≥3 字符走 FTS 子串匹配，短关键词或 SQLite 缺 FTS5 支持时自动回退多列 `LIKE`。排序列名经白名单校验，数值字段（TEXT 存储）自动 `CAST AS REAL` 防字典序错误。
 
