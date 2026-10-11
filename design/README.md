@@ -21,7 +21,7 @@ design/
 
 | 设计稿 | 内容 | 对应实现 |
 | --- | --- | --- |
-| [aftersale_columns_v2.html](aftersale_columns_v2.html) | 售后记录表 · 列合并设计稿 v2（P0-2） | `windows/aftersale/records.py`（列合并方案实测见 `tools/perf/column_merge_probe.py`） |
+| [aftersale_columns_v2.html](aftersale_columns_v2.html) | 售后记录表 · 列合并设计稿 v2（P0-2） | `windows/aftersale/records/page.py`（列合并方案实测见 `tools/perf/column_merge_probe.py`） |
 | [aftersale_dashboard_design.html](aftersale_dashboard_design.html) | 售后总览 · 图表设计稿（**由脚本生成**，内嵌真实生产数据） | `design/generator/gen_design.py` |
 | [tools_page_v2.html](tools_page_v2.html) | 工具页 · 二期设计稿（ToolHub v2 · qfluentwidgets 控件还原） | `main_window/tool_hub.py` |
 | [remote_page_v2.html](remote_page_v2.html) | 远程页 · 二期设计稿（RemoteHub v2 · 控件还原） | `windows/remote_session/remote_hub.py`（已被 v3 取代） |

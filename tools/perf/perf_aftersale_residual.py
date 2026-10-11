@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""售后面板性能残余复测 harness：委托化后填充/排序/弹窗/DB 链路量化。
+"""售后面板性能残余复测 harness：委托化后填充/行锚/弹窗/DB 链路量化。
 
 背景：docs/售后面板性能调查报告2026-09-06.md 的 S1/S2/S3/S4/S5/S6 已落地，
 本 harness 复测落地后现状并为 docs/管理面板性能调查报告2026-09-25.md
@@ -165,12 +165,10 @@ def main() -> int:
     med, all3 = _med(lambda: page._populate(rows60), repeat=3)
     out(f"A2 _populate 60 行（委托化后；09-06 基线 36~53ms，注释声称 8ms） {med:7.1f} ms   all={all3}")
 
-    # S2 排序验证：Qt sortItems 就地移动，不再重建
+    # P2-1 起本地 _sort_table 已删除，排序由 SQL 完成；这里只测行 id 锚反查
     page._populate(rows60)
-    page._sort_col = 3  # 任意数据列
-    page._sort_asc = True
-    med, all3 = _med(lambda: page._sort_table(), repeat=3)
-    out(f"A3 表头排序 _sort_table（S2 后；09-06 基线 59.7ms）      {med:7.1f} ms   all={all3}")
+    med, all3 = _med(lambda: page._rec_at_row(30), repeat=3)
+    out(f"A3 _rec_at_row 行 id 锚反查（替代 _rows 下标）            {med:7.3f} ms   all={all3}")
 
     out("\n== B. 弹窗成本 ==")
     rec = _row(0)
@@ -183,6 +181,9 @@ def main() -> int:
     out("\n== C. DB 链路（S1/S3/S4 落地回归，内存库 3k 行） ==")
     med, all3 = _med(lambda: adb.query_with_stats(1, 60), repeat=3)
     out(f"C1 query_with_stats 全部周期（09-06 基线 11.6ms）       {med:7.1f} ms   all={all3}")
+    med, all3 = _med(lambda: adb.query_with_stats(
+        1, 60, sort_key="problem", sort_order="asc"), repeat=3)
+    out(f"C5 query_with_stats 按 problem 排序（P2-1 下沉 SQL）     {med:7.1f} ms   all={all3}")
     day = (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
     med, all3 = _med(lambda: adb.query_with_stats(1, 60, cycle_start=day), repeat=3)
     out(f"C2 query_with_stats 周期筛选（S3 物化列；基线 24.2ms）   {med:7.1f} ms   all={all3}")

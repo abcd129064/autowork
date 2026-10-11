@@ -216,8 +216,9 @@ def build_page(rows, variant):
     if variant == "cache_paint":
         page._table.setItemDelegate(_CacheDelegate(page._table))
     if variant == "fewer_cols":
-        import windows.aftersale.records as _rec_mod
-        _rec_mod.TABLE_COLUMNS = _rec_mod.TABLE_COLUMNS[:6]
+        # 包化后列定义由 table_adapter 读取，须打到该模块才生效
+        from windows.aftersale.records import table_adapter as _ta
+        _ta.TABLE_COLUMNS = _ta.TABLE_COLUMNS[:6]
     if variant == "per_pixel":
         page._table.setVerticalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel)

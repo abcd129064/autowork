@@ -1,6 +1,6 @@
 # 滚动性能系统性调研（2026-09-07）
 
-调研范围：全项目表格与上下滚动列表，重点为售后面板（`windows/aftersale/records.py`）。
+调研范围：全项目表格与上下滚动列表，重点为售后面板（`windows/aftersale/records/page.py`）。
 结论全部基于实测，测量脚本 `tools/perf/scroll_profile.py`（可复跑）。
 
 ## 一、测量方法

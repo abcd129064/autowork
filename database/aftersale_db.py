@@ -671,16 +671,54 @@ def _build_where(keyword: str, issue_type: str, resolved: str,
     return where, params
 
 
+# 列表排序白名单：页面数据键 → ORDER BY 表达式元组
+# location 拆成三列逐级排序；三个是否判定列用 CASE 映射成 0/1，避免
+# SQLite 按字节、MySQL 按排序规则比较中文导致的跨后端顺序不一致。
+def _yes_no_rank(col: str) -> str:
+    """是/否文字列 → 数值排序表达式，是=1 否=0 空值=-1"""
+    return f"CASE {col} WHEN '是' THEN 1 WHEN '否' THEN 0 ELSE -1 END"
+
+
+_LIST_SORT = {
+    "created_at": ("created_at",),
+    "occurred_at": ("occurred_at",),
+    "issue_type": ("issue_type",),
+    "location": ("room_name", "region", "table_no"),
+    "problem": ("problem",),
+    "cause": ("cause",),
+    "solution": ("solution",),
+    "resolved": (_yes_no_rank("resolved"),),
+    "is_our_problem": (_yes_no_rank("is_our_problem"),),
+    "is_initiative": (_yes_no_rank("is_initiative"),),
+    "response_time": ("response_time",),
+}
+LIST_SORT_KEYS = frozenset(_LIST_SORT)
+
+
+def _build_order(sort_key: str, sort_order: str) -> str:
+    """排序键 + 方向 → ORDER BY 片段；未知键回退 id DESC
+
+    末尾统一补 id DESC：排序值并列时跨页不会来回漂移，同一查询可复现。
+    """
+    cols = _LIST_SORT.get(str(sort_key or "").strip())
+    if not cols:
+        return "id DESC"
+    direction = "ASC" if str(sort_order or "").lower() == "asc" else "DESC"
+    parts = [f"{col} {direction}" for col in cols]
+    parts.append("id DESC")
+    return ", ".join(parts)
+
+
 def query_page(page_no: int, page_size: int, keyword: str = "",
                cycle_start: str = "", issue_type: str = "",
                resolved: str = "", is_initiative: str = "",
-               is_our_problem: str = "") -> tuple:
+               is_our_problem: str = "", sort_key: str = "",
+               sort_order: str = "desc") -> tuple:
     """分页查询售后记录，返回 (total, rows)
 
-    周期筛选 SQL 化（cycle_start 物化列等值过滤走索引，与 _record_cycle
-    动态归属等价，由落库维护 + 重算保证一致）；COUNT + LIMIT/OFFSET
-    数据库侧分页，避免数据量增大后全量取回（压测 10k→100k 全量取回
-    p50 31.8→338.9ms，改造后与数据量无关，毫秒级）。
+    周期筛选走 cycle_start 物化列等值过滤，COUNT + LIMIT/OFFSET 在
+    数据库侧完成；排序也下沉到 SQL，跨页排序才与全量数据一致。
+    sort_key/sort_order 见 _LIST_SORT，未知键按 id DESC 返回。
     """
     conn = _conn()
     where, params = _build_where(keyword, issue_type, resolved,
@@ -689,9 +727,10 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
     total = conn.execute(
         f"SELECT COUNT(*) FROM aftersale_records{where}", params).fetchone()[0]
     offset = (max(1, page_no) - 1) * page_size
+    order = _build_order(sort_key, sort_order)
     cur = conn.execute(
         f"SELECT id, {', '.join(RECORD_FIELDS)} FROM aftersale_records"
-        f"{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"{where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [int(page_size), offset])
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -701,18 +740,16 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
 def query_with_stats(page_no: int, page_size: int, keyword: str = "",
                      cycle_start: str = "", issue_type: str = "",
                      resolved: str = "", is_initiative: str = "",
-                     is_our_problem: str = "") -> tuple:
+                     is_our_problem: str = "", sort_key: str = "",
+                     sort_order: str = "desc") -> tuple:
     """分页查询 + 同口径统计，返回 (total, rows, stats)
 
-    周期按记录时间动态归属（与列表同规则），保证列表与统计一一对应；
-    stats 统计不带 resolved/is_initiative/is_our_problem 筛选（否则
-    已解决/未解决计数退化），返回 {total, resolved, unresolved,
-    initiative, our_problem, rate}：initiative 为「我方主动发起」条数，
-    our_problem 为「属我方问题」条数，rate 为已解决率（整数百分比）。
+    列表与统计共用筛选口径；排序参数只影响列表，统计恒为全量聚合。
+    统计不带 resolved/is_* 筛选，否则已解决/未解决计数会退化。
     """
     total, rows = query_page(page_no, page_size, keyword, cycle_start,
                              issue_type, resolved, is_initiative,
-                             is_our_problem)
+                             is_our_problem, sort_key, sort_order)
     conn = _conn()
     # 统计与列表同口径（keyword/issue_type/周期；不带 resolved/initiative/
     # our_problem 筛选）。单次 SQL 聚合替代旧实现的「二次全表取回 + Python

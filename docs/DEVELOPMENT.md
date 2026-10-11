@@ -46,8 +46,9 @@ cd web/vue-pure-admin && pnpm dev          # v2 前端 dev
 
 开发约定高频条目（完整见 AGENTS.md）：
 
-- 改界面：主窗口经典布局改 `autowork_with_table.ui` 后重新编译；FluentWindow
-  各页直接改 `main_window/` 与 `windows/<module>/` 的 Python 代码。
+- 改界面：项目**没有 .ui**（`autowork_with_table.py` 已被人手维护，改动前读
+  [售后期记录页分层改造与UI组织评审2026-10-18.md](售后期记录页分层改造与UI组织评审2026-10-18.md)）；
+  FluentWindow 各页直接改 `main_window/` 与 `windows/<module>/` 的 Python 代码。
 - 改表结构：只改 `database/schema.py`，两侧自动迁移；新增 SQLite 专有 SQL 先扩
   `database/backend.py::_convert_sql`。
 - 新增脚本：按前缀语义落目录（`test_`→tests/，`smoke_`/`verify_`/`regression_`→tools/smoke/，

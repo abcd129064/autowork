@@ -78,6 +78,7 @@ docs/
 | [MySQL兜底降级设计.md](MySQL兜底降级设计.md) | MySQL 为唯一主库，不可用时自动透明回退本地 SQLite，恢复后按 LWW 自动合并增量 | 设计·已落地（`database/backend.py`、`fallback_backup.py`、`merge_back.py`） |
 | [auto_update_research.md](auto_update_research.md) | 程序内「检查更新 → 下载 → 替换重启」全链路调研，选定方案 A（整包 zip + 独立 updater 脚本 + nginx 静态分发） | 设计·已落地（`core/updater.py`、`tools/deploy/publish_update.py`、`tools/update_sim/`） |
 | [架构评审与SQL代码优化方案.md](架构评审与SQL代码优化方案.md) | 代码拆分/合并需求评审 + SQL 代码专项优化（双后端方言、镜像推送下线等） | 设计·已落地（T01-T05 全过 QA，见文档第 10 节） |
+| [售后期记录页分层改造与UI组织评审2026-10-18.md](售后期记录页分层改造与UI组织评审2026-10-18.md) | 回应「为什么没有 .ui」：核查生成链已断、qfw 下 .ui 不适用；并记录 records 页 P0 补测试 + P1 拆四层（query_state/table_adapter/controller/page）+ P2-1 跨页排序下沉与行 id 锚的试点、行为保持清单、验证证据与遗留项 | 设计·已落地（P0/P1/P2-1，2026-10-18） |
 | [售后面板UI改进方案.md](售后面板UI改进方案.md) | 售后面板 UI 分层改进方案，前置依赖 `core/design_tokens.py`、`core/theme_qss.py` | 设计·大部落地（09 月拆包重构随附；剩余 P2 视觉微调见文档头部核对块） |
 | [frp-source-integration.md](frp-source-integration.md) | frp Go 源码接入调研 + 落地记录（附录 E~G：二期 P0/P1、frps 概览卡、开机静默预连与预热打洞） | 调研快照 + 设计·已落地（附录） |
 | [settings_panel_redesign/统一设置面板重构设计.md](settings_panel_redesign/统一设置面板重构设计.md) | 统一设置面板重构设计，配图在 `settings_panel_redesign/assets/` | 设计·已落地（实际形态为 SegmentedWidget 7 段，见文档头部核对块；字段映射仍权威） |

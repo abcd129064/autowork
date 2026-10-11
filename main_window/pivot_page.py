@@ -172,8 +172,19 @@ class PivotPage(QWidget):
     )
 
     def detach_workers(self):
-        """请求停止所有子页后台线程（只 interrupt 不 wait，等待由主窗口统一做）"""
+        """请求停止所有子页后台线程（只 interrupt 不 wait，等待由主窗口统一做）
+
+        优先走页面自带的 detach_workers() 钩子（如 records 页已把 worker
+        收进 controller，属性扫描扫不到）；没有钩子的页面仍按 _worker
+        后缀属性 + _WORKER_ATTR_EXTRA 兜底扫描。
+        """
         for page in self._pages:
+            hook = getattr(page, "detach_workers", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:
+                    pass
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     self._stop(getattr(page, attr, None))

@@ -1633,7 +1633,7 @@ AftersalePanelWindow(parent=None)
 | load_candidates(cands) | 填充动态候选（问题/解决人/地区），保留已输入文本 |
 | set_values(rec) / collect() / validate() / clear_form() | 编辑回填 / 收集值 / 必填校验 / 清空 |
 
-**周期筛选**（`RecordsPage`，实现于 `windows/aftersale/records.py`）：周期下拉选项来自 aftersale_db 的 `get_cycle_options`（库中记录实际归属周期）；当前周期仅在库中有数据时出现。切换周期后列表与统计按同一套归属规则重查，一一对应。
+**周期筛选**（`RecordsPage`，实现于 `windows/aftersale/records/page.py`）：周期下拉选项来自 aftersale_db 的 `get_cycle_options`（库中记录实际归属周期）；当前周期仅在库中有数据时出现。切换周期后列表与统计按同一套归属规则重查，一一对应。
 
 | RecordsPage 关键方法 | 说明 |
 |------|------|

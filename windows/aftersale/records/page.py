@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
-"""records 模块（从 windows/aftersale_panel.py 拆出，逻辑未改动）"""
+"""记录与统计页（视图层）
+
+分层（P1 架构试点，2026-10）：
+    query_state.py    纯查询/文案逻辑，无 Qt，可直接 pytest
+    table_adapter.py  一条记录 → 单元格呈现（CellSpec），页面只负责套用
+    controller.py     全部 QThread 的归属地，只发信号不回摸控件
+    page.py           ← 本文件：建控件、翻译用户意图、把结果贴到界面
+
+页面不再 new QThread、不再持有 worker 属性；关窗前由 detach_workers()
+统一转交 controller.stop_all()。对外入口（set_keyword/refresh_async/
+_apply_smooth_mode/_load_cycles_then_data 等）保持不变。
+"""
 
 import os
 from datetime import datetime, timedelta
@@ -8,8 +19,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLabel, QListWidget,
     QListWidgetItem, QFileDialog, QApplication,
     QDialog, QPushButton as _QPushButton, QGridLayout)
-from PySide6.QtCore import (Qt, QTimer, QThread, QPointF, QDate, Signal,
-                            QEvent)
+from PySide6.QtCore import (Qt, QTimer, QPointF, QDate, Signal, QEvent)
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, RoundMenu, Action,
@@ -30,56 +40,25 @@ from core.perf import is_acrylic_enabled, apply_table_smooth_mode
 from core.theme_qss import current_accent_hex
 from core.utils import show_info_bar
 from database import aftersale_db, table_db
-from workers.aftersale_worker import AftersaleDBWorker
 from windows.mysql_sync_card import MysqlSyncCard
 
 from windows.aftersale.common import *  # noqa: F401,F403
+from windows.aftersale.records import query_state as qs
+from windows.aftersale.records.controller import RecordsController
+from windows.aftersale.records.table_adapter import (
+    data_cells, row_background,
+    FONT_BOLD, FONT_SMALL, OPS_LINKS_RESOLVED, OPS_LINKS_UNRESOLVED)
 from windows.aftersale.dialogs import EditRecordDialog, ImportPreviewDialog
 from windows.aftersale.stats_dialog import AfterSaleStatsDialog
 from windows.stat_charts import StatsOpener, _aftersale_options
 
-# 重要标记行底色（浅色=淡黄 / 深色=暗黄）：勾选「重要」后该条在列表中淡黄显示
-_IMPORTANT_BG_LIGHT = QColor(255, 243, 205)
-_IMPORTANT_BG_DARK = QColor(64, 57, 28)
+# 重要标记行底色与操作列链接清单下沉到 table_adapter.py，
+# 排序键则直接交给 database/aftersale_db.py 的 ORDER BY 白名单。
 
 # S5（2026-09-06）填充微优化：只读 item flags 循环外预计算一次
 # （原每格 cell.flags() & ~ItemIsEditable，720 次/页跨边界枚举运算 → 1 次；
 # 惰性初始化，避免模块导入期依赖 QApplication 环境）
 _RO_FLAGS = None
-
-# 操作列链接清单（(文案, 色键, 动作键)，由 core.ops_link_delegate 按矩形自绘）：
-# 未解决行 3 段、已解决行 2 段，按行取而非按行号（2026-09-19 取代原 cellWidget
-# 按钮与「重要行 ops 容器底色」样式串——现在 ops 格也是普通 item，背景随 _row_bg）
-_OPS_LINKS_UNRESOLVED = (("已解决", "primary", "resolve"),
-                         ("编辑", "primary", "edit"),
-                         ("删除", "danger", "delete"))
-_OPS_LINKS_RESOLVED = (("编辑", "primary", "edit"),
-                       ("删除", "danger", "delete"))
-
-
-class _SortKeyItem(QTableWidgetItem):
-    """携带原始排序键的 item：sortItems 时按键比较而非显示文本
-
-    S2 返工（2026-09-06）：组合列（填写时间/位置/响应）的显示文本与原始
-    字段不一致——填写时间是截短日期 "MM-DD HH:MM"+填写人次行（年份丢失，
-    跨年数据排序错序）、位置是换行拼串、响应混入解决人次键。Qt 原生
-    sortItems 按 DisplayRole 文本比较，故这三列换用本类恢复旧
-    _apply_sort 的排序键语义（原始字段值 / 组合字段空格拼接）；
-    其余列显示文本即原始值，仍用普通 item（避免每页 720 个 Python
-    子类实例的填充开销）。键缺失或对端非本类时回退父类文本比较，
-    防混排异常。
-    """
-
-    def __init__(self, text: str, sort_key: str):
-        super().__init__(text)
-        self._sort_key = sort_key
-
-    def __lt__(self, other):
-        if (self._sort_key is not None
-                and isinstance(other, _SortKeyItem)
-                and other._sort_key is not None):
-            return self._sort_key < other._sort_key
-        return super().__lt__(other)
 
 # 线上售后面板兜底地址（本地 Web 服务未启用时超链接指向此处）
 _WEB_FALLBACK_URL = "http://49.235.34.253/"
@@ -128,25 +107,19 @@ class RecordsPage(QWidget):
         self._page_size = 60
         self._total = 0
         self._rows = []
-        self._worker = None
-        # 写操作（新增/复制/更新/删除）独立槽，不与查询 worker 抢 _worker：
-        # 2026-09-08 修复）。属性以 _worker 结尾，detach_workers 扫描自动覆盖。
-        self._mutate_worker = None
-        self._export_worker = None
-        self._import_worker = None
+        # 行 id → 记录：表格行被排序/重建后，仍按锚定位原记录
+        self._rec_by_id = {}
+        # 后台任务全部交给 controller（页面不再持有任何 QThread）。
+        # worker 属性、重入保护、seq 闭包都在 controller 内部；页面只连信号。
+        self._controller = RecordsController(self)
+        self._connect_controller()
         self._cycles_loaded = False
         self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
-        self._batch_worker = None
         self._stats_dialog = None  # 售后统计弹窗（非模态，复用实例）
         # S3（2026-09-06）：周期物化列兜底回填只跑一次（首次加载前）
         self._recalc_done = False
-        self._recalc_worker = None
-        # 周期选项拉取 worker（独立于数据 worker，供加载链重入保护判定）
-        self._cycles_worker = None
         # 自动刷新（2026-09-16 需求：他人填写免手动同步）：轮询轻量指纹，
-        # 仅在数据真的变化时静默重查，并保持阅读位置。独立查询槽
-        # _auto_worker（以 _worker 结尾，detach_workers 自动覆盖）。
-        self._auto_worker = None
+        # 仅在数据真的变化时静默重查，并保持阅读位置。
         self._auto_timer = QTimer(self)
         self._auto_timer.setTimerType(Qt.TimerType.CoarseTimer)
         self._auto_timer.timeout.connect(self._auto_refresh_tick)
@@ -157,6 +130,64 @@ class RecordsPage(QWidget):
         # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
         self._stats_opener = StatsOpener(_aftersale_options, "aftersale", self)
         self._stats_opener.finished.connect(self._on_stats_finished)
+
+    # ---------- 信号接线（controller → 视图） ----------
+
+    def _connect_controller(self):
+        """把后台任务的结果统一接到视图槽（页面侧唯一的线程入口）"""
+        c = self._controller
+        c.rows_ready.connect(self._on_loaded)
+        c.load_failed.connect(self._on_load_error)
+        c.cycles_ready.connect(self._on_cycles_loaded)
+        c.cycles_failed.connect(lambda: self._load())
+        c.recalc_finished.connect(self._after_recalc)
+        c.fingerprint_ready.connect(self._on_fingerprint)
+        c.mutation_done.connect(self._on_mutation_done)
+        c.mutation_failed.connect(self._on_mutation_failed)
+        c.export_done.connect(self._on_export_done)
+        c.export_failed.connect(self._on_export_error)
+        c.import_preview_ready.connect(self._on_import_preview_ready)
+        c.import_done.connect(self._on_import_done)
+        c.import_failed.connect(self._on_import_error)
+
+    def detach_workers(self):
+        """关窗/切页：请求中断本页所有后台线程（pivot_page 统一调用）"""
+        self._controller.stop_all()
+
+    # 写操作完成后的 InfoBar 文案（tag → (标题, 文案模板)）与失败标题
+    _MUTATION_DONE = {
+        "quick_resolve": ("操作成功", "记录已标记为已解决"),
+        "batch_resolve": ("批量操作", "已标记 {0} 条为已解决"),
+        "batch_delete": ("批量操作", "已删除 {0} 条记录"),
+        "duplicate": ("复制成功", "记录已复制并新增"),
+        "update": ("保存成功", "记录已更新"),
+        "delete": ("删除成功", "记录已删除"),
+    }
+    _MUTATION_ERROR_TITLE = {
+        "quick_resolve": "操作失败",
+        "batch_resolve": "批量操作失败",
+        "batch_delete": "批量操作失败",
+        "duplicate": "复制失败",
+        "update": "保存失败",
+        "delete": "删除失败",
+    }
+
+    def _on_mutation_done(self, tag, payload):
+        """写操作成功：按 tag 弹 InfoBar 并重查当前页"""
+        if tag == "duplicate":
+            # 复制新增成功后同样记住该发生日期（保持「下一条=这条的日期」）
+            aftersale_db.save_last_occurred(getattr(self, "_dup_occurred", ""))
+        title, text = self._MUTATION_DONE.get(tag, ("操作成功", "操作已完成"))
+        if "{0}" in text:
+            text = text.format(payload)
+        show_info_bar(text, "success", title=title, parent=self,
+                      duration=2500 if tag.startswith("batch_") else 2000)
+        self._load()
+
+    def _on_mutation_failed(self, tag, msg):
+        show_info_bar(msg, "error",
+                      title=self._MUTATION_ERROR_TITLE.get(tag, "操作失败"),
+                      parent=self, duration=4000)
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -353,8 +384,8 @@ class RecordsPage(QWidget):
         self._table.setColumnWidth(_COL_CHECK, 36)
         for i, (_k, _h, w) in enumerate(TABLE_COLUMNS):
             self._table.setColumnWidth(_COL_CHECK + 1 + i, w)
-        # 列排序：点击表头升/降序切换（本地对已加载页排序，勾选列不参与）
-        self._sort_col = -1        # 当前排序逻辑列号（-1=未排序）
+        # 列排序：点击表头升/降序切换，排序键下推到 SQL 才能跨页一致
+        self._sort_col = -1        # 当前排序逻辑列号，-1 表示按 id 倒序
         self._sort_asc = True
         header.setSortIndicatorShown(True)
         header.sectionClicked.connect(self._on_click_header)
@@ -433,25 +464,19 @@ class RecordsPage(QWidget):
     @staticmethod
     def _short_dt(val: str) -> str:
         """2026-08-22 21:14:33 → 08-22 21:14"""
-        s = str(val or "").strip()
-        return s[5:16] if len(s) >= 16 else s
+        return qs.short_dt(val)
 
     # ---------- 筛选条件 ----------
 
     def _current_filters(self) -> dict:
         """汇集当前筛选条件（周期/类型/状态/是否我们主动发起/是否我们的问题/关键词）"""
-        cycle = self._cycle_combo.currentData()
-        # 类型可编辑：下拉项与手输文本都按当前文本过滤，「全部类型」/空串不过滤
-        type_text = self._type_combo.currentText().strip()
-        return {
-            "cycle_start": str(cycle or ""),
-            "issue_type": "" if (not type_text or type_text == "全部类型")
-            else type_text,
-            "resolved": self._resolved_seg.value(),
-            "is_initiative": self._initiative_seg.value(),
-            "is_our_problem": self._our_problem_seg.value(),
-            "keyword": self._search_edit.text().strip(),
-        }
+        return qs.build_filters(
+            self._cycle_combo.currentData(),
+            self._type_combo.currentText(),
+            self._resolved_seg.value(),
+            self._initiative_seg.value(),
+            self._our_problem_seg.value(),
+            self._search_edit.text())
 
     def _on_search_input(self, _text):
         self._search_timer.start()
@@ -603,13 +628,10 @@ class RecordsPage(QWidget):
         from PySide6.QtWidgets import QApplication
         if QApplication.activeModalWidget() is not None:
             return
-        for w in (self._auto_worker, self._worker, self._mutate_worker):
-            if w is not None and w.isRunning():
-                return
-        self._auto_worker = AftersaleDBWorker(aftersale_db.change_fingerprint)
-        self._auto_worker.result_ready.connect(self._on_fingerprint)
-        self._auto_worker.error.connect(lambda _m: None)
-        self._auto_worker.start()
+        if self._controller.is_running(
+                "_auto_worker", "_query_worker", "_mutate_worker"):
+            return
+        self._controller.check_fingerprint()
 
     def _on_fingerprint(self, fp):
         """指纹回来：与上次快照比对，一致则完全不动表格，变化才静默重查。"""
@@ -707,13 +729,8 @@ class RecordsPage(QWidget):
         """
         if not self._recalc_done:
             self._recalc_done = True
-            self._recalc_worker = AftersaleDBWorker(
-                aftersale_db.recalc_cycle_starts_on_load)
-            self._recalc_worker.result_ready.connect(
-                lambda _v: self._after_recalc())
-            self._recalc_worker.error.connect(
-                lambda _m: self._after_recalc())
-            self._recalc_worker.start()
+            # 成功/失败都由 recalc_finished 信号回到 _after_recalc
+            self._controller.recalc_cycles()
             return
         self._fetch_cycles()
 
@@ -725,9 +742,7 @@ class RecordsPage(QWidget):
         会在任意时刻重入造成双链交错（QA 实测偶发最终无数据）——已有周期
         worker 在跑或周期已加载即跳过，链 B 会带着最新筛选取代本链。
         """
-        if ((getattr(self, "_cycles_worker", None) is not None
-             and self._cycles_worker.isRunning())
-                or self._cycles_loaded):
+        if self._controller.is_running("_cycles_worker") or self._cycles_loaded:
             return
         self._fetch_cycles()
 
@@ -737,13 +752,8 @@ class RecordsPage(QWidget):
         重入保护：已有周期拉取在跑时不再重复起链（showEvent 与显式调用/
         连续刷新交叠场景）——在跑的链完成后会带着最新筛选项加载数据。
         """
-        if (getattr(self, "_cycles_worker", None) is not None
-                and self._cycles_worker.isRunning()):
-            return
-        self._cycles_worker = AftersaleDBWorker(aftersale_db.get_cycle_options)
-        self._cycles_worker.result_ready.connect(self._on_cycles_loaded)
-        self._cycles_worker.error.connect(lambda _m: self._load())
-        self._cycles_worker.start()
+        # 重入保护在 controller 内部；失败由 cycles_failed 信号接到 _load
+        self._controller.fetch_cycles()
 
     def _on_cycles_loaded(self, cycle_starts):
         self._cycles_loaded = True
@@ -771,29 +781,16 @@ class RecordsPage(QWidget):
         self._load()
 
     def _load(self):
-        """按当前筛选异步查询（分页数据 + 统计一次返回）"""
-        if self._worker and self._worker.isRunning():
-            # 只 interrupt 不 disconnect：worker.run() 检测到中断会静默返回
-            # 不发 result_ready；且 disconnect() 会连内部 finished→_release
-            # 一起断掉，导致保活集合泄漏。双保险：_query_seq 过期守卫。
-            self._worker.requestInterruption()
-        # 查询代数守卫：即便旧查询信号已入队（disconnect 拦不住 queued 调用），
-        # 回调时按 seq 丢弃过期结果（2026-09-08 搜索中新增竞态修复）
+        """按当前筛选异步查询（分页数据 + 统计一次返回）
+
+        查询代数守卫保留在页面侧：即便旧查询结果已排队，回调时按 seq
+        丢弃过期帧（2026-09-08 搜索中新增竞态修复）。
+        """
         self._query_seq = getattr(self, "_query_seq", 0) + 1
-        seq = self._query_seq
-        f = self._current_filters()
-        self._worker = AftersaleDBWorker(
-            aftersale_db.query_with_stats,
-            self._page_no, self._page_size,
-            keyword=f["keyword"], cycle_start=f["cycle_start"],
-            issue_type=f["issue_type"], resolved=f["resolved"],
-            is_initiative=f["is_initiative"],
-            is_our_problem=f["is_our_problem"])
-        self._worker.result_ready.connect(
-            lambda result, _s=seq: self._on_loaded(result, _s))
-        self._worker.error.connect(
-            lambda msg, _s=seq: self._on_load_error(msg, _s))
-        self._worker.start()
+        # 排序状态下推到 SQL：翻页/筛选后仍是全量数据的顺序，而非当前 60 行
+        self._controller.query(
+            self._current_filters(), self._page_no, self._page_size,
+            self._query_seq, self._sort_key(), self._sort_order())
 
     def _on_loaded(self, result, seq=None):
         if seq is not None and seq != getattr(self, "_query_seq", None):
@@ -802,10 +799,6 @@ class RecordsPage(QWidget):
         self._total = total
         self._rows = rows
         self._populate(rows)
-        # 保持表头排序状态：筛选/翻页/刷新后按当前排序列就地重排
-        # （S2：Qt sortItems 移动现有行，不再全量重建）
-        if self._sort_col >= 0:
-            self._sort_table()
         self._update_pager()
         self._update_source_label()
         self._update_overview(stats)
@@ -883,139 +876,72 @@ class RecordsPage(QWidget):
     # ---------- 表格渲染 ----------
 
     def _row_tooltip(self, rec: dict) -> str:
-        """行 tooltip：整合字段完整信息（含移入 tooltip 的判定字段）"""
-        return (
-            f"填写时间: {rec.get('created_at') or ''}\n"
-            f"填写人: {rec.get('creator') or ''}\n"
-            f"发生时间: {rec.get('occurred_at') or ''}\n"
-            f"类型: {rec.get('issue_type') or ''}\n"
-            f"位置: {rec.get('room_name') or ''} · "
-            f"{rec.get('region') or ''} · {rec.get('table_no') or ''}\n"
-            f"问题: {rec.get('problem') or ''}\n"
-            f"发生原因: {rec.get('cause') or ''}\n"
-            f"是否解决: {rec.get('resolved') or '否'}\n"
-            f"是否我们主动发起: {rec.get('is_initiative') or '否'}\n"
-            f"是否是我们的问题: {rec.get('is_our_problem') or '否'}\n"
-            f"解决方案: {rec.get('solution') or ''}\n"
-            f"解决人: {rec.get('resolver') or ''}\n"
-            f"响应时间: {rec.get('response_time') or ''}")
+        """行 tooltip：整合字段完整信息（含移入 tooltip 的判定字段）
+
+        实现下沉到 query_state.row_tooltip（无 Qt，可单测）；本方法保留
+        是历史兼容点（tools/perf/scroll_profile.py:198 monkeypatch 它）。
+        """
+        return qs.row_tooltip(rec)
 
     def _populate(self, rows):
-        """行数据 → 表格：勾选列 + 双行信息整合列 + 是/否徽章三列 + 行内操作按钮
+        """行数据 → 表格：勾选列 + 双行信息整合列 + 是/否徽章三列 + 行内操作链接
 
-        性能（2026-08-26）：是/否徽章由 cellWidget（QLabel）改为文本 item +
-        语义色前景/淡色背景——QTableWidget 的 cellWidget 在填充与滚动重绘时
-        每个都要创建/重定位，每行 3 个徽章 × 50 行 = 150 个小部件是填充耗时
-        第一名（cProfile 占 42%）；文本 item 零小部件开销，视觉用
-        彩色文字 + 淡底色近似胶囊徽章。行内操作列同理已由 cellWidget 按钮改为
-        单元格内文字链接（core.ops_link_delegate 自绘 + 矩形命中，零子控件），
-        因此本函数不再预构建按钮 QSS。
-        性能（2026-09-06 S2/S5）：勾选列 item 写入记录 id 锚（UserRole），
-        供表头排序后按可视行序回读重排 _rows；只读 flags 循环外预计算。
+        呈现规则（文本/字体/前景底色/链接清单）已下沉到
+        table_adapter.data_cells；本方法只负责「套用」与性能开关：
+
+        - 派发上一代 deleteLater 僵尸控件（processEvents 不消化 DeferredDelete，
+          须显式派发；2026-09-19 操作列文字化后已无 cellWidget，此行保留作为
+          弹窗/其他控件延迟销毁的卫生兵，实测零开销）
+        - setUpdatesEnabled(False) + blockSignals 包住整轮填充
+        - 只读 item flags 循环外预计算（720 次/页跨边界枚举 → 1 次）
+        - 字体实例循环外构造一次（避免每格 QFont 拷贝）
+        - 勾选列 item 写入记录 id 锚（UserRole），行序变化后仍能按锚定位
         """
-        # 派发上一代 deleteLater 僵尸控件（processEvents 不消化 DeferredDelete，
-        # 须显式派发）。本面板 2026-09-19 操作列文字化后已无 cellWidget，
-        # 保留此行作为弹窗/其他控件延迟销毁的卫生兵（实测零开销）
         QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self._rec_by_id = {rec.get("id"): rec for rec in rows}
         self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         try:
             self._table.setRowCount(len(rows))
-            # 只读 item flags 预计算一次（720 次/页跨边界枚举运算 → 1 次）
             global _RO_FLAGS
             if _RO_FLAGS is None:
                 _RO_FLAGS = QTableWidgetItem().flags() & \
                     ~Qt.ItemFlag.ItemIsEditable
-            # 双行单元格的小号字体（循环外构造一次，避免每行每列 QFont 复制）
-            small_font = QFont()
-            small_font.setPointSizeF(10.5)
-            # 徽章加粗字体（循环外构造一次：原每徽章 QFont(cell.font()) 拷贝
-            # ×3/行 ×50 行 = 150 次跨边界调用；默认应用字体加粗，渲染不变）
-            bold_font = QFont()
-            bold_font.setBold(True)
-            for r, item in enumerate(rows):
-                tip = self._row_tooltip(item)
+            fonts = {FONT_SMALL: QFont(), FONT_BOLD: QFont()}
+            fonts[FONT_SMALL].setPointSizeF(10.5)
+            fonts[FONT_BOLD].setBold(True)
+            for r, rec in enumerate(rows):
+                tip = self._row_tooltip(rec)
                 # 重要标记：勾选「重要」后该行整体淡黄底色（浅色亮黄 / 深色暗黄随主题）
-                if bool(item.get("is_important")):
-                    _row_bg = (_IMPORTANT_BG_DARK if isDarkTheme()
-                               else _IMPORTANT_BG_LIGHT)
-                else:
-                    _row_bg = None
+                row_bg = row_background(rec)
 
-                # 勾选列（供批量操作）；UserRole 存记录 id 作为行锚，
-                # 表头排序（sortItems 移动整行）后按可视行序回读锚重排 _rows
                 chk = QTableWidgetItem()
                 chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable
                              | Qt.ItemFlag.ItemIsEnabled)
                 chk.setCheckState(Qt.CheckState.Unchecked)
-                chk.setData(Qt.ItemDataRole.UserRole, item.get("id"))
-                if _row_bg is not None:
-                    chk.setBackground(_row_bg)
+                chk.setData(Qt.ItemDataRole.UserRole, rec.get("id"))
+                if row_bg is not None:
+                    chk.setBackground(row_bg)
                 self._table.setItem(r, _COL_CHECK, chk)
 
-                for i, (key, _h, _w) in enumerate(TABLE_COLUMNS):
+                for i, spec in enumerate(data_cells(rec)):
                     col = _COL_CHECK + 1 + i
-                    if key == "created_at":
-                        # 排序键 = 原始 created_at（显示文本截短丢年份，
-                        # 跨年数据按显示文本排序会错序）
-                        cell = _SortKeyItem(
-                            f"{self._short_dt(item.get('created_at'))}\n"
-                            f"{str(item.get('creator') or '')}",
-                            str(item.get("created_at") or ""))
-                        cell.setFont(small_font)
-                    elif key == "location":
-                        # 排序键 = 球房+地区+桌号空格拼接（与旧 _apply_sort
-                        # 组合键一致；显示文本是换行/点号拼串）
-                        cell = _SortKeyItem(
-                            f"{str(item.get('room_name') or '')}\n"
-                            f"{str(item.get('region') or '')} · "
-                            f"{str(item.get('table_no') or '')}",
-                            " ".join(str(item.get(k) or "") for k in
-                                     ("room_name", "region", "table_no")))
-                        cell.setFont(small_font)
-                    elif key == "response_time":
-                        # 排序键 = 原始 response_time（显示文本混入解决人
-                        # 次行，空值显示 '—' 也不参与排序）
-                        cell = _SortKeyItem(
-                            f"{str(item.get('response_time') or '—')}\n"
-                            f"{str(item.get('resolver') or '')}",
-                            str(item.get("response_time") or ""))
-                        cell.setFont(small_font)
-                    elif key in _YES_NO_COLORS:
-                        # 徽章文本化：只强调「是」（语义色加粗 + 极淡同色底）；
-                        # 「否」统一中性灰加粗、无底色，避免三列满屏色块过渡渲染。
-                        is_yes = str(item.get(key) or "") == "是"
-                        yes_c, _no_c = _YES_NO_COLORS[key]
-                        badge_c = yes_c if is_yes else SEMANTIC["neutral"]
-                        if isDarkTheme():
-                            # SEMANTIC 为浅色底选的低饱和色，深色背景上「否」的
-                            # 石板灰近乎全黑、「是」的蓝也偏暗 → 统一提亮 35%
-                            badge_c = lighten(badge_c, 0.35)
-                        cell = QTableWidgetItem("是" if is_yes else "否")
-                        cell.setForeground(QColor(badge_c))
-                        if _row_bg is None and is_yes:
-                            bgc = QColor(badge_c)
-                            bgc.setAlpha(20)  # ~8% 透明度，更淡的徽章底（仅「是」）
-                            cell.setBackground(bgc)
+                    cell = QTableWidgetItem(spec.text)
+                    font = fonts.get(spec.font)
+                    if font is not None:
+                        cell.setFont(font)
+                    if spec.fg is not None:
+                        cell.setForeground(spec.fg)
+                    if spec.bg is not None:
+                        cell.setBackground(spec.bg)
+                    if spec.align_center:
                         cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        cell.setFont(bold_font)
-                    elif key == "ops":
-                        # 操作列：空文本 item + 链接清单（LINKS_ROLE），由视图级
-                        # 委托按矩形自绘并反查命中，零子控件。清单按行取（未解决
-                        # 3 段 / 已解决 2 段），背景色/tooltip/flags 走循环尾统一代码
-                        cell = QTableWidgetItem("")
-                        cell.setData(
-                            LINKS_ROLE,
-                            _OPS_LINKS_RESOLVED
-                            if str(item.get("resolved") or "") == "是"
-                            else _OPS_LINKS_UNRESOLVED)
-                    else:
-                        val = str(item.get(key) or "")
-                        cell = QTableWidgetItem(val)
+                    if spec.links is not None:
+                        cell.setData(LINKS_ROLE, spec.links)
                     cell.setToolTip(tip)
                     cell.setFlags(_RO_FLAGS)
-                    if _row_bg is not None:
-                        cell.setBackground(_row_bg)
+                    if row_bg is not None:
+                        cell.setBackground(row_bg)
                     self._table.setItem(r, col, cell)
         finally:
             self._table.setUpdatesEnabled(True)
@@ -1025,12 +951,12 @@ class RecordsPage(QWidget):
     def _on_ops_link(self, row: int, _col: int, action: str):
         """操作列文字链接点击分发（core.ops_link_delegate 的 editorEvent 回调）
 
-        行号就是表格可视行号：与 _rows 同序（_populate 按 rows 顺序填充，
-        表头排序后 _sync_rows_to_table 按 id 锚回读重排），与右键菜单同一口径。
+        行号是表格可视行号，可能与 _rows 下标错位；统一经勾选列 id 锚
+        反查记录，排序、筛选、静默刷新都不会把操作落到邻行。
         """
-        if not (0 <= row < len(self._rows)):
+        rec = self._rec_at_row(row)
+        if rec is None:
             return
-        rec = self._rows[row]
         if action == "resolve":
             self._quick_resolve_rec(rec)
         elif action == "edit":
@@ -1102,100 +1028,59 @@ class RecordsPage(QWidget):
         ids = self._checked_ids()
         if not ids:
             return
-        if self._batch_worker and self._batch_worker.isRunning():
+        if self._controller.is_running("_batch_worker"):
             return
         if not MessageBox("批量标记已解决",
                           f"确定将选中的 {len(ids)} 条记录标记为已解决？",
                           self.window()).exec():
             return
-        self._batch_worker = AftersaleDBWorker(
-            aftersale_db.mark_resolved_batch, ids)
-        self._batch_worker.result_ready.connect(
-            lambda n: (show_info_bar(f"已标记 {n} 条为已解决", "success",
-                                     title="批量操作", parent=self, duration=2500),
-                       self._load()))
-        self._batch_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="批量操作失败",
-                                    parent=self, duration=4000))
-        self._batch_worker.start()
+        self._controller.batch_mutate(
+            "batch_resolve", aftersale_db.mark_resolved_batch, ids)
 
     def _on_batch_delete(self):
         """批量删除（确认后走 delete_records）"""
         ids = self._checked_ids()
         if not ids:
             return
-        if self._batch_worker and self._batch_worker.isRunning():
+        if self._controller.is_running("_batch_worker"):
             return
         if not MessageBox("批量删除",
                           f"确定删除选中的 {len(ids)} 条售后记录？\n删除后不可恢复",
                           self.window()).exec():
             return
-        self._batch_worker = AftersaleDBWorker(
-            aftersale_db.delete_records, ids)
-        self._batch_worker.result_ready.connect(
-            lambda n: (show_info_bar(f"已删除 {n} 条记录", "success",
-                                     title="批量操作", parent=self, duration=2500),
-                       self._load()))
-        self._batch_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="批量操作失败",
-                                    parent=self, duration=4000))
-        self._batch_worker.start()
+        self._controller.batch_mutate(
+            "batch_delete", aftersale_db.delete_records, ids)
 
     # ---------- 列排序 ----------
 
     def _col_key(self, col: int):
         """逻辑列号 → TABLE_COLUMNS 的数据键；勾选列/越界返回 None"""
-        i = col - _COL_CHECK - 1
-        if 0 <= i < len(TABLE_COLUMNS):
-            return TABLE_COLUMNS[i][0]
-        return None
+        return qs.col_key(col, TABLE_COLUMNS, _COL_CHECK)
 
-    def _sync_rows_to_table(self):
-        """按勾选列的记录 id 锚，把 _rows 重排成与表格可视行序一致
+    def _rec_at_row(self, row: int):
+        """可视行号 → 记录：以勾选列 id 锚反查，不依赖 _rows 下标"""
+        if row < 0 or row >= self._table.rowCount():
+            return None
+        it = self._table.item(row, _COL_CHECK)
+        rid = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+        return self._rec_by_id.get(rid) if rid is not None else None
 
-        S2：排序一律以「表格排序后的锚序」为准（Qt 按列 item 文本排序），
-        从 id → rec 映射重建列表；行内按钮回调捕获的是 rec 引用，重排
-        列表不换对象，按钮与行对应关系不受影响。
-        """
-        if not self._rows:
-            return
-        by_id = {}
-        for rec in self._rows:
-            by_id.setdefault(rec.get("id"), rec)
-        new_rows = []
-        for r in range(self._table.rowCount()):
-            it = self._table.item(r, _COL_CHECK)
-            rid = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
-            rec = by_id.pop(rid, None) if rid is not None else None
-            if rec is None:
-                return  # 锚缺失（异常防御）：维持现序，不做半截重排
-            new_rows.append(rec)
-        self._rows = new_rows
+    def _sort_key(self) -> str:
+        """当前排序对外的数据键；未排序为空串，由 DB 回退 id DESC"""
+        return self._col_key(self._sort_col) if self._sort_col >= 0 else ""
 
-    def _sort_table(self):
-        """按当前排序状态用 Qt 原生 sortItems 就地移动现有行，不重建控件
-
-        S2（2026-09-06）：旧实现本地排序 _rows 后 _populate 全量重建
-        （60 容器 + 139 按钮 + 720 item，实测 59.7ms/次）；sortItems 由
-        Qt 移动现有行（cellWidget 与勾选状态随行移动），排序后按锚序
-        重排 _rows 保持与可视行一致。
-        """
-        if self._sort_col < 0 or not self._rows:
-            return
-        order = (Qt.SortOrder.AscendingOrder if self._sort_asc
-                 else Qt.SortOrder.DescendingOrder)
-        self._table.setUpdatesEnabled(False)
-        self._table.blockSignals(True)
-        try:
-            self._table.sortItems(self._sort_col, order)
-        finally:
-            self._table.blockSignals(False)
-            self._table.setUpdatesEnabled(True)
-        self._sync_rows_to_table()
+    def _sort_order(self) -> str:
+        """当前排序方向，与 _build_order 的 asc/desc 约定一致"""
+        return "asc" if self._sort_asc else "desc"
 
     def _on_click_header(self, col: int):
-        """表头点击：首点升序、再点降序（勾选列不参与）"""
-        if col == _COL_CHECK or self._col_key(col) is None:
+        """表头点击：首点升序、再点降序；排序交给服务端跨页生效
+
+        操作列与勾选列没有可排序的字段，点击直接忽略，避免指示器
+        显示已排序而数据实际按 id 回退。
+        """
+        key = self._col_key(col)
+        if col == _COL_CHECK or key not in aftersale_db.LIST_SORT_KEYS:
             return
         if self._sort_col == col:
             self._sort_asc = not self._sort_asc
@@ -1206,15 +1091,17 @@ class RecordsPage(QWidget):
         header.setSortIndicator(
             col, Qt.SortOrder.AscendingOrder if self._sort_asc
             else Qt.SortOrder.DescendingOrder)
-        if self._rows:
-            self._sort_table()
+        # 排序变化后旧页号没有意义，从第一页重新取
+        self._page_no = 1
+        self._load()
 
     # ---------- 行内快捷操作 ----------
 
     def _quick_resolve(self, row: int):
         """一键标记已解决（按行号入口：右键菜单/双击等）"""
-        if 0 <= row < len(self._rows):
-            self._quick_resolve_rec(self._rows[row])
+        rec = self._rec_at_row(row)
+        if rec is not None:
+            self._quick_resolve_rec(rec)
 
     def _quick_resolve_rec(self, rec: dict):
         """一键标记已解决：最小化更新（不弹编辑窗），3 步变 1 步
@@ -1223,23 +1110,17 @@ class RecordsPage(QWidget):
         按引用/id 不受影响。"""
         if not rec or not rec.get("id"):
             return
-        if self._batch_worker and self._batch_worker.isRunning():
+        if self._controller.is_running("_batch_worker"):
             return
-        self._batch_worker = AftersaleDBWorker(
-            aftersale_db.mark_resolved_batch, [rec.get("id")])
-        self._batch_worker.result_ready.connect(
-            lambda _n: (show_info_bar("记录已标记为已解决", "success",
-                                      title="操作成功", parent=self, duration=2000),
-                        self._load()))
-        self._batch_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="操作失败",
-                                    parent=self, duration=4000))
-        self._batch_worker.start()
+        self._controller.batch_mutate(
+            "quick_resolve", aftersale_db.mark_resolved_batch,
+            [rec.get("id")])
 
     def _update_pager(self):
-        pages = max(1, (self._total + self._page_size - 1) // self._page_size)
+        pages = qs.pages_of(self._total, self._page_size)
         self._page_no = min(self._page_no, pages)
-        self._lbl_page.setText(f"{self._page_no}/{pages} · 共 {self._total} 条")
+        self._lbl_page.setText(
+            qs.pager_text(self._page_no, self._total, self._page_size))
         self._btn_prev.setEnabled(self._page_no > 1)
         self._btn_next.setEnabled(self._page_no < pages)
 
@@ -1270,7 +1151,7 @@ class RecordsPage(QWidget):
         act_copy.triggered.connect(
             lambda _=False: self._on_duplicate(idx.row()))
         menu.addAction(act_copy)
-        rec = self._rows[idx.row()] if idx.row() < len(self._rows) else {}
+        rec = self._rec_at_row(idx.row()) or {}
         if str(rec.get("resolved") or "") != "是":
             act_done = Action(FluentIcon.ACCEPT, "标记已解决", self._table)
             act_done.triggered.connect(
@@ -1291,10 +1172,8 @@ class RecordsPage(QWidget):
         dlg = EditRecordDialog({}, self, title="新增售后记录",
                                continuous=True, on_saved=self._load)
         # 新增弹窗也需动态候选
-        cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
-        cand_worker.result_ready.connect(dlg.form.load_candidates)
-        cand_worker.start()
-        self._edit_cand_worker = cand_worker  # 保活引用
+        self._controller.candidates_ready.connect(dlg.form.load_candidates)
+        self._controller.fetch_candidates()
         dlg.exec()
         # 关窗后兜底刷新一次（连续录入期间每条已实时刷新）
         self._load()
@@ -1303,33 +1182,25 @@ class RecordsPage(QWidget):
         """复制当前行：按原记录内容新增一条相同记录（填写时间/周期重算）"""
         if row < 0:
             row = self._selected_row()
-        if row < 0 or row >= len(self._rows):
+        rec = self._rec_at_row(row)
+        if rec is None:
             return
-        rec = dict(self._rows[row])
+        rec = dict(rec)
         rec.pop("id", None)
         rec.pop("created_at", None)    # insert_record 自动取当前填写时间
         rec.pop("cycle_start", None)   # 周期按发生时间重新归属
-        self._mutate_worker = AftersaleDBWorker(aftersale_db.insert_record, rec)
         # 复制新增成功 → 同样记住该发生日期（保持「下一条=这条的日期」语义一致）
-        _occ = str(rec.get("occurred_at") or "")
-        self._mutate_worker.result_ready.connect(
-            lambda _rid: (aftersale_db.save_last_occurred(_occ),
-                          show_info_bar("记录已复制并新增", "success",
-                                        title="复制成功", parent=self,
-                                        duration=2000),
-                          self._load()))
-        self._mutate_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="复制失败",
-                                    parent=self, duration=4000))
-        self._mutate_worker.start()
+        # 由 _on_mutation_done 的 duplicate 分支落地
+        self._dup_occurred = str(rec.get("occurred_at") or "")
+        self._controller.mutate("duplicate", aftersale_db.insert_record, rec)
 
     def _on_edit(self, row: int = -1):
         """编辑（按行号入口：双击/右键菜单/选中行）"""
         if row < 0:
             row = self._selected_row()
-        if row < 0 or row >= len(self._rows):
-            return
-        self._on_edit_rec(self._rows[row])
+        rec = self._rec_at_row(row)
+        if rec is not None:
+            self._on_edit_rec(rec)
 
     def _on_edit_rec(self, rec: dict):
         """编辑（按记录引用入口：行内按钮回调，排序后行号失效不影响定位）"""
@@ -1338,10 +1209,8 @@ class RecordsPage(QWidget):
         rec = dict(rec)
         dlg = EditRecordDialog(rec, self)
         # 编辑弹窗也需动态候选
-        cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
-        cand_worker.result_ready.connect(dlg.form.load_candidates)
-        cand_worker.start()
-        self._edit_cand_worker = cand_worker  # 保活引用
+        self._controller.candidates_ready.connect(dlg.form.load_candidates)
+        self._controller.fetch_candidates()
         if dlg.exec() and getattr(dlg, "collected", None):
             collected = dlg.collected
             collected["id"] = rec.get("id")
@@ -1349,23 +1218,15 @@ class RecordsPage(QWidget):
             self._run_update(collected)
 
     def _run_update(self, record):
-        self._mutate_worker = AftersaleDBWorker(aftersale_db.update_record, record)
-        self._mutate_worker.result_ready.connect(
-            lambda _n: (show_info_bar("记录已更新", "success",
-                                      title="保存成功", parent=self, duration=2000),
-                        self._load()))
-        self._mutate_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="保存失败",
-                                    parent=self, duration=4000))
-        self._mutate_worker.start()
+        self._controller.mutate("update", aftersale_db.update_record, record)
 
     def _on_delete(self, row: int = -1):
         """删除（按行号入口：右键菜单/选中行）"""
         if row < 0:
             row = self._selected_row()
-        if row < 0 or row >= len(self._rows):
-            return
-        self._on_delete_rec(self._rows[row])
+        rec = self._rec_at_row(row)
+        if rec is not None:
+            self._on_delete_rec(rec)
 
     def _on_delete_rec(self, rec: dict):
         """删除（按记录引用入口：行内按钮回调，排序后行号失效不影响定位）"""
@@ -1381,21 +1242,13 @@ class RecordsPage(QWidget):
         dlg.cancelButton.setText("取消")
         if not dlg.exec():
             return
-        self._mutate_worker = AftersaleDBWorker(aftersale_db.delete_record,
-                                                rec.get("id"))
-        self._mutate_worker.result_ready.connect(
-            lambda _n: (show_info_bar("记录已删除", "success",
-                                      title="删除成功", parent=self, duration=2000),
-                        self._load()))
-        self._mutate_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="删除失败",
-                                    parent=self, duration=4000))
-        self._mutate_worker.start()
+        self._controller.mutate("delete", aftersale_db.delete_record,
+                                rec.get("id"))
 
     # ---------- 导出 / 导入 ----------
 
     def _on_export(self):
-        if self._export_worker and self._export_worker.isRunning():
+        if self._controller.is_running("_export_worker"):
             return
         f = self._current_filters()
         default_name = "售后记录_" + datetime.now().strftime("%Y%m%d_%H%M") + ".xlsx"
@@ -1404,15 +1257,7 @@ class RecordsPage(QWidget):
         if not path:
             return
         self._btn_export.setEnabled(False)
-        self._export_worker = AftersaleDBWorker(
-            aftersale_db.export_xlsx, path,
-            keyword=f["keyword"], cycle_start=f["cycle_start"],
-            issue_type=f["issue_type"], resolved=f["resolved"],
-            is_initiative=f["is_initiative"],
-            is_our_problem=f["is_our_problem"])
-        self._export_worker.result_ready.connect(self._on_export_done)
-        self._export_worker.error.connect(self._on_export_error)
-        self._export_worker.start()
+        self._controller.export_xlsx(path, f)
 
     def _on_export_done(self, count):
         self._btn_export.setEnabled(True)
@@ -1424,7 +1269,7 @@ class RecordsPage(QWidget):
         show_info_bar(msg, "error", title="导出失败", parent=self, duration=4000)
 
     def _on_import(self):
-        if self._import_worker and self._import_worker.isRunning():
+        if self._controller.is_running("_import_worker"):
             return
         path, _sel = QFileDialog.getOpenFileName(
             self, "选择售后汇总 Excel", "", "Excel 文件 (*.xlsx)")
@@ -1433,10 +1278,7 @@ class RecordsPage(QWidget):
         # 第一步：后台解析（不写库），成功后弹预览确认
         self._btn_import.setEnabled(False)
         self._preview_path = path
-        self._import_worker = AftersaleDBWorker(aftersale_db.parse_excel_rows, path)
-        self._import_worker.result_ready.connect(self._on_import_preview_ready)
-        self._import_worker.error.connect(self._on_import_error)
-        self._import_worker.start()
+        self._controller.parse_excel(path)
 
     def _on_import_preview_ready(self, result):
         """解析完成：弹预览对话框，确认后真正写库"""
@@ -1446,11 +1288,7 @@ class RecordsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._btn_import.setEnabled(False)
-        self._import_worker = AftersaleDBWorker(
-            aftersale_db.import_excel_rows, self._preview_path)
-        self._import_worker.result_ready.connect(self._on_import_done)
-        self._import_worker.error.connect(self._on_import_error)
-        self._import_worker.start()
+        self._controller.commit_import(self._preview_path)
 
     def _on_import_done(self, count):
         self._btn_import.setEnabled(True)

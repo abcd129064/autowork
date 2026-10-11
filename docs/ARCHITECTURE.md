@@ -38,7 +38,7 @@ core ← win_api ← workers ← windows ← main_window ← main.py
 
 ```
 autowork/
-├── main.py / autowork_with_table.py(.ui)   # 入口；经典布局 UI 由 .ui 编译生成，勿手改
+├── main.py / autowork_with_table.py        # 入口；经典布局无 .ui，文件已被手改（见 docs/售后期记录页分层改造与UI组织评审2026-10-18.md）
 ├── core/ win_api/ workers/ database/ windows/ main_window/   # 运行时六层（见上表）
 ├── config/                  # 分域配置（8 个 json，见 §4）
 ├── styles/                  # dark.qss / light.qss（随包资源，spec datas 打包）
