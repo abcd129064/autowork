@@ -92,6 +92,14 @@ class LedgerPanelWindow(FluentWindow):
             except Exception:
                 pass
         for page in (self.entry_page, self.records_page):
+            # 新的分层页面把 worker 收进 controller，必须显式转调；
+            # 目录扫描仍保留给尚未拆层的旧页面。
+            detach = getattr(page, "detach_workers", None)
+            if callable(detach):
+                try:
+                    detach()
+                except Exception:
+                    pass
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))

@@ -31,29 +31,47 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRATCH_FALLBACK = os.path.join(ROOT, "tools", "_scratch", "pytest_chat_db")
 
 
+_OWNED_TMP_DIRS = []
+
+
+def _probe_writable(d: str) -> bool:
+    """真实写一个探针文件：目录存在不代表能写，受限沙箱会给出 0o700 空壳"""
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, "_probe.tmp")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
 def _writable_dir() -> str:
     """选一个真的能写文件的临时目录（探测失败则 skip，不产生假失败）
 
     受限文件沙箱下 pytest 的 tmp_path 建不出来（%TEMP% 下的 basetemp 会
     PermissionError [WinError 5]），所以落盘型用例自带可写目录探测。
+    scratch 优先，避免系统 temp 的 0o700 空壳让 tempfile 回退到 cwd。
     """
-    candidates = []
+    if _probe_writable(SCRATCH_FALLBACK):
+        return SCRATCH_FALLBACK
     try:
-        candidates.append(tempfile.mkdtemp(prefix="aw_wecom_clip_"))
+        owned = tempfile.mkdtemp(prefix="aw_wecom_clip_")
     except OSError:
-        pass
-    candidates.append(SCRATCH_FALLBACK)
-    for d in candidates:
-        try:
-            os.makedirs(d, exist_ok=True)
-            probe = os.path.join(d, "_probe.tmp")
-            with open(probe, "w", encoding="utf-8") as fh:
-                fh.write("x")
-            os.remove(probe)
-            return d
-        except OSError:
-            continue
+        pytest.skip("当前环境没有可写的临时目录")
+    _OWNED_TMP_DIRS.append(owned)
+    if _probe_writable(owned):
+        return owned
     pytest.skip("当前环境没有可写的临时目录")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_owned_tmp_dirs():
+    """系统临时目录兜底时清掉 aw_wecom_clip_*，不让测试污染 cwd"""
+    yield
+    for d in _OWNED_TMP_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -132,7 +150,7 @@ SAMPLE_LINES = [
 SAMPLE = "\r\n".join(SAMPLE_LINES) + "\r\n"
 
 #: 用户手工拖出来的原始文件（未入库，仅本机存在；存在时用它反查样本保真度）
-REAL_SAMPLE_PATH = "tests/复制测试"
+REAL_SAMPLE_PATH = os.path.join(ROOT, "tests", "复制测试")
 
 
 def _sample_messages():

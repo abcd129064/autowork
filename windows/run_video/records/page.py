@@ -4,17 +4,15 @@
 需求5（按天统计）：工具栏新增日期筛选区（模式下拉 + 起止日期控件），
 指标卡与列表同口径联动；实现参照售后面板周期筛选范式。
 """
-from datetime import datetime, timedelta
-
 from PySide6.QtCore import Qt, QTimer, QDate
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QHeaderView, QAbstractItemView, QFileDialog,
                                QTableWidgetItem)
 
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
-                            ToolButton, FluentIcon, TitleLabel, CaptionLabel,
-                            BodyLabel, CardWidget, MessageBox, MessageBoxBase,
+                            ToolButton, FluentIcon, CaptionLabel,
+                            BodyLabel, CardWidget, MessageBox,
                             ComboBox, EditableComboBox,
                             CalendarPicker, RoundMenu, Action)
 
@@ -24,162 +22,17 @@ from core.ops_link_delegate import LINKS_ROLE, install_ops_links
 from core.perf import apply_table_smooth_mode
 from core.utils import show_info_bar
 from database import ledger_db
-from workers.aftersale_worker import AftersaleDBWorker
 
 from windows.run_video.common import *  # noqa: F401,F403
-from windows.run_video.form import LedgerForm
+from windows.run_video.records.controller import RecordsController
+from windows.run_video.records.dialogs import (EditLedgerDialog,
+                                                SignerStatsDialog)
+from windows.run_video.records.query_state import (short_dt, date_range,
+                                                    current_filters,
+                                                    pages_of, clamp_page,
+                                                    page_text, total_text)
+from windows.run_video.records.table_adapter import FONT_BOLD, data_cells
 from windows.stat_charts import StatsOpener, _ledger_options
-
-
-class EditLedgerDialog(MessageBoxBase):
-    """跑视频编辑/新增弹窗：复用 LedgerForm（需求3：售后面板同款 UI）
-
-    continuous=True（新增模式）= 连续录入（与售后 EditRecordDialog 同逻辑）：
-    保存成功后**不关窗**，记住本次视频日期、清空表单等待录入下一条，
-    点「完成」才关窗；每条成功通过 on_saved 回调通知调用方刷新列表。
-    编辑模式保持原语义：保存即关窗。
-    """
-
-    def __init__(self, record: dict, parent=None, continuous: bool = False,
-                 on_saved=None):
-        super().__init__(parent)
-        self._record = record
-        self._is_new = not record.get("id")
-        # 连续录入仅用于新增（编辑保持单条语义）
-        self._continuous = bool(continuous) and self._is_new
-        self._busy = False          # 异步落库在途，防重复提交
-        self._validated_ok = False  # 最近一次 validate() 结果（供 _on_yes 判定）
-        self._on_saved_cb = on_saved
-        self._save_worker = None
-        title = "新增跑视频记录" if self._is_new else "编辑跑视频记录"
-        self.setWindowTitle(title)
-        self.form = LedgerForm(self)
-        self.form.set_values(record)
-        self.viewLayout.addWidget(self.form)
-        # MessageBoxBase 无系统标题栏，顶部自建 TitleLabel 标明用途（售后同款）
-        ttl = TitleLabel(title, self)
-        self.viewLayout.insertWidget(0, ttl)
-        self.yesButton.setText("保存并继续" if self._continuous else "保存")
-        self.cancelButton.setText("完成" if self._continuous else "取消")
-        self.yesButton.clicked.connect(self._on_yes)
-        # 弹窗宽度：表单控件较宽（售后 EditRecordDialog 同口径）
-        self.widget.setMinimumWidth(560)
-
-    def _on_yes(self):
-        """收集表单值 / 连续录入落库。
-
-        必填拦截在 validate()（qfw 基类 accept 前调用）：基类槽序为先跑
-        validate() → 通过才 accept → 再轮到本槽，因此走到这里时必填一定
-        已填齐；未通过时弹窗保持打开、不丢输入。
-
-        连续录入模式：validate() 恒 False → 基类永不 accept（弹窗不关），
-        校验通过时由本槽异步落库，成功后清表单等待下一条。
-        """
-        if not self._validated_ok:
-            return
-        if self._continuous:
-            self._submit_continue()
-            return
-        self.collected = self.form.collect()
-
-    def _submit_continue(self):
-        """连续录入：异步落库当前表单（防重复提交，按钮在途禁用）"""
-        if self._busy:
-            return
-        self._busy = True
-        self.yesButton.setEnabled(False)
-        record = self.form.collect()
-        self._save_worker = AftersaleDBWorker(ledger_db.insert_record, record)
-        self._save_worker.result_ready.connect(
-            lambda rid, occ=record.get("occurred_at"): self._on_saved(rid, occ))
-        self._save_worker.error.connect(self._on_save_error)
-        self._save_worker.start()
-
-    def _on_saved(self, rec_id, occurred_at=None):
-        """单条落库成功：记住视频日期 → 清表单 → 提示可继续录入 →
-        通知调用方刷新列表。弹窗保持打开（连续录入语义）。"""
-        self._busy = False
-        self.yesButton.setEnabled(True)
-        if occurred_at:
-            ledger_db.save_last_occurred(str(occurred_at))
-        self.form.clear_form()
-        show_info_bar(f"已新增跑视频记录（编号 {rec_id}），可继续录入",
-                      "success", title="连续录入",
-                      parent=self, duration=2500)
-        if self._on_saved_cb is not None:
-            try:
-                self._on_saved_cb()
-            except Exception:
-                pass
-
-    def _on_save_error(self, msg):
-        self._busy = False
-        self.yesButton.setEnabled(True)
-        show_info_bar(msg, "error", title="保存失败",
-                      parent=self, duration=4000)
-
-    def validate(self) -> bool:
-        """必填校验：不通过返回 False → qfw 基类不 accept、弹窗不关闭。
-
-        连续录入模式：校验通过也返回 False（基类不 accept、弹窗保持打开），
-        落库改由 _on_yes 异步执行；编辑模式保持原行为（通过→accept 关窗，
-        收集结果放 self.collected 由调用方落库）。
-        """
-        missing = self.form.validate()
-        if missing:
-            self._validated_ok = False
-            show_info_bar(f"请先填写必填项: {'、'.join(missing)}", "warning",
-                          title="无法保存", parent=self, duration=3000)
-            first_error = getattr(self.form, "first_error", None)
-            if first_error is not None:
-                first_error.setFocus()
-            return False
-        self._validated_ok = True
-        return not self._continuous
-
-    def exec(self):
-        self.collected = None
-        self._validated_ok = False
-        return super().exec()
-
-
-class SignerStatsDialog(MessageBoxBase):
-    """署名统计弹窗：按署名汇总四分类计数（模板「计数」sheet 的电子版）"""
-
-    def __init__(self, stats: list, parent=None):
-        super().__init__(parent)
-        # MessageBoxBase 无 titleLabel/contentLabel（那是 MessageBox 子类的属性，
-        # 见 sftp_window 注释：qfluentwidgets 1.11+ 已移除），与其他子类一致自建标题
-        self.titleLabel = TitleLabel("署名统计", self)
-        self.contentLabel = CaptionLabel(
-            "每人 问题/未复现/精度/使用 计数与总和"
-            "（与在线模板「计数」sheet 同口径）", self)
-        self.viewLayout.addWidget(self.titleLabel)
-        self.viewLayout.addWidget(self.contentLabel)
-        table = TableWidget(self)
-        table.setColumnCount(6)
-        table.setHorizontalHeaderLabels(
-            ["署名", "问题", "未复现", "精度", "使用", "总和"])
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.setSelectionMode(
-            QAbstractItemView.SelectionMode.NoSelection)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch)
-        table.setRowCount(max(1, len(stats)))
-        for r, s in enumerate(stats):
-            vals = [s.get("signer", ""),
-                    s.get("问题", 0), s.get("未复现", 0),
-                    s.get("精度", 0), s.get("使用", 0), s.get("total", 0)]
-            for c, v in enumerate(vals):
-                it = QTableWidgetItem(str(v))
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(r, c, it)
-        table.setFixedHeight(260)
-        self.viewLayout.addWidget(table)
-        self.yesButton.setText("关闭")
-        self.cancelButton.hide()
-        self.widget.setMinimumWidth(560)
 
 
 class RecordsPage(QWidget):
@@ -194,26 +47,74 @@ class RecordsPage(QWidget):
         self._page_size = 50
         self._total = 0
         self._rows = []
-        self._worker = None
-        self._stats_worker = None
-        self._export_worker = None
-        self._del_worker = None
-        self._mutate_worker = None  # 编辑保存独立槽，不与查询 worker 抢占
+        # 查询/指标卡的代际号：controller 的异步结果回来时先比 seq，
+        # 过滤掉筛选连续切换后迟到的旧帧（详见 controller 模块 docstring）。
+        self._seq = 0
+        self._stats_seq = 0
         self._manual_refresh = False  # 手动刷新标志：完成/失败时弹 infobar 反馈
         # 自动刷新（需求4，仿售后面板范式）：轮询轻量指纹，仅在数据真的
-        # 变化时静默重查并保持阅读位置。独立查询槽 _auto_worker（以 _worker
-        # 结尾，closeEvent 的 detach 扫描自动覆盖）。
-        self._auto_worker = None
+        # 变化时静默重查并保持阅读位置。worker 全部归 controller 所有，
+        # 页面只保留定时器与指纹快照。
         self._auto_timer = QTimer(self)
         self._auto_timer.setTimerType(Qt.TimerType.CoarseTimer)
         self._auto_timer.timeout.connect(self._auto_refresh_tick)
         self._last_fingerprint = None   # 上次全表指纹快照（None=需重建基线）
         self._preserve_view = None      # 静默重查待恢复的滚动偏移
+        self._controller = RecordsController(self)
+        self._connect_controller()
         self._init_ui()
+        # 分类徽章字体只构造一次（循环内逐格 new QFont 会拖慢 50 行渲染）
+        self._bold_font = QFont()
+        self._bold_font.setBold(True)
         self._sync_auto_timer()
         # pygwalker 统计图表（独立浏览器窗口，工具栏「统计图表」按钮触发）
         self._stats_opener = StatsOpener(_ledger_options, "run_video", self)
         self._stats_opener.finished.connect(self._on_stats_finished)
+
+    # ---------- controller 连线 / 生命周期 ----------
+
+    def _connect_controller(self):
+        """把异步编排层的信号接到视图槽；所有槽都在主线程（Qt 自动排队）。
+
+        指纹信号先过一个动态分发器：测试会 monkeypatch 页面上的
+        _on_fingerprint，若 controller 直接连旧绑定就绕过了补丁。
+        """
+        c = self._controller
+        c.rows_ready.connect(self._on_loaded)
+        c.load_failed.connect(self._on_load_error)
+        c.stats_ready.connect(self._on_stats_loaded)
+        c.signers_ready.connect(self._on_signers_ready)
+        c.candidates_ready.connect(self._on_candidates_ready)
+        c.fingerprint_ready.connect(self._dispatch_fingerprint)
+        c.mutation_done.connect(self._on_mutation_done)
+        c.mutation_failed.connect(self._on_mutation_failed)
+        c.export_done.connect(self._on_export_done)
+        c.export_failed.connect(self._on_export_failed)
+        c.signer_stats_ready.connect(self._on_signer_stats_ready)
+        c.signer_stats_failed.connect(self._on_signer_stats_failed)
+
+    def _dispatch_fingerprint(self, fp):
+        """稳定转调，保证 monkeypatch(self._on_fingerprint) 仍然生效。"""
+        self._on_fingerprint(fp)
+
+    def detach_workers(self):
+        """切页/关窗：停自动刷新并请求中断 controller 的全部后台线程。
+
+        主窗口 pivot_page 的目录扫描仍会兜底扫 *_worker 属性，但本页真正
+        的 worker 都在 controller 里，必须显式转调 stop_all。
+        """
+        self._auto_timer.stop()
+        self._controller.stop_all()
+
+    @property
+    def _worker(self):
+        """兼容旧测试/外部探针：查询 worker 的只读视图（不再是页面属性）。"""
+        return self._controller._query_worker
+
+    @property
+    def _auto_worker(self):
+        """兼容旧测试/外部探针：指纹 worker 的只读视图。"""
+        return self._controller._auto_worker
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -527,19 +428,15 @@ class RecordsPage(QWidget):
     # ---------- 筛选条件 ----------
 
     def _current_filters(self) -> dict:
-        cat = self._cat_combo.currentText().strip()
-        kind = self._kind_combo.currentText().strip()
-        signer = self._signer_combo.currentText().strip()
+        """界面控件值 → 查询参数；归一规则全在 query_state，视图只搬运。"""
         date_from, date_to = self._date_range()
-        return {
-            "category": "" if cat == "全部分类" else cat,
-            "kind": "" if kind == "全部类别" else kind,
-            "signer": "" if signer == "全部署名" else signer,
-            "keyword": self._search_edit.text().strip(),
-            "date_from": date_from,
-            "date_to": date_to,
-            "repro": self._repro_seg.value(),  # 全部→"" / 否 / 是
-        }
+        return current_filters(
+            self._cat_combo.currentText(),
+            self._kind_combo.currentText(),
+            self._signer_combo.currentText(),
+            self._search_edit.text(),
+            date_from, date_to,
+            self._repro_seg.value())  # 全部→"" / 否 / 是
 
     def _on_date_mode_changed(self):
         """日期模式切换：仅「自定义」显示结束日期控件，随后重查"""
@@ -556,34 +453,15 @@ class RecordsPage(QWidget):
         self._date_from.setDate(self._date_from.date.addDays(delta_days))
 
     def _date_range(self) -> tuple:
-        """按日期模式与基准日期计算 (date_from, date_to)；空串表示不过滤
+        """按日期模式与基准日期算 (date_from, date_to)；空串=不过滤。
 
-        需求2 重构：默认「今天」；基准日期可翻看昨天/前天等历史日期。
-        - 全部：不过滤
-        - 今天：基准日期当天
-        - 近7天：基准日期前推 6 天（共 7 天，含基准日）
-        - 近30天：基准日期前推 29 天（共 30 天，含基准日）
-        - 本月：基准日期所在自然月（1 号 ~ 月末）
-        - 自定义：起止日期控件（倒置时自动交换）
+        具体口径（近 7 天含基准日、本月月末、自定义倒置交换）都在
+        query_state.date_range 里，本方法只把 QDate 翻成 datetime.date。
         """
-        mode = self._date_mode_combo.currentText()
-        if mode == "全部":
-            return "", ""
-        d = self._date_from.date.toPython()  # QDate 属性 → datetime.date
-        if mode == "自定义":
-            d2 = self._date_to.date.toPython()  # QDate 属性 → datetime.date
-            if d2 < d:
-                d, d2 = d2, d
-            return d.isoformat(), d2.isoformat()
-        if mode == "近7天":
-            return (d - timedelta(days=6)).isoformat(), d.isoformat()
-        if mode == "近30天":
-            return (d - timedelta(days=29)).isoformat(), d.isoformat()
-        if mode == "本月":
-            import calendar
-            last = calendar.monthrange(d.year, d.month)[1]
-            return d.replace(day=1).isoformat(), d.replace(day=last).isoformat()
-        return d.isoformat(), d.isoformat()  # 今天
+        return date_range(
+            self._date_mode_combo.currentText(),
+            self._date_from.date.toPython(),  # QDate 属性 → datetime.date
+            self._date_to.date.toPython())
 
     def _on_search_input(self, _text):
         self._search_timer.start()
@@ -600,44 +478,35 @@ class RecordsPage(QWidget):
         self._load_kind_options(cat)
 
     def _load_kind_options(self, category: str):
-        """异步拉取类别筛选候选（全部类别 + 该分类候选）"""
-        def _fill(cands):
-            cur = self._kind_combo.currentText().strip()
-            self._kind_combo.blockSignals(True)
-            self._kind_combo.clear()
-            self._kind_combo.addItem("全部类别")
-            cands = list(cands or ())
-            self._kind_combo.addItems(cands)
-            if cur:
-                self._kind_combo.setText(cur)  # EditableComboBox 用 setText 回填
-            else:
-                self._kind_combo.setCurrentIndex(0)
-            self._kind_combo.blockSignals(False)
-            # 手输补全提示（EditableComboBox 为 LineEdit 子类，需显式挂补全器）
-            try:
-                from PySide6.QtWidgets import QCompleter
-                self._kind_combo.setCompleter(
-                    QCompleter(["全部类别"] + cands, self._kind_combo))
-            except Exception:
-                pass
-            self._on_filter_changed()
+        """类别候选：查询在 controller；空分类会同步发 candidates_ready。"""
+        self._controller.load_kind_options(category)
 
-        if not category:
-            cands = []
-            seen = set()
-            for v in ledger_db.KIND_CANDIDATES.values():
-                for k in v:
-                    if k not in seen:
-                        seen.add(k)
-                        cands.append(k)
-            _fill(cands)
+    def _on_candidates_ready(self, cands, category):
+        """填类别下拉；旧分类的迟到候选由 controller 代际号 + 这里双保险丢弃。"""
+        current = self._cat_combo.currentText().strip()
+        if current == "全部分类":
+            current = ""
+        if str(category or "").strip() != current:
             return
-        self._stats_worker = AftersaleDBWorker(
-            ledger_db.get_kind_candidates, category)
-        self._stats_worker.result_ready.connect(_fill)
-        self._stats_worker.error.connect(
-            lambda _m: _fill(ledger_db.KIND_CANDIDATES.get(category, ())))
-        self._stats_worker.start()
+        cur = self._kind_combo.currentText().strip()
+        self._kind_combo.blockSignals(True)
+        self._kind_combo.clear()
+        self._kind_combo.addItem("全部类别")
+        cands = list(cands or ())
+        self._kind_combo.addItems(cands)
+        if cur:
+            self._kind_combo.setText(cur)  # EditableComboBox 用 setText 回填
+        else:
+            self._kind_combo.setCurrentIndex(0)
+        self._kind_combo.blockSignals(False)
+        # 手输补全提示（EditableComboBox 为 LineEdit 子类，需显式挂补全器）
+        try:
+            from PySide6.QtWidgets import QCompleter
+            self._kind_combo.setCompleter(
+                QCompleter(["全部类别"] + cands, self._kind_combo))
+        except Exception:
+            pass
+        self._on_filter_changed()
 
     # ---------- 首次显示自动加载 ----------
 
@@ -685,19 +554,16 @@ class RecordsPage(QWidget):
         """定时器回调：前置守卫后起一条轻量指纹查询。
 
         跳过条件：有模态弹窗在前台（编辑/新增/确认），或本页正在查询/写库
-        ——不打扰用户操作，等下个周期。
+        ——不打扰用户操作，等下个周期。worker 归属判定在 controller。
         """
         from PySide6.QtWidgets import QApplication
         if QApplication.activeModalWidget() is not None:
             return
-        for w in (self._auto_worker, self._worker, self._mutate_worker,
-                  self._del_worker):
-            if w is not None and w.isRunning():
-                return
-        self._auto_worker = AftersaleDBWorker(ledger_db.change_fingerprint)
-        self._auto_worker.result_ready.connect(self._on_fingerprint)
-        self._auto_worker.error.connect(lambda _m: None)
-        self._auto_worker.start()
+        if self._controller.is_running(
+                "query_worker", "mutate_worker", "del_worker",
+                "auto_worker"):
+            return
+        self._controller.check_fingerprint()
 
     def _on_fingerprint(self, fp):
         """指纹回来：与上次快照比对，一致则完全不动表格，变化才静默重查"""
@@ -710,10 +576,11 @@ class RecordsPage(QWidget):
         if fp == self._last_fingerprint:
             return  # 无远端变化：保留滚动位置，零重绘
         self._last_fingerprint = fp
-        # 先捕获阅读位置再重查；_on_loaded 完成后还原
-        offset = self._capture_view()
+        # 先捕获阅读位置、登记还原意图，再重查；_on_loaded 完成后还原。
+        # 顺序不能反：_load 的 worker 虽异步回来，但登记晚于请求会让
+        # 「请求已发出、结果先到」的极端时序丢掉滚动位置。
+        self._preserve_view = self._capture_view()
         self._load()
-        self._preserve_view = offset
 
     def _capture_view(self) -> int:
         """捕获当前阅读位置：表格垂直滚动偏移"""
@@ -757,94 +624,51 @@ class RecordsPage(QWidget):
         self._load()
 
     def _load(self):
-        """异步分页查询 + 指标卡 + 署名选项刷新"""
-        if self._worker and self._worker.isRunning():
-            self._worker.requestInterruption()
+        """异步分页查询 + 指标卡 + 署名选项刷新（worker 全在 controller）"""
         self._update_source_label()
         self._load_signers()
         filters = self._current_filters()
-        self._worker = AftersaleDBWorker(
-            ledger_db.query_page, self._page_no, self._page_size,
-            filters["keyword"], filters["category"],
-            filters["kind"], filters["signer"],
-            filters["date_from"], filters["date_to"],
-            filters["repro"])
-        self._worker.result_ready.connect(self._on_loaded)
-        self._worker.error.connect(self._on_load_error)
-        self._worker.start()
+        self._seq += 1
+        self._controller.query(filters, self._page_no, self._page_size,
+                               self._seq)
         # 指标卡（需求5：与列表同口径，按日期范围计数）
-        self._stats_worker = AftersaleDBWorker(
-            self._count_by_category, filters["date_from"], filters["date_to"])
-        self._stats_worker.result_ready.connect(self._on_stats_loaded)
-        self._stats_worker.error.connect(lambda _m: None)
-        self._stats_worker.start()
-
-    @staticmethod
-    def _count_by_category(date_from: str = "", date_to: str = "") -> dict:
-        """分类计数（指标卡数据源）；日期范围按视频日期 occurred_at 过滤
-        （需求7；COALESCE 兼容旧库 occurred_at 为空回退 created_at，与
-        ledger_db._build_where 同口径，保证指标卡与列表一致）"""
-        from database import table_db
-        conn = table_db.get_conn()
-        where, params = [], []
-        if date_from:
-            where.append("substr(COALESCE(NULLIF(occurred_at, ''), created_at),"
-                         " 1, 10) >= ?")
-            params.append(str(date_from).strip())
-        if date_to:
-            where.append("substr(COALESCE(NULLIF(occurred_at, ''), created_at),"
-                         " 1, 10) <= ?")
-            params.append(str(date_to).strip())
-        sql = "SELECT category, COUNT(*) FROM ledger_records"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " GROUP BY category"
-        counts = {"total": 0}
-        for c in ledger_db.CATEGORIES:
-            counts[c] = 0
-        for cat, n in conn.execute(sql, params).fetchall():
-            counts[str(cat or "")] = int(n or 0)
-            counts["total"] += int(n or 0)
-        return counts
+        self._stats_seq += 1
+        self._controller.count_by_category(
+            filters["date_from"], filters["date_to"], self._stats_seq)
 
     def _load_signers(self):
-        """异步刷新署名筛选候选（全部 + 库中署名）"""
-        def _fill(signers):
-            cur = self._signer_combo.currentText().strip()
-            self._signer_combo.blockSignals(True)
-            self._signer_combo.clear()
-            self._signer_combo.addItem("全部署名")
-            self._signer_combo.addItems(
-                [s for s in (signers or []) if s and s != "全部署名"])
-            if cur:
-                idx = self._signer_combo.findText(cur)
-                self._signer_combo.setCurrentIndex(max(0, idx))
-            self._signer_combo.blockSignals(False)
-        self._stats_worker = AftersaleDBWorker(self._fetch_signers)
-        self._stats_worker.result_ready.connect(_fill)
-        self._stats_worker.error.connect(lambda _m: None)
-        self._stats_worker.start()
+        """刷新署名候选：查询在 controller，结果由 _on_signers_ready 填控件。"""
+        self._controller.load_signers()
 
-    @staticmethod
-    def _fetch_signers() -> list:
-        from database import table_db
-        conn = table_db.get_conn()
-        return [str(r[0] or "").strip() for r in conn.execute(
-            "SELECT DISTINCT signer FROM ledger_records "
-            "WHERE signer != '' ORDER BY signer").fetchall()]
+    def _on_signers_ready(self, signers):
+        """填署名下拉并保留当前选中项；失败静默（controller 不发错误）。"""
+        cur = self._signer_combo.currentText().strip()
+        self._signer_combo.blockSignals(True)
+        self._signer_combo.clear()
+        self._signer_combo.addItem("全部署名")
+        self._signer_combo.addItems(
+            [s for s in (signers or []) if s and s != "全部署名"])
+        if cur:
+            idx = self._signer_combo.findText(cur)
+            self._signer_combo.setCurrentIndex(max(0, idx))
+        self._signer_combo.blockSignals(False)
 
-    def _on_loaded(self, result):
+    def _on_loaded(self, result, seq=None):
+        """分页结果回填；seq 不是最新一帧就直接丢弃（防止旧筛选覆盖新筛选）。"""
+        if seq is not None and seq != self._seq:
+            return
         self._update_source_label()
         if not result:
             return
         self._total, self._rows = result
         self._populate()
-        pages = max(1, (self._total + self._page_size - 1) // self._page_size)
-        self._page_no = min(self._page_no, pages)
-        self._lbl_page.setText(f"{self._page_no}/{pages}")
-        self._lbl_stats.setText(f"共 {self._total} 条")
+        self._page_no = clamp_page(self._page_no, self._total, self._page_size)
+        self._lbl_page.setText(
+            page_text(self._page_no, self._total, self._page_size))
+        self._lbl_stats.setText(total_text(self._total))
         self._btn_prev.setEnabled(self._page_no > 1)
-        self._btn_next.setEnabled(self._page_no < pages)
+        self._btn_next.setEnabled(
+            self._page_no < pages_of(self._total, self._page_size))
         if self._manual_refresh:
             self._manual_refresh = False
             show_info_bar(f"已刷新，共 {self._total} 条记录", "success",
@@ -855,88 +679,64 @@ class RecordsPage(QWidget):
             self._preserve_view = None
             self._restore_view(pv)
 
-    def _on_load_error(self, msg):
+    def _on_load_error(self, msg, seq=None):
+        if seq is not None and seq != self._seq:
+            return
         if self._manual_refresh:
             self._manual_refresh = False
             show_info_bar(msg, "error", title="刷新失败",
                           parent=self, duration=4000)
 
-    def _on_stats_loaded(self, counts):
+    def _on_stats_loaded(self, counts, seq=None):
+        if seq is not None and seq != self._stats_seq:
+            return
         for key, lbl in self._cards.items():
             lbl.setText(str(counts.get(key, 0)))
 
     # ---------- 表格填充 ----------
 
     def _populate(self):
-        self._table.setUpdatesEnabled(False)
-        self._table.blockSignals(True)
+        """按 table_adapter 的呈现描述重建当前页表格（不再手写列值顺序）。
+
+        列序严格跟随 TABLE_COLUMNS；呈现规则（截断/tooltip/分类色/链接）
+        在 table_adapter，视图只负责把 CellSpec 落到 QTableWidgetItem。
+        """
+        table = self._table
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
         try:
-            self._table.clearContents()
-            self._table.setRowCount(len(self._rows))
-            # 性能（2026-08-26）：徽章文本化——分类徽章由 cellWidget 改为文本 item
-            # （语义色前景 + 淡色底）；2026-09-19 操作列也改为单元格内文字链接
-            # （core.ops_link_delegate 自绘 + 命中），本面板已无 cellWidget，
-            # 因此不再预构建按钮 QSS
-            # 徽章加粗字体（循环外构造一次：原每徽章 QFont(it.font()) 拷贝；
-            # 默认应用字体加粗，渲染不变）
-            bold_font = QFont()
-            bold_font.setBold(True)
+            table.clearContents()
+            table.setRowCount(len(self._rows))
             for r, row in enumerate(self._rows):
-                # 描述/复现过长截断 + tooltip 保留完整内容
-                desc = str(row.get("description") or "")
-                repro = str(row.get("repro") or "")
-                short_desc = (desc[:60] + "…") if len(desc) > 60 else desc
-                short_repro = (repro[:30] + "…") if len(repro) > 30 else repro
-                vals = [
-                    RecordsPage._short_dt(row.get("created_at")),
-                    row.get("category", ""),
-                    row.get("kind", ""),
-                    row.get("room_name", ""),
-                    row.get("video_name", ""),
-                    row.get("frame", ""),
-                    short_desc,
-                    short_repro,
-                    row.get("new_program", ""),
-                    row.get("signer", ""),
-                ]
-                for c, v in enumerate(vals):
-                    if c == 1:  # 分类徽章：文本 item + 语义色（不再用 cellWidget）
-                        it = QTableWidgetItem(str(v))
-                        color = _category_color(str(v))
-                        it.setForeground(color)
-                        bgc = QColor(color)
-                        bgc.setAlpha(26)  # ~10% 透明度，近似徽章淡底
-                        it.setBackground(bgc)
-                        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        it.setFont(bold_font)
-                        self._table.setItem(r, c, it)
-                        continue
-                    it = QTableWidgetItem(str(v))
-                    if c == 0:
+                specs = data_cells(row)
+                for c, (key, _header, _width) in enumerate(TABLE_COLUMNS):
+                    spec = specs[c]
+                    it = QTableWidgetItem(spec.text)
+                    if key == "created_at":
                         it.setTextAlignment(
                             Qt.AlignmentFlag.AlignVCenter
                             | Qt.AlignmentFlag.AlignLeft)
-                    if c in (6, 7) and str(v) != desc and str(v) != repro:
-                        pass  # 无截断不需提示
-                    if c == 6 and desc != short_desc:
-                        it.setToolTip(desc)
-                    if c == 7 and repro != short_repro:
-                        it.setToolTip(repro)
-                    self._table.setItem(r, c, it)
-                # 操作列：空文本 item + 链接清单，委托按矩形自绘并反查命中
-                ops = QTableWidgetItem("")
-                ops.setData(LINKS_ROLE, _OPS_LINKS)
-                self._table.setItem(r, _COL_OPS, ops)
+                    if spec.font == FONT_BOLD:
+                        it.setFont(self._bold_font)
+                    if spec.fg is not None:
+                        it.setForeground(spec.fg)
+                    if spec.bg is not None:
+                        it.setBackground(spec.bg)
+                    if spec.align_center:
+                        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if spec.tooltip:
+                        it.setToolTip(spec.tooltip)
+                    if spec.links is not None:
+                        it.setData(LINKS_ROLE, spec.links)
+                    table.setItem(r, c, it)
         finally:
-            self._table.setUpdatesEnabled(True)
-            self._table.blockSignals(False)
-        pass
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
 
     @staticmethod
     def _short_dt(val) -> str:
-        """2026-08-22 21:14:33 → 08-22 21:14（紧凑展示）"""
-        s = str(val or "").strip()
-        return s[5:16] if len(s) >= 16 else s
+        """2026-08-22 21:14:33 → 08-22 21:14（兼容旧调用，逻辑在 query_state）"""
+        return short_dt(val)
 
     def _on_ops_link(self, row: int, _col: int, action: str):
         """操作列文字链接点击分发（core.ops_link_delegate 的 editorEvent 回调）
@@ -989,8 +789,8 @@ class RecordsPage(QWidget):
     def _on_edit(self, row=None):
         """编辑：row 为记录 dict（行内链接/右键菜单）或 None（取当前行）
 
-        编辑模式保持单条语义：validate 通过后弹窗 accept，
-        collected 由本方法异步落库（update_record）。
+        编辑模式保持单条语义：validate 通过后弹窗 accept，collected 交给
+        controller 异步落库；成功/失败由 mutation_done/failed 回主线程提示。
         """
         if row is None:
             idx = self._table.currentRow()
@@ -999,18 +799,7 @@ class RecordsPage(QWidget):
             row = self._rows[idx]
         dlg = EditLedgerDialog(dict(row), self)
         if dlg.exec() and getattr(dlg, "collected", None):
-            rec_id = int(row["id"])
-            collected = dlg.collected
-            self._mutate_worker = AftersaleDBWorker(
-                ledger_db.update_record, rec_id, collected)
-            self._mutate_worker.result_ready.connect(
-                lambda _ok: (self._load(), show_info_bar(
-                    "已保存修改", "success", title="编辑",
-                    parent=self, duration=2500)))
-            self._mutate_worker.error.connect(
-                lambda m: show_info_bar(m, "error", title="保存失败",
-                                        parent=self, duration=4000))
-            self._mutate_worker.start()
+            self._controller.update_record(int(row["id"]), dlg.collected)
 
     def _on_delete(self, row):
         box = MessageBox("删除确认",
@@ -1019,48 +808,56 @@ class RecordsPage(QWidget):
                          f"{row.get('room_name')}", self)
         if not box.exec():
             return
-        self._del_worker = AftersaleDBWorker(
-            ledger_db.delete_record, int(row["id"]))
-        self._del_worker.result_ready.connect(
-            lambda _ok: (self._load(), show_info_bar(
-                "已删除", "success", title="删除",
-                parent=self, duration=2500)))
-        self._del_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="删除失败",
-                                    parent=self, duration=4000))
-        self._del_worker.start()
+        self._controller.delete_record(int(row["id"]))
+
+    # ---------- 写操作 / 导出的结果回调 ----------
+
+    def _on_mutation_done(self, tag, _payload=None):
+        """写库成功：编辑/删除共用一条静默重查链，按 tag 给不同文案。"""
+        if tag == "edit":
+            self._load()
+            show_info_bar("已保存修改", "success", title="编辑",
+                          parent=self, duration=2500)
+        elif tag == "delete":
+            self._load()
+            show_info_bar("已删除", "success", title="删除",
+                          parent=self, duration=2500)
+
+    def _on_mutation_failed(self, tag, msg):
+        title = "保存失败" if tag == "edit" else "删除失败"
+        show_info_bar(msg, "error", title=title, parent=self, duration=4000)
 
     # ---------- 署名统计 / 导出 ----------
 
     def _on_show_stats(self):
-        self._stats_worker = AftersaleDBWorker(ledger_db.stats_by_signer)
-        self._stats_worker.result_ready.connect(
-            lambda stats: SignerStatsDialog(stats or [], self).exec())
-        self._stats_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="统计失败",
-                                    parent=self, duration=4000))
-        self._stats_worker.start()
+        """署名统计：查询在 controller，结果回来再开弹窗。"""
+        self._controller.signer_stats()
+
+    def _on_signer_stats_ready(self, stats):
+        SignerStatsDialog(stats or [], self).exec()
+
+    def _on_signer_stats_failed(self, msg):
+        show_info_bar(msg, "error", title="统计失败",
+                      parent=self, duration=4000)
 
     def _on_export(self):
         path, _sel = QFileDialog.getSaveFileName(
             self, "导出跑视频记录", "跑视频_export.xlsx", "Excel 文件 (*.xlsx)")
-        if not path:
-            return
-        self._export_worker = AftersaleDBWorker(ledger_db.export_xlsx, path)
-        self._export_worker.result_ready.connect(
-            lambda n: show_info_bar(
-                f"已导出 {n} 条",
-                "success", title="导出成功", parent=self, duration=3000))
-        self._export_worker.error.connect(
-            lambda m: show_info_bar(m, "error", title="导出失败",
-                                    parent=self, duration=4000))
-        self._export_worker.start()
+        if path:
+            self._controller.export_xlsx(path)
+
+    def _on_export_done(self, count):
+        show_info_bar(f"已导出 {count} 条", "success",
+                      title="导出成功", parent=self, duration=3000)
+
+    def _on_export_failed(self, msg):
+        show_info_bar(msg, "error", title="导出失败",
+                      parent=self, duration=4000)
 
     # ---------- 分页 ----------
 
     def _step_page(self, delta: int):
-        pages = max(1, (self._total + self._page_size - 1) // self._page_size)
         new_page = self._page_no + delta
-        if 1 <= new_page <= pages:
+        if 1 <= new_page <= pages_of(self._total, self._page_size):
             self._page_no = new_page
             self._load()

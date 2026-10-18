@@ -1674,7 +1674,7 @@ LedgerPanelWindow(parent=None)
 | set_values(rec) / collect() / validate(show_errors=True) / clear_form() | 编辑回填 / 收集值 / 必填校验（show_errors=False 时静默校验不显示红框，供必填进度用）/ 清空 |
 | _on_category_changed(category) | 分类切换：类别候选异步联动 + 重建补全器 |
 
-**记录与统计**（实现于 `windows/run_video/records.py`）：指标卡（总记录/问题/未复现/精度/使用）与列表同口径，随日期范围联动。日期筛选模式：全部日期/今天/近7天/近30天/本月/自定义（默认今天，基准日期可翻历史，结束日历仅自定义显示）；`_date_range` 按档计算区间（近7天=基准前推 6 天、近30天=前推 29 天、本月=自然月、自定义起止倒置自动交换），按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`）。首次显示自动加载（showEvent + `_loaded_once`）；自动刷新定时器按指纹比对（`ledger_db.change_fingerprint`）跳过无变化重查。
+**记录与统计**（实现于 `windows/run_video/records/`，视图 `page.py` / 异步编排 `controller.py` / 纯逻辑 `query_state.py` / 呈现 `table_adapter.py` / 弹窗 `dialogs.py`）：指标卡（总记录/问题/未复现/精度/使用）与列表同口径，随日期范围联动。日期筛选模式：全部日期/今天/近7天/近30天/本月/自定义（默认今天，基准日期可翻历史，结束日历仅自定义显示）；`_date_range` 按档计算区间（近7天=基准前推 6 天、近30天=前推 29 天、本月=自然月、自定义起止倒置自动交换），按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`）。首次显示自动加载（showEvent + `_loaded_once`）；自动刷新定时器按指纹比对（`ledger_db.change_fingerprint`）跳过无变化重查。
 
 **弹窗**：`EditLedgerDialog`（MessageBoxBase）新增/编辑记录（复用共享表单，`continuous=True` 连续录入模式：保存并继续不关窗）；`SignerStatsDialog`（MessageBoxBase）署名统计（问题/未复现/精度/使用/总和）。
 

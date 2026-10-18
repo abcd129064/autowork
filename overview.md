@@ -44,7 +44,7 @@
 ## 1. 二级切换条缩小 30% + 删除页头副标题
 - `main_window/pivot_page.py`：`_shrink_items()`——PivotItem 字体 18→13px、行高→24px、qss `padding: 10px 12px`→`1px 12px`。实测运维切换条 600→500px、售后/跑视频 258→213px，行高 42→24px。
   - 坑：只 `setFixedHeight(24)` 压不住——全局字体大时 qss padding 使 item minimumSizeHint 涨到 42px 并被布局写回，整行仍撑高；必须同步改写 item 样式表 padding（保留选中态/hover 规则）。
-- `windows/aftersale/records.py` / `windows/run_video/records.py`：删除记录页页头副标题「售后问题上报」「跑视频记录：…」（与二级页签重复）。「记录与统计」大标题保留，需要一并去掉可再删。
+- `windows/aftersale/records.py` / `windows/run_video/records/page.py`：删除记录页页头副标题「售后问题上报」「跑视频记录：…」（与二级页签重复）。「记录与统计」大标题保留，需要一并去掉可再删。
 
 ## 2. 设置页改为左标题 + 右 SegmentedWidget 分页（Watt 式）
 - `main_window/hub_pages.py::SettingsHubPage` 重排：头部 = 左侧 56px 图标块 +「设置」大标题 + 描述，右侧 SegmentedWidget；内容 = QStackedWidget 5 页（每页独立滚动）：

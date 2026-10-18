@@ -12,7 +12,7 @@
 原因是受限文件沙箱下 pytest 连自己的 basetemp（%TEMP%\\pytest-of-<user>）
 都建不出来（PermissionError [WinError 5]），tmp_path 型测试会整批变成
 「环境性 error」而不是跑到断言——归档库这种要落盘 SQLite 的测试必须真跑起来。
-探测顺序：系统临时目录 → tools/_scratch/pytest_chat_db（已被 .gitignore 命中）。
+探测顺序：tools/_scratch/pytest_chat_db（已被 .gitignore 命中）→ 系统临时目录。
 """
 import json
 import os
@@ -34,25 +34,47 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRATCH_FALLBACK = os.path.join(ROOT, "tools", "_scratch", "pytest_chat_db")
 
 
-def _writable_dir() -> str:
-    """选一个真的能写文件的临时目录（探测失败则 skip，不产生假失败）"""
-    candidates = []
+_OWNED_TMP_DIRS = []
+
+
+def _probe_writable(d: str) -> bool:
+    """真实写一个探针文件：目录存在不代表能写，受限沙箱会给出 0o700 空壳"""
     try:
-        candidates.append(tempfile.mkdtemp(prefix="aw_chat_archive_"))
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, "_probe.tmp")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        os.remove(probe)
+        return True
     except OSError:
-        pass
-    candidates.append(SCRATCH_FALLBACK)
-    for d in candidates:
-        try:
-            os.makedirs(d, exist_ok=True)
-            probe = os.path.join(d, "_probe.tmp")
-            with open(probe, "w", encoding="utf-8") as fh:
-                fh.write("x")
-            os.remove(probe)
-            return d
-        except OSError:
-            continue
+        return False
+
+
+def _writable_dir() -> str:
+    """选一个真的能写文件的临时目录（探测失败则 skip，不产生假失败）
+
+    仓库内 scratch 优先。系统 temp 在受限沙箱里可能建出 0o700 的不可读
+    目录，tempfile 随后回退到 cwd，测试就会在仓库根目录留下空目录。
+    只有 scratch 不可写时才创建系统临时目录，避免每次探测都留一个空壳。
+    """
+    if _probe_writable(SCRATCH_FALLBACK):
+        return SCRATCH_FALLBACK
+    try:
+        owned = tempfile.mkdtemp(prefix="aw_chat_archive_")
+    except OSError:
+        pytest.skip("当前环境没有可写的临时目录")
+    _OWNED_TMP_DIRS.append(owned)
+    if _probe_writable(owned):
+        return owned
     pytest.skip("当前环境没有可写的临时目录")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_owned_tmp_dirs():
+    """系统临时目录兜底时清掉 aw_chat_archive_*，不让测试污染任意 cwd"""
+    yield
+    for d in _OWNED_TMP_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
