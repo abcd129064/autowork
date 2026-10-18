@@ -449,6 +449,27 @@ AI 厂商注册表：统一各厂商的 OpenAI 兼容接入参数（DeepSeek / �
 | `substitute_accent(qss_text)` | 把 QSS 中的固定青色锚点替换为当前主题强调色 |
 | `current_accent_hex()` | 当前主题强调色 hex（`qconfig.themeColor`，带容错回退） |
 
+### core.theme_policy
+
+主题/外观配置的纯逻辑解析（无 Qt / 无 qfluentwidgets 依赖）：把配置解析、系统深浅色判定从 `main_window/ui_mixin.py` 抽成可单测函数，UI 层只负责应用结果。
+
+| 函数/常量 | 签名 | 说明 |
+|------|------|------|
+| `DEFAULT_THEME_COLOR` | `str = "#00BCD4"` | 默认强调色（唯一来源，设置页与主窗口共用） |
+| `VALID_THEME_MODES` | `tuple = ("auto", "light", "dark")` | 合法主题模式 |
+| `parse_theme_color(settings, default=DEFAULT_THEME_COLOR)` | `(dict, str) -> str` | 优先 `theme_color`（HEX 原样返回），兼容旧 `highlight_color` RGB 三元组（逐通道钳制 0..255），都没有时返回 default |
+| `theme_mode(settings)` | `(dict) -> str` | 返回 `auto/light/dark`；兼容旧 `dark_theme`（True→dark，否则 auto） |
+| `system_is_dark()` | `() -> bool` | 读系统深浅色（darkdetect）；缺失/异常返回 False |
+| `effective_is_dark(settings, system_dark_fn=None)` | `(dict, callable?) -> bool` | 解析实际生效的深浅色；auto 模式调用系统判定，可注入 `system_dark_fn` 便于单测 |
+
+### core.ui_scale
+
+启动期 DPI 缩放策略（无 Qt 依赖，必须在 `QApplication` 创建前调用）：写 `QT_SCALE_FACTOR`，并叠加系统缩放告警。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_dpi_scale(settings)` | `(dict) -> None` | 读取 `dpi_scale`（百分比，默认 100）；非 100 时写 `QT_SCALE_FACTOR = scale/100`；系统缩放 ≥150% 时经 `core.perf.set_dpi_stack_warning` 落告警（只告警不阻断），任何异常静默 |
+
 ### core.design_tokens
 
 设计令牌（Design Tokens）：消除 `windows/*.py` 与 `styles/*.qss` 中散落的硬编码颜色/间距/字号，统一主题色、语义色、灰阶、间距、圆角、排版刻度。纯常量、不依赖 qfluentwidgets；运行时主题色（accent）仍由 `qconfig.themeColor` 提供。
@@ -1921,13 +1942,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
 #### 类 `UIMixin`
 
-UI 辅助（状态栏、菜单栏、右键菜单、主题切换、布局切换）。模块内另有 `AboutDialog`（关于弹窗）、`VisibleAcrylicMenu`（增强可见度亚克力菜单）、`_ShortcutKeyEdit`（Fluent 风格快捷键录入框）、`NewLogDialog`（视频/日志批量整理对话框）等辅助类。
+UI 辅助（状态栏、菜单栏 Action、右键菜单、主题切换、布局切换）。`AboutDialog` / `VisibleAcrylicMenu` / `_ShortcutKeyEdit` / `NewLogDialog` 已迁至 `main_window.ui` 包；本模块仍 re-export 这些名字，旧的 `from main_window.ui_mixin import AboutDialog` 写法继续可用。
 
 | 方法 | 说明 |
 |------|------|
 | `_init_statusbar()` | 初始化底部状态栏 |
 | `_init_context_menus()` | 初始化右键菜单 |
-| `_init_menubar()` | 初始化菜单栏（含「工具」菜单：单杆视频 / 端口占用 / 视频/日志批量整理 / 上传清单——各入口统一经 `_on_open_tool_hub` 跳转工具页对应工作区） |
+| `_init_menubar()` | 初始化设置页复用的主题/布局 Action 与菜单栏对象（2026-09-06 起菜单栏不再插入工作台，入口统一在统一设置页/工具页） |
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_parse_theme_color(settings)` | [静态] 解析主题强调色：优先 `theme_color`（HEX），兼容旧 `highlight_color`（RGB 列表） |
 | `_apply_theme_color()` | 从配置加载主题强调色到内存（`_apply_theme` 时应用） |
@@ -1943,12 +1964,21 @@ UI 辅助（状态栏、菜单栏、右键菜单、主题切换、布局切换�
 | `_on_open_port_fake()` | 工具菜单「端口占用」：弹窗真实监听指定端口模拟服务占用（`PortFakeWidget`） |
 | `_on_newlog_organize()` | 工具菜单「视频/日志批量整理」：按 Excel 署名筛选批量归类（`NewLogDialog` + `NewLogWorker`），支持一键打包上传 |
 
-#### 类 `AboutDialog` / `NewLogDialog` / `VisibleAcrylicMenu`
+### main_window.ui（UI 资产包）
 
-- `AboutDialog(MessageBoxBase)`：关于弹窗——应用名/版本号 + GitHub 链接 + 开源依赖库清单
-- `NewLogDialog(MessageBoxBase)`：视频/日志批量整理对话框——`append_line` 输出、enter_running/enter_organized/enter_uploading/enter_failed 状态机、上传字节进度 `set_upload_percent`、运行中拦截 closeEvent
-- `VisibleAcrylicMenu(AcrylicMenu)`：增强可见度亚克力菜单（深色/浅色主题均有明显磨砂玻璃效果；`_VisibleAcrylicView` 亚克力关时改绘纯色背景）
-- `_ShortcutKeyEdit(LineEdit)`：Fluent 风格快捷键录入框——点击聚焦后按下目标组合键即记录，`keySequence()` 取当前序列
+从 `main_window/ui_mixin.py` 拆出的零主窗口依赖资产；`ui_mixin` 保留同名 re-export 兼容旧导入路径。
+
+| 模块 | 内容 |
+|------|------|
+| `main_window/ui/about_dialog.py` | `AboutDialog`（关于弹窗：应用名/版本号 + GitHub 链接 + 开源依赖库清单）、`ABOUT_LINKS` / `ABOUT_OSS_LIBS` / `GITHUB_REPO` |
+| `main_window/ui/newlog_dialog.py` | `NewLogDialog`（视频/日志批量整理对话框：`append_line` 输出、enter_running/enter_organized/enter_uploading/enter_failed 状态机、上传字节进度 `set_upload_percent`、运行中拦截 closeEvent） |
+| `main_window/ui/acrylic_menu.py` | `VisibleAcrylicMenu` / `_VisibleAcrylicView` / `_create_menu` / `_patch_acrylic_exec` / `_patch_dropdown_button` / `_exec_menu` / `_ensure_menu_fit`（增强可见度亚克力菜单与几何兜底） |
+| `main_window/ui/shortcut_edit.py` | `_ShortcutKeyEdit`（Fluent 风格快捷键录入框——点击聚焦后按下目标组合键即记录，`keySequence()` 取当前序列） |
+| `main_window/ui/qss_runtime.py` | `load_qss` / `apply_business_qss` / `reset_qss_compose_trees` / `enforce_toolbar_radio_height` / `enforce_toolbar_button_height`（窗口 QSS 运行时原语，调用方传显式 widget） |
+| `main_window/ui/status_bar.py` | `init_statusbar` / `show_status_message` / `update_status_device/running/idle/paused/logs`（底部状态栏，host 持原属性名 `_statusbar_widget` 等） |
+| `main_window/ui/context_menus.py` | `init_context_menus` / `build_id_list_menu` / `build_log_list_menu` / `build_video_list_menu` / `id_list_context_menu` / `log_list_context_menu` / `local_video_list_context_menu` / `add_file_to_upload` / `on_upload_collect_done`（三个列表右键菜单与上传目录收集，host 暴露 `ui` 与日志/提示回调） |
+| `main_window/ui/menu_actions.py` | `init_menubar`（只创建 `_menubar_widget` 空壳与 5 个跨页面 QAction：`_act_theme_auto` / `_act_theme_light` / `_act_theme_dark`、`_act_layout_classic` / `_act_layout_panel`；这 5 个属性名是 `main_window/hub_pages.py:341-342,413-415` 的直接访问契约，不可改名） |
+| `main_window/ui/appearance.py` | `apply_theme` / `apply_global_font` / `set_widget_font_recursive` / `apply_theme_color` / `init_system_theme_monitor` / `sync_theme_polling` / `poll_system_theme` / `on_theme_selected` / `on_layout_selected` / `apply_layout`（主题/字体/轮询/布局；host 提供设置读写与主题策略方法） |
 
 ---
 

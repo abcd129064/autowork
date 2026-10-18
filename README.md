@@ -234,7 +234,8 @@ autowork/
 │   ├── setting_cards.py       #   统一设置页卡片组件（SettingGroup/SettingRow）
 │   ├── settings_mixin.py      #   配置读写、快捷键
 │   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
-│   └── ui_mixin.py            #   状态栏/菜单栏/右键菜单/主题
+│   ├── ui/                    #   可独立拆分的 UI 资产（关于/亚克力菜单/快捷键/批量整理/状态栏/右键菜单/菜单 Action/QSS/主题）
+│   └── ui_mixin.py            #   状态栏/菜单栏 Action/右键菜单/主题
 │
 ├── tools/                     # 开发/运维脚本（一律不参与运行时，规范见 AGENTS.md）
 │   ├── inventory.py           #   只读目录盘点

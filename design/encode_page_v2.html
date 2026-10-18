@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>编码配置 v2 设计稿（对齐 ConfigTool 字段）</title>
+<style>
+  :root{
+    --bg:#1a1f2b; --card:#232838; --card2:#1f2534; --line:#3a4056;
+    --txt:#e6e9f2; --sub:#9aa1b5; --accent:#4f8cff; --ok:#70d49c; --warn:#e0a855;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--txt); font:13px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:24px;}
+  h1{font-size:16px; margin-bottom:4px;}
+  .note{color:var(--sub); font-size:12px; margin-bottom:18px;}
+  .hub-tabs{display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:16px;}
+  .hub-tabs .tab{padding:8px 18px; color:var(--sub); border-radius:6px 6px 0 0;}
+  .hub-tabs .tab.on{color:var(--accent); background:var(--card); border-bottom:2px solid var(--accent);}
+  .row{display:flex; gap:16px; align-items:center; margin-bottom:12px;}
+  .row label{width:88px; color:var(--sub); text-align:right; flex:none;}
+  select,input[type=text]{background:#2c3347; color:var(--txt); border:1px solid var(--line);
+    border-radius:6px; padding:5px 10px; min-width:180px;}
+  .slider{display:flex; align-items:center; gap:10px;}
+  .slider .track{width:180px; height:4px; background:var(--line); border-radius:2px; position:relative;}
+  .slider .fill{position:absolute; left:0; top:0; height:4px; background:var(--accent); border-radius:2px;}
+  .slider .knob{position:absolute; top:-5px; width:14px; height:14px; background:var(--accent);
+    border-radius:50%; box-shadow:0 0 0 3px rgba(79,140,255,.25);}
+  .val{min-width:52px; color:var(--txt);}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px;}
+  .card h3{font-size:13px; margin-bottom:12px; display:flex; align-items:center; gap:10px;}
+  .badge{font-size:11px; color:var(--accent); border:1px solid var(--accent); border-radius:10px; padding:1px 10px;}
+  .cols{display:grid; grid-template-columns:1fr 1fr; gap:6px 28px;}
+  .grid2{display:grid; grid-template-columns:auto 1fr; gap:8px 12px; align-items:center;}
+  .grid2 .lab{color:var(--sub); text-align:right;}
+  .ch{display:flex; align-items:center; gap:8px; margin-bottom:14px;}
+  .ch label{color:var(--sub);}
+  .foot{display:flex; justify-content:flex-end; margin-top:6px;}
+  .btn{border:none; border-radius:6px; padding:7px 22px; font-size:13px; cursor:pointer;}
+  .btn.primary{background:var(--accent); color:#fff;}
+  .btn.ghost{background:transparent; color:var(--txt); border:1px solid var(--line);}
+  .gray{color:var(--sub);}
+  .dis{opacity:.45; pointer-events:none;}
+  .tag-warn{font-size:11px; color:var(--warn); border:1px dashed var(--warn); border-radius:6px; padding:1px 8px;}
+  .anno{margin-top:26px; background:var(--card2); border:1px solid var(--line); border-radius:10px; padding:14px 18px; font-size:12px; color:var(--sub);}
+  .anno b{color:var(--txt);}
+  code{background:#151a26; border:1px solid var(--line); border-radius:4px; padding:0 6px; color:#8fd0ff;}
+</style>
+</head>
+<body>
+<h1>相机面板 ·「编码配置」页 设计稿 v2</h1>
+<div class="note">对齐 ConfigTool「编码配置」字段布局；深色 Fluent 风格与现有相机工具页一致 · 2026-10-07</div>
+
+<div class="hub-tabs">
+  <div class="tab">相机工具</div>
+  <div class="tab on">编码配置</div>
+</div>
+
+<!-- 通道 -->
+<div class="ch">
+  <label>通道</label>
+  <select><option>1</option></select>
+  <span class="gray">（取自登录回包通道数；当前设备单通道）</span>
+</div>
+
+<!-- 主码流 -->
+<div class="card">
+  <h3>主码流 <span class="badge">GetConfig/SetConfig(1100) · emFormatType=1</span></h3>
+  <div class="cols">
+    <div class="grid2">
+      <div class="lab">码流类型</div><select class="dis"><option>普通</option></select>
+      <div class="lab">码流控制</div><select><option>VBR 可变码率</option><option>CBR 固定码率</option></select>
+      <div class="lab">帧率</div>
+      <div class="slider"><div class="track"><div class="fill" style="width:62%"></div><div class="knob" style="left:60%"></div></div><span class="val">25 fps</span></div>
+      <div class="lab">分辨率</div><select><option>1080P（1920×1080）</option><option>720P（1280×720）</option><option>D1（704×576）</option><option>360P（640×360）</option></select>
+      <div class="lab">图像质量</div>
+      <div class="slider"><div class="track"><div class="fill" style="width:80%"></div><div class="knob" style="left:78%"></div></div><span class="val">80%</span></div>
+      <div class="lab">码率上限</div><select><option>4096 KB/s</option><option>6144 KB/s</option><option>8192 KB/s</option><option>2048 KB/s</option></select>
+      <div class="lab">I 帧间隔</div><select><option>50</option><option>25</option><option>100</option></select>
+    </div>
+    <div class="grid2">
+      <div class="lab">编码模式</div><select><option>H.264</option><option>H.265</option></select>
+      <div class="lab">音频使能</div><span class="gray dis">☑（待接入：音频配置接口） <span class="tag-warn">规划中</span></span>
+      <div class="lab">音频编码</div><select class="dis"><option>G.711A</option></select>
+      <div class="lab">采样率</div><select class="dis"><option>8000</option></select>
+    </div>
+  </div>
+</div>
+
+<!-- 辅码流 -->
+<div class="card">
+  <h3>辅码流1 <span class="badge">emFormatType=4</span></h3>
+  <div class="cols">
+    <div class="grid2">
+      <div class="lab">码流控制</div><select><option>VBR 可变码率</option><option>CBR 固定码率</option></select>
+      <div class="lab">帧率</div>
+      <div class="slider"><div class="track"><div class="fill" style="width:62%"></div><div class="knob" style="left:60%"></div></div><span class="val">25 fps</span></div>
+      <div class="lab">分辨率</div><select><option>360P（640×360）</option><option>720P（1280×720）</option><option>D1（704×576）</option></select>
+      <div class="lab">图像质量</div>
+      <div class="slider"><div class="track"><div class="fill" style="width:80%"></div><div class="knob" style="left:78%"></div></div><span class="val">80%</span></div>
+      <div class="lab">码率上限</div><select><option>512 KB/s</option><option>1024 KB/s</option></select>
+      <div class="lab">I 帧间隔</div><select><option>50</option></select>
+    </div>
+    <div class="grid2">
+      <div class="lab">编码模式</div><select><option>H.264</option><option>H.265</option></select>
+    </div>
+  </div>
+</div>
+
+<div class="foot">
+  <button class="btn ghost">读取</button>
+  <button class="btn primary">应用到设备</button>
+</div>
+
+<div class="anno">
+  <b>SDK 映射与行为说明</b><br>
+  · 全部字段同源 <code>GetConfig/SetConfig(ENCODE_VIDEO=1100)</code>，结构 <code>NET_ENCODE_VIDEO_INFO</code>，RMW 只改改动字段；<br>
+  · <b>分辨率</b>为预设下拉（1080P/720P/D1/360P/自定义宽高），内部换算 nWidth/nHeight；<br>
+  · <b>图像质量</b>滑条 1-6 档（10%/30%/50%/60%/80%/100%），VBR 模式下生效；<br>
+  · <b>码率上限</b>下拉预设常用档位（512/1024/2048/3072/4096/6144/8192 KB/s）；<br>
+  · <b>码流类型（普通）</b>只读展示（普通/动检/报警编码属不同 emFormatType，本期不做）；<br>
+  · <b>音频区</b>灰显待接入（需音频配置接口，P2）；<br>
+  · 「读取」拉取两条码流现值回填；「应用到设备」RMW 写入后自动重读回填，失败 toast 提示（串行队列防协议超时）。
+</div>
+</body>
+</html>

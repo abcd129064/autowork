@@ -46,6 +46,13 @@
       BASE_VERSION 3.11→3.13、TodeskToggleWorker 真实构造签名。
       重跑审计：`missing_modules` 0 / `undocumented` 0 / `deleted` 35（全部为已正确
       登记的模块级常量与 Signal——审计工具只提取函数/类的既有盲区）；check_refs rc=0。
+- [ ] **按 [架构重构清单2026-10-18.md](架构重构清单2026-10-18.md) 逐项推进**：
+      P0-1（workers 惰性导出）、UIMixin 第一刀（main_window/ui/ 迁出）、
+      G18（core/ui_scale.py）、G15（main_window/ui/qss_runtime.py）、
+      G1（main_window/ui/status_bar.py）、外观（main_window/ui/appearance.py）、
+      G2+G3（main_window/ui/context_menus.py）与 G4（main_window/ui/menu_actions.py）
+      已完成；下一项 G5/G6 设置对话框，之后删死代码（需用户确认）。A2 评估后暂缓，
+      再之后 A3、B4、B1、B2、B3、C2-C5。
 - [ ] **`frpc.exe`（16MB，tracked 但被 .gitignore 命中）是否 `git rm --cached`**（AGENTS.md §7）。
 - [ ] **`tools/*/_archive/` 未入库一次性脚本**：提交还是删除（AGENTS.md §7）。
 

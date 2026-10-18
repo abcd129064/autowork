@@ -13,6 +13,7 @@
 隔离方式同 tests/test_aftersale_rank_page.py：tmp SQLite + tmp app_dir +
 monkeypatch，UI 在 offscreen 平台跑，不依赖显示器与真实网络。
 """
+import gc
 import os
 import shutil
 import sys
@@ -69,6 +70,9 @@ def workdir():
     try:
         yield d
     finally:
+        # Windows 上 worker 线程可能仍持有 t.db 句柄，先回收再删，
+        # 否则 rmtree 静默失败、系统 temp 持续堆积 autowork_rec_*。
+        gc.collect()
         shutil.rmtree(d, ignore_errors=True)
 
 

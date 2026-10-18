@@ -79,6 +79,7 @@ docs/
 | [auto_update_research.md](auto_update_research.md) | 程序内「检查更新 → 下载 → 替换重启」全链路调研，选定方案 A（整包 zip + 独立 updater 脚本 + nginx 静态分发） | 设计·已落地（`core/updater.py`、`tools/deploy/publish_update.py`、`tools/update_sim/`） |
 | [架构评审与SQL代码优化方案.md](架构评审与SQL代码优化方案.md) | 代码拆分/合并需求评审 + SQL 代码专项优化（双后端方言、镜像推送下线等） | 设计·已落地（T01-T05 全过 QA，见文档第 10 节） |
 | [售后期记录页分层改造与UI组织评审2026-10-18.md](售后期记录页分层改造与UI组织评审2026-10-18.md) | 回应「为什么没有 .ui」：核查生成链已断、qfw 下 .ui 不适用；并记录 records 页 P0 补测试 + P1 拆四层（query_state/table_adapter/controller/page）+ P2-1 跨页排序下沉与行 id 锚 + P2-2 纯逻辑 32 例的试点、行为保持清单、验证证据与遗留项 | 设计·已落地（P0/P1/P2-1/P2-2，2026-10-18） |
+| [架构重构清单2026-10-18.md](架构重构清单2026-10-18.md) | 后续重构的执行清单：已完成项、P0/P1/P2 顺序、UIMixin 子 mixin 的边界与验收门禁；含审计修正、死代码清单与 qfw 测试环境说明 | 执行中（2026-10-18：P0-1、UIMixin 第一刀、G18/G15/G1/外观已完成；下一项右键菜单） |
 | [售后面板UI改进方案.md](售后面板UI改进方案.md) | 售后面板 UI 分层改进方案，前置依赖 `core/design_tokens.py`、`core/theme_qss.py` | 设计·大部落地（09 月拆包重构随附；剩余 P2 视觉微调见文档头部核对块） |
 | [frp-source-integration.md](frp-source-integration.md) | frp Go 源码接入调研 + 落地记录（附录 E~G：二期 P0/P1、frps 概览卡、开机静默预连与预热打洞） | 调研快照 + 设计·已落地（附录） |
 | [settings_panel_redesign/统一设置面板重构设计.md](settings_panel_redesign/统一设置面板重构设计.md) | 统一设置面板重构设计，配图在 `settings_panel_redesign/assets/` | 设计·已落地（实际形态为 SegmentedWidget 7 段，见文档头部核对块；字段映射仍权威） |

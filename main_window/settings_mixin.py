@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QLineEdit
 
 from core.app_paths import get_app_dir
 from core.secrets import decrypt_settings, encrypt_settings
+from core.theme_policy import DEFAULT_THEME_COLOR as _DEFAULT_THEME_COLOR
 
 
 class SettingsMixin:
@@ -42,8 +43,8 @@ class SettingsMixin:
         "shortcut_aftersale_panel": "Ctrl+2",  # 售后面板
         "shortcut_table_panel": "Ctrl+3",      # 运维管理面板
     }
-    # 默认主题强调色（青色，与早期硬编码 setThemeColor("#00BCD4") 一致）
-    DEFAULT_THEME_COLOR = "#00BCD4"
+    # 默认主题强调色（单一来源 core.theme_policy，保留类属性供既有引用）
+    DEFAULT_THEME_COLOR = _DEFAULT_THEME_COLOR
 
     @staticmethod
     def _get_app_dir():
