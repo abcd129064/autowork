@@ -5,6 +5,10 @@
     - TableFetchWorker: 球桌列表接口 wechat2-billiard.newbv.cn（无认证）
     - SnookerOmFetchWorker: 新球房运维管理后台接口 xqzg.newbv.cn（Session + CSRF 认证）
     - DevicesFetchWorker: 球房运维管理后台接口 kd.newbv.cn:30005（JWT Bearer Token 认证）
+
+三个接口的认证方式互不兼容，因此各自维护一份登录与重登逻辑，没有抽公共基类：
+硬合并会把「Session + CSRF」和「JWT Bearer」的差异挤进同一段条件分支，可读性更差。
+统一约定：网络异常都在 Worker 内转成 error 信号，不让异常穿出 run() 打断 Qt 事件循环。
 """
 
 import json
@@ -17,6 +21,8 @@ from PySide6.QtCore import QThread, Signal
 
 def _load_api_credentials():
     """从配置门面 credentials 域读取 API 账号密码配置（敏感字段透明解密）"""
+    # 延迟到调用时 import：core.app_settings 会触发配置加载与 DPAPI 解密，
+    # 放到模块顶层会让「仅 import 本模块」的场合也白付这笔开销。
     from core import app_settings
     return app_settings.get("api_credentials") or {}
 
@@ -27,6 +33,7 @@ def _load_toggle_config() -> dict:
     try:
         merged = app_settings.get_merged() or {}
     except Exception:
+        # 配置读写异常不应打断 ToDesk 开关，退回空配置由调用方使用内置默认值
         merged = {}
     cfg = merged.get("todesk_toggle")
     return cfg if isinstance(cfg, dict) else {}
@@ -35,15 +42,18 @@ def _load_toggle_config() -> dict:
 def get_active_api_source() -> str:
     """读取当前启用的设备数据源（'kd' / 'xqzg'），默认 kd"""
     src = str(_load_api_credentials().get("active_source", "kd")).lower()
+    # 配置里写了未知值（历史拼写或大小写错误）时退回 kd，保证取数链路不中断
     return src if src in ("kd", "xqzg") else "kd"
 
 
 # ==================== 原有接口（wechat2-billiard） ====================
 
+# 老球桌列表接口：无认证，靠固定查询条件筛选，分页参数在 _fetch_page 里单独拼
 BASE_URL = "https://wechat2-billiard.newbv.cn/prod-api/api/billiardtable/listext"
 DEFAULT_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "AutoWork/1.0",
+    # version 是接口自己的版本协商字段，不是 AutoWork 的版本号，改动会影响返回结构
     "version": "1.4.0",
 }
 
@@ -53,6 +63,9 @@ class TableFetchWorker(QThread):
 
     首页请求后读取接口返回的 total，若超过单页 pageSize 则自动翻页
     继续拉取，避免数据超过 1000 条时后续记录被静默遗漏。
+
+    翻页上限 _MAX_PAGES 是防御性约束：接口若把 total 报成异常大的值，
+    没有上限会一直翻到超时，界面表现为「刷新永远转圈」。
 
     Signals:
         result_ready(list): 全量数据列表
@@ -65,7 +78,8 @@ class TableFetchWorker(QThread):
     _PAGE_SIZE = 1000
     _MAX_PAGES = 50
 
-    # 除分页参数外的固定查询条件
+    # 除分页参数外的固定查询条件：接口按「字段存在且为空」判断不筛选，
+    # 缺字段会改变返回集合，所以这里必须把字段全部显式置空。
     _FIXED_PARAMS = {
         "roomName": "", "roomInfo": "", "roomStatus": "",
         "calculated": "", "sales": "", "code": "",
@@ -89,6 +103,8 @@ class TableFetchWorker(QThread):
         params.update(self._FIXED_PARAMS)
         resp = requests.get(BASE_URL, params=params,
                             headers=DEFAULT_HEADERS, timeout=20)
+        # 先判 HTTP 再解析 JSON：网关报错时响应是 HTML，直接 .json() 抛的解析异常
+        # 对用户毫无信息量，raise_for_status 才能给出 4xx/5xx 这样的有效线索。
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("code") != 200:
@@ -123,6 +139,8 @@ class TableFetchWorker(QThread):
                 rows.extend(batch)
 
             self.result_ready.emit(rows)
+        # 超时与连接失败分开给提示，用户能据此判断是接口慢还是网络断了；
+        # 其余异常保留原文，便于定位接口改版或字段缺失。
         except requests.exceptions.Timeout:
             self.error.emit("请求超时（20秒），请检查网络后重试")
         except requests.exceptions.ConnectionError:
@@ -133,6 +151,8 @@ class TableFetchWorker(QThread):
 
 # ==================== 接口1: xqzg.newbv.cn（Session 认证） ====================
 
+# 接口1 各端点都以 / 结尾：Django 的 APPEND_SLASH 会对无斜杠路径回 301，
+# 而 requests 跟随 301 时会把 POST 降级成 GET，登录会静默失败。
 API1_BASE = "https://xqzg.newbv.cn"
 API1_LOGIN_URL = f"{API1_BASE}/api/rbac/auth/login/"
 API1_DATA_URL = f"{API1_BASE}/api/snooker_om/status/"
@@ -141,6 +161,9 @@ API1_MIGRATE_URL = f"{API1_BASE}/api/snooker_om/migrate_image/"
 
 class SnookerOmFetchWorker(QThread):
     """异步拉取接口1数据（Session + CSRF 认证，支持过期自动重登录）
+
+    构造参数里带 page/pagesize 而不是只用类常量，是为了让设置页能临时调小页大小
+    排查接口超时；正常流程走默认值即可。
 
     Signals:
         result_ready(list): 拉取到的全量记录列表（自动按 total 翻页拉全，
@@ -158,6 +181,7 @@ class SnookerOmFetchWorker(QThread):
                  username=None, password=None, parent=None):
         super().__init__(parent)
         self.file_path = file_path
+        # 页码按 1 基约定传入；run 里还会 max(1, ...) 兜底，防止调用方传 0
         self.page = page
         self.pagesize = pagesize
         # 优先使用传入参数，否则从配置文件读取
@@ -178,6 +202,8 @@ class SnookerOmFetchWorker(QThread):
                 return session
         except requests.exceptions.RequestException:
             pass
+        # 失败统一返回 None：调用方只区分「登录成功/失败」，网络错误与凭据错误的
+        # 后续动作相同（提示检查账号密码），没必要在这里分类。
         return None
 
     def run(self):
@@ -196,6 +222,7 @@ class SnookerOmFetchWorker(QThread):
                 self.error.emit("接口1登录失败，请检查账号密码")
                 return
 
+            # file_path 是服务端图片目录的日期前缀（形如 2026/08/02），空串表示不限目录
             base_params = {
                 "file_path": self.file_path,
                 "page": self.page,
@@ -218,6 +245,7 @@ class SnookerOmFetchWorker(QThread):
                         return
                     resp = session.get(API1_DATA_URL, params=params, timeout=30)
 
+                # 重登后仍然失败就抛给外层统一报错，避免带着失效 session 继续翻页
                 resp.raise_for_status()
                 data = resp.json()
                 batch = data.get("results") or []
@@ -245,12 +273,15 @@ class SnookerOmFetchWorker(QThread):
 
 # ==================== 接口2: kd.newbv.cn:30005（JWT 认证） ====================
 
+# 接口2 走明文 HTTP + 非标端口 30005，凭据在链路上不做加密，
+# 这是服务端现状，客户端无法单独改成 HTTPS。
 API2_BASE = "http://kd.newbv.cn:30005"
 API2_LOGIN_URL = f"{API2_BASE}/api/getAccessToken/"
 API2_DATA_URL = f"{API2_BASE}/api/devices/status/"
 API2_MIGRATE_URL = f"{API2_BASE}/api/devices/migrate_image/"
 
-# 分类目录映射：中文名 → 服务器目录名
+# 分类目录映射：库里存中文名（界面展示用），服务器按英文目录名落盘；
+# 迁移接口两端都要传路径，所以下面还维护了反向映射。
 CATEGORY_DIRS = {
     "正常": "normal",
     "操作": "except",
@@ -266,6 +297,9 @@ DIR_CATEGORIES = {v: k for k, v in CATEGORY_DIRS.items()}
 
 class DevicesFetchWorker(QThread):
     """异步拉取接口2设备状态（JWT 认证，Token 过期自动重登，支持关键词搜索）
+
+    keyword 非空时由服务端过滤，本地不做二次筛选：服务端的 total 已经是匹配数，
+    翻页逻辑因此对「全量」和「搜索结果」共用同一套代码。
 
     Signals:
         result_ready(list): 拉取到的全量记录列表（自动按 total 翻页拉全，
@@ -442,6 +476,8 @@ class MigrateImageWorker(QThread):
                     "password": self.password,
                 }, timeout=15)
                 if resp.status_code == 200:
+                    # CSRF token 绑在 Session 的 cookie 上，必须留住同一个 Session，
+                    # 否则后续 POST 会因 token 对不上被 403。
                     self._session = session
                     return session
                 return None
@@ -459,7 +495,8 @@ class MigrateImageWorker(QThread):
 
     def _post_migrate(self, file_name: str, src_path: str, dest_path: str):
         """按源发起一次迁移 POST，返回 (resp, status_code)；网络异常返回 (None, 0)"""
-        # 接口要求 multipart/form-data 格式提交路径参数
+        # 接口要求 multipart/form-data 格式提交路径参数；(None, 值) 是 requests
+        # 表达「只传字段值、不带文件名」的写法，服务端按普通表单字段读取。
         form_data = {
             "src_path": (None, src_path),
             "dest_path": (None, dest_path),
@@ -503,7 +540,11 @@ class MigrateImageWorker(QThread):
 
     def _migrate_one(self, file_name: str, src_path: str, dest_path: str) -> tuple:
         """迁移单张图片；认证过期（401/403，含 xqzg Session/CSRF 过期）
-        自动重登重试一次。返回 (ok: bool, msg: str)"""
+        自动重登重试一次。返回 (ok: bool, msg: str)
+
+        只重试一次：重登后仍失败通常意味着权限或路径有问题，反复重试只会拖长
+        整体耗时，具体原因交给调用方汇总展示。
+        """
         resp, code = self._post_migrate(file_name, src_path, dest_path)
         if resp is not None and code in (401, 403):
             if self._login():
@@ -543,6 +584,7 @@ class MigrateImageWorker(QThread):
 
             # 第四步：汇总结果，全部成功走 success，有失败走 error
             if fail_list:
+                # 只列前 5 个失败文件：一次迁移几十张时全量拼进弹窗会把界面撑爆
                 shown = ', '.join(fail_list[:5])
                 suffix = f'（另有 {len(fail_list) - 5} 个文件未列出）' if len(fail_list) > 5 else ''
                 self.error.emit(
@@ -585,6 +627,7 @@ class HealthUpdateWorker(QThread):
     def __init__(self, pairs, parent=None):
         """pairs: [(name, device_code), ...]，name 为球桌号仅用于失败提示"""
         super().__init__(parent)
+        # 统一去空白并转字符串：球桌号来自表格单元格，可能是 None 或纯数字
         self.pairs = [(str(n or "").strip(), str(c or "").strip())
                       for n, c in (pairs or [])]
         creds = _load_api_credentials()
@@ -615,6 +658,7 @@ class HealthUpdateWorker(QThread):
         }
         try:
             resp = session.post(API1_UPDATE_HEALTH_URL,
+                                # 4000 是服务端「健康」初始值，写回即等于把告警计数清零
                                 json={"device_code": device_code, "health": 4000},
                                 headers=headers, timeout=20)
             if resp.status_code in (401, 403):
@@ -686,6 +730,7 @@ def parse_value_response(data) -> tuple:
     只看顶层会假失败）。失败形如 data.errorcode=-1 + errortext="该设备号没找到"
     （datacode 必须传设备编码，传 todesk_id 即此错）。
     """
+    # 网关卡或错误页会返回 HTML/字符串，先挡掉非 dict，避免后面的 .get 抛异常
     if not isinstance(data, dict):
         return False, str(data)[:160]
     payload = data.get("data") if isinstance(data.get("data"), dict) else {}
@@ -711,6 +756,8 @@ def pick_todesk_status(rows, table_id, device_code=""):
     for row in rows or []:
         if tid and str(row.get("table_id") or "").strip() == tid:
             return row.get("todesk_status")
+    # table_id 未命中时按设备编码兜底：球桌重编号后旧 table_id 会失配，
+    # 而设备编码与物理机绑定，是更稳定的关联键。
     for row in rows or []:
         if code and str(row.get("device_code") or "").strip().lower() == code:
             return row.get("todesk_status")
@@ -800,6 +847,8 @@ class TodeskToggleWorker(QThread):
         """确保 session 带 csrftoken cookie（登录后一般已种；无则 GET 首页补种）"""
         if session.cookies.get("csrftoken"):
             return
+        # 登录接口本身不保证下发 csrftoken；GET 一次首页让 Django 中间件补种，
+        # 否则后续 POST 会被 CSRF 校验直接 403。
         try:
             session.get(f"{API1_BASE}/", timeout=15)
         except requests.exceptions.RequestException:
@@ -814,6 +863,8 @@ class TodeskToggleWorker(QThread):
         try:
             resp = session.post(
                 API1_VALUE_URL,
+                # 必须用 data= 走 form 编码；json= 会被接口当成空表单忽略（实测），
+                # 表现是指令永远发不出去但 HTTP 仍返回 200。
                 data={
                     "datacode": self.device_code,
                     "datatype": TODESK_ACTION,
@@ -841,6 +892,7 @@ class TodeskToggleWorker(QThread):
         实测 table_id=/device_code= 精确参数无效（恒 total=0），
         keyword 模糊过滤有效；keyword 缩量后本地精确匹配 table_id。
         """
+        # 只取前 20 条：keyword 已把候选缩到目标附近，取太多纯属浪费带宽
         params = {"page": 1, "pagesize": 20,
                   "keyword": self.table_id or self.device_code}
         resp = session.get(API1_DATA_URL, params=params, timeout=20)
@@ -889,6 +941,7 @@ class TodeskToggleWorker(QThread):
                     last = self._read_live_status(session)
                 except (requests.exceptions.RequestException, ValueError):
                     continue  # 单次读状态失败不终止轮询，等下一轮
+                # 状态没翻转就继续轮询：设备上报有延迟，读到旧值不代表指令失败
                 if last == expect:
                     self.confirmed.emit(last)
                     return
@@ -932,6 +985,7 @@ class LoginTestWorker(QThread):
             else:
                 resp = requests.post(API2_LOGIN_URL, json={
                     "username": self.username, "password": self.password}, timeout=15)
+                # kd 的 200 也可能带空 access，必须校验 token 才说明认证真的通过
                 ok = resp.status_code == 200 and bool(resp.json().get("access"))
             if ok:
                 self.success.emit("账号密码验证通过")

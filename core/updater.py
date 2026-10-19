@@ -40,8 +40,11 @@ DEFAULT_UPDATE_BASE_URL = "http://49.235.34.253/update"
 CHANNEL_AUTOWORK = "autowork"
 CHANNEL_AFTERSALE = "aftersale"
 
+# 标记与回执都放在安装目录内：updater 换位时要连同它们搬进新目录，
+# 否则重启后读不到回执，用户会以为更新根本没发生
 PENDING_FLAG = ".update-pending"
 RESULT_LOG = "update_result.log"
+# staging 必须与安装目录同卷：bat 靠 move 换位，跨卷会退化成整目录复制
 STAGING_DIRNAME = "_update_staging"
 _BACKUP_SUFFIX = "_old"
 
@@ -68,7 +71,11 @@ def parse_version(v: str):
 
 
 def is_newer(remote: str, local: str) -> bool:
-    """远端版本是否新于本地"""
+    """远端版本是否严格新于本地。
+
+    不做「版本倒退」判断：远端被误回滚时不提示更新，也不主动降级。降级
+    只能由人工装包，避免自动把用户带回旧版本。
+    """
     return parse_version(remote) > parse_version(local)
 
 
@@ -131,6 +138,7 @@ def check_update(base_url: str, local_version: str,
     url = pkg.get("url") or ""
     if url and not url.startswith(("http://", "https://")):
         url = base_url.rstrip("/") + "/" + url.lstrip("/")
+    # 下划线字段是内部附加信息，不回写远端条目，只供上层展示与下载复用
     entry["_resolved_url"] = url
     entry["_remote_version"] = remote
     return entry
@@ -139,6 +147,11 @@ def check_update(base_url: str, local_version: str,
 # ==================== 下载与校验 ====================
 
 def sha256_of_file(path: str, chunk: int = 1024 * 256) -> str:
+    """计算文件的 sha256 十六进制小写串。
+
+    分块读取而非一次读进内存：更新包动辄上百 MB，整读会把 32 位进程的
+    内存顶爆。
+    """
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
@@ -161,20 +174,26 @@ def download_file(url: str, dest: str, expect_sha256: str = "",
     若不拦截，用户只会看到误导性的「sha256 校验失败」而查不出是包没传上去。
     """
     import requests
+    # 先写 .part 再原子改名：中途失败不会留下一个"看着完整"的坏包
     part = dest + ".part"
+    # 目标目录可能还没建：增量下载按相对路径逐层创建
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     try:
         with requests.get(url, stream=True, timeout=timeout) as resp:
             resp.raise_for_status()
             ctype = str(resp.headers.get("Content-Type") or "").lower()
+            # 先于 sha256 拦 HTML：nginx 回退成 200+text/html 时若只报
+            # 「校验失败」，用户根本查不出是包没传上去
             if "html" in ctype:
                 raise ValueError(
                     f"更新包下载地址返回 HTML（Content-Type={ctype}），"
                     f"包可能未上传成功或更新源配置有误：{url}")
+            # 服务端可能用 chunked 不给长度，此时 total=0，按"未知总量"上报
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
             with open(part, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=256 * 1024):
+                    # 在块边界检查取消：已写盘的字节留给 finally 统一清理
                     if should_stop is not None and should_stop():
                         raise InterruptedError("用户取消下载")
                     if not chunk:
@@ -183,6 +202,7 @@ def download_file(url: str, dest: str, expect_sha256: str = "",
                     done += len(chunk)
                     if progress_cb is not None:
                         progress_cb(done, total)
+        # 空 expect 表示调用方自己已比对过（增量文件在 manifest_diff 里比过）
         if expect_sha256:
             actual = sha256_of_file(part)
             if actual.lower() != expect_sha256.lower():
@@ -193,6 +213,7 @@ def download_file(url: str, dest: str, expect_sha256: str = "",
         os.replace(part, dest)
         return dest
     finally:
+        # 成功时 part 已被 rename 走，这里是空操作；失败或取消才真正删除
         if os.path.exists(part):
             try:
                 os.remove(part)
@@ -201,7 +222,11 @@ def download_file(url: str, dest: str, expect_sha256: str = "",
 
 
 def verify_and_extract_zip(zip_path: str, dest_dir: str) -> str:
-    """zip 完整性校验 + 解压到 dest_dir（返回解压根）；坏包抛 ValueError"""
+    """校验 zip 完整性并解压到 dest_dir，返回解压根目录。
+
+    testzip 会逐条读 CRC，坏包在这一步暴露，不会等 robocopy 复制出一堆半坏
+    文件；解压前还要拦 zip-slip，避免条目路径跳出目标目录。
+    """
     with zipfile.ZipFile(zip_path) as zf:
         bad = zf.testzip()
         if bad is not None:
@@ -228,6 +253,7 @@ def flatten_extract_root(dest_dir: str, main_exe: str = "") -> str:
         entries = os.listdir(dest_dir)
     except OSError:
         return dest_dir
+    # 只有一个子目录才可能是打包套的那层壳；多条目说明 dest_dir 已是安装根
     if len(entries) == 1:
         sub = os.path.join(dest_dir, entries[0])
         if os.path.isdir(sub):
@@ -249,6 +275,7 @@ def manifest_diff(files: list, local_root: str) -> list:
         if not rel or not want:
             continue
         local = os.path.join(local_root, rel.replace("/", os.sep))
+        # 哈希一致就跳过；不拿 size 提前返回，因为清单里的 size 可能缺省为 0
         if os.path.isfile(local) and sha256_of_file(local) == want:
             continue
         need.append(entry)
@@ -272,6 +299,8 @@ def download_incremental(base_url: str, files: list, staging_dir: str,
             url = base_url.rstrip("/") + "/" + url.lstrip("/")
         dest = os.path.join(staging_dir, rel)
 
+        # 默认参数把本文件之前的累计字节绑进闭包：循环里直接引用 done_base
+        # 会让所有回调都看到最终值，进度瞬间跳满
         def _cb(done, _t, _b=done_base):
             if progress_cb is not None:
                 progress_cb(_b + done, total)
@@ -424,6 +453,7 @@ def build_bat(install_dir: str, staging_dir: str, main_exe: str,
     new_dir/bak_dir 缺省按 install_dir 同级派生 `<name>_new` / `<name>_old`。
     返回的字符串由 write_updater_scripts 以 GBK 落盘（cmd 默认代码页非 UTF-8）。
     """
+    # 缺省值在这里统一派生，调用方不必重复拼路径规则
     install_dir = os.path.normpath(install_dir)
     if not result_log:
         result_log = os.path.join(install_dir, RESULT_LOG)
@@ -432,6 +462,7 @@ def build_bat(install_dir: str, staging_dir: str, main_exe: str,
     if not bak_dir:
         bak_dir = install_dir + _BACKUP_SUFFIX
     out = _BAT_TEMPLATE
+    # 逐个占位符替换而不走 str.format：bat 里满是 % 与 {}，会与格式化语法冲突
     out = out.replace("__INSTALL_DIR__", install_dir)
     out = out.replace("__STAGING_DIR__", os.path.normpath(staging_dir))
     out = out.replace("__NEW_DIR__", new_dir)
@@ -448,9 +479,11 @@ def build_bat(install_dir: str, staging_dir: str, main_exe: str,
 
 def write_updater_scripts(work_dir: str, install_dir: str, staging_dir: str,
                           main_exe: str, wait_pid: int, mode: str) -> tuple:
-    """把 update.bat + launcher.vbs 写到 work_dir（%TEMP%，安装目录之外）
+    """把 update.bat 与 launcher.vbs 写到 work_dir（%TEMP%，安装目录之外）。
 
-    返回 (bat_path, vbs_path)。"""
+    脚本落盘而不是驻留内存，是因为主程序随后就要退出；文件留在 TEMP 里，
+    由 bat 末尾的 del 自删。返回 (bat_path, vbs_path)。
+    """
     os.makedirs(work_dir, exist_ok=True)
     bat_path = os.path.join(work_dir, "update.bat")
     # GBK 落盘：cmd.exe 默认代码页非 UTF-8，且 BOM 会让首行 @echo off 解析失败
@@ -468,6 +501,8 @@ def write_updater_scripts(work_dir: str, install_dir: str, staging_dir: str,
 
 def mark_update_pending(app_dir: str, info: dict):
     """写安装发起标记（重启后消费；防失败死循环的关键——见 consume）"""
+    # 写失败只告警不中断：标记丢了最坏是这次更新没有回执，
+    # 远比让整个更新流程直接失败好
     try:
         with open(os.path.join(app_dir, PENDING_FLAG), "w",
                   encoding="utf-8") as f:
@@ -494,8 +529,10 @@ def consume_update_receipt(app_dir: str) -> dict | None:
         with open(pending_path, "r", encoding="utf-8") as f:
             pending = json.load(f)
         receipt["version"] = str(pending.get("version") or "")
+    # pending 内容坏了也继续：版本号只用于展示，回执本身能读就够
     except Exception:
         pending = {}
+    # 有回执说明 updater 跑到了最后；没有就按"未完成"处理，绝不重试安装
     if os.path.isfile(result_path):
         try:
             with open(result_path, "r", encoding="utf-8") as f:
@@ -531,12 +568,15 @@ def launch_updater(app_dir: str, staging_dir: str, main_exe: str,
     调用方成功后应尽快退出主程序（QApplication.quit / sys.exit）。
     拉起失败抛 OSError（调用方提示用户并保持运行）。"""
     pid = os.getpid() if pid is None else int(pid)
+    # 脚本固定在 %TEMP%\autowork_update：绝不能落进安装目录，否则整目录
+    # rename 时会把正在运行的 updater 自己卷进去
     work_dir = work_dir or os.path.join(tempfile.gettempdir(), "autowork_update")
     bat_path, vbs_path = write_updater_scripts(
         work_dir, app_dir, staging_dir, main_exe, pid, mode)
     mark_update_pending(app_dir, pending_info or {})
     # 路径已全部内联进 bat，运行期只传 bat 自身路径一个参数
     cmd = ["wscript.exe", "//nologo", vbs_path, bat_path]
+    # 独立进程 + 无控制台：主程序马上退出，子进程不能跟着被回收
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | \
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -551,6 +591,7 @@ def launch_updater(app_dir: str, staging_dir: str, main_exe: str,
 def launch_updater_and_exit(app_dir: str, staging_dir: str, main_exe: str,
                             mode: str = "full", pending_info: dict | None = None):
     """launch_updater 的兼容封装：拉起后返回 True"""
+    # 兼容旧调用点：调用方只关心成败，不需要脚本路径
     launch_updater(app_dir, staging_dir, main_exe, mode, pending_info)
     return True
 
@@ -561,6 +602,8 @@ def resolve_mode(entry: dict, local_version: str) -> str:
     entry.package.mode 为 incremental 时，若本地版本低于 entry.min_version，
     说明中间跨了多个版本、增量清单不足以保证一致 → 强制降级为 full。
     """
+    # 只有显式声明 incremental 才走增量：默认 full 更安全。漏文件的代价是
+    # 程序起不来，多下一个包的代价只是一点流量
     pkg = entry.get("package") or {}
     mode = str(pkg.get("mode") or "full").lower()
     if mode != "incremental":
@@ -574,6 +617,7 @@ def resolve_mode(entry: dict, local_version: str) -> str:
 def resolve_package_url(base_url: str, entry: dict) -> str:
     """package.url → 绝对下载地址（相对路径按 base_url 拼接）"""
     pkg = entry.get("package") or {}
+    # 优先用 check_update 已解析好的绝对地址，避免相对路径被拼两次
     url = entry.get("_resolved_url") or pkg.get("url") or ""
     url = str(url)
     if url and not url.startswith(("http://", "https://")):
@@ -593,9 +637,11 @@ def prepare_update(base_url: str, entry: dict, app_dir: str,
     pkg = entry.get("package") or {}
     mode = resolve_mode(entry, local_version)
     url = resolve_package_url(base_url, entry)
+    # 增量模式不需要整包地址；全量缺地址必须在下载前就报错
     if mode == "full" and not url:
         raise ValueError("更新条目缺少下载地址")
 
+    # 与 launch_updater 共用同一工作目录：包、解压物、脚本放一起便于清理
     work_dir = os.path.join(tempfile.gettempdir(), "autowork_update")
     os.makedirs(work_dir, exist_ok=True)
     # staging 放安装目录同级：与安装目录同卷，robocopy/move 才是本地瞬时操作
@@ -607,6 +653,7 @@ def prepare_update(base_url: str, entry: dict, app_dir: str,
     extract_root = os.path.join(work_dir, "extract")
 
     def _cleanup_on_fail():
+        """清掉本函数产生的中间产物；只在异常路径调用。"""
         for d in (staging_dir, extract_root):
             if os.path.isdir(d):
                 shutil.rmtree(d, ignore_errors=True)
@@ -617,6 +664,7 @@ def prepare_update(base_url: str, entry: dict, app_dir: str,
         if mode == "incremental":
             files = entry.get("files") or []
             need = manifest_diff(files, app_dir)
+            # 清单与本地完全一致说明这个版本已装过，报错让上层提示"无需更新"
             if not need:
                 raise ValueError("增量清单与本地一致，无需更新")
             files_count = download_incremental(base_url, need, staging_dir,
@@ -651,6 +699,7 @@ def get_install_info() -> dict:
     from core.app_paths import get_app_dir
     from core.version import get_app_version
     app_dir = get_app_dir()
+    # frozen 决定 main_exe：源码运行时没有可重启的 exe，留空让调用方跳过自更新
     frozen = bool(getattr(sys, "frozen", False))
     main_exe = os.path.basename(sys.executable) if frozen else ""
     return {"app_dir": app_dir, "main_exe": main_exe, "frozen": frozen,
@@ -666,6 +715,7 @@ def get_update_base_url(settings_get=None) -> str:
         else:
             from core import app_settings
             url = str(app_settings.get("update_base_url") or "").strip()
+    # 读设置失败一律回落默认源：配置坏掉不该让"检查更新"整条不可用
     except Exception:
         url = ""
     return url or DEFAULT_UPDATE_BASE_URL

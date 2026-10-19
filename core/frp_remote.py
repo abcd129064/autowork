@@ -171,6 +171,7 @@ class RemoteSessionManager(QObject):
     log_message = Signal(str)          # 运行日志（主窗口接入日志区）
     visitor_removed = Signal(str)      # visitor 被「删除 snk」彻底移除（主窗口列表同步清理用）
     tunnel_issue_changed = Signal(str, str)  # (snk, "lost"/"ok") 隧道失联/恢复
+    tunnel_notice_requested = Signal(str, str)  # UI 层监听：给会话面板加/撤提示条
     prewarmed = Signal(list)           # 预热成功的 snk 列表（预热线程 → 主线程标记）
     async_done = Signal(int, object)   # 后台任务完成（(序号, ("ok", 结果)|("err", 异常))）
 
@@ -181,6 +182,9 @@ class RemoteSessionManager(QObject):
         #                "tableId", "source", "lastUsed"}
         self._visitors: dict = {}
         self._session_window = None
+        # 会话面板 UI 工厂：主窗口启动时注入（windows/remote_session/session_ui），
+        # core 只按鸭子类型调用 create_*，不 import 任何 windows 模块（B2）。
+        self._session_ui = None
         # frpc admin API（热重载通道）：随机端口 + 随机 BasicAuth 口令，
         # 仅监听 127.0.0.1，随进程存活；口令不落任何持久化文件
         self._admin_port = self._pick_admin_port()
@@ -207,6 +211,27 @@ class RemoteSessionManager(QObject):
         self.prewarmed.connect(self._mark_prewarmed)
         self.tunnel_issue_changed.connect(self.notify_tunnel_issue)
         self._load_registry()
+
+    # ---------- 会话 UI 工厂注入（B2） ----------
+
+    def set_session_ui(self, ui) -> None:
+        """注入会话面板/窗口工厂（主窗口初始化时由 UI 层调用）。
+
+        core 与 UI 的边界就落在这四个 create_* 方法上；测试注入 fake 即可在
+        缺 qfluentwidgets 的解释器里跑 _do_open。
+        """
+        self._session_ui = ui
+
+    def _require_session_ui(self):
+        """取已注入的 UI 工厂；未注入时抛错，由调用方转成 InfoBar 提示。
+
+        不返回 None 让调用方判空：注入是启动期一次性接线，缺失说明有人绕过
+        主窗口直接开了会话中心，越早暴露越好。
+        """
+        ui = self._session_ui
+        if ui is None:
+            raise RuntimeError("会话 UI 未安装（应由 UI 层启动时注入）")
+        return ui
 
     # ---------- visitor 注册表 ----------
 
@@ -785,21 +810,12 @@ class RemoteSessionManager(QObject):
             self.tunnel_issue_changed.emit(snk, "ok")
 
     def notify_tunnel_issue(self, snk: str, state: str):
-        """P2-5：隧道失联/恢复时，对该端口上已打开的会话面板展示/
-        撤除提示条（SSH/SFTP/RDP 面板顶部）"""
-        port = None
-        for v in self._visitors.values():
-            if v.get("serverName") == snk:
-                port = v.get("bindPort")
-                break
-        if port is None:
-            return
-        from windows.remote_session.tunnel_notice import clear, show
-        for p in self.sessions_on_port(port):
-            try:
-                (show if state == "lost" else clear)(p, snk)
-            except RuntimeError:
-                pass  # 面板已销毁（C++ 对象不在），跳过
+        """P2-5：把隧道失联/恢复转成 UI 信号。
+
+        core 层不再 import windows；由 windows.remote_session.tunnel_notice
+        的 install() 监听本信号，对已打开会话面板展示/撤除提示条。
+        """
+        self.tunnel_notice_requested.emit(str(snk or ""), str(state or ""))
 
     def wait_ports_ready(self, ports, on_ready, on_deadline=None):
         """轮询本地隧道端口监听就绪（P2-4）：全部就绪立即回调，不空等
@@ -1389,7 +1405,8 @@ class RemoteSessionManager(QObject):
         凭据：显式传入优先，未传则取 settings ssh_user/ssh_pass（隧道设备的
         账号密码，2026-10-04 起由远程页 XTCP 卡/TCP 卡分别维护，互不覆盖）。
         """
-        # 会话面板依赖 paramiko 等重组件，延迟导入避免模块加载开销
+        # 面板构造委托注入的 UI 工厂：core 不再 import windows，缺 qfluentwidgets
+        # 的解释器只是开面板时报错，而不是模块加载即失败。
         settings = _load_settings()
         if username is None:
             username = settings.get("ssh_user", "")
@@ -1400,22 +1417,22 @@ class RemoteSessionManager(QObject):
         host = str(host or "").strip() or "127.0.0.1"
         title_snk = f"{table_id}（{snk}）" if table_id else snk
         try:
+            # 未安装 UI 时这里抛 RuntimeError，走下面的 _notify 提示而不是崩栈
+            ui = self._require_session_ui()
             if kind == "ssh":
-                from windows.remote_session.ssh_terminal import SSHTerminalPanel
-                panel = SSHTerminalPanel(
+                panel = ui.create_ssh_panel(
                     host, port, username, password,
                     # P0-3：会话中心入口的日志转发到全局日志（此前完全静默）
                     log_callback=self.log_message.emit,
                     server_name=title_snk,
                 )
             elif kind == "sftp":
-                from windows.remote_session.sftp_window import SFTPPanel
                 # snk 会话：本地初始目录 = videos_dir/{球桌号}（不存在自动创建）
                 local_dir = None
                 videos_dir = str(settings.get("videos_dir") or "").strip()
                 if table_id and videos_dir and os.path.isdir(videos_dir):
                     local_dir = os.path.join(videos_dir, str(table_id).strip())
-                panel = SFTPPanel(
+                panel = ui.create_sftp_panel(
                     host, port, username, password,
                     server_name=title_snk,
                     log_callback=self.log_message.emit,
@@ -1427,8 +1444,7 @@ class RemoteSessionManager(QObject):
                     lambda path, _t=(host, port, username, password, title_snk):
                         self._open_terminal_from_sftp(_t, path))
             else:  # rdp
-                from windows.remote_session.rdp_window import RDPPanel
-                panel = RDPPanel(
+                panel = ui.create_rdp_panel(
                     host, port, username, password,
                     server_name=title_snk,
                     log_callback=self.log_message.emit,
@@ -1446,8 +1462,7 @@ class RemoteSessionManager(QObject):
         """
         host, port, username, password, server_name = target
         try:
-            from windows.remote_session.ssh_terminal import SSHTerminalPanel
-            panel = SSHTerminalPanel(
+            panel = self._require_session_ui().create_ssh_panel(
                 host, port, username, password,
                 log_callback=self.log_message.emit,
                 server_name=server_name,
@@ -1586,7 +1601,6 @@ class RemoteSessionManager(QObject):
 
     def ensure_session_window(self):
         """获取或创建全局远程会话标签容器窗口（单例复用）"""
-        from windows.remote_session.remote_session_window import RemoteSessionWindow
         win = self._session_window
         if win is not None:
             try:
@@ -1597,7 +1611,8 @@ class RemoteSessionManager(QObject):
                 return win
             except RuntimeError:
                 self._session_window = None
-        win = RemoteSessionWindow()
+        # 窗口构造同样走 UI 工厂：core 不再 import RemoteSessionWindow（B2）
+        win = self._require_session_ui().create_session_window()
         win.destroyed.connect(lambda: setattr(self, "_session_window", None))
         self._session_window = win
         win.show()

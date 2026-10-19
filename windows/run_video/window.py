@@ -21,7 +21,11 @@ from windows.run_video.settings import SettingsPage
 
 
 class LedgerPanelWindow(FluentWindow):
-    """跑视频面板：表单录入 + 记录列表/筛选/分页 + 设置"""
+    """跑视频面板：填写录入、记录与统计、设置三个子界面。
+
+    页面本体在 windows/run_video/ 的 EntryPage/RecordsPage/SettingsPage，
+    本窗口只负责导航、跨页信号连线与关闭时的 Worker 清理。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,7 +42,8 @@ class LedgerPanelWindow(FluentWindow):
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY,
                              "记录与统计")
 
-        # 提交成功后记录页静默刷新（不弹 infobar）
+        # 提交成功后记录页静默刷新而非弹 infobar：用户视线还在录入页，
+        # 连续录入时提示会叠成一串，反而挡住下一次提交。
         self.entry_page.saved.connect(self.records_page.refresh_async)
 
         self.settings_page = SettingsPage(self)
@@ -65,10 +70,15 @@ class LedgerPanelWindow(FluentWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 每次显示都复位：窗口可能在拖动中被关闭，release 丢失后按钮卡在 PRESSED。
         self._reset_titlebar_button_state()
 
     def _reset_titlebar_button_state(self):
-        """重置标题栏按钮状态（同售后面板：修复关闭按钮卡 PRESSED 无法拖动）"""
+        """把卡在 PRESSED 的标题栏按钮复位，否则窗口失去拖动能力。
+
+        qframelesswindow 的按钮释放事件丢失后不会自愈，只能在这里兜底；
+        导入或遍历失败只影响拖动体验，不能让显示流程抛异常。
+        """
         try:
             from qframelesswindow.titlebar.title_bar_buttons import (
                 TitleBarButton, TitleBarButtonState)
@@ -79,7 +89,11 @@ class LedgerPanelWindow(FluentWindow):
             pass
 
     def closeEvent(self, event):
-        """关闭窗口快速清理 Worker（同售后面板策略：disconnect + 200ms 短等）"""
+        """关闭前断开并中断各页 Worker，再等 200ms 让信号队列排空。
+
+        页面对象随窗口一起销毁，但 QThread 里可能还有信号在途；不在
+        销毁前 detach，槽函数会摸到已删除的 C++ 对象。
+        """
         def _detach(w):
             if w is None:
                 return

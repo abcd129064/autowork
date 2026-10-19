@@ -111,6 +111,10 @@ def main():
     out = {"env": {"python": sys.version.split()[0], "qt": "offscreen",
                    "note": "HTTP/进程均打桩，仅 UI 与文件 IO 为真实成本"}}
     mgr = get_session_manager()
+    # B2：core 不再 import windows，_do_open 经注入的 UI 工厂构造面板；
+    # 第 4/5 段要测真实面板构造成本，先装真实工厂再打桩
+    from windows.remote_session.session_ui import install as _install_session_ui
+    _install_session_ui(mgr)
 
     # ---- 打桩 ----
     notifies = []
@@ -119,7 +123,8 @@ def main():
     panels = []
 
     class FakeWin:
-        def add_session(self, panel):
+        # 与真实容器签名对齐（P0-4 起 add_session 带 icon 关键字参数）
+        def add_session(self, panel, icon=None):
             panels.append(panel)
     mgr.ensure_session_window = lambda: FakeWin()
 

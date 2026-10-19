@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""dialogs 模块（从 windows/management_panel.py 拆出，逻辑未改动）"""
+"""管理面板的弹窗集合：补录记录、设备目录自愈、上传清单与打包上传。
+
+拆自 windows/management_panel.py，逻辑未改动。本模块只单向依赖 workers 里的
+后台线程对象，不反向 import 面板；新增弹窗时保持这个依赖方向，避免循环导入。
+"""
 
 import csv
 import difflib
@@ -55,12 +59,18 @@ logger = logging.getLogger(__name__)
 from windows.management.common import *  # noqa: F401,F403
 
 class AddRecordDialog(QDialog):
-    """手动添加记录弹窗"""
+    """手动补录一条球桌记录。
+
+    用于接口拉不到数据、需要人工填的场景；校验只守住「球桌号非空」，因为
+    其余字段会被接口同步覆盖，卡太严反而录不进去。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 固定尺寸：字段数固定，允许拉伸只会把底部按钮推离表单
         self.setWindowTitle("手动添加记录")
         self.setFixedSize(420, 356)
+        # 去掉标题栏的问号按钮：Qt 默认带它，但本弹窗没有上下文帮助
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
@@ -73,18 +83,24 @@ class AddRecordDialog(QDialog):
         form.addRow("球桌号:", self._edit_name)
         self._edit_room = LineEdit(self)
         form.addRow("球房名称:", self._edit_room)
+        # 相机密码用明文框而不是 PasswordLineEdit：旧密码区分大小写且含符号，
+        # 掩码会让人反复输错，这里本来就由操作者本人在现场填写
         self._edit_camera = LineEdit(self)
         form.addRow("相机密码:", self._edit_camera)
         self._edit_snk = LineEdit(self)
+        # 允许留空：落库时会尝试从备注里解析，手填值优先
         self._edit_snk.setPlaceholderText("如 snk_001（留空则从备注解析）")
         form.addRow("SNK标识:", self._edit_snk)
         self._edit_remark = PlainTextEdit(self)
+        # 备注给 80px（约四行）而非单行：现场描述常带换行与多个要点
         self._edit_remark.setFixedHeight(80)
         form.addRow("备注:", self._edit_remark)
         layout.addLayout(form)
+        # 表单与按钮之间留弹性空间：窗口高度固定，多出的像素集中落在这里
         layout.addStretch(1)
 
         btn_row = QHBoxLayout()
+        # 按钮右对齐：取消在左、主操作在右，与系统对话框一致
         btn_row.addStretch(1)
         btn_cancel = PushButton("取消", self)
         btn_cancel.clicked.connect(self.reject)
@@ -96,13 +112,18 @@ class AddRecordDialog(QDialog):
 
     def _on_ok(self):
         if not self._edit_name.text().strip():
+            # 不用弹窗报错：把占位文字换成错误说明，用户视线还在输入框上
             self._edit_name.setPlaceholderText("球桌号不能为空")
             self._edit_name.setFocus()
             return
         self.accept()
 
     def get_record(self) -> dict:
-        """收集表单内容为球桌记录（onlineStatusName 留空，同步时由接口数据覆盖）"""
+        """把表单读成一条球桌记录，字段名对齐接口返回。
+
+        onlineStatusName 故意留空：该字段由同步链路按接口数据回填，这里写
+        占位值会让下一次同步误判为「本地已修改」而覆盖线上状态。
+        """
         return {
             "name": self._edit_name.text().strip(),
             "roomName": self._edit_room.text().strip(),
@@ -114,15 +135,22 @@ class AddRecordDialog(QDialog):
 
 
 class EditSnkDialog(MessageBoxBase):
-    """SNK 标识手动写入/修改对话框（留空保存即清空）"""
+    """手动写入或清除某张球桌的 SNK 标识。
+
+    SNK 是相机端约定的稳定编号，接口不返回时只能人工补；留空保存等价于
+    清空，调用方据此区分「没改」与「明确清掉」。
+    """
 
     def __init__(self, parent, table_name: str, current: str):
+        """把当前值填进输入框；table_name 用于标题，便于确认改的是哪张桌。"""
         super().__init__(parent)
+        # 标题带上球桌号：同一张桌子可能重复打开弹窗，不标号容易改错桌
         self.titleLabel = BodyLabel(f"修改 SNK 标识 · 球桌 {table_name}", self)
         self.viewLayout.addWidget(self.titleLabel)
         self.edit = LineEdit(self)
         self.edit.setText(current)
         self.edit.setPlaceholderText("如 snk_001（留空则清空）")
+        # 280 是 12 位 SNK 加边框的宽度下限，再窄长编号会被截断
         self.edit.setMinimumWidth(280)
         self.viewLayout.addWidget(self.edit)
 
@@ -137,18 +165,23 @@ class DeviceDirHealDialog(MessageBoxBase):
     def __init__(self, parent, videos_dir: str, candidates: list, scored: list):
         """scored: [(相似度分, 目录名), ...] 已按分数降序"""
         super().__init__(parent)
+        # 保存根目录而不是绝对路径：手动浏览与相对路径换算都要用到它
         self.videos_dir = videos_dir
         # 默认空串代表"没选"：用户取消时调用方靠它走原失败提示，不误触自愈落库
         self.chosen_dir = ""
+        # 用 MessageBoxBase 而非 QDialog：确认/取消按钮与 InfoBar 样式统一
         self.titleLabel = BodyLabel("设备目录自愈向导", self)
         self.viewLayout.addWidget(self.titleLabel)
+        # candidates 可能为空（设备号解析不出来），用文案兜底而不是留白
         codes = " / ".join(candidates) or "未知设备"
         self.subLabel = CaptionLabel(
             f"未在视频目录中找到设备「{codes}」对应的文件夹。\n"
             f"请选择实际对应的本地目录，选择后将被记忆，下次自动命中。", self)
+        # 必须开换行：设备号一多提示就超宽，关掉换行会被裁掉右半边
         self.subLabel.setWordWrap(True)
         self.viewLayout.addWidget(self.subLabel)
 
+        # 尺寸调到一屏能看五六个候选：向导出现时用户往往赶时间，再小就要滚
         self.listWidget = QListWidget(self)
         self.listWidget.setMinimumWidth(360)
         self.listWidget.setMinimumHeight(220)
@@ -168,6 +201,7 @@ class DeviceDirHealDialog(MessageBoxBase):
 
         self.yesButton.setText("确认选择")
         self.cancelButton.setText("取消")
+        # 与候选列表最小宽度配套：再窄「相似度 xx%」会被省略号截断
         self.widget.setMinimumWidth(420)
 
     def validate(self) -> bool:
@@ -187,6 +221,8 @@ class DeviceDirHealDialog(MessageBoxBase):
             self, "选择设备目录", self.videos_dir)
         if not picked:
             return
+        # 两侧都 normpath：选择器返回的路径可能带尾部分隔符或混合斜杠，
+        # 不归一化会让 commonpath 的包含判定失效
         picked = os.path.normpath(picked)
         root = os.path.normpath(self.videos_dir)
         try:
@@ -205,12 +241,17 @@ class DeviceDirHealDialog(MessageBoxBase):
 
 
 class DeviceFilesDialog(QDialog):
-    """设备文件列表详情弹窗（按分类展示全部文件，支持一键复制）"""
+    """只读查看某台采集设备命中了哪些文件的弹窗。
+
+    清单按 FILE_FIELD_CATEGORIES 分类展示，并以纯文本呈现便于整段复制到
+    沟通记录；这里不做任何磁盘操作，避免误改采集产物。
+    """
 
     def __init__(self, row: dict, parent=None):
         super().__init__(parent)
         code = row.get("device_code", "")
         self.setWindowTitle(f"文件详情 - {code}")
+        # 620x500：一屏能盖住大部分设备的分类数量，不做自适应以免抖动
         self.resize(620, 500)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
@@ -226,17 +267,21 @@ class DeviceFilesDialog(QDialog):
         header.addWidget(btn_copy)
         layout.addLayout(header)
 
+        # 先算好纯文本：复制按钮与展示区共用同一份内容，避免两者不一致
         self._plain = self._build_text(row)
         browser = QTextBrowser(self)
+        # 用 setPlainText 而非 setHtml：文件名里的 & < > 会被当成富文本标签
         browser.setPlainText(self._plain)
         layout.addWidget(browser, 1)
 
+        # 关闭按钮右对齐，与上传清单弹窗保持同一操作位置
         btn_close = PushButton("关闭", self)
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close, 0, Qt.AlignmentFlag.AlignRight)
 
     @staticmethod
     def _build_text(row) -> str:
+        """把一行设备记录摊平成按分类分段的纯文本。"""
         parts = []
         for field, cn in FILE_FIELD_CATEGORIES:
             files = row.get(field) or []
@@ -256,8 +301,10 @@ class UploadListDialog(QDialog):
 
     def __init__(self, upload_root: str, parent=None):
         super().__init__(parent)
+        # worker 引用挂实例：只存局部变量会被 GC 提前回收，连带销毁运行中的线程
         self._upload_root = upload_root
         self._upload_worker = None
+        # 标题写死不拼路径：目录过长时系统会截断，反而看不出是哪个窗口
         self.setWindowTitle("上传清单")
         self.resize(560, 460)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -265,12 +312,15 @@ class UploadListDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 12)
         layout.setSpacing(8)
+        # 采集根目录置顶显示：打包前用户要先确认打的是哪个目录
         layout.addWidget(BodyLabel(f"收集目录: {upload_root}", self))
 
         self._tree = TreeWidget(self)
         self._tree.setColumnCount(3)
         self._tree.setHeaderLabels(["文件", "大小", "操作"])
+        # 交替行色：层级缩进后同层文件容易看串行
         self._tree.setAlternatingRowColors(True)
+        # 文件名列拉伸占满，操作列固定 56 只放一个图标按钮
         self._tree.header().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
         self._tree.header().setSectionResizeMode(
@@ -282,6 +332,7 @@ class UploadListDialog(QDialog):
         self._progress_bar = ProgressBar(self)
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
+        # 4px 细条：进度只是辅助信息，不该占掉一整行按钮的高度
         self._progress_bar.setFixedHeight(4)
         self._progress_bar.hide()
         layout.addWidget(self._progress_bar)
@@ -292,6 +343,7 @@ class UploadListDialog(QDialog):
         # 打包上传阶段提示（打包中/连接中/上传中），代替多个 InfoBar 叠加
         self._lbl_progress = CaptionLabel("", self)
         bottom.addWidget(self._lbl_progress)
+        # 左侧文字、右侧按钮：中间 stretch 保证窗口变宽时按钮不被拉散
         bottom.addStretch(1)
         # 最小化：仅上传进行中可用，隐藏对话框后上传后台继续，完成后重新激活
         self._btn_min = PushButton(FluentIcon.MINIMIZE, "最小化", self)
@@ -300,9 +352,11 @@ class UploadListDialog(QDialog):
         self._btn_min.clicked.connect(self.hide)
         bottom.addWidget(self._btn_min)
         btn_open = PushButton(FluentIcon.FOLDER, "打开目录", self)
+        # 打开的是 upload 根目录，方便用户在系统里先核对再打包
         btn_open.clicked.connect(self._open_dir)
         bottom.addWidget(btn_open)
         self._btn_package = PushButton(FluentIcon.SEND, "打包上传", self)
+        # 提示写明「成功后清空本地目录」：这是不可逆动作，必须提前告知
         self._btn_package.setToolTip("将收集的文件打包 zip 上传服务器，成功后清空本地 upload 目录")
         self._btn_package.clicked.connect(self._on_package_upload)
         bottom.addWidget(self._btn_package)
@@ -349,8 +403,10 @@ class UploadListDialog(QDialog):
         """为行最右侧创建删除按钮（FluentIcon.DELETE）"""
         btn = ToolButton(FluentIcon.DELETE, self)
         btn.setToolTip(f"删除 {name}")
+        # 固定 30x24：树行高由控件尺寸决定，不锁死时按钮会把行撑高
         btn.setIconSize(QSize(16, 16))
         btn.setFixedSize(30, 24)
+        # 默认参数绑定当前路径：循环里直接闭包取变量会全部指向最后一项
         btn.clicked.connect(lambda checked=False, p=full_path, n=name:
                             self._on_delete_item(p, n))
         return btn
@@ -359,14 +415,18 @@ class UploadListDialog(QDialog):
         """扫描 upload 根目录构建清单树：一级=设备目录，二级=文件/子文件夹，逐行挂删除按钮"""
         total_files = 0
         total_size = 0
+        # 目录可能刚被上传清空或用户手动删掉；失败按空清单处理，弹窗照常
+        # 显示 0 个文件，不把异常抛给调用方
         try:
             entries = sorted(os.listdir(self._upload_root))
         except OSError:
             entries = []
         for dev in entries:
             dev_dir = os.path.join(self._upload_root, dev)
+            # upload 根下只认子目录：散落文件归不到设备，打包时也不会收
             if not os.path.isdir(dev_dir):
                 continue
+            # 设备行先占位，遍历完再回填总大小
             dev_item = QTreeWidgetItem([dev, "", ""])
             dev_size = 0
             for fname in sorted(os.listdir(dev_dir)):
@@ -390,6 +450,7 @@ class UploadListDialog(QDialog):
                 dev_item.addChild(child)
                 self._tree.setItemWidget(child, 2, self._make_delete_btn(full, fname))
             dev_item.setText(1, _fmt_size(dev_size))
+            # 默认展开：设备层通常只有一两个，折叠反而多一次点击
             dev_item.setExpanded(True)
             self._tree.addTopLevelItem(dev_item)
             self._tree.setItemWidget(dev_item, 2, self._make_delete_btn(dev_dir, dev))
@@ -399,7 +460,12 @@ class UploadListDialog(QDialog):
     # ---------- 逐行删除（二次确认 + 路径安全校验） ----------
 
     def _safe_upload_path(self, full_path: str):
-        """路径安全校验：必须位于 upload 根目录内部且不是根目录本身"""
+        """校验待删路径确实落在 upload 根目录内，返回规范化路径或 None。
+
+        normcase 用于 Windows 下大小写不敏感的比较；commonpath 跨盘符会抛
+        ValueError，同样按「不安全」处理。根目录本身必须挡住，否则一次
+        误点就会删掉整个待上传目录。
+        """
         root = os.path.normcase(os.path.normpath(os.path.abspath(self._upload_root)))
         path = os.path.normcase(os.path.normpath(os.path.abspath(full_path)))
         if path == root:
@@ -422,16 +488,21 @@ class UploadListDialog(QDialog):
             show_info_bar("路径不在 upload 目录内，已拒绝删除", "error",
                           title="删除失败", parent=self, duration=4000)
             return
+        # 用应用内 MessageBox 而非 QMessageBox：主题一致，且按钮文案能改成
+        # 「删除」而不是笼统的 OK，降低误点概率
         box = MessageBox("删除确认", f"确定删除 {name} 吗？", self)
         box.yesButton.setText("删除")
         box.cancelButton.setText("取消")
         if not box.exec():
             return
         try:
+            # 目录整棵删：清单里的子文件夹对应的是整个设备目录，不是空壳
             if os.path.isdir(safe_path):
                 shutil.rmtree(safe_path)
             else:
                 os.remove(safe_path)
+        # 目标已不存在不算失败：接着走下面的刷新，让清单与磁盘对齐；
+        # 权限错误与其它 OSError 则提前返回，避免误报「已删除」
         except FileNotFoundError:
             show_info_bar(f"{name} 已不存在，正在刷新清单", "warning",
                           title="删除失败", parent=self, duration=3000)
@@ -444,11 +515,16 @@ class UploadListDialog(QDialog):
                           title="删除失败", parent=self, duration=4000)
             return
         show_info_bar(name, "success", title="已删除", parent=self, duration=2000)
+        # 重建整棵树而不是删单行：目录大小与文件总数都要重算，增量更新更易错
         self._tree.clear()
         self._populate()
 
     def _open_dir(self):
-        """在资源管理器中打开 upload 根目录"""
+        """在系统文件管理器中打开 upload 根目录。
+
+        用 os.startfile 而非 subprocess：走 shell 关联能适应用户改过的默认
+        管理器，也不会在无桌面会话时额外留下子进程。
+        """
         if os.path.isdir(self._upload_root):
             os.startfile(self._upload_root)
 
@@ -462,6 +538,7 @@ class UploadListDialog(QDialog):
         密码不在代码中内置默认值，未配置时提示用户在设置中填写。
         上传进行中此按钮语义切换为「取消上传」（Task #57）。
         """
+        # 同一按钮兼作取消：上传中再点就走取消流程，不另设按钮省出视觉噪音
         if self._upload_worker is not None and self._upload_worker.isRunning():
             self._on_cancel_upload()
             return
@@ -471,6 +548,7 @@ class UploadListDialog(QDialog):
             return
         settings = _load_settings()
         host = str(settings.get("upload_host") or "49.235.34.253").strip()
+        # 端口可能被手改成非法值；解析失败回落 22，不让一条坏配置堵死上传
         try:
             port = int(settings.get("upload_port") or 22)
         except (TypeError, ValueError):
@@ -478,11 +556,13 @@ class UploadListDialog(QDialog):
         remote_dir = str(settings.get("upload_remote_dir") or "/lhcos-data/videos").strip()
         username = str(settings.get("upload_user") or "root").strip()
         password = str(settings.get("upload_pass") or "")
+        # 密码不内置默认值：仓库里的任何默认口令都等于公开凭据
         if not password:
             show_info_bar("未配置上传密码，请先在设置中填写后重试", "warning",
                           title="提示", parent=self, duration=3000)
             return
 
+        # 先统计再确认：这个数字复用与打包遍历一致的 file_count，不是估算值
         count = self.file_count(self._upload_root)
         box = MessageBox(
             "打包上传",
@@ -509,6 +589,7 @@ class UploadListDialog(QDialog):
         self._upload_worker.done.connect(self._on_upload_done)
         self._upload_worker.error.connect(self._on_upload_fail)
         self._upload_worker.cancelled.connect(self._on_upload_cancelled)
+        # 信号全部接好再 start：先启动可能丢掉最早的一次 progress
         self._upload_worker.start()
 
     def _on_cancel_upload(self):
@@ -523,6 +604,8 @@ class UploadListDialog(QDialog):
         if not box.exec():
             return
         if self._upload_worker is not None and self._upload_worker.isRunning():
+            # 先置灰并给文字反馈：中断要等 SFTP 当前分片传完，这段窗口期
+            # 没有反馈用户会反复点取消
             self._btn_package.setEnabled(False)
             self._lbl_progress.setText("正在取消...")
             self._upload_worker.requestInterruption()
@@ -554,7 +637,11 @@ class UploadListDialog(QDialog):
         self._progress_bar.setValue(0)
 
     def _reactivate_if_hidden(self):
-        """对话框被最小化时重新弹出并激活（上传后台完成的提示入口）"""
+        """把被最小化的窗口重新弹出并置前。
+
+        上传在后台结束时窗口可能已被隐藏，不主动 show 的话结果提示会落在
+        一个看不见的窗口上，用户以为上传没反应。
+        """
         if not self.isVisible():
             self.show()
         self.raise_()
@@ -568,6 +655,11 @@ class UploadListDialog(QDialog):
         self._lbl_progress.setText(f"上传中 {p}%")
 
     def _on_upload_done(self, info):
+        """上传成功：恢复 UI、重扫清单并回填上传台账。
+
+        worker 已清空本地 upload 目录，这里必须重扫，否则清单还留着刚上传
+        的文件。台账回填只影响统计，失败不阻断成功提示。
+        """
         self._restore_upload_ui()
         self._reactivate_if_hidden()
         self._tree.clear()
@@ -581,6 +673,11 @@ class UploadListDialog(QDialog):
                       title="上传成功", parent=self, duration=5000)
 
     def _on_upload_fail(self, msg):
+        """上传失败：恢复 UI，只展示错误首行。
+
+        worker 抛出的异常文本常是多行 traceback，InfoBar 放不下，也会把真正
+        的原因挤到看不见的位置。
+        """
         self._restore_upload_ui()
         self._reactivate_if_hidden()
         show_info_bar(msg.split(chr(10))[0], "error",
@@ -597,6 +694,7 @@ class UploadListDialog(QDialog):
     def file_count(upload_root: str) -> int:
         """清单中的文件总数（递归统计，与打包遍历 os.walk 一致，供外部确认弹窗展示）"""
         count = 0
+        # 目录不存在（已被上传清空或用户删掉）时按 0 计，调用方只关心数量
         try:
             entries = os.listdir(upload_root)
         except OSError:

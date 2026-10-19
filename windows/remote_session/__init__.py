@@ -16,6 +16,7 @@
   main_window/ 迁入——远程页面文件统一归口本包）
 - remote_mixin.py          : RemoteMixin 主窗口远程面板 Mixin（同上迁入）
 - tunnel_notice.py         : 隧道失联/恢复会话面板提示条（P2-5，2026-09-23）
+- session_ui.py             : 会话面板/窗口 UI 工厂（B2，core→windows 倒置解耦）
 
 外部一律使用直路径 ``from windows.remote_session.xxx import ...``（旧 shim 已删除）。
 

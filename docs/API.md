@@ -451,7 +451,8 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 |------|------|------|
 | `log_message` | `Signal(str)` | frpc 日志转发（主窗口日志区订阅） |
 | `frpc_state_changed` | `Signal(bool)` | frpc 运行状态变化 |
-| `tunnel_issue_changed` | `Signal(str, str)` | (snk, "lost"/"ok") 隧道失联/恢复翻转（P2-5，`report_tunnel_issue` 上报去重后发出，联动已开会话面板提示条） |
+| `tunnel_issue_changed` | `Signal(str, str)` | (snk, "lost"/"ok") 隧道失联/恢复翻转（P2-5，`report_tunnel_issue` 上报去重后发出） |
+| `tunnel_notice_requested` | `Signal(str, str)` | (snk, state) 转给 UI 层：由 `windows.remote_session.tunnel_notice.install` 监听并给已打开面板加/撤提示条；core 不再 import windows |
 | `prewarmed` | `Signal(list)` | 预热成功的 snk 列表（预热线程 queued 回主线程，标记 `prewarmedAt` 仅内存态） |
 | `async_done` | `Signal(int, object)` | 后台任务结果分发（P0-2：`_run_bg` 后台线程 emit，`_on_bg_done` 在 GUI 线程按 seq 分发 on_done/on_error） |
 
@@ -459,7 +460,9 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 |------|------|
 | `open_session(kind, snk, table_id, notifier=None, source="")` | 建立远程会话（kind: ssh/sftp/rdp），自动确保 frpc 运行与隧道就绪；受理即 InfoBar 反馈，就绪等待为**端口监听轮询**（P2-4：200ms 间隔、8s 上限）；预检 frps 缓存过期时**挂起 + `request_refresh` 后台感知，回执后经 `_on_refresh_finished_resume` 续接**（P0-1，2026-09-24，不再同步阻塞 GUI） |
 | `open_direct_session(kind, host, port, name="", notifier=None, username=None, password=None)` | **TCP 直连会话**（2026-09-24，不经 frpc）：对任意 host:port 开 SSH/SFTP 面板（远程页「连接」TCP 模式与 frps 代理 tcp 页签「直连」用）；**凭据显式传入优先，`None` 才回退 `settings.ssh_user/ssh_pass`（2026-10-04）**——远程页 TCP 卡传 `tcp_ssh_user/tcp_ssh_pass` 的主机凭据，frps 代理页不传即沿用设备凭据；进全局会话窗口；host/port 校验失败与 paramiko 缺失走 `_notify` 拒绝 |
-| `_do_open(kind, snk, table_id, port, notifier=None, host="127.0.0.1", username=None, password=None)` | 会话面板的实际创建点（内部）：`username/password` 为 `None` 时回退 `settings.ssh_user/ssh_pass`；隧道路径（`open_session`）不传即设备凭据 |
+| `_do_open(kind, snk, table_id, port, notifier=None, host="127.0.0.1", username=None, password=None)` | 会话面板的实际创建点（内部）：`username/password` 为 `None` 时回退 `settings.ssh_user/ssh_pass`；隧道路径（`open_session`）不传即设备凭据；面板构造委托注入的 UI 工厂（B2） |
+| `set_session_ui(ui)` | 注入会话面板/窗口工厂（B2）：main_window 启动时注入 `SessionUi`；core 只按鸭子类型调 `create_*`，不再 import windows |
+| `_require_session_ui()` | 取已注入的工厂；未注入时抛 `RuntimeError`，由 `_do_open`/`_open_terminal_from_sftp` 接住转成 InfoBar 提示（内部） |
 | `frps_server_addr()` | frps 服务器地址（`frpc_server.serverAddr`，缺省回退默认值）——frps 代理视图 tcp 页签直连的目标主机 |
 | `disconnect_visitor(server_name)` | 隧道面板「断开连接」：仅 frpc 运行中生效（返回 ok/not_running/not_found/error），先关相关会话再把 visitor 置 `disabled` 态并 apply 摘除隧道、释放端口；**注册与持久化保留**（记录落 `frpc_xtcp_disabled.json` 侧车，不进 frpc TOML），重新连接自动恢复启用，绝不自动启动 frpc |
 | `delete_visitor(server_name)` | 隧道面板「删除 snk」：从注册表与持久化文件（含 disabled 侧车）彻底移除，frpc 未运行时也可执行且不启动 frpc |
@@ -472,7 +475,7 @@ frpc 管理 + 统一远程会话中心（XTCP 隧道 / SSH / SFTP / RDP 会话�
 | `prewarm_when_ready()` | frpc 启动后用：轮询全部 bindPort 监听就绪（200ms 间隔、8s 上限）后立即预热，替代固定 3s 等待 |
 | `wait_ports_ready(ports, on_ready, on_deadline=None)` | 轮询本地端口监听就绪：全部就绪立即回调，超上限走 `on_deadline`（缺省落 on_ready） |
 | `report_tunnel_issue(snk, lost)` | 感知端（remote_hub 总览刷新）上报失联/恢复，状态翻转才发 `tunnel_issue_changed` |
-| `notify_tunnel_issue(snk, state)` | 失联/恢复联动：对该端口上已打开的 SSH/SFTP/RDP 面板展示/撤除提示条（`windows/remote_session/tunnel_notice`） |
+| `notify_tunnel_issue(snk, state)` | 只发 `tunnel_notice_requested` 信号；UI 层 `tunnel_notice.install` 负责查端口和给面板加/撤提示条（B2：core 不再 import windows） |
 | `sessions_on_port(port)` / `is_transferring_on_port(port)` | 查指定本地端口上的会话面板 / 是否有 SFTP 传输进行中 |
 | `close_sessions_on_port(port, reason)` / `close_all_sessions(reason)` | 优雅关闭指定端口/全部会话面板（panel.shutdown()），返回关闭数量 |
 | `shutdown()` | 停止 frpc 并关闭全局会话窗口（主窗口 closeEvent 调用） |
@@ -1736,6 +1739,37 @@ SingleVideoDialog(parent, settings=None)
 | `closeEvent(e)` | 运行中（running/browsing）拦截关闭 |
 
 表单控件使用 `CompactSpinBox`（紧凑版微调框，继承 QSpinBox，API 兼容）。
+
+---
+
+### windows.remote_session.session_ui
+
+远程会话面板/窗口 UI 工厂（B2）。`core/frp_remote.py` 只描述「要开什么」，本模块负责构造真实控件；四个 `create_*` 方法内部延迟 import 各重面板，模块顶层只依赖标准库，因此注入动作不会拉起 qfluentwidgets/PySide6/paramiko。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `install(manager)` | `-> None` | 幂等注入：已有 `_session_ui` 则原样保留，否则 `manager.set_session_ui(SessionUi())` |
+
+#### 类 `SessionUi`
+
+| 方法 | 说明 |
+|------|------|
+| `create_ssh_panel(host, port, username, password, *, server_name="", log_callback=None, start_dir="")` | 构造 `SSHTerminalPanel`（SSH 会话与 SFTP「终端」按钮共用） |
+| `create_sftp_panel(host, port, username, password, *, server_name="", log_callback=None, default_remote_path=None, default_local_path=None)` | 构造 `SFTPPanel`；初始目录由调用方算好传入 |
+| `create_rdp_panel(host, port, username, password, *, server_name="", log_callback=None)` | 构造 `RDPPanel` |
+| `create_session_window()` | 构造 `RemoteSessionWindow`（单例复用由 core 的 `ensure_session_window` 管） |
+
+---
+
+### windows.remote_session.tunnel_notice
+
+隧道失联/恢复时给已打开的 SSH/SFTP/RDP 会话面板加/撤顶部提示条（P2-5）。core 层只发信号，本模块的 install 负责 UI 接线。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `show(panel, snk)` | `-> None` | 在面板顶部懒创建/更新失联提示条 |
+| `clear(panel, snk)` | `-> None` | 撤除提示条（恢复/关闭时） |
+| `install(manager)` | `-> None` | 幂等连接 `manager.tunnel_notice_requested`，按 snk 查 bindPort 和会话面板 |
 
 ---
 

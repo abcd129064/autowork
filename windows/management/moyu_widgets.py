@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 """摸鱼中心控件集合：2048 / 贪吃蛇 / 扫雷 / 小说阅读器
 
-供 management_panel.py 的 GamePage 组装使用。状态（最高分、最快用时、
-难度选择、字号、滚动进度、上次 txt 路径/章节 URL）持久化到独立的
-moyu_state.json，不写 settings.json——规避既有配置缓存覆盖问题
-（settings_mixin 会对 settings.json 做全量回写）。
+供 management_panel.py 的 GamePage 组装使用。四个玩法各自独立成控件，
+共用一个页签容器；切走时由 GamePage 调 auto_pause/auto_resume 停表，
+避免隐藏页的定时器继续空转。
+
+状态持久化放在独立的 moyu_state.json，不写 settings.json。settings_mixin
+会对 settings.json 做全量回写，外部写入会被下一次保存覆盖；摸鱼数据
+丢失也不该牵连主业务配置。落盘用「先写 .tmp 再 os.replace」，进程中途
+被杀不会留下半截 JSON。
 
 贪吃蛇/扫雷的分难度成绩以 {难度: 成绩} 字典存（best_snake / best_mines），
 旧版单值 int 自动归入当时的默认难度，读取端兼容两种形态。
 
 小说阅读器网页抓取：站点规则/通用 XPath → trafilatura → html.parser
 三级提取链，自动解析上一章/下一章与章节列表（目录页），支持续读。
+网络请求放在 QThread 里，主线程只接收结果，抓取期间界面不会卡死。
 """
 
 import base64
@@ -50,7 +55,11 @@ def _state_path():
 
 
 def load_moyu_state() -> dict:
-    """读摸鱼状态，文件缺失/损坏返回空字典"""
+    """读摸鱼状态，文件缺失/损坏返回空字典
+
+    这是启动路径的一部分，任何异常都只能降级为「没有数据」，不能让
+    摸鱼功能把主窗口拦在启动阶段。
+    """
     try:
         with open(_state_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -60,7 +69,11 @@ def load_moyu_state() -> dict:
 
 
 def save_moyu_state(patch: dict):
-    """读-改-写合并落盘，失败静默（摸鱼状态丢失不影响主业务）"""
+    """读-改-写合并落盘，失败静默，摸鱼状态丢失不影响主业务
+
+    各玩法只提交自己那几个 key，先读后写才不会把别的玩法进度冲掉。
+    临时文件加 os.replace 是为了原子替换，写到一半断电不会留下残缺 JSON。
+    """
     data = load_moyu_state()
     data.update(patch)
     path = _state_path()
@@ -90,6 +103,7 @@ def _level_bests(name: str, legacy_level: str) -> dict:
             except (TypeError, ValueError):
                 continue
     elif isinstance(raw, (int, float)) and raw > 0:
+        # 旧版只有一个速度档，裸整数就是当时默认档的纪录
         table[legacy_level] = int(raw)
     return table
 
@@ -99,6 +113,7 @@ def _submit_level_best(name: str, level: str, value: int, *, minimize: bool,
     """刷新单难度成绩并落盘，破纪录返回 True（旧单值一并升格为表）"""
     table = _level_bests(name, legacy_level)
     old = table.get(level)
+    # 用时取小、得分取大；没纪录时 None 也算破纪录，0 秒同样是有效成绩
     if old is None or (value < old if minimize else value > old):
         table[level] = value
         save_moyu_state({name: table})
@@ -107,7 +122,11 @@ def _submit_level_best(name: str, level: str, value: int, *, minimize: bool,
 
 
 def _saved_level(key: str, levels: dict, default: str) -> str:
-    """读上次选择的难度；值已不在配置表里时回退默认档"""
+    """读上次选择的难度；值已不在配置表里时回退默认档
+
+    难度表可能在版本间增删档位，落盘值先校验再使用，避免 ComboBox
+    找不到对应索引而抛异常。
+    """
     saved = str(load_moyu_state().get(key) or "")
     return saved if saved in levels else default
 
@@ -115,6 +134,7 @@ def _saved_level(key: str, levels: dict, default: str) -> str:
 def _load_custom_mines() -> tuple:
     """读上次自定义规格 (列, 行, 雷数)；缺省/损坏回退默认值"""
     raw = load_moyu_state().get("mines_custom")
+    # 旧值可能是任意 JSON 类型，解包失败就按默认规格处理
     try:
         cols, rows, mines = (int(v) for v in raw)
     except (TypeError, ValueError):
@@ -129,6 +149,8 @@ def _grid_geom(avail_w, avail_h, cols, rows, cell_min, cell_max, margin=6):
     不高于 cell_max（大屏上不至于糊成巨型方块）。整块棋盘在控件内居中，
     绘制与鼠标命中测试共用这一套坐标，避免两处算式漂移。
     """
+    # 先压到 cell_max 再抬到 cell_min：空间不足时宁可让棋盘顶出可用区，
+    # 也不缩到点不准的尺寸
     cell = min((avail_w - margin * 2) // cols,
                (avail_h - margin * 2) // rows, cell_max)
     cell = max(cell, cell_min)
@@ -161,6 +183,8 @@ def _draw_overlay(p, x, y, w, h, title, subtitle):
 
 # ==================== 2048 ====================
 
+# 方块数值 → (底色, 字色)。0 不画字，所以字色留空；超过 2048 的方块
+# 由绘制处回退到深色底，不必在这里穷举
 _TILE_COLORS = {
     0: ("#cdc1b4", None),
     2: ("#eee4da", "#776e65"),
@@ -178,25 +202,35 @@ _TILE_COLORS = {
 
 
 class _Board2048(QWidget):
-    """2048 棋盘：QPainter 绘制 + 键盘操作 + 合并逻辑"""
+    """2048 棋盘：QPainter 绘制 + 键盘操作 + 合并逻辑
+
+    必须拿 StrongFocus，否则方向键会被外层滚动容器当成滚屏操作吃掉。
+    """
 
     SIZE = 4
     score_changed = Signal(int)  # 本次合并新增分数
 
     def __init__(self, parent=None):
+        """初始化空盘：棋盘内容全部交给 reset 生成，避免两处初始化漂移"""
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # 420 是 4x4 布局的下限，再小单格不足 90px，四位数会挤出格子
         self.setMinimumSize(420, 420)
         self._grid = [[0] * self.SIZE for _ in range(self.SIZE)]
         self._over = False
         self._won = False       # 曾达成 2048
         self._won_cont = False  # 达成后选择继续
+        # reset 内部已经落子并 update，这里不再重复初始化
         self.reset()
 
     # ---------- 游戏逻辑 ----------
 
     def reset(self):
-        """重开一局：清盘并预置两个方块"""
+        """重开一局：清盘并预置两个方块
+
+        R 键与「重新开始」按钮共用这一入口，胜利/结束遮罩的状态也在这里
+        一并清掉。
+        """
         self._grid = [[0] * self.SIZE for _ in range(self.SIZE)]
         self._over = False
         self._won = False
@@ -206,17 +240,25 @@ class _Board2048(QWidget):
         self.update()
 
     def _spawn(self):
-        """随机空格生成新方块（90% 出 2，10% 出 4）"""
+        """随机空格生成新方块（90% 出 2，10% 出 4）
+
+        4 的比例比原版低：高比例会让开局期望分虚高，节奏也更容易崩。
+        """
         empty = [(r, c) for r in range(self.SIZE) for c in range(self.SIZE)
                  if self._grid[r][c] == 0]
         if not empty:
             return
         r, c = random.choice(empty)
+        # 4 的出现率压到 10%，否则开局期望分虚高，节奏也更容易崩
         self._grid[r][c] = 4 if random.random() < 0.1 else 2
 
     @staticmethod
     def _merge_line(line, gained_box):
-        """向左压缩合并一行，gained_box[0] 累加得分"""
+        """向左压缩合并一行，gained_box[0] 累加得分
+
+        gained_box 用单元素列表是为了让静态方法能就地回传得分，免得多造
+        一个返回值。每个方块一步内只合并一次，[2,2,2,2] 得到 [4,4] 而非 [8]。
+        """
         vals = [v for v in line if v]
         out = []
         i = 0
@@ -231,7 +273,10 @@ class _Board2048(QWidget):
         return out + [0] * (4 - len(out))
 
     def _move(self, direction):
-        """四方向移动：行/列归一为向左压缩合并，返回是否发生移动"""
+        """四方向移动：行/列归一为向左压缩合并，返回是否发生移动
+
+        右/下方向先把序列反转，复用同一套向左逻辑，合并优先级才不会反。
+        """
         g = self._grid
         moved = False
         box = [0]
@@ -261,7 +306,11 @@ class _Board2048(QWidget):
         return moved
 
     def _moves_available(self):
-        """是否还能移动：有空格或任意相邻同值即未终局"""
+        """是否还能移动：有空格或任意相邻同值即未终局
+
+        只查右/下两个方向即可覆盖全部四邻：左/上相邻的情况会被对方的
+        右/下检查命中，省掉一半比较。
+        """
         g = self._grid
         for r in range(self.SIZE):
             for c in range(self.SIZE):
@@ -276,12 +325,18 @@ class _Board2048(QWidget):
     # ---------- 事件 ----------
 
     def keyPressEvent(self, e):
+        """键盘入口：R 重开优先于一切状态，其次是移动与胜利遮罩确认
+
+        判断顺序就是优先级，先处理 over/won 会把 R 键吞掉。
+        """
+        # R 在任何状态下都可用，包括结算遮罩显示时
         key = e.key()
         if key == Qt.Key.Key_R:
             self.reset()
             return
         if self._over:
             return
+        # 胜利遮罩期间只认「继续」键，避免误触直接改盘
         if self._won and not self._won_cont:
             # 达成 2048 提示覆盖层：回车/空格继续游戏
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter,
@@ -299,6 +354,7 @@ class _Board2048(QWidget):
             super().keyPressEvent(e)
             return
         if self._move(move):
+            # 只有真的发生移动才落新块，否则按一下方向键就白送一个方块
             self._spawn()
             if not self._won and any(v >= 2048 for row in self._grid
                                      for v in row):
@@ -310,8 +366,15 @@ class _Board2048(QWidget):
     # ---------- 绘制 ----------
 
     def paintEvent(self, _e):
+        """绘制棋盘、方块与结算遮罩
+
+        所有坐标由 margin/gap/cell 现算，窗口缩放时格子等比变化；
+        数字字号单独按位数调整，四位数才塞得进同一格。
+        """
         p = QPainter(self)
+        # 圆角与数字在 125% 缩放下锯齿明显，抗锯齿必须开
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 棋盘取短边做正方形，宽高不等时居中留白，不拉伸格子
         margin = 12
         side = min(self.width(), self.height()) - margin * 2
         if side <= 0:
@@ -330,6 +393,7 @@ class _Board2048(QWidget):
                 v = self._grid[r][c]
                 cx = x0 + gap + c * (cell + gap)
                 cy = y0 + gap + r * (cell + gap)
+                # 超过 2048 的方块走默认深色，不为此在色表里无限补值
                 bg, fg = _TILE_COLORS.get(v, ("#3c3a32", "#f9f6f2"))
                 p.setBrush(QBrush(QColor(bg)))
                 p.drawRoundedRect(int(cx), int(cy), int(cell), int(cell),
@@ -338,6 +402,7 @@ class _Board2048(QWidget):
                     p.setPen(QPen(QColor(fg)))
                     f = QFont("Segoe UI", 10, QFont.Weight.Bold)
                     digits = len(str(v))
+                    # 位数越多字越小，四位数挤进同一格才不会溢出
                     f.setPixelSize(int(cell * (0.42 if digits <= 2
                                                else 0.34 if digits == 3
                                                else 0.27)))
@@ -348,11 +413,13 @@ class _Board2048(QWidget):
         # 覆盖层：胜利 / 游戏结束
         overlay = None
         if self._won and not self._won_cont:
+            # 胜利用金色、结束用白色，两种遮罩一眼可分
             overlay = ("达成 2048！", "回车继续游戏 · R 重新开始")
         elif self._over:
             overlay = ("游戏结束", "按 R 重新开始")
         if overlay:
             p.setPen(Qt.PenStyle.NoPen)
+            # 结束用半透明白、胜利用金色：浅色盘面上两种遮罩都能看清
             p.setBrush(QBrush(QColor(255, 255, 255, 160)
                               if self._over else QColor(237, 194, 46, 190)))
             p.drawRoundedRect(x0, y0, side, side, 10, 10)
@@ -370,17 +437,24 @@ class _Board2048(QWidget):
 
 
 class Game2048Widget(QWidget):
-    """2048 游戏：信息栏（得分/最高分/重开）+ 棋盘"""
+    """2048 游戏：信息栏（得分/最高分/重开）+ 棋盘
+
+    视图片签切进来时由 GamePage 调 setFocus，焦点必须落到棋盘，否则
+    方向键没有接收者。
+    """
 
     def __init__(self, parent=None):
+        """信息栏在上、棋盘占满剩余高度；最高分直接读持久化值"""
         super().__init__(parent)
         self._score = 0
+        # 历史最高分是裸整数；读坏了按 0 处理，不让坏值带崩整页
         self._best = int(load_moyu_state().get("best_2048") or 0)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
 
+        # 信息栏固定高度，剩余空间全部交给棋盘
         bar = QHBoxLayout()
         self._lbl_score = BodyLabel("得分：0", self)
         self._lbl_best = BodyLabel(f"最高分：{self._best}", self)
@@ -402,12 +476,18 @@ class Game2048Widget(QWidget):
         layout.addWidget(self._board, 1)
 
     def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
-        """页签切入时由 GamePage 调用，把键盘焦点转给棋盘"""
+        """页签切入时由 GamePage 调用，把键盘焦点转给棋盘
+
+        容器本身不接收按键，必须显式转交一次。
+        """
         super().setFocus(reason)
         self._board.setFocus(reason)
 
     def _on_score(self, gained):
-        """累加得分，刷新最高分并落盘"""
+        """累加得分，刷新最高分并落盘
+
+        只在刷新纪录时写文件；得分每步都变，落盘次数因此被压到很少。
+        """
         self._score += gained
         self._lbl_score.setText(f"得分：{self._score}")
         if self._score > self._best:
@@ -417,6 +497,7 @@ class Game2048Widget(QWidget):
 
     def _restart(self):
         """重新开始：重开棋盘并清零得分"""
+        # 得分计数在控件侧，棋盘 reset 不会动它，必须在这里同步清零
         self._board.reset()
         self._score = 0
         self._lbl_score.setText("得分：0")
@@ -426,20 +507,23 @@ class Game2048Widget(QWidget):
 # ==================== 贪吃蛇 ====================
 
 # 难度 → 走格节奏与计分：step 起步间隔ms，accel 每吃一个提速 ms，
-# floor 间隔下限（防止后期失控不可玩），gain 单食得分（难度越高得分越高）
+# floor 间隔下限（防止后期失控不可玩），gain 单食得分（难度越高得分越高）。
+# accel 为 0 即定速档，简单难度不加速，给手生的人留出反应时间。
 _SNAKE_LEVELS = {
     "easy": {"label": "简单", "step": 170, "accel": 0, "floor": 170, "gain": 5},
     "normal": {"label": "普通", "step": 120, "accel": 2, "floor": 70, "gain": 10},
     "hard": {"label": "困难", "step": 85, "accel": 2, "floor": 50, "gain": 20},
 }
-_SNAKE_DEFAULT_LEVEL = "normal"   # 旧版单一速度即此档，历史纪录归入这里
+# 旧版只有一个速度档，历史纪录统一归入普通档，迁移时不丢数据
+_SNAKE_DEFAULT_LEVEL = "normal"
 
 
 class _SnakeBoard(QWidget):
     """贪吃蛇棋盘：QTimer 驱动 + QPainter 绘制，难度决定走格节奏
 
     格子边长按可用宽高现算（见 _geom），面板给多大盘面就铺多大，
-    不再钉死 22px 导致高窗口下半页空白。
+    不再钉死 22px 导致高窗口下半页空白。定时器以 self 为父对象，
+    控件销毁时随之停掉，不需要额外析构处理。
     """
 
     COLS, ROWS = 24, 17
@@ -448,6 +532,10 @@ class _SnakeBoard(QWidget):
     state_changed = Signal(str)  # idle / running / paused / over
 
     def __init__(self, parent=None, level=_SNAKE_DEFAULT_LEVEL):
+        """按难度建盘：格子尺寸交给 _grid_geom，蛇身与食物由 _reset 生成
+
+        难度只决定速度与初始长度，不改变盘面尺寸，切档无需重建控件。
+        """
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # 只钉最小占位，多余空间由父布局的 stretch 交给本控件
@@ -459,14 +547,17 @@ class _SnakeBoard(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(_SNAKE_LEVELS[self._level]["step"])
         self._timer.timeout.connect(self._tick)
-        self._queue = deque()
-        self._resume_on_show = False
+        self._queue = deque()          # 待执行转向，最多缓存两拍
+        self._resume_on_show = False   # 因切页导致的暂停，切回时恢复
         self._reset()
 
     # ---------- 状态机 ----------
 
     def _reset(self):
-        """重置蛇身/方向/食物与节奏，回到待开始态"""
+        """重置蛇身/方向/食物与节奏，回到待开始态
+
+        蛇身用 deque 且头在左端，走格只需 appendleft/pop，代价恒为 O(1)。
+        """
         self._timer.stop()
         self._step = _SNAKE_LEVELS[self._level]["step"]
         self._timer.setInterval(self._step)
@@ -478,7 +569,10 @@ class _SnakeBoard(QWidget):
         self._food = self._spawn_food()
 
     def _spawn_food(self):
-        """在非蛇身格随机放食物；占满全场返回 None"""
+        """在非蛇身格随机放食物；占满全场返回 None
+
+        None 是「没有空格」的合法状态，调用方据此判定通关，不按异常处理。
+        """
         occupied = set(self._snake)
         free = [(x, y) for x in range(self.COLS) for y in range(self.ROWS)
                 if (x, y) not in occupied]
@@ -493,7 +587,10 @@ class _SnakeBoard(QWidget):
         return self._level
 
     def set_level(self, level):
-        """切难度：换节奏并回到待开始态，避开低难度续刷高难度纪录"""
+        """切难度：换节奏并回到待开始态，避开低难度续刷高难度纪录
+
+        直接续玩会把当前长度带进新档，同一局分数在两档之间不可比。
+        """
         if level not in _SNAKE_LEVELS or level == self._level:
             return
         self._level = level
@@ -502,7 +599,10 @@ class _SnakeBoard(QWidget):
         self.update()
 
     def start(self):
-        """开始/重开游戏并启动走格定时器"""
+        """开始/重开游戏并启动走格定时器
+
+        暂停态不走这里，恢复走 resume；这里只处理开局与终局重开。
+        """
         if self._state in ("idle", "over"):
             self._reset()
         self._state = "running"
@@ -518,6 +618,7 @@ class _SnakeBoard(QWidget):
         self.state_changed.emit(self._state)
         self.update()
 
+    # 暂停只停表，蛇身与食物原样保留，恢复后沿用原节奏
     def pause(self):
         """运行中暂停（停表保状态）"""
         if self._state == "running":
@@ -538,6 +639,7 @@ class _SnakeBoard(QWidget):
 
     def _tick(self):
         """单步走格：消费方向队列，撞墙/撞自己判死；吃到食物加分并换食物"""
+        # 每拍只消费一个转向，连续按键不会在同一拍内拐两次弯
         if self._queue:
             self._dir = self._queue.popleft()
         hx, hy = self._snake[0]
@@ -552,12 +654,14 @@ class _SnakeBoard(QWidget):
         if (nx, ny) in body:
             self._die()
             return
+        # 新头先入队；吃到食物时不弹尾，等效于长一格
         self._snake.appendleft((nx, ny))
         if eating:
             self.score_changed.emit(_SNAKE_LEVELS[self._level]["gain"])
             self._speed_up()
             self._food = self._spawn_food()
-            if self._food is None:  # 占满全场，胜利结束
+            # 棋盘被蛇占满即通关；没有单独的 win 态，复用 over 遮罩
+            if self._food is None:
                 self._die()
                 return
         else:
@@ -565,7 +669,10 @@ class _SnakeBoard(QWidget):
         self.update()
 
     def _speed_up(self):
-        """吃食物按难度设定提速（accel=0 即定速档，floor 为上限速度）"""
+        """吃食物按难度设定提速（accel=0 即定速档，floor 为上限速度）
+
+        间隔不能无限减小，否则高分局会在几帧内撞墙，玩家来不及反应。
+        """
         cfg = _SNAKE_LEVELS[self._level]
         if not cfg["accel"] or self._step <= cfg["floor"]:
             return
@@ -573,14 +680,21 @@ class _SnakeBoard(QWidget):
         self._timer.setInterval(self._step)
 
     def _die(self):
-        """判死：停表并切 over 态"""
+        """判死：停表并切 over 态
+
+        死后必须立刻停表：继续走秒会让结算界面的用时一直增长。
+        """
         self._state = "over"
         self._timer.stop()
         self.state_changed.emit(self._state)
         self.update()
 
     def _push_dir(self, d):
-        """方向入队：忽略重复与 180° 反向，队列最深 2（兼顾手感与可预测性）"""
+        """方向入队：忽略重复与 180° 反向，队列最深 2（兼顾手感与可预测性）
+
+        反向判断以队尾而不是当前方向为准，否则连按「上左下」仍可能在一拍
+        内掉头撞到自己。
+        """
         last = self._queue[-1] if self._queue else self._dir
         if d == last:
             return
@@ -592,6 +706,10 @@ class _SnakeBoard(QWidget):
     # ---------- 事件 ----------
 
     def keyPressEvent(self, e):
+        """键盘入口：方向键/WASD 转向，回车/空格在待开始或结束时开局
+
+        转向键在 idle/over 下先开局再入队，省掉「先按开始」这一步。
+        """
         dirs = {
             Qt.Key.Key_Up: (0, -1), Qt.Key.Key_W: (0, -1),
             Qt.Key.Key_Down: (0, 1), Qt.Key.Key_S: (0, 1),
@@ -606,6 +724,7 @@ class _SnakeBoard(QWidget):
                 return
             super().keyPressEvent(e)
             return
+        # 方向键兼作开局/恢复：待开始或已结束时直接开新局
         if self._state in ("idle", "over"):
             self.start()
         if self._state == "paused":
@@ -613,7 +732,10 @@ class _SnakeBoard(QWidget):
         self._push_dir(d)
 
     def hideEvent(self, e):
-        """页面不可见时停表，避免后台空转"""
+        """页面不可见时停表，避免后台空转
+
+        只登记「因隐藏而暂停」，这样手动暂停的局在切回时不会被误恢复。
+        """
         super().hideEvent(e)
         if self._state == "running":
             self._resume_on_show = True
@@ -622,6 +744,7 @@ class _SnakeBoard(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         if self._resume_on_show:
+            # 只恢复因隐藏而暂停的局，用户手动暂停的不会被误恢复
             self._resume_on_show = False
             self.resume()
 
@@ -633,8 +756,14 @@ class _SnakeBoard(QWidget):
                           self.CELL_MIN, self.CELL_MAX)
 
     def paintEvent(self, _e):
+        """绘制网格、食物、蛇身与状态遮罩
+
+        与 _geom 共用坐标换算，窗口缩放后命中测试不会与画面错位；
+        食物与蛇身按格边长等比内缩，大小屏观感一致。
+        """
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 与 _geom 共用同一套坐标，鼠标命中测试才不会与画面错位
         cell, x0, y0, w, h = self._geom()
         p.setPen(QPen(QColor("#232a35"), 1))
         p.setBrush(QBrush(QColor("#10141a")))
@@ -664,7 +793,7 @@ class _SnakeBoard(QWidget):
             p.setBrush(QBrush(QColor(color)))
             p.drawRoundedRect(x0 + x * cell + pad, y0 + y * cell + pad,
                               cell - pad * 2, cell - pad * 2, radius, radius)
-        # 覆盖层
+        # 覆盖层：idle/paused/over 各一句提示，running 时不挡视野
         overlay = {
             "idle": ("贪吃蛇", "方向键 / WASD 开始并控制方向"),
             "paused": ("已暂停", "点击「继续」或方向键恢复"),
@@ -677,17 +806,20 @@ class _SnakeBoard(QWidget):
 class SnakeWidget(QWidget):
     """贪吃蛇：信息栏（得分/最高分/难度/控制按钮）+ 棋盘
 
-    最高分按难度分档记账（moyu_state.json 的 best_snake）。
+    最高分按难度分档记账（moyu_state.json 的 best_snake）。控件只负责
+    信息栏与状态联动，走格规则全部在 _SnakeBoard 内。
     """
 
     def __init__(self, parent=None):
+        """恢复上次难度与该档最高分，走格规则全部由 _SnakeBoard 负责"""
         super().__init__(parent)
         self._level = _saved_level("snake_level", _SNAKE_LEVELS,
                                    _SNAKE_DEFAULT_LEVEL)
         self._score = 0
         self._best = _level_bests("best_snake", _SNAKE_DEFAULT_LEVEL).get(
             self._level, 0)
-        self._auto_paused = False  # 页签切走导致的暂停，切回自动恢复
+        # 只有页签切换引起的暂停才自动恢复，手动暂停必须由用户自己继续
+        self._auto_paused = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
@@ -704,7 +836,8 @@ class SnakeWidget(QWidget):
         self._combo_level = ComboBox(self)
         self._combo_level.setFixedWidth(88)
         for key, cfg in _SNAKE_LEVELS.items():
-            # qfw addItem 第二参是 icon，userData 必须关键字传参
+            # qfw 的 addItem 第二参是图标，userData 只能关键字传；位置传参
+            # 会把字符串当图标用并抛类型错
             self._combo_level.addItem(cfg["label"], userData=key)
         # 先回显再连接，初始化不误触发切换逻辑
         self._combo_level.setCurrentIndex(
@@ -734,11 +867,15 @@ class SnakeWidget(QWidget):
         layout.addWidget(self._board, 1)
 
     def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
+        """页签切入时把焦点转给棋盘，保证方向键立即可用"""
         super().setFocus(reason)
         self._board.setFocus(reason)
 
     def _on_level(self, _index):
-        """难度切换：重开棋局、刷新该档最高分并记住选择"""
+        """难度切换：重开棋局、刷新该档最高分并记住选择
+
+        切档必须先清零本局得分，否则低难度攒的分数会带进高难度纪录。
+        """
         level = self._combo_level.currentData()
         if not level:
             return
@@ -753,7 +890,11 @@ class SnakeWidget(QWidget):
         self._board.setFocus()
 
     def _toggle(self):
-        """开始/暂停/继续三态切换按钮"""
+        """开始/暂停/继续三态切换按钮
+
+        按钮文案由 state_changed 驱动，这里只管动作，避免两处改文字。
+        """
+        # 按钮文案由 state_changed 驱动，这里不要自己改文字
         s = self._board.state()
         if s == "running":
             self._board.pause()
@@ -763,7 +904,10 @@ class SnakeWidget(QWidget):
             self._board.start()
 
     def _restart(self):
-        """重开：清零得分并清盘重新开局"""
+        """重开：清零得分并清盘重新开局
+
+        得分必须先归零，否则上一局的分数会带进新一局的高分判定。
+        """
         self._score = 0
         self._lbl_score.setText("得分：0")
         self._board.restart()
@@ -787,7 +931,11 @@ class SnakeWidget(QWidget):
     # ---------- 页签切换联动 ----------
 
     def auto_pause(self):
-        """页签切走：运行中则暂停并记录，供切回恢复"""
+        """页签切走：运行中则暂停并记录，供切回恢复
+
+        棋盘自己也会在 hideEvent 停表；这里多一层是为了区分「自动暂停」
+        与「用户手动暂停」两种来源。
+        """
         if self._board.state() == "running":
             self._auto_paused = True
             self._board.pause()
@@ -810,14 +958,16 @@ _MINES_LEVELS = {
     "extreme": ("终极", 22, 16, 99),
     "custom": ("自定义", 12, 12, 30),
 }
-# 自定义棋盘的合法范围：雷数留出至少 10 个安全格，保证首点有展开空间
+# 自定义棋盘的合法范围。雷数上限要留出至少 10 个安全格，否则首点
+# 邻域连同禁区一起被雷占满，开局只能开出一格。
 _MINES_CUSTOM_BOUNDS = ((5, 40), (5, 30))   # (列数区间, 行数区间)
 _MINES_CUSTOM_SAFE = 10
 _MINES_DEFAULT_LEVEL = "easy"
 # 格子边长区间：小面板压到下限仍可点，大屏放大到上限即止
 _MINES_CELL_MIN, _MINES_CELL_MAX = 18, 42
 
-# 单元格状态
+# 单元格状态：FLAG 是「隐藏 + 用户声称有雷」，所以取消插旗要回到
+# HIDDEN，而不是再多一个空状态
 _HIDDEN, _OPEN, _FLAG = 0, 1, 2
 # 八邻域偏移
 _MINES_ADJ = ((-1, -1), (0, -1), (1, -1), (-1, 0),
@@ -840,9 +990,14 @@ class _MinesBoard(QWidget):
     state_changed = Signal(str)   # idle / running / paused / over / win
 
     def __init__(self, parent=None, level=_MINES_DEFAULT_LEVEL):
+        """按难度建盘：尺寸只钉最小值，多余空间由父布局 stretch 分配
+
+        雷在首点后才生成，构造阶段只清空状态，不提前布雷。
+        """
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._level = level if level in _MINES_LEVELS else _MINES_DEFAULT_LEVEL
+        # 元组首项是中文名，棋盘只关心尺寸与雷数
         _, self._cols, self._rows, self._mines = _MINES_LEVELS[self._level]
         # 只钉最小占位，多余空间由父布局的 stretch 交给本控件
         self.setMinimumSize(self._cols * _MINES_CELL_MIN + 2,
@@ -850,7 +1005,7 @@ class _MinesBoard(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
         self._timer = QTimer(self)
-        self._timer.setInterval(1000)
+        self._timer.setInterval(1000)   # 秒表按 1s 走，与界面显示精度一致
         self._timer.timeout.connect(self._on_second)
         self._resume_on_show = False
         self._reset()
@@ -874,6 +1029,7 @@ class _MinesBoard(QWidget):
         self._flags = 0
         self._opened = 0
         self._boom = None
+        # 重开即刷新信息栏，信号兜底比每个调用点各自 setText 可靠
         self.time_changed.emit(0)
         self.left_changed.emit(self._mines)
         self.state_changed.emit(self._state)
@@ -881,6 +1037,7 @@ class _MinesBoard(QWidget):
 
     def restart(self):
         """重开（按钮 / R 键）：换一份新雷图"""
+        # 不带 keep_layout，_planted 清 False，下一次首点会重新布雷
         self._reset()
 
     def retry(self):
@@ -889,6 +1046,7 @@ class _MinesBoard(QWidget):
         与 R 重开的区别：R 换新局（重新随机布雷），T 保留刚才那份
         雷图再打一遍，适合差一步就通关想验证同一思路的场景。
         """
+        # 只有踩雷结束才允许同图重试，胜利后没有「同一局」可复用
         if self._state != "over":
             return
         self._reset(keep_layout=True)
@@ -923,6 +1081,7 @@ class _MinesBoard(QWidget):
         (c_lo, c_hi), (r_lo, r_hi) = _MINES_CUSTOM_BOUNDS
         cols = min(max(int(cols), c_lo), c_hi)
         rows = min(max(int(rows), r_lo), r_hi)
+        # 三重夹取在棋盘侧再做一遍：调用方可能绕过弹窗直接传参
         mines = min(max(int(mines), 1), cols * rows - _MINES_CUSTOM_SAFE)
         self._level = "custom"
         self._cols, self._rows, self._mines = cols, rows, mines
@@ -931,7 +1090,11 @@ class _MinesBoard(QWidget):
         self._reset()
 
     def _begin(self):
-        """首次操作起表；暂停中被点击则顺带恢复计时"""
+        """首次操作起表；暂停中被点击则顺带恢复计时
+
+        扫雷没有「开始」按钮，任何一次有效操作都是开局信号，这样操作
+        路径只有一条，不必在按钮与棋盘之间同步状态。
+        """
         if self._state == "idle":
             self._state = "running"
             self._timer.start()
@@ -956,16 +1119,22 @@ class _MinesBoard(QWidget):
             self.update()
 
     def _on_second(self):
+        """秒表 tick：只累加并广播，界面文案由外层标签负责"""
         self._seconds += 1
         self.time_changed.emit(self._seconds)
 
     # ---------- 游戏逻辑 ----------
 
     def _in_board(self, x, y):
+        """格坐标是否在盘内；洪水与邻域计算都要先过这一关"""
         return 0 <= x < self._cols and 0 <= y < self._rows
 
     def _plant(self, safe):
-        """首点后布雷：避开首点及其邻域，保证开局可展开一片"""
+        """首点后布雷：避开首点及其邻域，保证开局可展开一片
+
+        禁区最多 9 格；雷数超过可布格数时退化成只避开首点，否则
+        random.sample 会直接抛 ValueError。
+        """
         banned = {safe}
         banned.update((safe[0] + dx, safe[1] + dy) for dx, dy in _MINES_ADJ)
         cells = [(x, y) for y in range(self._rows) for x in range(self._cols)
@@ -983,6 +1152,7 @@ class _MinesBoard(QWidget):
         return sum(1 for dx, dy in _MINES_ADJ if (x + dx, y + dy) in self._mineset)
 
     def _neighbors(self, x, y):
+        """八邻域并裁掉盘外坐标；边缘格与角格因此不会越界"""
         return [(x + dx, y + dy) for dx, dy in _MINES_ADJ
                 if self._in_board(x + dx, y + dy)]
 
@@ -993,6 +1163,7 @@ class _MinesBoard(QWidget):
         if self._grid[y][x] != _HIDDEN:
             return
         self._begin()
+        # 先起表再布雷：首点安全区依赖这次点击坐标，计时也从这次点击算
         if not self._planted:
             self._plant((x, y))
         if (x, y) in self._mineset:
@@ -1004,7 +1175,10 @@ class _MinesBoard(QWidget):
         self.update()
 
     def _flood(self, x, y):
-        """从 (x,y) 洪水铺开：数字格止步，0 格继续扩散邻域"""
+        """从 (x,y) 洪水铺开：数字格止步，0 格继续扩散邻域
+
+        用显式栈而不是递归，40x30 的自定义盘递归会顶到 Python 栈上限。
+        """
         stack = deque([(x, y)])
         while stack:
             cx, cy = stack.popleft()
@@ -1026,6 +1200,7 @@ class _MinesBoard(QWidget):
         if st == _OPEN:
             return
         self._begin()
+        # FLAG 与 HIDDEN 只差一个标记位，翻转时同步维护剩余雷数
         self._grid[y][x] = _HIDDEN if st == _FLAG else _FLAG
         self._flags += -1 if st == _FLAG else 1
         self.left_changed.emit(self._mines - self._flags)
@@ -1036,6 +1211,7 @@ class _MinesBoard(QWidget):
         if self._state != "running" or not self._in_board(x, y):
             return
         n = self._numbers[y][x]
+        # 空白格没有数字可对，先排除，免得 0 == 旗数时误触展开
         if self._grid[y][x] != _OPEN or not n:
             return
         around = self._neighbors(x, y)
@@ -1061,6 +1237,7 @@ class _MinesBoard(QWidget):
         只做一轮全盘扫描（无链式/矩阵推理），标完顺手检查是否收尾胜利；
         已标对的旗不会重复计，返回本轮新插旗数（无可标为 0）。
         """
+        # idle 时棋盘还没布雷，任何推理都没有依据，直接返回 0
         if self._state not in ("running", "paused"):
             return 0
         added = 0
@@ -1089,13 +1266,18 @@ class _MinesBoard(QWidget):
 
     def _lose(self):
         """踩雷：停表并摊开全盘雷与错旗"""
+        # _boom 记录被踩的那颗，绘制时单独标红；其余雷由绘制层按状态摊开
         self._state = "over"
         self._timer.stop()
         self.state_changed.emit(self._state)
         self.update()
 
     def _check_win(self):
-        """翻开格数达总数-雷数即胜利：剩余雷自动补旗收尾"""
+        """翻开格数达总数-雷数即胜利：剩余雷自动补旗收尾
+
+        判胜只看翻开数，不二次校验旗子是否全对；旗只是玩家标记，
+        翻完所有安全格就等价于排完雷。
+        """
         if self._state in ("over", "win"):
             return
         if self._opened != self._cols * self._rows - self._mines:
@@ -1119,6 +1301,7 @@ class _MinesBoard(QWidget):
 
     def _hit(self, pos):
         """鼠标坐标 → 格子坐标；落在盘外返回 None"""
+        # 先减去棋盘偏移再判边界，点在盘外留白处不能算到边角格
         cell, x0, y0, w, h = self._geom()
         gx, gy = int(pos.x()) - x0, int(pos.y()) - y0
         if not (0 <= gx < w and 0 <= gy < h):
@@ -1126,6 +1309,7 @@ class _MinesBoard(QWidget):
         return gx // cell, gy // cell
 
     def keyPressEvent(self, e):
+        """快捷键：R 重开、T 同图重试、A 自动标雷，其余交回 Qt 默认处理"""
         if e.key() == Qt.Key.Key_R:
             self._reset()
             return
@@ -1138,7 +1322,9 @@ class _MinesBoard(QWidget):
         super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
+        """左键翻开、右键插旗；中键与侧键直接忽略，不能落进插旗分支"""
         left = e.button() == Qt.MouseButton.LeftButton
+        # 中键/侧键直接忽略，不能让「非左键」被当成右键插旗
         if not left and e.button() != Qt.MouseButton.RightButton:
             return
         cell_pos = self._hit(e.position())
@@ -1150,6 +1336,7 @@ class _MinesBoard(QWidget):
             self.toggle_flag(*cell_pos)
 
     def mouseDoubleClickEvent(self, e):
+        """双击已开数字快速展开；双击前不会先走一次插旗，故无需防抖"""
         if e.button() != Qt.MouseButton.LeftButton:
             return
         cell_pos = self._hit(e.position())
@@ -1166,18 +1353,25 @@ class _MinesBoard(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         if self._resume_on_show:
+            # 与贪吃蛇同一语义：只有因隐藏而暂停的局才自动恢复
             self._resume_on_show = False
             self.resume()
 
     # ---------- 绘制 ----------
 
     def paintEvent(self, _e):
+        """绘制全部格子与状态遮罩；终局时摊开所有雷
+
+        逐格内容交给 _draw_cell，这里只负责盘底、整盘状态与遮罩，
+        保证绘制路径只有一条。
+        """
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cell, x0, y0, w, h = self._geom()
         p.setPen(QPen(QColor("#232a35"), 1))
         p.setBrush(QBrush(QColor("#10141a")))
         p.drawRect(x0, y0, w + 1, h + 1)
+        # 失败时把全盘雷摊开，成功时只亮己方旗标
         dead = self._state == "over"
         for y in range(self._rows):
             for x in range(self._cols):
@@ -1196,6 +1390,7 @@ class _MinesBoard(QWidget):
 
         尺寸均按 cell 等比，不再假定 26px 格边长。
         """
+        # 每格外缩 1px 做缝，网格线自然显现，不必逐格描边
         px, py = x0 + x * cell + 1, y0 + y * cell + 1
         size = cell - 2
         st = self._grid[y][x]
@@ -1232,7 +1427,10 @@ class _MinesBoard(QWidget):
 
     @staticmethod
     def _draw_flag(p, px, py, cell, mine=False):
-        """旗子：橙色三角旗面 + 旗杆；终局已标对的雷改用中性灰"""
+        """旗子：橙色三角旗面 + 旗杆；终局已标对的雷改用中性灰
+
+        所有尺寸从 cell 推导，格子缩到 18px 时旗面仍能看清。
+        """
         cx = px + cell // 2
         p.setPen(QPen(QColor("#cbd5e1"), 2))
         p.drawLine(cx, py + max(4, cell * 6 // 26),
@@ -1246,7 +1444,10 @@ class _MinesBoard(QWidget):
 
     @staticmethod
     def _draw_mine(p, px, py, cell):
-        """雷：中心圆 + 八向短刺（均按格边长等比）"""
+        """雷：中心圆 + 八向短刺（均按格边长等比）
+
+        坐标全部走整数除法，高 DPI 下线条不会因半像素偏移发虚。
+        """
         cx, cy = px + cell // 2, py + cell // 2
         spike = max(5, cell * 9 // 26)
         diag = spike * 7 // 9
@@ -1269,7 +1470,9 @@ class _CustomMinesDialog(MessageBoxBase):
     """
 
     def __init__(self, current, parent=None):
+        """按上次规格预填三个输入框；取消时 values 保持 None"""
         super().__init__(parent)
+        # None 表示用户取消或校验未过；三元组才是可用的规格
         self.values = None
         self.widget.setMinimumWidth(380)
         ttl = TitleLabel("自定义棋盘", self)
@@ -1287,6 +1490,7 @@ class _CustomMinesDialog(MessageBoxBase):
             row.addWidget(cap)
             edit = LineEdit(self)
             edit.setText(str(int(val)))
+            # 只挡非数字输入，范围校验留给 validate，便于一次提示全部问题
             edit.setValidator(QIntValidator(0, 9999, edit))
             row.addWidget(edit, 1)
             self.viewLayout.addLayout(row)
@@ -1295,7 +1499,11 @@ class _CustomMinesDialog(MessageBoxBase):
         self.cancelButton.setText("取消")
 
     def validate(self) -> bool:
-        """范围校验：不过则弹窗保持打开、不丢输入（同 EditRecordDialog 套路）"""
+        """范围校验：不过则弹窗保持打开、不丢输入
+
+        把校验放在确认回调里而不是输入时逐格拦截，是为了让用户一次看到
+        完整的规格约束，而不是修一格再撞下一个错。
+        """
         try:
             cols, rows, mines = (int(e.text()) for e in self._edits)
         except ValueError:
@@ -1318,21 +1526,25 @@ class _CustomMinesDialog(MessageBoxBase):
 class MinesweeperWidget(QWidget):
     """扫雷：信息栏（雷数/用时/最快纪录/难度/控制）+ 棋盘
 
-    最快用时按难度分档记账（moyu_state.json 的 best_mines）。
+    最快用时按难度分档记账（moyu_state.json 的 best_mines）。自定义局
+    不参与纪录，因为不同规格的盘面没有可比性。
     """
 
     def __init__(self, parent=None):
+        """恢复难度/自定义规格/该档纪录，并把三个信号接到信息栏"""
         super().__init__(parent)
         self._level = _saved_level("mines_level", _MINES_LEVELS,
                                    _MINES_DEFAULT_LEVEL)
         self._custom = _load_custom_mines()   # 自定义档 (列, 行, 雷数)
+        # None 表示该档暂无纪录；0 秒同样是有效成绩，不能用 falsy 判断
         self._best = _level_bests("best_mines", _MINES_DEFAULT_LEVEL).get(
-            self._level)   # None = 该档暂无纪录（0 秒也是真纪录）
+            self._level)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
 
+        # 信息栏从左到右按使用频率排：剩余雷数、用时、纪录、难度、操作
         bar = QHBoxLayout()
         self._lbl_left = BodyLabel(f"剩余雷数：{self._mines_of(self._level)}",
                                    self)
@@ -1366,6 +1578,7 @@ class MinesweeperWidget(QWidget):
         self._btn_restart = PushButton("重开", self)
         self._btn_restart.clicked.connect(self._restart)
         self._btn_auto = PushButton("自动标雷", self)
+        # 说明推理强度，避免用户以为它能解整盘
         self._btn_auto.setToolTip("单格推理插旗：数字格的未开邻格数恰等于剩余雷数提示时全标（也可按 A）")
         self._btn_auto.clicked.connect(self._auto_flag)
         bar.addWidget(self._btn_toggle)
@@ -1378,7 +1591,8 @@ class MinesweeperWidget(QWidget):
         self._board.left_changed.connect(self._on_left)
         self._board.state_changed.connect(self._on_state)
         if self._level == "custom":
-            # 应用上次的自定义规格（_reset 会经 left_changed 刷新剩余雷数）
+            # 按上次规格重建棋盘；_reset 会经 left_changed 刷新剩余雷数，
+            # 这里不需要再手动改标签
             self._board.set_custom(*self._custom)
         # 同贪吃蛇：棋盘自适配格边长，给满 stretch 把页高交给盘面
         layout.addWidget(self._board, 1)
@@ -1390,9 +1604,11 @@ class MinesweeperWidget(QWidget):
 
     def _mines_of(self, level):
         """档位对应雷数（自定义档用上次输入的规格）"""
+        # 自定义档在 _MINES_LEVELS 里的雷数只是占位，真实值在 self._custom
         return self._custom[2] if level == "custom" else _MINES_LEVELS[level][3]
 
     def _best_text(self):
+        """纪录文案：自定义局不计、无纪录、有纪录三种形态"""
         if self._level == "custom":
             return "最快：自定义不计纪录"
         return ("最快：暂无纪录" if self._best is None
@@ -1411,6 +1627,8 @@ class MinesweeperWidget(QWidget):
             dlg = _CustomMinesDialog(self._custom, self.window())
             dlg.exec()
             if dlg.values is None:
+                # 取消时把下拉框拨回原档；必须屏蔽信号，否则又会触发一次
+                # 切换逻辑并弹出同一个弹窗
                 idx = list(_MINES_LEVELS).index(self._level)
                 self._combo_level.blockSignals(True)
                 self._combo_level.setCurrentIndex(idx)
@@ -1431,7 +1649,10 @@ class MinesweeperWidget(QWidget):
         self._board.setFocus()
 
     def _toggle(self):
-        """暂停/继续：扫雷无“开始”态，首次翻开自动起表"""
+        """暂停/继续：扫雷无“开始”态，首次翻开自动起表
+
+        idle/over/win 下按钮本就禁用，这里不做兜底分支。
+        """
         s = self._board.state()
         if s == "running":
             self._board.pause()
@@ -1439,6 +1660,10 @@ class MinesweeperWidget(QWidget):
             self._board.resume()
 
     def _restart(self):
+        """重开：换一份新雷图（R 键同效），随后把焦点还给棋盘
+
+        焦点必须还回去，否则 R/T/A 快捷键在点过按钮后失效。
+        """
         self._board.restart()
         self._board.setFocus()
 
@@ -1448,13 +1673,24 @@ class MinesweeperWidget(QWidget):
         self._board.setFocus()
 
     def _on_time(self, seconds):
+        """计时信号 → 信息栏文本；只做展示，不参与纪录判定
+
+        纪录判定直接用棋盘累计的秒数，避免解析界面文本。
+        """
         self._lbl_time.setText(f"用时：{seconds} 秒")
 
     def _on_left(self, left):
+        """剩余雷数信号 → 信息栏；旗数变化与胜利补旗都会走这里
+
+        胜利时统一补旗并把剩余数归零，信息栏因此始终是真实值。
+        """
         self._lbl_left.setText(f"剩余雷数：{left}")
 
     def _on_state(self, state):
-        """状态机变化：按钮联动 + 胜利时按难度刷新最快纪录（自定义局不计）"""
+        """状态机变化：按钮联动 + 胜利时按难度刷新最快纪录（自定义局不计）
+
+        提交的是棋盘计时器累计值，而不是界面文本解析出来的数字。
+        """
         self._btn_toggle.setText("继续" if state == "paused" else "暂停")
         self._btn_toggle.setEnabled(state in ("running", "paused"))
         if state == "win" and self._level != "custom":
@@ -1469,6 +1705,7 @@ class MinesweeperWidget(QWidget):
 
     def auto_pause(self):
         """页签切走：计时中则暂停并记录，供切回恢复"""
+        # 棋盘 pause 自带「仅 running 时生效」，这里无需再判状态
         self._board.pause()
 
     def auto_resume(self):
@@ -1481,7 +1718,8 @@ class MinesweeperWidget(QWidget):
 class _TextExtractor(HTMLParser):
     """html.parser 提取纯文本：剔除 script/style，块级标签转换行
 
-    仅作为 trafilatura 提取失败/结果过短时的兜底方案。
+    仅作为 trafilatura 提取失败/结果过短时的兜底方案。skip_depth 用计数
+    而不是布尔，是因为 script 里还可能嵌套模板标签。
     """
 
     _SKIP = {"script", "style", "noscript", "head", "template", "iframe"}
@@ -1489,23 +1727,27 @@ class _TextExtractor(HTMLParser):
               "article", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"}
 
     def __init__(self):
+        # convert_charrefs 把 &nbsp; 等实体自动转成字符，压缩阶段才能统一处理
         super().__init__(convert_charrefs=True)
         self._parts = []
         self._skip_depth = 0
 
     def handle_starttag(self, tag, attrs):
+        # 块级标签只补换行不补空格，否则段首会多出缩进
         if tag in self._SKIP:
             self._skip_depth += 1
         elif tag in self._BREAK:
             self._parts.append("\n")
 
     def handle_endtag(self, tag):
+        # max(0, ...) 兜住畸形 HTML 里多余的结束标签，计数不能变负
         if tag in self._SKIP:
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag in self._BREAK:
             self._parts.append("\n")
 
     def handle_data(self, data):
+        # 只丢纯空白片段，正文缩进交给 _compress_lines 统一处理
         if not self._skip_depth and data.strip():
             self._parts.append(data)
 
@@ -1515,9 +1757,14 @@ class _TextExtractor(HTMLParser):
 
 
 def _compress_lines(text: str) -> str:
-    """压缩文本：去行首尾空白、合并连续空行为单个空行（各提取路径共用）"""
+    """压缩文本：去行首尾空白、合并连续空行为单个空行（各提取路径共用）
+
+    网页抓下来的文本普遍带大量 &nbsp; 与换行，不压缩会让阅读区出现成片
+    空白；合并成单个空行既保留分段感又不显得散。
+    """
     lines = []
     for raw in text.splitlines():
+        # split() 不带参数按任意空白切分，顺带吃掉制表符与全角空格
         lines.append(" ".join(raw.split()))
     out, blank = [], False
     for s in lines:
@@ -1534,12 +1781,14 @@ def _extract_web_text(html: str) -> str:
     """网页正文提取：优先 trafilatura（自动剔除导航/广告/页脚，精度更高）
 
     失败或结果过短时回退 _TextExtractor，保证旧行为兜底、不引入新风险。
+    trafilatura 在函数内导入：它是可选依赖，缺失时模块本身仍要能加载。
     """
     try:
         from trafilatura import extract
         text = extract(html, output_format="txt", favor_precision=True,
                        include_links=False, include_images=False,
                        include_tables=False, deduplicate=True)
+        # 50 字是「看起来像正文」的下限；更短的结果多半是版权声明或错误页
         if text and len(text) >= 50:
             return text
     except Exception:
@@ -1553,6 +1802,7 @@ def _extract_web_text(html: str) -> str:
 
 # 站点规则：域名关键字 → 正文容器 XPath（legado 书源规则简化版）。
 # 命中则优先精准提取；全部未命中回退通用提取链（trafilatura → _TextExtractor）。
+# 匹配用子串包含，顺序即优先级：更具体的域名关键字要排在泛化关键字前面
 _SITE_RULES = [
     ("biquge", ["//*[@id='content']", "//*[@id='chaptercontent']"]),
     ("xbiquge", ["//*[@id='content']", "//*[@id='chaptercontent']"]),
@@ -1560,7 +1810,8 @@ _SITE_RULES = [
     ("bqxs", ["//*[@id='content']"]),
 ]
 
-# 通用正文容器 XPath：不依赖站点规则，按序尝试，首个 ≥50 字者采纳
+# 通用正文容器 XPath：不依赖站点规则，按序尝试，首个 ≥50 字者采纳。
+# 顺序按命中率排，content 类 id 在中文书站里最常见。
 _GENERIC_CONTENT_XPATHS = [
     "//*[@id='content']",
     "//*[@id='chaptercontent']",
@@ -1585,18 +1836,24 @@ _TOC_CONTAINER_XPATHS = [
     "//*[contains(@class,'catalog')]//a[@href]",
 ]
 
+# 章节标题特征：中文数字与阿拉伯数字都要覆盖，数字两侧允许空格
 _CHAPTER_RE = re.compile(r"第\s*[0-9零一二三四五六七八九十百千万两]+\s*[章节卷回篇]")
+# 翻页链接文本；只认短文本，避免正文里提到「下一页」的普通链接被误判
 _NEXT_RE = re.compile(r"下一[章节篇]|下章|下一页|next", re.I)
 _PREV_RE = re.compile(r"上一[章节篇]|上章|上一页|prev", re.I)
 
 
 class _HtmlText:
-    """lxml 节点转段落纯文本：剔除 script/style，块级标签换行分隔"""
+    """lxml 节点转段落纯文本：剔除 script/style，块级标签换行分隔
+
+    与 _TextExtractor 职责相同，但直接走 lxml 已解析的树，省一次 HTML 解析。
+    """
 
     _SKIP = {"script", "style", "noscript", "head", "template", "iframe"}
 
     @staticmethod
     def _walk(el, parts):
+        """递归收集文本；注释/PI 节点的 tag 不是字符串，先过滤掉"""
         tag = el.tag if isinstance(el.tag, str) else None
         if tag in _HtmlText._SKIP:
             # 跳过内部内容，但保留其后置文本（如 <script>..</script> 后的文字）
@@ -1604,6 +1861,7 @@ class _HtmlText:
                 parts.append(el.tail)
             return
         if tag in _BLOCK_TAGS:
+            # 块级标签前后各补一个换行，段落之间才会断开
             parts.append("\n")
         if el.text and el.text.strip():
             parts.append(el.text)
@@ -1621,7 +1879,11 @@ class _HtmlText:
 
 
 def _norm_host(url: str) -> str:
-    """归一化域名：去协议/路径/www 前缀，小写"""
+    """归一化域名：去协议/路径/www 前缀，小写
+
+    netloc 里可能带端口，这里不剥离；同站判断只在同一站点内比较，
+    端口差异实际不会出现。
+    """
     host = urlparse(url).netloc.lower()
     return host[4:] if host.startswith("www.") else host
 
@@ -1632,13 +1894,17 @@ def _same_site(url_a: str, url_b: str) -> bool:
 
 
 def _extract_by_rules(doc, url: str) -> str:
-    """站点规则 + 通用正文容器 XPath 提取；首个 ≥50 字结果即采纳"""
+    """站点规则 + 通用正文容器 XPath 提取；首个 ≥50 字结果即采纳
+
+    站点规则排在通用规则之前，命中专属容器时就不再浪费后续 XPath 查询。
+    """
     host = _norm_host(url)
     xpaths = []
     for kw, paths in _SITE_RULES:
         if kw in host:
             xpaths.extend(paths)
     xpaths.extend(_GENERIC_CONTENT_XPATHS)
+    # 站点规则与通用规则可能重复，去重避免同一个容器解析两遍
     seen = set()
     for xp in xpaths:
         if xp in seen:
@@ -1655,7 +1921,11 @@ def _extract_by_rules(doc, url: str) -> str:
 
 
 def _extract_title(doc) -> str:
-    """章节标题：lastread.set（书名/章节名数据）→ h1 → title 逐级降级"""
+    """章节标题：lastread.set（书名/章节名数据）→ h1 → title 逐级降级
+
+    lastread.set 是部分书站写给阅读器记进度用的 JS，参数里带干净的书名与
+    章节名，比 title 标签少一堆站点后缀。
+    """
     js = "".join(doc.xpath("//script/text()"))
     m = re.search(r"lastread\.set\(([^)]+)\)", js)
     if m:
@@ -1670,6 +1940,7 @@ def _extract_title(doc) -> str:
         t = "".join(node.itertext()).strip()
         if not t:
             continue
+        # 站点习惯把 title 拼成「章节名_书名」，按分隔符取第一段
         return re.split(r"[_\-|]", t)[0].strip()
     return ""
 
@@ -1678,7 +1949,8 @@ def _decrypt_writeln_text(html: str) -> str:
     """解密 JS 加密正文（彩虹工具类：document.writeln(xxx.bb('base64'))）
 
     此类站点把段落 HTML 经 base64 编码后由 JS 写入页面，
-    Python 侧直接解码还原明文 HTML 再转纯文本。
+    Python 侧直接解码还原明文 HTML 再转纯文本。bb() 只是 base64 的
+    马甲，不含真正的加密，所以能直接解。
     """
     parts = []
     pat = re.compile(r"document\.writeln\(\s*[\w.$]+\.bb\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\)")
@@ -1687,6 +1959,7 @@ def _decrypt_writeln_text(html: str) -> str:
             parts.append(base64.b64decode(m.group(1))
                          .decode("utf-8", errors="replace"))
         except Exception:
+            # 单段解码失败就跳过，其余能解的段落仍然可用
             continue
     if not parts:
         return ""
@@ -1700,8 +1973,11 @@ def _decrypt_writeln_text(html: str) -> str:
 
 
 def _chapter_key(url: str) -> str:
-    """章节 URL 归一化：取路径末尾数字段（13812008_1.html → 13812008），
-    用于目录列表与当前章节匹配、上下章推导。"""
+    """章节 URL 归一化：取路径末尾数字段（13812008_1.html → 13812008）
+
+    目录链接常带 _1 分页后缀，直接用整串 URL 比较会匹配不上当前章节；
+    统一取书号段，既用于高亮当前章，也用于上下章推导。
+    """
     m = re.search(r"/(\d+)(?:_\d+)?\.html?$", url)
     return m.group(1) if m else url
 
@@ -1717,7 +1993,13 @@ def _parse_nav(doc, url: str):
     chapters = []
     seen = set()
 
+    # 同一 URL 可能被多个容器重复收录，按目标 URL 去重并保序
     def _add_chapter(text, target):
+        """收录一条章节：按目标 URL 去重并保留首次出现的顺序
+
+        同一章常同时出现在「最新章节」与「目录」两个容器里，按 URL
+        去重比按标题可靠——标题里可能夹着分页后缀。
+        """
         if text and target not in seen:
             seen.add(target)
             chapters.append((text, target))
@@ -1727,6 +2009,7 @@ def _parse_nav(doc, url: str):
             nodes = doc.xpath(xp)
         except Exception:
             continue
+        # 站外链接一律丢弃，否则目录里会混进广告与友链
         for a in nodes:
             href = (a.get("href") or "").strip()
             text = "".join(a.itertext()).strip()
@@ -1736,7 +2019,8 @@ def _parse_nav(doc, url: str):
             if _same_site(url, target):
                 _add_chapter(text, target)
 
-    # 全页兜底：标题含「第X章/节/卷」的链接（目录容器未命中时）
+    # 全页兜底：标题含「第X章/节/卷」的链接（目录容器未命中时）。
+    # 阈值 10 是经验值：正常目录远多于 10 条，少于 10 条基本可判定容器没命中。
     if len(chapters) < 10:
         for a in doc.xpath("//a[@href]"):
             href = (a.get("href") or "").strip()
@@ -1758,12 +2042,14 @@ def _parse_nav(doc, url: str):
         target = urljoin(url, href)
         if not _same_site(url, target):
             continue
+        # 只认短文本，长段落里出现「下一页」多半是正文引用而非导航
         if len(text) <= 16 and _NEXT_RE.search(text):
             next_url = target
         elif len(text) <= 16 and _PREV_RE.search(text):
             prev_url = target
 
-    # 上一章/下一章：pageEvent 键盘事件（key==37/39 → location=变量）
+    # 上一章/下一章：pageEvent 键盘事件（key==37/39 → location=变量）。
+    # 这类站点不渲染可见翻页链接，只在 JS 里绑定左右方向键，只能解析脚本。
     js = "".join(doc.xpath("//script/text()"))
     m37 = re.search(r"key\s*==\s*37\s*\)\s*(?:window\.)?location\s*=\s*([A-Za-z_]\w*)", js)
     m39 = re.search(r"key\s*==\s*39\s*\)\s*(?:window\.)?location\s*=\s*([A-Za-z_]\w*)", js)
@@ -1777,10 +2063,8 @@ def _parse_nav(doc, url: str):
             elif name == m39.group(1):
                 next_url = urljoin(url, val)
 
-    # 章节目录链接（供 worker 自动抓目录页）：
-    # 优先文本含「目录/章节列表」且与当前章节同书目录层级者（书详情页/最近更新
-    # 页虽含「目录」字样但链接到 /book/ 体系，章节列表不全或乱序，需避开）；
-    # 无候选时按 URL 结构推导 /{book}/{chapter}.html → /{book}/
+    # 章节目录链接（供 worker 自动抓目录页）。含「目录」字样的链接可能是
+    # 书详情页或最近更新页，其章节列表不全，需按 URL 层级打分择优。
     path = urlparse(url).path
     book_base = urljoin(url, path.rsplit("/", 1)[0] + "/") if "/" in path else ""
     toc_candidates = []
@@ -1793,6 +2077,12 @@ def _parse_nav(doc, url: str):
             toc_candidates.append(urljoin(url, href))
     if toc_candidates:
         def _score(u):
+            """给目录候选打分：0=同书目录且非章节页，1=同书，2=无从判断
+
+            书详情页往往仍挂在同书路径下，只能靠「是否 .html」再区分；
+            分不出时给 2 分垫底，排序仍稳定。
+            """
+            # 0 分最优先：同书目录下且不是具体章节页；1 分同书；2 分无从判断
             if not book_base:
                 return 2
             if u.startswith(book_base) and \
@@ -1807,7 +2097,10 @@ def _parse_nav(doc, url: str):
 
 
 def _parse_toc_page(html: str, url: str):
-    """目录页解析：复用 _parse_nav 的容器逻辑，返回章节列表"""
+    """目录页解析：复用 _parse_nav 的容器逻辑，返回章节列表
+
+    目录页没有正文，nav 里的上下章结果用不上，只取章节列表。
+    """
     try:
         from lxml import html as _lh
         doc = _lh.fromstring(html)
@@ -1821,7 +2114,8 @@ def _parse_web_page(html: str, url: str) -> dict:
     """解析小说页面：返回 {url, title, text, prev_url, next_url, chapters, toc_url}
 
     提取链：站点规则 XPath → 通用 XPath → JS 加密正文解密 →
-    trafilatura → html.parser 兜底。
+    trafilatura → html.parser 兜底。后一级只在前一级拿不到 ≥50 字时
+    启动，顺序按「精度从高到低、代价从低到高」排。
     """
     result = {"url": url, "title": "", "text": "",
               "prev_url": "", "next_url": "", "chapters": [], "toc_url": ""}
@@ -1838,10 +2132,11 @@ def _parse_web_page(html: str, url: str) -> dict:
         result["prev_url"] = prev or ""
         result["next_url"] = nxt or ""
         result["toc_url"] = toc or ""
-        # 去重保序
+        # 去重保序：seen.add 返回 None，条件表达式借它做副作用，一行完成
         seen = set()
         result["chapters"] = [c for c in chapters
                                if not (c[1] in seen or seen.add(c[1]))]
+    # 前两级拿不到正文才继续降级，避免对已成功的页面重复解析
     if len(result["text"]) < 50:
         result["text"] = _decrypt_writeln_text(html)
     if len(result["text"]) < 50:
@@ -1850,20 +2145,33 @@ def _parse_web_page(html: str, url: str) -> dict:
 
 
 class _FetchWorker(QThread):
-    """一次性网页抓取 worker：requests 拉取 + 正文/章节导航解析，完成即退"""
+    """一次性网页抓取 worker：requests 拉取 + 正文/章节导航解析，完成即退
+
+    每次抓取都新建实例、结束后由调用方 deleteLater，QThread 对象不能
+    复用；解析失败通过 failed 信号回传，不向主线程抛异常。
+    """
 
     ok = Signal(dict)  # _parse_web_page 结果：正文/标题/上下章/章节列表
     failed = Signal(str)
 
+    # 伪装桌面 Chrome：默认的 python-requests UA 在书站几乎必被 403
     _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
     def __init__(self, url, parent=None):
+        """记录目标 URL；worker 一次性使用，重定向后的地址在 run 内解析
+
+        worker 不持有界面引用，正文与导航全靠信号回传。
+        """
         super().__init__(parent)
         self._url = url
 
     def _headers(self):
-        """反爬请求头：UA + 同源 Referer + 中文语言偏好"""
+        """反爬请求头：UA + 同源 Referer + 中文语言偏好
+
+        部分站点校验 Referer 是否同源，缺了会直接返回 403；语言偏好则
+        影响站点返回简体还是繁体版本。
+        """
         p = urlparse(self._url)
         return {
             "User-Agent": self._UA,
@@ -1874,11 +2182,17 @@ class _FetchWorker(QThread):
         }
 
     def _fetch_text(self, url):
-        """requests 拉取页面并规范编码，返回 (html, final_url)（final_url 为重定向后地址）"""
+        """requests 拉取页面并规范编码，返回 (html, final_url)
+
+        final_url 是重定向后的真实地址，后续上下章推导必须基于它，
+        用请求前的 URL 会对不上章节列表。
+        """
         import requests
         resp = requests.get(url, headers=self._headers(),
                             timeout=10, allow_redirects=True)
         resp.raise_for_status()
+        # 中文站常把响应头写成 ISO-8859-1，按它解码会整页乱码；
+        # apparent_encoding 会嗅探字节内容，失败再退回 UTF-8
         if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
             try:
                 resp.encoding = resp.apparent_encoding
@@ -1887,7 +2201,11 @@ class _FetchWorker(QThread):
         return resp.text, resp.url or url
 
     def run(self):
-        """拉取页面 → 解析正文/导航；章节不足自动补目录页，上下章缺失按目录推导"""
+        """拉取页面 → 解析正文/导航；章节不足自动补目录页，上下章缺失按目录推导
+
+        所有异常都转成 failed 信号：worker 线程里抛异常只会打印堆栈，
+        界面拿不到任何提示。
+        """
         try:
             html, final_url = self._fetch_text(self._url)
             result = _parse_web_page(html, final_url)
@@ -1896,6 +2214,7 @@ class _FetchWorker(QThread):
                 try:
                     toc_html, toc_url = self._fetch_text(result["toc_url"])
                     toc_chapters = _parse_toc_page(toc_html, toc_url)
+                    # 目录页可能在重定向后换了域名，按书号去重而不是整串 URL
                     merged = list(result["chapters"])
                     seen = {_chapter_key(u) for _t, u in merged}
                     for t, u in toc_chapters:
@@ -1906,7 +2225,9 @@ class _FetchWorker(QThread):
                     result["chapters"] = merged
                 except Exception:
                     pass
-            # 上下章推导：在章节列表定位当前章节，缺失的按序补齐
+            # 上下章推导：在章节列表定位当前章节，缺失的按序补齐。
+            # 当前章可能不在列表里（站外跳转/列表不含本章），此时保持
+            # 页面自带的上下章不动。
             key = _chapter_key(final_url)
             idx = next((i for i, (_t, u) in enumerate(result["chapters"])
                         if _chapter_key(u) == key), -1)
@@ -1915,6 +2236,7 @@ class _FetchWorker(QThread):
                     result["prev_url"] = result["chapters"][idx - 1][1]
                 if not result["next_url"] and idx + 1 < len(result["chapters"]):
                     result["next_url"] = result["chapters"][idx + 1][1]
+            # 正文过短基本等于被反爬拦了，明确提示而不是给用户一篇空白
             if len(result["text"]) < 50:
                 self.failed.emit("未能提取到有效正文（可能触发站点反爬）")
             else:
@@ -1924,7 +2246,11 @@ class _FetchWorker(QThread):
 
 
 def _fake_log_text() -> str:
-    """生成静态假日志文本，供老板键伪装的「系统日志」视图使用"""
+    """生成静态假日志文本，供老板键伪装的「系统日志」视图使用
+
+    固定种子让每次打开都是同一份日志，时间戳又随当前时刻滚动，
+    比完全随机更经得起同事多看一眼。
+    """
     rnd = random.Random(20260808)
     hosts = ("collector-01", "collector-02", "edge-gw", "api-node")
     tpls = (
@@ -1935,8 +2261,10 @@ def _fake_log_text() -> str:
         ("WARN", "retry upload chunk seq={b} reason=timeout"),
         ("INFO", "log rotate ok size={e}MB"),
     )
+    # 起始时间设在 26 分钟前：滚动到底部时最新几条正好贴近当前时刻
     t = datetime.now().replace(second=0, microsecond=0) - timedelta(minutes=26)
     lines = []
+    # 96 行足够撑满一屏并留出滚动余量，再多没有视觉收益
     for _ in range(96):
         lvl, tpl = rnd.choice(tpls)
         msg = tpl.format(a=rnd.randint(3, 45), b=rnd.randint(10, 500),
@@ -1949,11 +2277,16 @@ def _fake_log_text() -> str:
 
 
 class MoyuReaderWidget(QWidget):
-    """小说阅读器：txt / 粘贴 / 网页抓取 + 字号调节 + 老板键伪装"""
+    """小说阅读器：txt / 粘贴 / 网页抓取 + 字号调节 + 老板键伪装
+
+    老板键把正文整块换成深色假日志，用于工位上快速遮掩；阅读进度与
+    字号写进 moyu_state.json，下次打开继续。
+    """
 
     _FONT_MIN, _FONT_MAX = 12, 32
 
     def __init__(self, parent=None):
+        """恢复字号/上次来源/滚动比例，再搭工具栏与正文/伪装双视图"""
         super().__init__(parent)
         st = load_moyu_state()
         self._font_size = min(max(int(st.get("reader_font_size") or 16),
@@ -1977,6 +2310,7 @@ class MoyuReaderWidget(QWidget):
         self._btn_open.clicked.connect(self._open_txt)
         self._btn_paste = PushButton("粘贴阅读", self)
         self._btn_paste.clicked.connect(self._paste_read)
+        # 章节导航要等抓到网页才有目标，初始一律禁用，避免空点击
         self._btn_prev = PushButton(FluentIcon.UP, "上一章", self)
         self._btn_prev.setEnabled(False)
         self._btn_prev.setToolTip("跳转到上一章（自动解析）")
@@ -2021,6 +2355,7 @@ class MoyuReaderWidget(QWidget):
         self._url_edit = LineEdit(self)
         self._url_edit.setPlaceholderText(
             "输入小说章节/目录页 URL，回车或点「抓取」；自动解析上下章与目录")
+        # 回车与「抓取」按钮走同一入口，URL 校验逻辑只保留一份
         self._url_edit.returnPressed.connect(self._fetch_web)
         self._btn_fetch = PushButton("抓取", self)
         self._btn_fetch.clicked.connect(self._fetch_web)
@@ -2033,9 +2368,12 @@ class MoyuReaderWidget(QWidget):
 
         self._browser = QTextBrowser(self._stack)
         self._browser.setReadOnly(True)
+        # 链接交给我们自己的跳转逻辑，QTextBrowser 自行导航会把当前正文冲掉
         self._browser.setOpenLinks(False)
+        # 空面板给操作提示：否则空白视图分不清是没加载还是控件坏了
         self._browser.setPlaceholderText(
             "打开 TXT / 粘贴文本 / 抓取网页开始阅读")
+        # 滚动只登记防抖保存，真正落盘在 _flush_save，避免每滚一格写一次盘
         self._browser.verticalScrollBar().valueChanged.connect(
             self._schedule_save)
         self._stack.addWidget(self._browser)
@@ -2053,6 +2391,7 @@ class MoyuReaderWidget(QWidget):
         self._boss_log.setStyleSheet(
             "QTextBrowser { background: #0b1015; color: #9fb3c8; "
             "border: none; }")
+        # 打开即滚到底部，视觉上与正在实时刷新的日志流一致
         self._boss_log.setPlainText(_fake_log_text())
         self._boss_log.verticalScrollBar().setValue(
             self._boss_log.verticalScrollBar().maximum())
@@ -2065,12 +2404,16 @@ class MoyuReaderWidget(QWidget):
 
         # ---- 老板键快捷键 ----
         self._boss_sc = QShortcut(QKeySequence("Ctrl+`"), self)
+        # WidgetWithChildrenShortcut：焦点落在正文或按钮里也能触发，
+        # 又不会像全局快捷键那样抢别的窗口
         self._boss_sc.setContext(
             Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._boss_sc.activated.connect(self.toggle_boss)
 
         # ---- 恢复上次阅读 ----
         self._apply_font()
+        # 上次是 txt 就直接同步载入；上次是网页则延迟发请求，
+        # 避免启动瞬间界面被网络阻塞
         if self._last_txt and os.path.isfile(self._last_txt):
             self._load_txt(self._last_txt, restore_scroll=True)
         elif self._last_url:
@@ -2080,7 +2423,11 @@ class MoyuReaderWidget(QWidget):
     # ---------- 字号 ----------
 
     def _apply_font(self):
-        """把当前字号套到正文样式并同步按钮可用态"""
+        """把当前字号套到正文样式并同步按钮可用态
+
+        setDefaultStyleSheet 只对之后解析出的 document 生效，所以每次
+        setPlainText 之后都要重新调用一次。
+        """
         self._browser.document().setDefaultStyleSheet(
             f"body {{ font-size: {self._font_size}pt; line-height: 1.6; }}")
         self._lbl_font.setText(f"{self._font_size}pt")
@@ -2088,7 +2435,10 @@ class MoyuReaderWidget(QWidget):
         self._btn_font_plus.setEnabled(self._font_size < self._FONT_MAX)
 
     def _adjust_font(self, delta):
-        """字号增减（限制在 MIN~MAX），变更后落盘"""
+        """字号增减（限制在 MIN~MAX），变更后落盘
+
+        到达边界时直接返回，避免每次点击都写一遍状态文件。
+        """
         new = min(max(self._font_size + delta, self._FONT_MIN),
                   self._FONT_MAX)
         if new == self._font_size:
@@ -2100,16 +2450,24 @@ class MoyuReaderWidget(QWidget):
     # ---------- 正文载入 ----------
 
     def _set_text(self, text, source):
-        """正文载入浏览器并更新来源标签"""
+        """正文载入浏览器并更新来源标签
+
+        setPlainText 会重建 document，字号样式必须紧跟其后重套。
+        """
         self._browser.setPlainText(text)
         self._apply_font()  # setPlainText 重建 document 后需重新套用字号
         self._lbl_source.setText(source)
 
     @staticmethod
     def _read_text_file(path):
-        """UTF-8 / GBK 自动探测读取"""
+        """UTF-8 / GBK 自动探测读取
+
+        中文 txt 两种编码都很常见，逐个试解码比猜编码可靠；全部失败时
+        用 replace 兜底，宁可个别乱码也不要让阅读面板崩掉。
+        """
         with open(path, "rb") as f:
             data = f.read()
+        # UTF-8 优先；GB18030 是 GBK 的超集，放最后兜底
         for enc in ("utf-8", "gbk", "gb18030"):
             try:
                 return data.decode(enc)
@@ -2118,7 +2476,11 @@ class MoyuReaderWidget(QWidget):
         return data.decode("utf-8", errors="replace")
 
     def _load_txt(self, path, restore_scroll=False):
-        """载入 txt：成功后记为最近文件，恢复场景按进度比例回滚"""
+        """载入 txt：成功后记为最近文件，恢复场景按进度比例回滚
+
+        读取失败只弹提示不抛出：阅读器是娱乐功能，不该因为一个坏文件
+        打断整个主流程。
+        """
         try:
             text = self._read_text_file(path)
         except OSError as e:
@@ -2127,22 +2489,28 @@ class MoyuReaderWidget(QWidget):
             return
         self._last_txt = path
         self._set_text(text, f"正在阅读：{os.path.basename(path)}")
+        # 只记路径不记内容：txt 原文留在磁盘原位置，状态文件保持轻量
         save_moyu_state({"reader_last_txt": path})
         if restore_scroll:
             self._restore_scroll(self._current_ratio)
 
     def _open_txt(self):
         """文件对话框选 txt（起点为上次打开位置）"""
+        # 上次文件所在目录优先，没有可用记录才回落到应用目录
         start = self._last_txt if os.path.isfile(self._last_txt) \
             else get_app_dir()
         path, _ = QFileDialog.getOpenFileName(
             self, "打开文本", start, "文本文件 (*.txt);;所有文件 (*)")
         if path:
+            # 换文件必须归零进度，否则新文件会套用上一本的滚动比例
             self._current_ratio = 0.0
             self._load_txt(path)
 
     def _paste_read(self):
-        """粘贴阅读：弹窗贴文本后直接载入"""
+        """粘贴阅读：弹窗贴文本后直接载入
+
+        粘贴内容只存在内存里，关掉面板即丢失，避免往磁盘写来历不明的文本。
+        """
         dlg = QDialog(self)
         dlg.setWindowTitle("粘贴阅读")
         dlg.resize(560, 420)
@@ -2170,11 +2538,18 @@ class MoyuReaderWidget(QWidget):
     # ---------- 网页抓取 ----------
 
     def _fetch_web(self):
-        """「抓取」按钮：读取输入框 URL 发起加载"""
+        """「抓取」按钮：读取输入框 URL 发起加载
+
+        输入框回车与按钮共用一个入口，URL 校验逻辑只保留一份。
+        """
         self._load_url(self._url_edit.text().strip())
 
     def _load_url(self, url, quiet=False):
-        """统一加载入口：校验 + 防重复 + 启动 worker（翻页/目录跳转复用）"""
+        """统一加载入口：校验 + 防重复 + 启动 worker（翻页/目录跳转复用）
+
+        quiet 供启动自动续读使用：失败不弹提示，不打断用户进入页面。
+        """
+        # 同一时刻只允许一个抓取线程，重复点击直接忽略
         if self._fetch_worker is not None and self._fetch_worker.isRunning():
             if not quiet:
                 show_info_bar("正在抓取中，请稍候", "warning",
@@ -2186,14 +2561,17 @@ class MoyuReaderWidget(QWidget):
                 show_info_bar("请先输入网页 URL", "warning",
                               title="提示", parent=self, duration=2000)
             return
+        # 裸域名补 https：书站基本都已上 HTTPS，补 http 反而多吃一次重定向
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        # 抓取期间锁住输入与按钮，防并发 worker；结束后由 _finish_fetch 恢复
         self._url_edit.setText(url)
         self._url_edit.setEnabled(False)
         self._btn_fetch.setEnabled(False)
         self._btn_fetch.setText("抓取中…")
         w = _FetchWorker(url, self)
         self._fetch_worker = w
+        # lambda 只做签名适配：信号带 dict，槽只收 data，直连会类型不匹配
         w.ok.connect(lambda data: self._on_fetch_ok(data))
         w.failed.connect(lambda msg, u=url: self._on_fetch_failed(u, msg))
         # lambda 持有 w 引用，防止运行中被 GC 销毁触发 QThread qFatal
@@ -2201,19 +2579,27 @@ class MoyuReaderWidget(QWidget):
         w.start()
 
     def _restore_last_url(self):
-        """启动自动续读上次章节（失败静默，不影响进入页面）"""
+        """启动自动续读上次章节（失败静默，不影响进入页面）
+
+        quiet=True 时失败不弹提示条，避免每次启动都被网络问题打扰。
+        """
         self._load_url(self._last_url, quiet=True)
 
     def _finish_fetch(self, w):
-        """抓取线程结束：恢复输入框/按钮并销毁 worker"""
+        """抓取线程结束：恢复输入框/按钮并销毁 worker
+
+        无论成功失败都要走到这里，否则输入框会一直禁用。
+        """
         self._fetch_worker = None
         self._url_edit.setEnabled(True)
         self._btn_fetch.setEnabled(True)
         self._btn_fetch.setText("抓取")
+        # deleteLater 交给事件循环回收；在 finished 槽里直接 delete 会崩
         w.deleteLater()
 
     def _on_fetch_ok(self, data):
         """抓取成功：载入正文、更新导航按钮、记最近 URL 并提示字数"""
+        # 重定向后的真实 URL 优先，它才是章节推导与续读的锚点
         url = data.get("url") or ""
         text = data.get("text") or ""
         self._current_ratio = 0.0
@@ -2222,11 +2608,16 @@ class MoyuReaderWidget(QWidget):
         self._set_text(text, source)
         self._update_nav(data)
         save_moyu_state({"reader_last_url": url})
+        # 字数让用户一眼判断是否抓全，被截断时通常远小于预期
         show_info_bar(f"已提取 {len(text)} 字正文", "success",
                       title="抓取成功", parent=self, duration=2500)
 
     def _update_nav(self, data):
-        """根据解析结果更新上一章/下一章/目录按钮状态"""
+        """根据解析结果更新上一章/下一章/目录按钮状态
+
+        解析不到就禁用按钮而不是隐藏：按钮位置固定，频繁显隐会跳。
+        """
+        # 解析结果可能是 None，统一收敛成空串，后续 bool() 判断才可靠
         self._prev_url = data.get("prev_url") or ""
         self._next_url = data.get("next_url") or ""
         self._chapters = data.get("chapters") or []
@@ -2235,17 +2626,27 @@ class MoyuReaderWidget(QWidget):
         self._btn_toc.setEnabled(bool(self._chapters))
 
     def _go_prev(self):
-        """跳转上一章（解析出的链接）"""
+        """跳转上一章（解析出的链接）
+
+        没有解析出链接时按钮本就是禁用的，这里不再重复判断状态。
+        """
         if self._prev_url:
             self._load_url(self._prev_url)
 
     def _go_next(self):
-        """跳转下一章"""
+        """跳转下一章（解析出的链接）
+
+        与上一章共用 _load_url，翻页时的防重复与状态锁一并生效。
+        """
         if self._next_url:
             self._load_url(self._next_url)
 
     def _show_toc(self):
-        """章节目录弹窗：双击跳转，当前章节高亮"""
+        """章节目录弹窗：双击跳转，当前章节高亮
+
+        只展示当前页解析出的章节，不再额外请求目录页——目录页的内容
+        已由 worker 合并进 _chapters。
+        """
         if not self._chapters:
             return
         dlg = QDialog(self)
@@ -2256,6 +2657,7 @@ class MoyuReaderWidget(QWidget):
         current = self._url_edit.text().strip()
         cur_key = _chapter_key(current)
         for idx, (title, url) in enumerate(self._chapters):
+            # URL 存 UserRole：章节标题可能重复，不能靠文本反查目标
             item = QListWidgetItem(title)
             item.setData(Qt.ItemDataRole.UserRole, url)
             lst.addItem(item)
@@ -2272,7 +2674,10 @@ class MoyuReaderWidget(QWidget):
         dlg.exec()
 
     def _jump_from_toc(self, item, dlg):
-        """目录双击：关弹窗并加载选中章节"""
+        """目录双击：先关弹窗再加载，避免模态窗口挡住新章节的提示条
+
+        加载仍走 _load_url，防重复与状态锁一并生效。
+        """
         url = item.data(Qt.ItemDataRole.UserRole) or ""
         dlg.accept()
         if url:
@@ -2280,6 +2685,7 @@ class MoyuReaderWidget(QWidget):
 
     def _on_fetch_failed(self, url, msg):
         """抓取失败：错误首行提示 + 「浏览器打开」动作兜底"""
+        # duration=0 让提示条常驻，用户点「浏览器打开」或手动关闭后才消失
         first = str(msg).splitlines()[0][:120] if msg else "未知错误"
         bar = show_info_bar(first, "error", title="抓取失败", parent=self, duration=0)
         btn = PushButton("浏览器打开", bar)
@@ -2290,7 +2696,10 @@ class MoyuReaderWidget(QWidget):
     # ---------- 老板键 ----------
 
     def toggle_boss(self):
-        """老板键：正文 ⇄ 假日志伪装视图切换（切走前先存进度）"""
+        """老板键：正文 ⇄ 假日志伪装视图切换（切走前先存进度）
+
+        伪装视图不参与滚动记忆，切回来时按切换前记下的比例恢复。
+        """
         if self._stack.currentIndex() == 0:
             self._flush_save()  # 切走前保存阅读进度
             self._stack.setCurrentIndex(1)
@@ -2304,12 +2713,18 @@ class MoyuReaderWidget(QWidget):
 
     def _scroll_ratio(self):
         """当前滚动位置比例（0~1，用于跨会话续读）"""
+        # span 为 0 表示内容不足一屏，此时按 0 处理，避免除零
         bar = self._browser.verticalScrollBar()
         span = bar.maximum() - bar.minimum()
         return (bar.value() - bar.minimum()) / span if span > 0 else 0.0
 
     def _restore_scroll(self, ratio):
-        """延迟到布局完成后按比例恢复滚动位置"""
+        """延迟到布局完成后按比例恢复滚动位置
+
+        singleShot(0) 把恢复推迟到本轮事件循环之后，这时布局已完成、
+        滚动条 maximum 才是最终值，否则会滚到错误位置。
+        """
+        # 闭包捕获 ratio：singleShot 只接受无参可调用对象
         def _do():
             bar = self._browser.verticalScrollBar()
             span = bar.maximum() - bar.minimum()
@@ -2318,14 +2733,22 @@ class MoyuReaderWidget(QWidget):
         QTimer.singleShot(0, _do)
 
     def _schedule_save(self, *_):
-        """滚动停止 1.2s 后落盘进度，避免高频写文件"""
+        """滚动停止 1.2s 后落盘进度，避免高频写文件
+
+        _save_pending 做防抖：连续滚动只登记一个定时器，期间的事件全部
+        忽略，停止后才真正写一次。
+        """
         if self._save_pending:
             return
         self._save_pending = True
         QTimer.singleShot(1200, self._flush_save)
 
     def _flush_save(self):
-        """落盘阅读进度（滚动比例 + 字号）"""
+        """落盘阅读进度（滚动比例 + 字号）
+
+        字号一起写是因为这个入口同时承担「切走前保存」，分成两次写
+        只会多一次磁盘 IO。
+        """
         self._save_pending = False
         self._current_ratio = round(self._scroll_ratio(), 4)
         save_moyu_state({
@@ -2334,7 +2757,10 @@ class MoyuReaderWidget(QWidget):
         })
 
     def hideEvent(self, e):
-        """页签切走 / 面板关闭前保存阅读进度"""
+        """页签切走 / 面板关闭前保存阅读进度
+
+        停在伪装视图时不保存，避免把假日志的滚动位置写进阅读进度。
+        """
         if self._stack.currentIndex() == 0:
             self._flush_save()
         super().hideEvent(e)

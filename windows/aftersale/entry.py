@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""entry 模块（从 windows/aftersale_panel.py 拆出，逻辑未改动）"""
+"""售后填写录入页：页头周期指示 + 三段表单 + 随内容操作条。
+
+从 windows/aftersale_panel.py 拆出时逻辑未改动，拆分只为让单文件
+不继续膨胀；记录列表与统计在兄弟模块，本模块只管录入。
+"""
 
 import os
 from datetime import datetime, timedelta
@@ -33,7 +37,11 @@ from windows.aftersale.form import AftersaleForm
 # ==================== 板块一：填写录入页 ====================
 
 class EntryPage(QWidget):
-    """填写录入页：页头（周期指示）+ 三段表单 + 随内容操作条"""
+    """填写录入页：表单 + 必填进度 + 随内容滚动的操作条。
+
+    页头标题已移除，周期指示芯片并入底部操作条；表单按自身高度排布、
+    不随窗口拉伸，避免大面积留白把操作条推到屏幕外。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,7 +89,9 @@ class EntryPage(QWidget):
         _total_required = len(self.form._required_map())  # 必填项数随表单联动
         self._prog.setRange(0, _total_required)
         self._prog.setValue(0)
+        # 进度条只做视觉提示，具体缺项由右侧文案点名，避免条内文字被截断
         self._prog.setTextVisible(False)
+        # 固定宽度，避免「还差 N 项」文案变长时把右侧按钮挤得跳动
         self._prog.setFixedWidth(72)
         bar.addWidget(self._prog)
         self._prog_text = CaptionLabel("必填项 0/%d 已填写" % _total_required, view)
@@ -123,12 +133,21 @@ class EntryPage(QWidget):
                 pass
 
     def showEvent(self, event):
+        """每次进入页面都刷新候选与周期芯片。
+
+        周期设置可能在别的页面改过，候选值也会随他人录入增长，
+        缓存起来反而会让下拉框变旧。
+        """
         super().showEvent(event)
         self._refresh_candidates()
         self._refresh_cycle_chip()
 
     def _refresh_cycle_chip(self):
-        """页头周期指示：本周期 mm/dd – mm/dd（周期设置变化后 showEvent 重算）"""
+        """刷新本周期起止日期，周期设置改动后由 showEvent 重算。
+
+        数据库未初始化或周期设置缺失时保留「按发生时间自动归属」的
+        兜底文案，录入页不应因为读不到周期就显示空白。
+        """
         try:
             start = datetime.strptime(
                 aftersale_db.current_cycle_start(), "%Y/%m/%d")
@@ -140,12 +159,17 @@ class EntryPage(QWidget):
             self._cycle_chip.setText("按发生时间自动归属")
 
     def _update_required_progress(self, *_a):
-        """必填进度：n/必填总数 实时刷新；填齐变绿，缺项琥珀色点名"""
+        """实时刷新必填进度；填齐转绿，缺项用琥珀色逐个点名。
+
+        文案直接列出缺哪几项，用户不用在长表单里逐栏找红框；
+        颜色与进度条 chunk 同步，扫一眼就能判断能否提交。
+        """
         total = len(self.form._required_map())
         bad = [name for name, is_bad, _l, _c in self.form._required_map()
                if is_bad]
         done = total - len(bad)
         self._prog.setValue(done)
+        # chunk 颜色必须整段重设样式表，只改文字颜色不会影响填充色
         if not bad:
             self._prog_text.setText("必填项 %d/%d 已填齐" % (total, total))
             self._prog_text.setStyleSheet("color: %s;" % SEMANTIC["success"])
@@ -171,14 +195,22 @@ class EntryPage(QWidget):
         self._update_required_progress()
 
     def _refresh_candidates(self):
-        """进入页面刷新动态候选（问题/解决人/地区）"""
+        """刷新问题/解决人/地区候选值，进页面时后台拉取。
+
+        走工作线程而不是直接查库，避免大表扫描卡住 UI；失败时静默，
+        候选缺失只影响下拉建议，不阻断手工录入。
+        """
         self._cand_worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
         self._cand_worker.result_ready.connect(self.form.load_candidates)
         self._cand_worker.error.connect(lambda _m: None)
         self._cand_worker.start()
 
     def _on_submit(self):
-        """提交：必填校验（失败则字段级红框+滚动聚焦）→ 后台写库 → 清表单"""
+        """校验必填后后台写库，成功再清表单。
+
+        校验失败时滚动到首个错误控件并聚焦，长表单里用户才知道
+        该改哪里；写库期间禁用按钮，防止连点产生重复记录。
+        """
         missing = self.form.validate()
         if missing:
             show_info_bar(f"请先填写必填项: {'、'.join(missing)}", "warning",
@@ -188,6 +220,7 @@ class EntryPage(QWidget):
                 self._scroll.ensureWidgetVisible(
                     self.form.first_error, 0, 90)
             return
+        # 上一笔仍在写库时直接吞掉点击，避免并发写入同一份表单快照
         if self._save_worker and self._save_worker.isRunning():
             return
         self._btn_submit.setEnabled(False)
@@ -202,6 +235,11 @@ class EntryPage(QWidget):
         self._save_worker.start()
 
     def _on_saved(self, rec_id, occurred_at=None):
+        """写库成功回调：恢复按钮、记住发生日期、清表单并通知记录页。
+
+        发生日期只在开关打开时由表单带出；没有值就不覆盖上次记录，
+        否则「沿用上一条日期」的默认值会被一次空值抹掉。
+        """
         self._btn_submit.setEnabled(True)
         if occurred_at:
             aftersale_db.save_last_occurred(str(occurred_at))
@@ -216,5 +254,9 @@ class EntryPage(QWidget):
             page.refresh_async()
 
     def _on_save_error(self, msg):
+        """写库失败回调：恢复提交按钮并保留表单内容。
+
+        不清表单是为了让用户改完就能重试，错误信息由 InfoBar 展示。
+        """
         self._btn_submit.setEnabled(True)
         show_info_bar(msg, "error", title="提交失败", parent=self, duration=4000)

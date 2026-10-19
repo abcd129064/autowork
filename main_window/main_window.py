@@ -33,6 +33,8 @@ from workers.kd_status_worker import _KdStatusQueryWorker
 from qfluentwidgets import Dialog
 
 
+# 规则按顺序求值、首条命中即返回：排在后面的规则对同一行永远不会生效，
+# 所以更具体的规则必须排在更宽泛的规则之前，否则会被前面的规则整条吞掉。
 def _match_log_rule(line, rules):
     """返回首个命中规则的 (color, name, notify)，未命中返回 (None, None, False)（notify 决定是否弹 InfoBar）"""
     for r in rules:
@@ -48,6 +50,8 @@ class _DbSettingsDialog(MessageBoxBase):
         super().__init__(parent)
         self._card = card
         self.viewLayout.addWidget(card)
+        # 卡片自带「测试连接/保存」，对话框只当容器用：隐藏 yesButton 是为了
+        # 不让两个确认按钮并列，否则用户会以为点对话框按钮就会提交卡片里的修改。
         self.yesButton.setText("关闭")
         self.yesButton.setVisible(False)
         self.cancelButton.setText("关闭")
@@ -59,6 +63,8 @@ class _LogLoadWorker(QThread):
     loaded = Signal(list, int, bool, float)  # lines_data(line,color,name,notify), line_count, truncated, size_mb
     error = Signal(str)
 
+    # tail_bytes 做成参数而不是常量，是为了让测试用很小的阈值验证截断路径，
+    # 不必为了造一个超大文件而写几十 MB 的临时内容。
     def __init__(self, path, rules, tail_bytes=2 * 1024 * 1024):
         super().__init__()
         self.path = path
@@ -102,6 +108,8 @@ class _LogLoadWorker(QThread):
 
 
 
+# Mixin 必须排在 FluentWindow 之前：MRO 从左到右解析，页面代码调到的
+# _load_settings/_save_settings 要先命中 SettingsMixin，基类放最后才不会被遮蔽。
 class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin, FluentWindow):
     """主窗口：组合 SettingsMixin / ProcessMixin / RemoteMixin / UIMixin / UpdateMixin
 
@@ -182,6 +190,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _reapply_mica(self):
         """兜底重设云母（DWMWA_SYSTEMBACKDROP_TYPE + HOSTBACKDROP）"""
+        # 云母纯属观感：窗口销毁与这次重设存在竞态，winId 失效会抛 RuntimeError，
+        # 吞掉即可，不该因为背景特效失败而中断显示流程。
         try:
             if self.isMicaEffectEnabled() and self.isVisible():
                 self.windowEffect.setMicaEffect(self.winId(), isDarkTheme())
@@ -215,6 +225,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         # 页面通过 getattr(self.window(), "_remote_bridge", None) 取远程会话中心
         # （全局单例，与球桌面板/主窗口远程面板共享同一 frpc 进程）
         self._remote_bridge = get_session_manager()
+        from windows.remote_session.tunnel_notice import install as _install_tunnel_notice
+        _install_tunnel_notice(self._remote_bridge)
+        # 会话面板/窗口工厂（B2）：core 只调 create_*，实现与重依赖留在 windows 层
+        from windows.remote_session.session_ui import install as _install_session_ui
+        _install_session_ui(self._remote_bridge)
 
         self.management_hub = ManagementHub(self)
         self.aftersale_hub = AftersaleHub(self)
@@ -281,6 +296,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 "cameraHub": self.camera_hub,
                 "toolHub": self.tool_hub,
             }
+            # 相机面板加载失败时 camera_hub 是 None，配置项却可能仍指向它；
+            # 取到 None 就停在当前页而不是抛错，避免启动流程卡在异常分支里。
             target = pages.get(key)
             if target is not None and self.stackedWidget.currentWidget() is not target:
                 self.switchTo(target)
@@ -289,6 +306,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _apply_all_table_smooth(self, scope: str = "all"):
         """统一设置页任意表格平滑开关变更 → 刷新三个 Hub + 已打开远程窗口"""
+        # 已弹出的独立窗口不挂在 Hub 树内，扫不到，只能单独通知远程窗口那份实现；
+        # 少调一个就会出现「内嵌表变平滑、弹出窗口还是旧行为」的不一致。
         self.management_hub._apply_table_smooth_all()
         self.ledger_hub._apply_table_smooth_all()
         self.remote_hub._apply_table_smooth_all()
@@ -305,6 +324,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         """
         if page is None:
             return
+        # 用 _hub_container 属性而非 isinstance 判断：页面由各 Hub 注册，
+        # 主窗口不该反过来 import 全部 Hub 类型；普通页没有该属性，直接切即可。
         hub = getattr(page, "_hub_container", None)
         if hub is not None:
             self.switchTo(hub)
@@ -314,6 +335,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def open_aftersale_records_for(self, table_no: str):
         """球桌右键「查看售后记录」→ 售后 Hub 记录页按桌号预筛选"""
+        # 目标是 Hub 本身而不是子页，走 switchTo 即可；交给 switch_to_page
+        # 反而会因为 Hub 没有 _hub_container 而多绕一层。
         self.switchTo(self.aftersale_hub)
         self.aftersale_hub.open_records_for_table(table_no)
 
@@ -411,6 +434,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     @property
     def health_page(self):
+        """ManagementHub.health_page（设备健康度页，预警项跳转的目标页）"""
         return getattr(self.management_hub, "health_page", None)
 
     @property
@@ -447,7 +471,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         # 初始化设备代码列表 - 扫描 videos 目录下的设备文件夹
         self._load_device_list()
 
-        # 在日志区域显示欢迎信息
+        # 欢迎信息只进日志区、不弹 InfoBar：启动阶段弹窗会挡住用户先去点设备，
+        # 而路径这类排查信息留在日志里，事后还能翻。
         self._append_log("欢迎使用 AutoWork 工具！")
         self._append_log(f"程序目录: {self.exe_dir}")
         self._append_log(f"视频目录: {self.videos_dir}")
@@ -518,6 +543,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _init_fallback_backup(self):
         """启动周备份：启动后延迟首次检查 + 每 24h 重复（仅 MySQL 主模式生效）"""
+        # worker 引用挂在实例上而不是用局部变量：QThread 一旦被 GC 回收，
+        # 正在运行的 run() 会连带析构，Windows 上表现为进程直接异常退出。
         self._backup_worker = None
         self._backup_timer = QTimer(self)
         self._backup_timer.setInterval(24 * 60 * 60 * 1000)  # 24h
@@ -531,6 +558,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         from database import backend
         if not backend.is_mysql_test_mode():
             return
+        # 单飞守卫：24h 定时器与启动延迟检查可能撞在一起，两个备份线程并发
+        # 会重复读写同一批表，结果提示也会连弹两次。
         if self._backup_worker and self._backup_worker.isRunning():
             return
         from workers.backup_worker import BackupWorker
@@ -542,6 +571,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         """周备份结果提示（未到期跳过时不打扰用户）"""
         if not ok:
             self._show_info_bar(f"MySQL 周备份失败：{msg}", "warning", duration=4000)
+        # count == 0 是「本周未到期、正常跳过」，天天报成功会让成功提示贬值，
+        # 所以只有真的写了数据才提示。
         elif count > 0:
             self._show_info_bar(f"MySQL 周备份完成：{msg}", "success", duration=3000)
 
@@ -553,7 +584,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._cleanup_timer = QTimer(self)
         self._cleanup_timer.setInterval(24 * 60 * 60 * 1000)  # 24h
         self._cleanup_timer.timeout.connect(self._start_cleanup_worker)
-        # 启动后延迟 8s 首次检查，避开启动高峰与周备份（5s）错峰
+        # 启动后延迟 8s 首次检查，与周备份的 5s 首查错开 3s：两个扫表线程
+        # 撞在一起会把启动后头几秒的界面拖到明显卡顿。
         QTimer.singleShot(8000, self._start_cleanup_worker)
         self._cleanup_timer.start()
 
@@ -564,7 +596,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             if not is_enabled():
                 return
         except Exception:
-            pass  # 配置读取异常时仍尝试执行
+            # 读取开关失败时仍执行：清理只删过期数据，静默停掉保留策略的风险
+            # 大于多跑一次的代价。
+            pass
         if self._cleanup_worker and self._cleanup_worker.isRunning():
             return
         from workers.cleanup_worker import CleanupWorker
@@ -583,6 +617,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _init_backend_state_monitor(self):
         """后端状态轮询：降级/恢复时提示用户，并同步更新右侧数据库状态标签"""
         from database import backend
+        # 先记录当前状态作基线：少了它，首轮轮询会把「本来就在线」误判成
+        # 一次状态变化，程序一启动就弹提示。
         self._last_backend_state = backend.get_state()
         self._backend_state_timer = QTimer(self)
         self._backend_state_timer.setInterval(3000)
@@ -599,6 +635,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _refresh_clock(self):
         """工具栏右侧时间标签：按系统时间刷新 HH:mm:ss"""
         try:
+            # 标签缺失（旧布局或裁剪版 UI）不该中断这个 1s 定时器，
+            # 异常直接吞掉，避免每秒刷一条错误日志。
             self.ui.time_label.setText(
                 QDateTime.currentDateTime().toString("HH:mm:ss"))
         except Exception:
@@ -612,11 +650,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             label.setText("数据库: MySQL 在线")
             label.setStyleSheet("color: #1D9E75;")
         else:
+            # 兜底态用琥珀色而不是故障红：走 SQLite 时功能仍然可用，
+            # 用红色会让人误判成「数据库不可用」而去停业务。
             label.setText("数据库: SQLite 兜底")
             label.setStyleSheet("color: #BA7517;")
 
     def _poll_backend_state(self):
         """轮询后端状态，变化时提示并刷新右侧标签"""
+        # 3s 轮询而不是等事件通知：MySQL 空闲断连与恢复都不会主动告知客户端，
+        # 只能靠定期读一次 backend 状态来发现。
         from database import backend
         cur = backend.get_state()
         if cur != self._last_backend_state:
@@ -625,6 +667,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             if cur == backend.STATE_DEGRADED:
                 self._show_info_bar("MySQL 不可用，已切换本地 SQLite 兜底",
                                     "warning", duration=5000)
+            # 只在「从降级恢复」时提示：首次启动本来就在线，不该弹「已恢复在线」。
             elif cur == backend.STATE_ONLINE and prev == backend.STATE_DEGRADED:
                 self._show_info_bar("MySQL 已恢复在线", "success", duration=3000)
             self._refresh_db_status_text()
@@ -632,6 +675,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _db_test_cfg(self) -> dict:
         """从 settings 读取 mysql_sync 连接配置（敏感字段透明解密）"""
         try:
+            # 配置文件里的 mysql_sync 密码是 DPAPI 密文，不解密直接交给
+            # MysqlTestWorker 只会得到认证失败，让人误以为密码配错了。
             from core.secrets import decrypt_settings
             raw = self._load_settings()
             if isinstance(raw, dict) and "mysql_sync" in raw:
@@ -648,6 +693,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             return
         cfg = self._db_test_cfg()
         from workers.mysql_sync_worker import MysqlTestWorker
+        # 引用留在实例上，上面那条「已有测试进行中」的守卫才有对象可查；
+        # 否则连点状态标签会并发打开多个连接去测同一台库。
         self._db_test_worker = MysqlTestWorker(cfg, self)
         self._db_test_worker.finished.connect(self._on_db_test_done)
         self._db_test_worker.start()
@@ -676,6 +723,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _on_open_db_settings(self):
         """右键点击数据库状态：打开数据库设置对话框（复用 MysqlSyncCard）"""
         from windows.mysql_sync_card import MysqlSyncCard
+        # 连接参数编辑/保存/测试全部复用 MysqlSyncCard，主窗口不重复实现一份；
+        # sync_scope="ops" 表示这里改的是运维侧库，与业务域的库分开管理。
         card = MysqlSyncCard(self, sync_scope="ops")
         card.load()
         dlg = _DbSettingsDialog(card, self)
@@ -690,6 +739,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self.ui.write_table.clicked.connect(self.on_open_dir_clicked)
         self.ui.pause_btn.clicked.connect(self._on_pause_clicked)
         # 球桌管理面板入口
+        # 延迟到事件循环下一轮再切页/建窗：在 clicked 的处理栈里直接切换，
+        # 按钮会一直保持按下态，面板构造期间的忙碌也会卡住这次点击的重绘。
         self.ui.table_panel_btn.clicked.connect(lambda: QTimer.singleShot(0, self._on_open_table_panel))
         # 售后面板入口（右侧入口组）
         self.ui.btn_aftersale.clicked.connect(
@@ -701,6 +752,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         # 列表项选择事件
         self.ui.id_list.currentItemChanged.connect(self._on_id_current_changed)
         self.ui.local_video_list.currentItemChanged.connect(self._on_video_current_changed)
+        # 单击只解析帧号并写 cfg.json，双击才真正拉起程序（见 on_log_double_clicked），
+        # 这样浏览日志不会误触发播放。
         self.ui.log_list.itemClicked.connect(self.on_log_selected)
         self.ui.log_list.itemDoubleClicked.connect(self.on_log_double_clicked)
 
@@ -767,6 +820,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _init_log_auto_scroll(self):
         """初始化日志控件的智能自动滚动功能"""
         self._log_at_bottom = True
+        # 新日志到达而用户停在历史位置时，不立刻抢滚动条，而是 1s 后再回到底部：
+        # 给「想看刚刷过去那条」留出时间，期间用户自己滚回底部就取消这次强制滚动。
         self._log_scroll_timer = QTimer(self)
         self._log_scroll_timer.setSingleShot(True)
         self._log_scroll_timer.setInterval(1000)
@@ -777,6 +832,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._log_batch_timer.setInterval(50)
         self._log_batch_timer.setSingleShot(True)
         self._log_batch_timer.timeout.connect(self._flush_log_batch)
+        # 缓冲只存文本，高亮规则在 flush 时才统一求值：规则改了以后新入队的行
+        # 立刻按新规则着色，不必等下一次重建控件。
         self._log_batch_buf: list[str] = []
 
     def _is_log_at_bottom(self):
@@ -788,6 +845,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         """滚动条值变化时更新底部状态标志"""
         sb = self.ui.show_log.verticalScrollBar()
         self._log_at_bottom = (value >= sb.maximum() - 2)
+        # 用户自己滚回底部就撤销待执行的滚动：否则 1s 后那次强制滚动会打断
+        # 正在进行的拖动，表现为滚动条被"抢"回底部。
         if self._log_at_bottom and self._log_scroll_timer.isActive():
             self._log_scroll_timer.stop()
 
@@ -812,6 +871,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 exclude = self._load_settings().get("home_log_exclude_frp")
             if exclude:
                 return
+        # 只入队不直接渲染：frpc 输出可能瞬间几百行，逐条写控件会让布局反复重算，
+        # UI 明显卡顿，50ms 合并一次是实时感与流畅度之间的折中。
         self._log_batch_buf.append(text)
         if not self._log_batch_timer.isActive():
             self._log_batch_timer.start()
@@ -826,8 +887,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
         # 逐行写入 + 字符格式着色
         # （不用 insertHtml：HTML fragment 首块会与目标块合并，导致丢样式/与上行串行）
+        # 同一规则命中多行只记一次：一次异常刷屏会连弹十几个 InfoBar。
         hit_names = []
         cur = self.ui.show_log.textCursor()
+        # 先移到文档末尾：用户可能把光标停在历史行上看内容，不归位的话
+        # 新日志会插进历史中间，顺序全乱。
         cur.movePosition(cur.MoveOperation.End)
         # 光标不在块首则先补一个块：否则 insertText 会与末行尾字符粘在同一行
         if not cur.atBlockStart():
@@ -852,6 +916,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             cursor.movePosition(cursor.Start)
             cursor.movePosition(cursor.Down, cursor.KeepAnchor,
                                 doc.blockCount() - self._LOG_MAX_LINES)
+            # 一次性选中整段再删，而不是逐块 removeBlock：几千行逐块删除每次
+            # 都触发一次文档重排，截断本身就成了卡顿源。
             cursor.removeSelectedText()
             cursor.deleteChar()  # 删除选区末尾残留的换行符
 
@@ -886,6 +952,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         hint = getattr(list_widget, '_empty_hint', None)
         if hint is None:
             return
+        # 用 setHidden 过滤的列表项不会从 count 里消失，所以不能只判 count == 0，
+        # 还要看有没有可见项，否则搜索无结果时列表区是空白而非占位提示。
         n = list_widget.count()
         if n == 0:
             hint.show()
@@ -904,6 +972,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             return
 
         # 查找所有匹配的 exe 文件
+        # 只认名字含 SnookerTracking 的 exe：同目录还放着调试版/旧版程序，
+        # 全列出来会导致选错程序，帧号与视频对不上。
         pattern = os.path.join(exe_dir, "*SnookerTracking*.exe")
         exe_files = glob.glob(pattern)
 
@@ -913,6 +983,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
         # 清空并添加文件列表
         self.ui.choose_exe.clear()
+        # 按文件名排序：glob 的返回顺序不保证，不排的话每次刷新同一程序会跳位。
         for exe_path in sorted(exe_files):
             exe_name = os.path.basename(exe_path)
             self.ui.choose_exe.addItem(exe_name)
@@ -945,9 +1016,12 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self._update_empty_hint(self.ui.id_list)
             return
 
-        # 清空并添加设备代码列表（自然排序：数字段按数值比较）
+        # 清空并添加设备代码列表；批量填充期间关掉重绘——几百个设备逐项
+        # addItem 会闪屏，耗时也翻几倍。
         self.ui.id_list.setUpdatesEnabled(False)
         self.ui.id_list.clear()
+        # 自然排序而非字典序：设备码带数字序号，字典序会把 1001 排到 999
+        # 前面，找设备时容易看漏。
         for code in sorted(device_codes, key=natural_sort_key):
             self.ui.id_list.addItem(code)
         self.ui.id_list.setUpdatesEnabled(True)
@@ -979,11 +1053,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         log_files = []
 
         # 路径1：日期子目录下的 txt 和 log 文件
+        # 两种扩展名都收：.txt 是程序按天汇总的文本日志，.log 是旧版直接落盘的
+        # 原始输出，只收一种就会漏掉另一批。
         if os.path.exists(date_dir):
             log_files += glob.glob(os.path.join(date_dir, '*.txt'))
             log_files += glob.glob(os.path.join(date_dir, '*.log'))
 
         # 路径2：设备根目录下文件名以 YYYYMMDD_ 开头的日志文件
+        # 路径2 兼容历史版本：早期程序把日志直接写在设备根目录、文件名带
+        # YYYYMMDD_ 前缀，不扫这里就看不到那批老日志。
         date_prefix = date_str.replace('-', '')  # e.g. "20251128"
         try:
             for fname in os.listdir(device_dir):
@@ -994,7 +1072,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                     continue
                 # 匹配 YYYYMMDD_ 前缀
                 if fname.startswith(date_prefix + '_'):
-                    # 避免与日期子目录中已找到的文件重复（按文件名去重）
+                    # 同一文件可能同时命中路径1与路径2（日期子目录与根目录同名），
+                    # 按 basename 判重，否则第二列会出现两条一模一样的记录。
                     if not any(os.path.basename(p) == fname for p in log_files):
                         log_files.append(fpath)
         except OSError as e:
@@ -1007,18 +1086,24 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self._show_info_bar(f"{device_code} 下未找到 {date_str} 的日志", "warning")
             return
 
+        # 与设备列表同理：关掉重绘再批量填充，几百条日志时差别肉眼可见。
         self.ui.local_video_list.setUpdatesEnabled(False)
+        # 按完整路径排序：日期子目录的条目排在根目录之前，组内文件名本身带
+        # YYYYMMDD_HHMMSS，天然就是时间序，不必再解析时间。
         for log_path in sorted(log_files):
             # 只显示文件名，如 20260705_131009.log
             self.ui.local_video_list.addItem(os.path.basename(log_path))
         self.ui.local_video_list.setUpdatesEnabled(True)
 
-        # 列表重载后重新应用搜索过滤
+        # 重建列表会清掉 setHidden 状态：不按当前关键字重放一次过滤，
+        # 就会出现搜索框有关键字、列表却显示全量。
         self._on_video_search_changed(self.ui.video_search.text())
         self._update_empty_hint(self.ui.local_video_list)
 
         self._append_log(f"[日志目录] {device_code}/{date_str} 下有 {len(log_files)} 个日志文件")
 
+    # 切换设备时必须立刻清空第三列：残留下来的上一台设备日志会被误读成
+    # 当前设备的记录，接着算出的帧号也就跟着错。
     def _load_logs_for_device(self, device_code):
         """初始化第三列为空，等待点击日志后展示内容"""
         self.ui.log_list.clear()
@@ -1044,6 +1129,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _on_search_shortcut(self):
         """Ctrl+F：根据焦点所在列表切换对应搜索框的显示/隐藏"""
+        # 窗口失焦时 focusWidget() 返回 None，会落到最后的分支打开设备搜索，
+        # 这是可接受的默认行为（Ctrl+F 最常用于在设备列表里找人）。
         focused = self.focusWidget()
         # 焦点在日志内容列表（或其过滤框）→ 操作 log_filter（第三态）
         if focused is self.ui.log_list or focused is self.ui.log_filter:
@@ -1072,6 +1159,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _hide_id_search(self):
         """隐藏设备搜索框，清空内容并恢复完整设备列表"""
+        # 屏蔽信号再 clear：clear 会触发 textChanged → 先全部清空再恢复显示，
+        # 中间那一帧列表会闪一下。
         self.ui.id_search.blockSignals(True)
         self.ui.id_search.clear()
         self.ui.id_search.blockSignals(False)
@@ -1082,6 +1171,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _hide_video_search(self):
         """隐藏日志文件搜索框，清空内容并恢复完整列表"""
+        # 同样先屏蔽信号：clear 触发的 textChanged 会走一遍全列表过滤，
+        # 紧接着又要逐项恢复显示，等于白做两次遍历。
         self.ui.video_search.blockSignals(True)
         self.ui.video_search.clear()
         self.ui.video_search.blockSignals(False)
@@ -1092,6 +1183,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _hide_log_filter(self):
         """隐藏日志内容过滤框，清空关键字并恢复全部行显示"""
+        # 状态位先置 False：布局切换钩子按它恢复可见性，晚置会把刚隐藏的
+        # 过滤框又显示回来。
         self._log_filter_shown = False
         self.ui.log_filter.blockSignals(True)
         self.ui.log_filter.clear()
@@ -1250,6 +1343,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 cached_view.exec(picker.mapToGlobal(QPoint(x, y)))
 
             # 替换原始方法
+            # 替换私有方法而不是加事件过滤器：qfw 的日历每次点击都新建一个
+            # CalendarView 再 exec，首帧要重建整棵月历控件，实测 0.5s 起步。
             picker._showCalendarView = _fast_show_calendar_view
             # 保存引用防止 GC
             picker._cached_calendar_view = cached_view
@@ -1274,6 +1369,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._frame_offset_save_timer.setInterval(500)
         self._frame_offset_save_timer.setSingleShot(True)
         self._frame_offset_save_timer.timeout.connect(self._save_frame_offset)
+        # 接 start 而不是直接连 _save_frame_offset：每次输入都重新计时，
+        # 实现「停止输入 500ms 才落盘一次」。
         self.ui.input_frame.textChanged.connect(self._frame_offset_save_timer.start)
 
     def _save_frame_offset(self):
@@ -1282,6 +1379,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             val = int(self.ui.input_frame.text().strip())
         except ValueError:
             return
+        # 与已存值比较后再写：_save_settings 要整份解密-合并-加密，
+        # 光标移动等不改变数值的触发不该白白多一次写盘。
         if val != self._load_settings().get("frame_offset"):
             self._save_settings({"frame_offset": val})
             self._append_log(f"[配置] 已保存帧偏移: {val}")
@@ -1294,6 +1393,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _get_frame_input_value(self):
         """获取输入框中的帧数值，默认 400"""
+        # 回退 400 而不是 0：0 是合法起始帧，会被原样写进 cfg.json，
+        # 三端程序从片头开播，与日志里的实际帧号差出整段视频。
         try:
             return int(self.ui.input_frame.text().strip())
         except (ValueError, AttributeError):
@@ -1319,6 +1420,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             return result
         elif self.ui.input_frame_set.isChecked():
             offset = self._get_frame_input_value()
+            # 帧后只加偏移、不做负值钳制：偏移由用户显式输入，真的算成负数说明
+            # 输入本身异常，保留原值才能在下游报错里看出来源，钳成 0 会掩盖问题。
             result = log_frame_id + offset
             self._append_log(f"  [模式] 帧后: {log_frame_id} + {offset} = {result}")
             return result
@@ -1365,11 +1468,14 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
         # 3. 恢复之前选中的设备，并重新加载其日志目录（第二列）
         if saved_device_code:
+            # 刷新后列表项都是新建的，只能按文本重新定位；找不到就保持无选中，
+            # 不要退而选第一项，否则用户会莫名跳到别的设备上。
             for i in range(self.ui.id_list.count()):
                 if self.ui.id_list.item(i).text() == saved_device_code:
                     self.ui.id_list.setCurrentItem(self.ui.id_list.item(i))
                     self._load_videos_for_device(saved_device_code)
                     break
+            # 设备重载后第三列内容已经失效，清空避免旧日志挂在新设备名下。
             self.ui.log_list.clear()
 
         self._append_log("[刷新] 完成")
@@ -1385,6 +1491,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
         device_code = self.ui.id_list.currentItem().text()
         date_str = self._get_selected_date_str()
+        # 文件名由采集端按天固定为 daily_{日期}.txt，这里直接拼而不扫目录：
+        # 扫目录会把同目录的历史日志也当成当天的 CPP 日志打开。
         daily_path = os.path.join(
             self.videos_dir, device_code, f"daily_{date_str}.txt"
         )
@@ -1394,6 +1502,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self._show_info_bar(f"CPP 日志文件不存在: {daily_path}", "warning")
             return
 
+        # 交给系统默认程序打开，不自己读文件：daily_*.txt 可能几百 MB，
+        # 读进内存再渲染会把整个界面拖住。
         os.startfile(daily_path)
         self._append_log(f"[CPP日志] 已打开: {daily_path}")
 
@@ -1413,6 +1523,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self._show_info_bar("目录不存在", "warning")
             return
 
+        # 直接打开设备目录而不是视频根目录：排查问题的下一步基本都是把
+        # 日志/视频拖出来，少一层层点进去。
         os.startfile(device_dir)
         self._append_log(f"[打开目录] {device_dir}")
 
@@ -1476,6 +1588,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 try:
                     win.open_entry_with_context(ctx)
                 except Exception:
+                    # 各面板的预填入口实现不一，旧面板可能没有这个方法；
+                    # 退化成「只弹出不预填」，比整次点击报错好。
                     pass
             self._append_log(
                 f"[跑视频] 已弹出跑视频面板并预填会话: 球房={ctx['room_name'] or '-'} "
@@ -1491,7 +1605,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _open_config_file(self, name: str):
         """打开指定配置文件（菜单栏「配置」下拉项 / Ctrl+, 快捷键）"""
         if name == "settings.json":
-            # 拆分后配置位于 config/ 目录（settings.json 已迁移为 .bak）
+            # 拆分后配置位于 config/ 目录（settings.json 已迁移为 .bak）；
+            # 打开目录而不是单个文件——真正的配置已拆成多个文件，逐个看才全。
             try:
                 from core import app_settings
                 path = app_settings.config_dir()
@@ -1503,6 +1618,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             os.startfile(path)
             self._append_log(f"[配置] 已打开配置目录: {path}")
             return
+        # cfg.json 跟着 exe 目录走而不是跟着用户配置走：它是程序侧的帧号/视频路径，
+        # 换一个程序版本就该读那一份，混进 config/ 会串版本。
         elif name == "cfg.json":
             path = os.path.join(self.exe_dir, "cfg.json")
         else:  # frpc_xtcp_panel.toml（唯一 frp 持久化配置）
@@ -1582,7 +1699,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self._log_worker.requestInterruption()
             self._log_worker.wait(500)
 
-        # 清空列表并显示加载提示
+        # 先占位再启动线程：后台读文件要几百毫秒，界面空着用户会以为点了
+        # 没反应，往往连点几次，反而触发多次加载。
         self.ui.log_list.clear()
         self.ui.log_list.addItem("加载中...")
 
@@ -1609,9 +1727,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         try:
             from workers.collect_worker import clip_base_name
             base = clip_base_name(log_filename)
+            # 取不到时间戳前缀就无法反查（kd 照片按同一前缀命名），
+            # 直接放弃比拿空串去查库省一次往返。
             if not base:
                 return
             date_str = self._get_selected_date_str()
+            # 引用挂到实例上：局部变量出作用域后 worker 会被 GC 回收，
+            # 正在跑的查询会随机丢失结果。
             self._kd_status_worker = _KdStatusQueryWorker(
                 device_code, date_str, base, self)
             self._kd_status_worker.done.connect(self._on_kd_status_queried)
@@ -1622,6 +1744,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def _on_kd_status_queried(self, info):
         """kd 反查结果回主线程：状态栏展示（含耗时提示与醒目分类）"""
         try:
+            # 查无记录是常态（该时段没拍 kd 照片），只更新状态栏不弹 InfoBar，
+            # 否则逐条点日志会被弹窗糊满屏。
             if not info:
                 self._show_kd_status_message("未找到对应 kd 记录")
                 return
@@ -1640,6 +1764,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         """状态栏显示 kd 反查结果；accent 非空时临时醒目着色，超时恢复"""
         self._show_status_message(msg, timeout)
         if accent:
+            # 着色只在这条消息的有效期内：到点清样式，否则下一条普通状态会
+            # 继承上次的强调色，红的黄的混在一起就分不清严重程度了。
             self._status_message.setStyleSheet(f"color: {accent}; font-weight: 600;")
             QTimer.singleShot(timeout, self._status_message.clearStyleSheet)
 
@@ -1650,6 +1776,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         日期变化 → dateChanged 重载；最后 _locate_video_item 定位选中
         （setCurrentItem 触发 on_video_selected 加载日志内容）。
         """
+        # 最小化时先还原再激活：窗口还停在任务栏里，raise_ 与 activateWindow
+        # 都不会把它带回屏幕，用户只会听到提示音却看不到窗口。
         if self.isMinimized():
             self.showNormal()
         else:
@@ -1659,6 +1787,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
         # 1. 选中设备（不在列表时刷新一次重试）
         target = None
+        # 最多重试两次：设备目录可能是刚创建的，本地列表还没刷新；
+        # 刷新一次仍找不到就是真的不存在，继续循环只是空转。
         for _ in range(2):
             for i in range(self.ui.id_list.count()):
                 if self.ui.id_list.item(i).text() == device_dir:
@@ -1695,8 +1825,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _on_log_loaded(self, lines_data, line_count, truncated, size_mb):
         """日志加载完成，填充 UI"""
+        # 几千行逐条 addItem，不关重绘会看到列表从头滚到尾的闪烁，耗时也是数倍。
         self.ui.log_list.setUpdatesEnabled(False)
         self.ui.log_list.clear()
+        # 颜色在 worker 里算好、随行一起带回来：主线程只负责套 QBrush，
+        # 不重跑正则，几千行也不会卡住界面。
         for line, color, _name, _notify in lines_data:
             item = QListWidgetItem(line)
             if color:
@@ -1704,7 +1837,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self.ui.log_list.addItem(item)
         self.ui.log_list.setUpdatesEnabled(True)
         self._update_empty_hint(self.ui.log_list)
-        # 日志文件命中通知规则 → InfoBar（仅 notify=True 的规则，复用 10s 防抖）
+        # 命中通知规则 → InfoBar（仅 notify=True，复用 10s 防抖）。放到渲染循环
+        # 之后单独扫一遍：在批量填充里弹窗会打断填充，拖慢整次加载。
         now = time.time()
         for _line, _color, name, notify in lines_data:
             if notify and name and now - self._rule_last_notify.get(name, 0) >= 10:
@@ -1714,6 +1848,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         # B3: 重载后重新应用过滤条件
         self._reapply_log_filter()
 
+        # 截断时必须说明「只显示尾部」：否则用户会以为日志从第一行开始，
+        # 照着缺失的开头去排查问题。
         if truncated:
             self._append_log(f"[日志内容] 文件 {size_mb:.1f}MB 过大，仅显示尾部 {line_count} 行")
             self._show_info_bar(f"大文件仅加载尾部 {line_count} 行", "warning")
@@ -1721,10 +1857,14 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             self._append_log(f"[日志内容] 已加载 {line_count} 行")
             self._show_info_bar(f"日志已加载 {line_count} 行", "success")
         self._update_status_logs(line_count)
+        # 线程已结束，置空引用让它及时被回收；下次选中同一文件也要新建线程，
+        # 否则会对着一个已结束的 QThread 调 isRunning 做无意义的等待。
         self._log_worker = None
 
     def _on_log_load_error(self, error_msg):
         """日志加载失败"""
+        # 失败也要清空第三列并复位当前路径：留着上一次的日志内容会让用户
+        # 以为这次打开成功了，后续右键定位还会指向旧文件。
         self._append_log(f"[错误] 无法读取日志文件: {error_msg}")
         self._show_info_bar(f"无法读取日志文件: {error_msg}", "error")
         self.ui.log_list.clear()
@@ -1739,6 +1879,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._append_log(f"\n[日志选中] {log_line}")
 
         # 解析日志：提取帧数
+        # 只认 frame_id：同一行里还有时间和其它数字，用宽松正则会把时间戳
+        # 当成帧号，算出来的起始帧完全错位。
         frame_match = re.search(r'frame_id:(\d+)', log_line)
         if not frame_match:
             self._append_log("[警告] 日志中未找到 frame_id")
@@ -1758,6 +1900,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
             return
 
         log_filename = self.ui.local_video_list.currentItem().text()
+        # 日志与录屏由采集端同名落盘，只差扩展名：直接换后缀就能找到配套视频，
+        # 不必在视频目录里再搜一遍。
         video_name = os.path.splitext(log_filename)[0] + '.mp4'
         # 视频查找路径：优先 videos/videos/，其次 videos/{device_code}/
         video_path_primary = os.path.join(self.videos_dir, "videos", video_name)
@@ -1768,6 +1912,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         elif os.path.exists(video_path_device):
             video_path = video_path_device.replace(os.sep, '/')
         else:
+            # 两处都不存在也写主路径：cfg.json 里留一个明确路径，好过留空让
+            # 三端程序沿用上一局的视频。
             video_path = video_path_primary.replace(os.sep, '/')
         self.current_video = video_path
 
@@ -1781,6 +1927,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
     def on_log_double_clicked(self, item):
         """日志列表项双击事件 - 解析日志、更新cfg.json并启动程序"""
         # 如果已有程序在运行，先自动结束旧程序
+        # 先结束旧进程再开新的：两个播放实例会抢同一份 cfg.json，
+        # 后启动的读到的是被前一个改过的帧号。
         if self.running_process is not None:
             self._append_log("\n[双击] 检测到已有程序运行，自动结束旧程序...")
             self.on_end_clicked()
@@ -1793,14 +1941,18 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _on_date_changed(self, date):
         """日期改变时重新加载第二列日志列表"""
+        # 日期一变，当天日志集合就是另一批文件，只能整体重扫；没选设备时
+        # 直接跳过，否则会用空设备码去拼路径。
         current_device = self.ui.id_list.currentItem()
         if current_device:
             device_code = current_device.text()
             self._load_videos_for_device(device_code)
+            # 换日期后第二列整体换了内容，第三列留着旧日志会与所选文件对不上。
             self.ui.log_list.clear()
 
     def _on_exe_changed(self, exe_name):
         """程序下拉框改变时保存选择到配置文件"""
+        # 下拉框清空重建时会短暂给出空字符串，空值不该覆盖上次保存的选择。
         if exe_name:
             self._save_settings({"last_exe": exe_name})
             self._append_log(f"[配置] 已保存程序选择: {exe_name}")
@@ -1810,6 +1962,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def _connect_sftp_download_signal(self):
         """A1: 连接 SFTP 下载完成全局信号（延迟 import，避免潜在循环依赖）"""
+        # 延迟导入不是风格问题：sftp_window 反过来依赖主窗口侧的工具函数，
+        # 放到模块顶层会形成循环导入，主窗口直接起不来。
         try:
             from windows.remote_session.sftp_window import GLOBAL_SIGNALS
         except Exception as e:
@@ -1827,6 +1981,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self._show_info_bar(f"已接收 SFTP 下载文件 {fname}", "success")
 
         # 1. 设备目录名非空且不在列表 → 刷新设备列表，然后选中该设备
+        # 切设备与切日期都会让第二列自动重载，用标志位记录是否还需要手动刷，
+        # 避免同一份列表被重建两次。
         reload_pending = True  # 是否需要手动刷新第二列
         if device_code:
             names = [self.ui.id_list.item(i).text()
@@ -1874,11 +2030,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         else:
             rel = os.path.basename(file_path)
         parts = rel.replace('\\', '/').split('/')
+        # 只有落在日期子目录里的文件，路径第一段才是 YYYY-MM-DD；根目录文件
+        # parts 只有文件名一段，不能拿它当日录解析。
         if len(parts) >= 2:
             qdate = QDate.fromString(parts[0], "yyyy-MM-dd")
             if qdate.isValid():
                 return qdate
         fname = parts[-1]
+        # 日期子目录解析失败时再按文件名前缀兜底：根目录那批老日志的时间
+        # 只体现在 YYYYMMDD_ 前缀里。
         if len(fname) >= 9 and fname[8] == '_':
             qdate = QDate.fromString(fname[:8], "yyyyMMdd")
             if qdate.isValid():
@@ -1891,12 +2051,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         target = None
         for i in range(list_w.count()):
             item = list_w.item(i)
+            # 只定位可见项：关键字过滤还在时目标可能被隐藏，选中它看起来像没反应。
             if item.text() == fname and not item.isHidden():
                 target = item
                 break
         if target is None:
             self._append_log(f"[SFTP] 第二列未找到下载文件: {fname}（可能不属于当前日期）")
             return
+        # 选中后必须 scrollToItem：刚下载的文件按名字排序往往落在列表末尾，
+        # 不滚动的话只剩背景闪烁在屏幕外，用户看不到定位结果。
         list_w.setCurrentItem(target)
         list_w.scrollToItem(target)
         self._flash_list_item(target)
@@ -1905,6 +2068,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         """列表项背景色闪烁提示（主题色 ↔ 原背景交替，结束后恢复）"""
         accent = QBrush(QColor(self._theme_color))  # 与主题强调色一致
         orig = item.data(Qt.BackgroundRole)
+        # 计数放进可变容器：闭包里对局部变量赋值只会新建绑定，_tick 读到的
+        # 永远是初始值，闪烁就不会停止。
         state = {'n': 0}
 
         def _tick():
@@ -1922,6 +2087,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def closeEvent(self, event):
         """主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程"""
+        # 必须先释放业务资源再交给 Qt 销毁窗口：顺序反了，shutdown 里的回调
+        # 可能打到已销毁的控件上，Windows 下直接是 access violation。
         shutdown_main_window(self)
 
         super().closeEvent(event)

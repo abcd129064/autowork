@@ -17,6 +17,7 @@ import pytest
 import core.frp_remote as fr
 import windows.remote_session.remote_hub as rh
 from core.frp_remote import RemoteSessionManager
+from windows.remote_session.session_ui import install as _install_session_ui
 
 
 SETTINGS = {
@@ -32,6 +33,7 @@ def mgr(monkeypatch, tmp_path):
     monkeypatch.setattr(fr, "get_app_dir", lambda: str(tmp_path))
     monkeypatch.setattr(fr, "_load_settings", lambda: dict(SETTINGS))
     m = RemoteSessionManager()
+    _install_session_ui(m)   # _do_open 经工厂构造面板（B2 后 core 不再 import windows）
     m._logs = []
     m.log_message.connect(m._logs.append)
     return m
