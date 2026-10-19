@@ -15,7 +15,9 @@ settings.json 字段：
     # 弹出菜单/绘制时动态检查，开关切换后下一次弹出即生效
 """
 
-from core import app_settings
+from core import (app_settings, perf_diagnostics, perf_patch_acrylic,
+    perf_patch_menu, perf_patch_mica, perf_patch_switch,
+    perf_patch_table_hover, perf_settings)
 
 # 模块级运行时状态（None = 尚未从配置门面加载）
 _acrylic_enabled: bool | None = None
@@ -54,28 +56,15 @@ def _load_perf_settings():
     """从配置门面 perf 域加载性能选项（首次调用时执行，含旧字段迁移）"""
     global _acrylic_enabled, _animation_enabled, _table_smooth_enabled
     global _lean_delegate_enabled
-    acrylic, animation, table_smooth = True, True, False
     try:
-        data = app_settings.get_domain("perf")
-        if "perf_acrylic" in data:
-            acrylic = bool(data["perf_acrylic"])
-        elif data.get("performance_mode") in (True, "true"):
-            acrylic = False  # 旧字段迁移
-        if "perf_animation" in data:
-            animation = bool(data["perf_animation"])
-        elif data.get("performance_mode") in (True, "true"):
-            animation = False  # 旧字段迁移
-        if "perf_table_smooth" in data:
-            table_smooth = bool(data["perf_table_smooth"])
-        # 轻量表格委托（P0-1）：默认开启，关闭即回退库自带 delegate
-        _lean = data.get("perf_lean_delegate", True)
-        _lean = _lean if isinstance(_lean, bool) else str(_lean) != "false"
+        cfg = perf_settings.resolve_global_settings(
+            app_settings.get_domain("perf"))
     except Exception:
-        _lean = True
-    _acrylic_enabled = acrylic
-    _animation_enabled = animation
-    _table_smooth_enabled = table_smooth
-    _lean_delegate_enabled = _lean
+        cfg = perf_settings.default_global_settings()
+    _acrylic_enabled = cfg["acrylic"]
+    _animation_enabled = cfg["animation"]
+    _table_smooth_enabled = cfg["table_smooth"]
+    _lean_delegate_enabled = cfg["lean_delegate"]
 
 
 def is_acrylic_enabled() -> bool:
@@ -111,14 +100,11 @@ def set_table_smooth_scroll_enabled(enabled: bool):
 def _load_panel_table_overrides():
     """从配置门面 perf 域加载各面板的平滑滚动覆盖值（未设置的面板不在 dict 中）"""
     global _panel_table_overrides
-    ov = {}
     try:
-        data = app_settings.get_domain("perf")
-        for panel, key in _PANEL_TABLE_KEYS.items():
-            if key in data:
-                ov[panel] = bool(data[key])
+        ov = perf_settings.panel_overrides(
+            app_settings.get_domain("perf"), _PANEL_TABLE_KEYS)
     except Exception:
-        pass
+        ov = {}
     _panel_table_overrides = ov
 
 
@@ -126,12 +112,10 @@ def get_table_smooth(panel: str | None = None) -> bool:
     """生效的表格平滑滚动：指定面板优先读其覆盖值，未设置回退全局开关"""
     if _table_smooth_enabled is None:
         _load_perf_settings()
-    if panel:
-        if _panel_table_overrides is None:
-            _load_panel_table_overrides()
-        if panel in _panel_table_overrides:
-            return _panel_table_overrides[panel]
-    return _table_smooth_enabled
+    if panel and _panel_table_overrides is None:
+        _load_panel_table_overrides()
+    return perf_settings.effective_value(
+        _table_smooth_enabled, _panel_table_overrides, panel)
 
 
 def set_table_smooth(panel: str | None, enabled: bool | None):
@@ -213,14 +197,11 @@ def apply_table_smooth_globally():
 def _load_panel_animation_overrides():
     """从配置门面 perf 域加载各面板的动画覆盖值（未设置的面板不在 dict 中）"""
     global _panel_animation_overrides
-    ov = {}
     try:
-        data = app_settings.get_domain("perf")
-        for panel, key in _PANEL_ANIMATION_KEYS.items():
-            if key in data:
-                ov[panel] = bool(data[key])
+        ov = perf_settings.panel_overrides(
+            app_settings.get_domain("perf"), _PANEL_ANIMATION_KEYS)
     except Exception:
-        pass
+        ov = {}
     _panel_animation_overrides = ov
 
 
@@ -228,12 +209,10 @@ def get_animation(panel: str | None = None) -> bool:
     """生效的弹出动画：指定面板优先读其覆盖值，未设置回退全局开关"""
     if _animation_enabled is None:
         _load_perf_settings()
-    if panel:
-        if _panel_animation_overrides is None:
-            _load_panel_animation_overrides()
-        if panel in _panel_animation_overrides:
-            return _panel_animation_overrides[panel]
-    return _animation_enabled
+    if panel and _panel_animation_overrides is None:
+        _load_panel_animation_overrides()
+    return perf_settings.effective_value(
+        _animation_enabled, _panel_animation_overrides, panel)
 
 
 def set_animation(panel: str | None, enabled: bool):
@@ -268,40 +247,8 @@ def _menu_panel_key(menu) -> str | None:
 
 
 def patch_table_hover_repaint():
-    """中央拦截 TableBase hover 重绘：鼠标扫过行时只重绘新旧两行条带（幂等）
-
-    背景：qfluentwidgets TableBase._setHoverRow 在 hover 行变化时调用
-    viewport().update()（无参=整视口重绘）。2K 分辨率 + 每页 50 行内嵌
-    cellWidget（售后/跑视频操作列）时，鼠标每划过一行就整表重绘一次，
-    与滚轮滚动的重绘叠加后是低配机掉帧的主因之一。改为仅 update 新旧
-    两行的水平条带（行高固定 36/40px），重绘面积约降至 1/25；
-    hover 高亮效果不变（delegate.paint 按 hoverRow 判断，逐格裁剪绘制）。
-    """
-    try:
-        from qfluentwidgets.components.widgets.table_view import TableBase
-    except Exception:
-        return
-    if getattr(TableBase, "_perf_hover_patched", False):
-        return
-
-    def _setHoverRow(self, row):
-        old = self.delegate.hoverRow
-        if old == row:
-            return
-        self.delegate.setHoverRow(row)
-        vp = self.viewport()
-        total = self.model().rowCount()
-        for r in (old, row):
-            if r is None or not 0 <= r < total:
-                continue
-            h = self.rowHeight(r)
-            if h <= 0:
-                continue
-            y = self.rowViewportPosition(r)
-            vp.update(0, y, vp.width(), h)
-
-    TableBase._setHoverRow = _setHoverRow
-    TableBase._perf_hover_patched = True
+    """表格 hover 条带重绘补丁（实现见 core.perf_patch_table_hover）。"""
+    perf_patch_table_hover.apply_table_hover_patch()
 
 
 # ==================== 轻量表格委托（P0-1） ====================
@@ -749,21 +696,7 @@ def table_blit_status() -> dict:
 def table_blit_status_text() -> str:
     """把 table_blit_status 汇总成一行中文（性能选项对话框状态行）"""
     try:
-        s = table_blit_status()
-        if not s["enabled"]:
-            return "表格滚动加速：已关闭（perf_table_scroll_blit_v2=false）"
-        parts = [f"已生效 {s['applied']}/{s['total']} 张"]
-        if s["no_bg"]:
-            parts.append(f"未取到底色 {s['no_bg']} 张")
-        if s["hidden"]:
-            parts.append(f"未显示 {s['hidden']} 张")
-        if s["other"]:
-            parts.append(f"其他 {s['other']} 张")
-        txt = "表格滚动加速：" + "，".join(parts)
-        if s["no_bg"]:
-            txt += "（取到底色才生效：表格四周需有 ≥6px 纯色间隙，有遮挡/" \
-                   "浮动面板压边则不生效）"
-        return txt
+        return perf_diagnostics.format_table_blit_status(table_blit_status())
     except Exception:
         return "表格滚动加速：状态读取失败"
 
@@ -1068,20 +1001,13 @@ def get_effective_degrade_pixels() -> int:
 def degrade_diagnostics_text() -> str:
     """降级判定诊断摘要（性能选项对话框「渲染加速状态」行）"""
     try:
-        limit = get_effective_degrade_pixels()
-        if limit <= 0:
-            base = "已关闭（配置 perf_dpi_degrade_pixels=0）"
-        elif _dpi_degrade_pixels_explicit:
-            base = f"{limit / 1e4:.0f} 万像素（配置指定）"
-        elif get_auto_degrade_pixels() is not None:
-            rate = _raster_rate or 0.0
-            base = (f"{limit / 1e4:.0f} 万像素（自适应：本机合成 "
-                    f"{rate:.3f} ms/百万像素，基准 {_AUTO_REF_MS_PER_MPX:.3f}）")
-        else:
-            base = f"{limit / 1e4:.0f} 万像素（静态默认，自适应不可用）"
-        if is_bigscreen_mode():
-            base += "；大屏性能模式开启（强制降级）"
-        return "自动降级阈值：" + base
+        return perf_diagnostics.format_degrade_diagnostics(
+            get_effective_degrade_pixels(),
+            _dpi_degrade_pixels_explicit,
+            get_auto_degrade_pixels(),
+            _raster_rate,
+            _AUTO_REF_MS_PER_MPX,
+            is_bigscreen_mode())
     except Exception:
         return "自动降级阈值：读取失败"
 
@@ -1735,111 +1661,19 @@ def patch_dialog_animation():
 
 
 def patch_menu_animation():
-    """中央拦截菜单弹出动画：降级与 FADE 映射（幂等）
-
-    qfluentwidgets 所有菜单动画（右键 RoundMenu、ComboBox/EditableComboBox
-    下拉、LineEdit 编辑菜单等）都汇聚到 MenuAnimationManager.make()；
-    库内 ComboBox 下拉硬编码 DROP_DOWN/PULL_UP，单靠调用点传参无法覆盖，
-    故在此统一拦截。三条规则（按优先级）：
-
-    1. 动画开关（面板覆盖→全局）为关 → 降级 NONE；
-    2. 超像素阈值（P0-3，按「所在屏幕物理像素」口径——菜单自身是小窗）
-       → 降级 NONE；
-    3. 其余：DROP_DOWN/PULL_UP → FADE_IN_DROP_DOWN/FADE_IN_PULL_UP
-       （P1-3，2026-09-25）。原动画每帧 setMask（真机 SetWindowRgn，
-       DWM 对分层窗逐帧重组）+ 半高滑动；FADE_IN_* 是库自带的
-       windowOpacity 淡入 + 8px 短滑动，纯合成层成本，视觉更顺。
-    """
-    try:
-        from qfluentwidgets.components.widgets.menu import (
-            MenuAnimationManager, MenuAnimationType)
-    except Exception:
-        return
-    if getattr(MenuAnimationManager, "_perf_patched", False):
-        return
-    _orig_make = MenuAnimationManager.make.__func__
-    _fade_map = {
-        MenuAnimationType.DROP_DOWN: MenuAnimationType.FADE_IN_DROP_DOWN,
-        MenuAnimationType.PULL_UP: MenuAnimationType.FADE_IN_PULL_UP,
-    }
-
-    @classmethod
-    def _make(cls, menu, aniType):
-        try:
-            if aniType != MenuAnimationType.NONE:
-                if not get_animation(_menu_panel_key(menu)) or \
-                        _over_dpi_degrade(menu, use_screen=True):
-                    aniType = MenuAnimationType.NONE
-                elif aniType in _fade_map:
-                    aniType = _fade_map[aniType]
-        except Exception:
-            pass
-        return _orig_make(cls, menu, aniType)
-
-    MenuAnimationManager.make = _make
-    MenuAnimationManager._perf_patched = True
+    """菜单弹出动画降级补丁（实现见 core.perf_patch_menu）。"""
+    perf_patch_menu.apply_menu_animation_patch(
+        lambda menu: get_animation(_menu_panel_key(menu)), _over_dpi_degrade)
 
 
 def patch_switch_animation():
-    """大屏自动直切 PopUpAniStackedWidget 页面切换动画（P0-3，幂等）
-
-    FluentWindow 系（主窗口/三个面板窗）的页面切换走 PopUpAniStackedWidget
-    （250ms 滑入），超阈值时改为直切——降级路径与库自带开关完全一致
-    （stacked_widget.py `not self.isAnimationEnabled` 分支，直接
-    super().setCurrentIndex）。生产代码全仓只用 popOut=False（单页滑入），
-    故无需区分 popOut 形态。阈值判定取「所属顶层窗口物理像素」。
-    """
-    try:
-        from PySide6.QtWidgets import QStackedWidget
-        from qfluentwidgets.components.widgets.stacked_widget import (
-            PopUpAniStackedWidget)
-    except Exception:
-        return
-    if getattr(PopUpAniStackedWidget, "_perf_switch_patched", False):
-        return
-    _orig_set_index = PopUpAniStackedWidget.setCurrentIndex
-
-    def _setCurrentIndex(self, index, *args, **kwargs):
-        try:
-            if _over_dpi_degrade(self):
-                return QStackedWidget.setCurrentIndex(self, index)
-        except Exception:
-            pass
-        return _orig_set_index(self, index, *args, **kwargs)
-
-    PopUpAniStackedWidget.setCurrentIndex = _setCurrentIndex
-    PopUpAniStackedWidget._perf_switch_patched = True
+    """大屏页面切换直切补丁（实现见 core.perf_patch_switch）。"""
+    perf_patch_switch.apply_switch_animation_patch(_over_dpi_degrade)
 
 
 def patch_acrylic_downsample():
-    """亚克力模糊强制降采样（P0-2，幂等，启动时调用一次）
-
-    导航 hover 展开时 NavigationPanel.expand() → AcrylicBrush.grabImage →
-    setImage → gaussianBlur(blurPicSize=None)，主线程**全分辨率**高斯模糊：
-    4K 级 PIL 实现单次 160ms（开发环境 scipy 路径 1090ms）同步阻塞。
-    qfw 两套实现（scipy/PIL 补丁）都支持 blurPicSize 先降采样再模糊，
-    且库内 BlurCoverThread 默认就传 (450,450)——模糊图缩放回放视觉无感。
-    这里在 blurPicSize 未显式设置（=None 全分辨率）时统一 clamp 到
-    (450,450)，4K 级模糊降到数 ms。
-    """
-    try:
-        from qfluentwidgets.components.widgets.acrylic_label import AcrylicBrush
-    except Exception:
-        return
-    if getattr(AcrylicBrush, "_perf_blur_patched", False):
-        return
-    _orig_set_image = AcrylicBrush.setImage
-
-    def _setImage(self, image):
-        try:
-            if self.blurPicSize is None:
-                self.blurPicSize = (450, 450)
-        except Exception:
-            pass
-        return _orig_set_image(self, image)
-
-    AcrylicBrush.setImage = _setImage
-    AcrylicBrush._perf_blur_patched = True
+    """亚克力模糊降采样补丁（实现见 core.perf_patch_acrylic）。"""
+    perf_patch_acrylic.apply_acrylic_downsample_patch()
 
 
 def set_acrylic_enabled(enabled: bool):
@@ -1929,46 +1763,8 @@ def mica_block_reason() -> str:
 
 
 def patch_mica_policy():
-    """云母环境兜底（幂等，启动时调用一次）：命中不渲染场景时双层短路，
-    所有 FluentWindow 窗口回退纯主题色背景，杜绝「透明背景叠裸框架」
-    的半残观感
-
-    双层原因（qfw 开启 Mica 有两条独立通路，缺一不可）：
-    1. FluentWidget.__init__ → setMicaEffectEnabled(True) —— 开关路径，
-       强制短路后 _isMicaEnabled=False，窗口背景走实色而非全透明；
-    2. FluentWidget 的基类 FramelessWindow（Win11 分支）在构造时
-       **无条件直调** windowEffect.setMicaEffect() —— 绕过开关的 DWM
-       backdrop 路径，必须一并 no-op，否则标题栏透明区仍会漏出 Mica。
-
-    环境支持时完全不 patch（保持库原行为）；探测只做一次，运行期系统
-    设置变化不追（透明效果重新打开需重启程序，与 qfw 现状一致）。
-    """
-    try:
-        from qfluentwidgets.window.fluent_window import FluentWidget
-        from qframelesswindow.windows.window_effect import WindowsWindowEffect
-    except Exception:
-        return
-    if getattr(FluentWidget, "_perf_mica_patched", False):
-        return
-    reason = mica_block_reason()
-    FluentWidget._perf_mica_patched = True
-    if not reason:
-        return  # 环境支持：保持库原行为
-
-    def _setMicaEffectEnabled(self, isEnabled: bool):
-        if isEnabled:
-            return  # 静默拒绝：_isMicaEnabled 保持 False，窗口走纯色背景
-        try:
-            self.windowEffect.removeBackgroundEffect(self.winId())
-        except Exception:
-            pass
-
-    def _setMicaEffect(self, hWnd, isDarkMode=False, isAlt=False):
-        return  # 静默跳过：不给 DWM 发任何 backdrop 属性（含基类直调路径）
-
-    FluentWidget.setMicaEffectEnabled = _setMicaEffectEnabled
-    WindowsWindowEffect.setMicaEffect = _setMicaEffect
-    _log(f"[perf] Mica 云母已禁用（{reason}），窗口使用纯色背景")
+    """云母环境兜底（幂等）：按当前环境 reason 应用双层短路（实现见 ui 无关模块）。"""
+    perf_patch_mica.apply_mica_policy(mica_block_reason(), _log)
 
 
 def _log(message: str):

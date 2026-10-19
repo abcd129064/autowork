@@ -25,7 +25,12 @@ import os
 from datetime import datetime, timedelta
 
 from core import app_settings
-from database import table_db
+from database import aftersale_cycle, aftersale_settings, table_db
+from database import aftersale_queries
+from database.aftersale_query_sql import (
+    LIST_SORT_KEYS, _LIST_SORT, _RECORD_DATE_EXPR, _SEARCH_FIELDS,
+    _build_order, _build_where, _yes_no_rank)
+from database import aftersale_excel
 
 # ==================== 字段枚举 ====================
 
@@ -58,11 +63,6 @@ RECORD_FIELDS = (
 # merge_back / 历史 mysql_sync 推送共用此定义。
 RECORD_KEY_COLS = ("created_at", "creator", "table_no", "problem")
 
-# 关键词搜索覆盖列，全字段模糊匹配
-_SEARCH_FIELDS = (
-    "table_no", "room_name", "problem", "region",
-    "cause", "solution", "resolver", "creator",
-)
 
 # 导出表头
 _EXPORT_HEADERS = (
@@ -162,48 +162,22 @@ def _save_recalc_pending(flag: bool) -> None:
         app_settings.remove(_CYCLE_RECALC_PENDING_KEY)
 
 
-# ==================== 常用句 ====================
-
-_QPC_KEY = "aftersale_quick_phrases"
-# 预置常见问题描述
-_QPC_DEFAULT = [
-    "主机没有开机", "遥控器没反应", "程序没了", "不能扫码",
-    "识别不了", "记分牌显示不出来",
-]
+# ==================== 常用句（实现见 database.aftersale_settings） ====================
 
 
 def load_quick_phrases() -> list:
-    """读取常用句列表（config/aftersale.json 持久化）"""
-    v = app_settings.get(_QPC_KEY)
-    if isinstance(v, list):
-        return [str(x) for x in v if str(x).strip()]
-    return list(_QPC_DEFAULT)
+    """读取常用句列表（config/aftersale.json 持久化）。"""
+    return aftersale_settings.load_quick_phrases()
 
 
 def add_quick_phrase(text: str) -> list:
-    """新增常用句，写回配置，返回更新后的列表"""
-    phrases = load_quick_phrases()
-    t = str(text or "").strip()
-    if t and t not in phrases:
-        phrases.insert(0, t)
-    app_settings.set(_QPC_KEY, phrases)
-    return phrases
+    """新增常用句，写回配置，返回更新后的列表。"""
+    return aftersale_settings.add_quick_phrase(text)
 
 
 def cycle_span_days() -> int:
     """当前模式周期天数：tue/mon 固定 7 天，custom 取配置值（≥1），month 取当月天数"""
-    import calendar
-
-    mode = load_cycle_mode()
-    if mode["type"] == "month":
-        now = datetime.now()
-        return calendar.monthrange(now.year, now.month)[1]
-    if mode["type"] == "custom":
-        try:
-            return max(1, int(mode.get("span") or 7))
-        except (TypeError, ValueError):
-            return 7
-    return 7
+    return aftersale_cycle.span_days(load_cycle_mode())
 
 
 def cycle_start_of(dt: datetime) -> str:
@@ -215,44 +189,22 @@ def cycle_start_of(dt: datetime) -> str:
     - custom：从配置起始日起每 span 天一个周期，历史周期向过去对齐
     - month：自然月，当月 1 号为起始日
     """
-    mode = load_cycle_mode()
-    if mode.get("type") == "month":
-        return dt.replace(day=1).strftime("%Y/%m/%d")
-    if mode["type"] == "mon":
-        start = dt - timedelta(days=dt.weekday())
-    elif mode["type"] == "custom":
-        start0 = _parse_occurred(mode.get("start")) or dt
-        span = max(1, int(mode.get("span") or 7))
-        diff = (dt.date() - start0.date()).days
-        start = start0 + timedelta(days=(diff // span) * span)
-    else:  # tue 默认
-        start = dt - timedelta(days=(dt.weekday() - 1) % 7)
-    return start.strftime("%Y/%m/%d")
+    return aftersale_cycle.start_of(dt, load_cycle_mode())
 
 
 def current_cycle_start() -> str:
     """当前周期起始日"""
-    return cycle_start_of(datetime.now())
+    return aftersale_cycle.current_start(load_cycle_mode())
 
 
 def _parse_occurred(occurred: str):
     """解析日期串 YYYY-MM-DD，非法返回 None 由调用方回退"""
-    try:
-        return datetime.strptime(str(occurred or "").strip()[:10], "%Y-%m-%d")
-    except (ValueError, TypeError):
-        return None
+    return aftersale_cycle.parse_occurred(occurred)
 
 
 def cycle_label(cycle_start: str) -> str:
     """周期展示标签：周模式 '08/19 - 08/25'（起始日 + 周期天数-1，custom 按配置 span）；month 模式 '2026-08'（自然月）"""
-    try:
-        start = datetime.strptime(str(cycle_start).strip(), "%Y/%m/%d")
-    except (ValueError, TypeError):
-        return str(cycle_start or "")
-    if load_cycle_mode().get("type") == "month":
-        return f"{start:%Y}-{start:%m}"
-    end = start + timedelta(days=cycle_span_days() - 1)
-    return f"{start:%m/%d} - {end:%m/%d}"
+    return aftersale_cycle.label(cycle_start, load_cycle_mode())
 
 
 # ==================== 周期归属 ====================
@@ -263,21 +215,7 @@ def cycle_date_range(cycle_start: str) -> tuple:
     供统计弹窗「当前周期」趋势范围使用；month 模式按周期自身所在月份计算
     （不依赖当前时刻，历史周期同样正确）。非法输入返回 (None, None)。
     """
-    start = _parse_occurred(cycle_start)
-    if start is None:
-        # 周期筛选/落库格式为 yyyy/MM/dd
-        try:
-            start = datetime.strptime(
-                str(cycle_start or "").strip()[:10], "%Y/%m/%d")
-        except (ValueError, TypeError):
-            return None, None
-    s = start.date()
-    if load_cycle_mode().get("type") == "month":
-        import calendar
-        e = s.replace(day=calendar.monthrange(s.year, s.month)[1])
-    else:
-        e = s + timedelta(days=cycle_span_days() - 1)
-    return s, e
+    return aftersale_cycle.date_range(cycle_start, load_cycle_mode())
 
 
 def _record_cycle(occurred_at: str, created_at: str):
@@ -287,19 +225,13 @@ def _record_cycle(occurred_at: str, created_at: str):
     保证四处口径一致；不依赖冗余落库的 cycle_start 字段。
     归属按当前周期配置（含 month 自然月）。
     """
-    for raw in (occurred_at, created_at):
-        dt = _parse_occurred(raw)
-        if dt:
-            return cycle_start_of(dt)
-    return None
+    return aftersale_cycle.record_cycle(
+        occurred_at, created_at, load_cycle_mode())
 
 
 def _match_cycle(record: dict, cycle_start: str) -> bool:
     """记录是否属于所选周期：按记录时间动态计算后匹配，空周期不过滤"""
-    if not cycle_start:
-        return True
-    return _record_cycle(record.get("occurred_at"),
-                         record.get("created_at")) == str(cycle_start).strip()
+    return aftersale_cycle.match_cycle(record, cycle_start, load_cycle_mode())
 
 
 # ==================== 连接与工具 ====================
@@ -481,12 +413,6 @@ def delete_records(rec_ids) -> int:
 
 # ==================== 查询 ====================
 
-# 记录日期表达式：优先 occurred_at（格式合法时），否则回退 created_at，
-# 与 Python _record_cycle 的回退语义一致（LIKE '____-__-__%' 校验
-# yyyy-MM-dd 外形；空串/非法格式均回退）。两侧方言语法一致。
-_RECORD_DATE_EXPR = (
-    "substr(CASE WHEN occurred_at LIKE '____-__-__%' "
-    "THEN occurred_at ELSE created_at END, 1, 10)")
 
 
 # 非法周期起点判定：传入的 cycle_start 不是当前模式下的真实周期起点
@@ -499,12 +425,7 @@ def _cycle_is_valid_start(cycle_start: str):
     - False：格式合法但非本模式真实周期起点（周/月口径混用）→ 0 命中；
     - None：无法解析（与旧实现一致，调用方不追加过滤）。
     """
-    cyc = str(cycle_start or "").strip()
-    try:
-        start = datetime.strptime(cyc, "%Y/%m/%d")
-    except (ValueError, TypeError):
-        return None
-    return cycle_start_of(start) == cyc
+    return aftersale_cycle.is_valid_start(cycle_start, load_cycle_mode())
 
 
 # 物化列兜底回填的连续失效计数（日期形似但不可解析/回填异常时防循环）
@@ -608,105 +529,14 @@ def recalc_cycle_starts_on_load() -> int:
     return 0
 
 
+
+
+# ==================== 查询实现（database.aftersale_queries） ====================
+
+
 def _append_cycle_where(where: str, params: list, cycle_start: str) -> tuple:
-    """把周期筛选并入 WHERE，返回 (where, params)
-
-    S3（2026-09-06）：由 _RECORD_DATE_EXPR 表达式范围过滤（索引失效，
-    EXPLAIN=SCAN，每次加载 3 条全表扫）改为 cycle_start 物化列等值过滤，
-    idx_aftersale_cycle 两端索引直接可用。传入非当前模式真实周期起点
-    时追加 1=0（与旧实现「非起点返回 0 条」等价，防止周/月口径混用），
-    无法解析的串不追加过滤（与旧实现一致）；物化列由 insert_record
-    落库维护 + 周期保存/首次加载重算保证一致，存量空值行先经
-    _ensure_cycle_materialized 幂等回填，旧数据不漏。
-    """
-    cyc = str(cycle_start or "").strip()
-    if not cyc:
-        return where, params
-    valid = _cycle_is_valid_start(cyc)
-    if valid is None:
-        return where, params
-    if not valid:
-        # 非本模式真实周期起点 → 无记录命中（与旧实现 total=0 等价）
-        where += (" AND " if where else " WHERE ") + " 1 = 0"
-        return where, params
-    _ensure_cycle_materialized()
-    where += (" AND " if where else " WHERE ") + "cycle_start = ?"
-    return where, params + [cyc]
-
-
-def _build_where(keyword: str, issue_type: str, resolved: str,
-                 is_initiative: str = "", is_our_problem: str = "") -> tuple:
-    """构造筛选 WHERE 子句与参数（类型/状态/关键词/主动发起/我方问题）
-
-    周期筛选不在本函数处理：由 _append_cycle_where 以 cycle_start 物化列
-    等值过滤接入（与 _record_cycle 动态归属等价，由落库维护 + 重算保证
-    一致），保证分页 COUNT/LIMIT 在数据库侧完成。
-    统计口径说明：resolved / is_initiative / is_our_problem 为空才参与筛选；
-    统计函数单独调用时传空串即得「已解决/未解决」分组基数与全景计数。
-    """
-    conds, params = [], []
-    # 软删除隔离：Web 回收站中的记录（deleted=1）桌面端一律不可见。
-    # 该列由 schema.py 声明、_ensure_initialized 自动补列，历史库首次
-    # 迁移后即存在；本函数是列表/统计的共同 WHERE 入口。
-    conds.append("deleted = 0")
-    if issue_type:
-        conds.append("issue_type = ?")
-        params.append(str(issue_type).strip())
-    if resolved:
-        conds.append("resolved = ?")
-        params.append(str(resolved).strip())
-    if is_initiative:
-        conds.append("is_initiative = ?")
-        params.append(str(is_initiative).strip())
-    if is_our_problem:
-        conds.append("is_our_problem = ?")
-        params.append(str(is_our_problem).strip())
-    kw = str(keyword or "").strip()
-    if kw:
-        like = f"%{kw}%"
-        kw_cond = " OR ".join([f"{f} LIKE ?" for f in _SEARCH_FIELDS])
-        conds.append(f"({kw_cond})")
-        params.extend([like] * len(_SEARCH_FIELDS))
-    where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    return where, params
-
-
-# 列表排序白名单：页面数据键 → ORDER BY 表达式元组
-# location 拆成三列逐级排序；三个是否判定列用 CASE 映射成 0/1，避免
-# SQLite 按字节、MySQL 按排序规则比较中文导致的跨后端顺序不一致。
-def _yes_no_rank(col: str) -> str:
-    """是/否文字列 → 数值排序表达式，是=1 否=0 空值=-1"""
-    return f"CASE {col} WHEN '是' THEN 1 WHEN '否' THEN 0 ELSE -1 END"
-
-
-_LIST_SORT = {
-    "created_at": ("created_at",),
-    "occurred_at": ("occurred_at",),
-    "issue_type": ("issue_type",),
-    "location": ("room_name", "region", "table_no"),
-    "problem": ("problem",),
-    "cause": ("cause",),
-    "solution": ("solution",),
-    "resolved": (_yes_no_rank("resolved"),),
-    "is_our_problem": (_yes_no_rank("is_our_problem"),),
-    "is_initiative": (_yes_no_rank("is_initiative"),),
-    "response_time": ("response_time",),
-}
-LIST_SORT_KEYS = frozenset(_LIST_SORT)
-
-
-def _build_order(sort_key: str, sort_order: str) -> str:
-    """排序键 + 方向 → ORDER BY 片段；未知键回退 id DESC
-
-    末尾统一补 id DESC：排序值并列时跨页不会来回漂移，同一查询可复现。
-    """
-    cols = _LIST_SORT.get(str(sort_key or "").strip())
-    if not cols:
-        return "id DESC"
-    direction = "ASC" if str(sort_order or "").lower() == "asc" else "DESC"
-    parts = [f"{col} {direction}" for col in cols]
-    parts.append("id DESC")
-    return ", ".join(parts)
+    """兼容入口：周期筛选拼接（实现见 database.aftersale_queries）。"""
+    return aftersale_queries._append_cycle_where(where, params, cycle_start)
 
 
 def query_page(page_no: int, page_size: int, keyword: str = "",
@@ -714,27 +544,10 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
                resolved: str = "", is_initiative: str = "",
                is_our_problem: str = "", sort_key: str = "",
                sort_order: str = "desc") -> tuple:
-    """分页查询售后记录，返回 (total, rows)
-
-    周期筛选走 cycle_start 物化列等值过滤，COUNT + LIMIT/OFFSET 在
-    数据库侧完成；排序也下沉到 SQL，跨页排序才与全量数据一致。
-    sort_key/sort_order 见 _LIST_SORT，未知键按 id DESC 返回。
-    """
-    conn = _conn()
-    where, params = _build_where(keyword, issue_type, resolved,
-                                 is_initiative, is_our_problem)
-    where, params = _append_cycle_where(where, params, cycle_start)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM aftersale_records{where}", params).fetchone()[0]
-    offset = (max(1, page_no) - 1) * page_size
-    order = _build_order(sort_key, sort_order)
-    cur = conn.execute(
-        f"SELECT id, {', '.join(RECORD_FIELDS)} FROM aftersale_records"
-        f"{where} ORDER BY {order} LIMIT ? OFFSET ?",
-        params + [int(page_size), offset])
-    cols = [d[0] for d in cur.description]
-    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    return int(total or 0), rows
+    """分页查询（实现见 database.aftersale_queries）。"""
+    return aftersale_queries.query_page(
+        page_no, page_size, keyword, cycle_start, issue_type, resolved,
+        is_initiative, is_our_problem, sort_key, sort_order)
 
 
 def query_with_stats(page_no: int, page_size: int, keyword: str = "",
@@ -742,124 +555,18 @@ def query_with_stats(page_no: int, page_size: int, keyword: str = "",
                      resolved: str = "", is_initiative: str = "",
                      is_our_problem: str = "", sort_key: str = "",
                      sort_order: str = "desc") -> tuple:
-    """分页查询 + 同口径统计，返回 (total, rows, stats)
-
-    列表与统计共用筛选口径；排序参数只影响列表，统计恒为全量聚合。
-    统计不带 resolved/is_* 筛选，否则已解决/未解决计数会退化。
-    """
-    total, rows = query_page(page_no, page_size, keyword, cycle_start,
-                             issue_type, resolved, is_initiative,
-                             is_our_problem, sort_key, sort_order)
-    conn = _conn()
-    # 统计与列表同口径（keyword/issue_type/周期；不带 resolved/initiative/
-    # our_problem 筛选）。单次 SQL 聚合替代旧实现的「二次全表取回 + Python
-    # 逐条 sum」——压测 100k 下该路径 439.5ms → 毫秒级。
-    where, params = _build_where(keyword, issue_type, "")
-    where, params = _append_cycle_where(where, params, cycle_start)
-    row = conn.execute(
-        "SELECT COUNT(*), SUM(resolved = '是'), SUM(is_initiative = '是'), "
-        "SUM(is_our_problem = '是') FROM aftersale_records" + where,
-        params).fetchone()
-    n_all = int(row[0] or 0)
-    n_resolved = int(row[1] or 0)
-    n_init = int(row[2] or 0)
-    n_our = int(row[3] or 0)
-    rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
-    stats = {"total": n_all, "resolved": n_resolved,
-             "unresolved": n_all - n_resolved,
-             "initiative": n_init, "our_problem": n_our, "rate": rate}
-    return total, rows, stats
+    """分页 + 同口径统计（实现见 database.aftersale_queries）。"""
+    return aftersale_queries.query_with_stats(
+        page_no, page_size, keyword, cycle_start, issue_type, resolved,
+        is_initiative, is_our_problem, sort_key, sort_order)
 
 
 def query_stats_detail(keyword: str = "", cycle_start: str = "",
                        issue_type: str = "", trend_start: str = "",
                        trend_end: str = "") -> dict:
-    """售后统计弹窗详细统计（与四卡片/列表完全同口径）
-
-    与 query_with_stats 一致：统计不带 resolved/is_initiative/
-    is_our_problem 筛选（否则已解决/未解决计数退化），仅按
-    keyword + issue_type + cycle_start（按记录时间动态归属）过滤。
-    返回：
-    - summary: {total, resolved, unresolved, rate, initiative, our_problem}
-    - daily  : [{"date": "2026-08-18", "count": n, "resolved": n}, ...]
-               按日升序；trend_start/trend_end（"YYYY-MM-DD"）仅过滤该序列
-    - regions: [{"region": "广东", "count": n}, ...] 按数量降序
-    - types  : [{"issue_type": "硬件问题", "count": n, "resolved": n,
-                 "unresolved": n}, ...] 按数量降序
-
-    性能（P2，2026-08-28）：summary/daily/regions/types 全部 SQL 聚合
-    （GROUP BY + SUM(CASE)），周期筛选 SQL 化（_append_cycle_where）——
-    旧实现全表取回 7 字段 + Python 逐条聚合，100k 下每次弹窗打开数百毫秒。
-    """
-    conn = _conn()
-    where, params = _build_where(keyword, issue_type, "")
-    where, params = _append_cycle_where(where, params, cycle_start)
-
-    # summary：单条 SQL 聚合
-    row = conn.execute(
-        "SELECT COUNT(*), SUM(resolved = '是'), SUM(is_initiative = '是'), "
-        "SUM(is_our_problem = '是') FROM aftersale_records" + where,
-        params).fetchone()
-    n_all = int(row[0] or 0)
-    n_resolved = int(row[1] or 0)
-    n_init = int(row[2] or 0)
-    n_our = int(row[3] or 0)
-    rate = int(round(n_resolved * 100 / n_all)) if n_all else 0
-    summary = {"total": n_all, "resolved": n_resolved,
-               "unresolved": n_all - n_resolved, "rate": rate,
-               "initiative": n_init, "our_problem": n_our}
-
-    date_col = _RECORD_DATE_EXPR
-    # 每日趋势：按记录日期聚合（occurred_at 优先回退 created_at），
-    # trend_start/trend_end 仅作用于 daily 序列
-    daily_where, daily_params = where, list(params)
-    if trend_start:
-        daily_where += (" AND " if daily_where else " WHERE ") + \
-                       f"{date_col} >= ?"
-        daily_params.append(str(trend_start))
-    if trend_end:
-        daily_where += (" AND " if daily_where else " WHERE ") + \
-                       f"{date_col} <= ?"
-        daily_params.append(str(trend_end))
-    rows = conn.execute(
-        f"SELECT {date_col} AS d, COUNT(*), SUM(resolved = '是') "
-        f"FROM aftersale_records{daily_where} GROUP BY {date_col} "
-        f"ORDER BY d ASC", daily_params).fetchall()
-    daily = [{"date": str(d or ""), "count": int(c), "resolved": int(r or 0)}
-             for d, c, r in rows if d]
-
-    # 按地区聚合（数量降序；count 并列时按地区名稳定排序）
-    rows = conn.execute(
-        "SELECT region, COUNT(*) FROM aftersale_records" + where +
-        " GROUP BY region ORDER BY COUNT(*) DESC, region ASC", params).fetchall()
-    regions = [{"region": str(r or "").strip() or "未填地区", "count": int(c)}
-               for r, c in rows]
-
-    # 按问题类型聚合（数量降序；count 并列时按类型名稳定排序）
-    rows = conn.execute(
-        "SELECT issue_type, COUNT(*), SUM(resolved = '是') "
-        "FROM aftersale_records" + where +
-        " GROUP BY issue_type ORDER BY COUNT(*) DESC, issue_type ASC",
-        params).fetchall()
-    types = [{"issue_type": str(t or "").strip() or "未分类",
-              "count": int(c), "resolved": int(rd or 0),
-              "unresolved": int(c) - int(rd or 0)}
-             for t, c, rd in rows]
-    return {"summary": summary, "daily": daily,
-            "regions": regions, "types": types}
-
-
-# ==================== 球房/球桌售后排行 ====================
-
-# 排行排序白名单：sort 键 → ORDER BY 片段（SELECT 别名排序，SQLite/MySQL
-# 均支持；与 Web 端 /api/stats/rank 的 _RANK_SORT 同口径，并列时按名称稳定排序）
-_RANK_SORT = {
-    "total": "total DESC, rn ASC",
-    "total_asc": "total ASC, rn ASC",
-    "unresolved": "unres DESC, total DESC, rn ASC",
-    "our_problem": "ourp DESC, total DESC, rn ASC",
-    "last_occurred": "lastd DESC, total DESC, rn ASC",
-}
+    """统计弹窗详细统计（实现见 database.aftersale_queries）。"""
+    return aftersale_queries.query_stats_detail(
+        keyword, cycle_start, issue_type, trend_start, trend_end)
 
 
 def query_rank(level: str = "room", limit: int = 10, sort: str = "total",
@@ -867,241 +574,79 @@ def query_rank(level: str = "room", limit: int = 10, sort: str = "total",
                resolved: str = "", is_initiative: str = "",
                is_our_problem: str = "", region: str = "",
                room_name: str = "", keyword: str = "") -> dict:
-    """球房/球桌售后排行（与 Web 端 /api/stats/rank 同口径）
-
-    口径：
-    - WHERE 复用 _build_where（keyword/resolved/is_initiative/is_our_problem
-      + deleted=0 软删除隔离）+ _append_cycle_where（账期物化列），追加
-      region / room_name（下钻，TRIM 精确）/ start~end（记录日期区间，
-      _RECORD_DATE_EXPR 字符串比较，跨 SQLite/MySQL 一致）
-    - 排行排除未填球房（球桌级同时排除未填桌号）的记录；球桌级联合名
-      「球房 · 桌号」在 Python 侧拼装（避开 CONCAT/|| 双后端方言差异）
-    - 每组一次 SQL 算齐 总量/未解决/我方问题/主动发起/最近发生
-      （SUM 布尔表达式 + MAX 日期，与 query_stats_detail 同范式）
-    - summary 反映同 WHERE 全量口径（不受 TOP N 截断影响）：
-      total/unresolved/覆盖球房（DISTINCT 非空球房）/覆盖球桌
-      （DISTINCT 非空球房+桌号对，经去重子查询——COUNT(DISTINCT) 多表达式
-      与 CONCAT 均为 MySQL 专属，子查询形式两端通用）
-    - share = 组总量 × 100 ÷ summary.total（整数百分比，四舍五入）
-
-    返回 {"rows": [{rank, room_name, table_no, name, total, share,
-    unresolved, our_problem, initiative, last_occurred}, ...],
-    "summary": {total, unresolved, rooms, tables}}。
-    """
-    if level not in ("room", "table"):
-        raise ValueError("level 仅支持 room/table")
-    order = _RANK_SORT.get(sort) or _RANK_SORT["total"]
-    conn = _conn()
-    where, params = _build_where(keyword, "", resolved, is_initiative,
-                                 is_our_problem)
-    where, params = _append_cycle_where(where, params, cycle_start)
-    region_v = str(region or "").strip()
-    if region_v:
-        where += " AND TRIM(region) = ?"
-        params.append(region_v)
-    drill = str(room_name or "").strip()
-    if drill:
-        where += " AND TRIM(room_name) = ?"
-        params.append(drill)
-    start_v = str(start or "").strip()
-    end_v = str(end or "").strip()
-    if start_v:
-        where += f" AND {_RECORD_DATE_EXPR} >= ?"
-        params.append(start_v)
-    if end_v:
-        where += f" AND {_RECORD_DATE_EXPR} <= ?"
-        params.append(end_v)
-
-    # 排行：排除未填球房（球桌级再排除未填桌号）
-    where_rank = where + " AND TRIM(room_name) != ''"
-    if level == "table":
-        where_rank += " AND TRIM(table_no) != ''"
-    if level == "table":
-        sel = "TRIM(room_name) AS rn, TRIM(table_no) AS tn"
-        group = "TRIM(room_name), TRIM(table_no)"
-    else:
-        sel = "TRIM(room_name) AS rn, '' AS tn"
-        group = "TRIM(room_name)"
-    cur = conn.execute(
-        f"SELECT {sel}, COUNT(*) AS total, "
-        f"SUM(resolved = '否') AS unres, "
-        f"SUM(is_our_problem = '是') AS ourp, "
-        f"SUM(is_initiative = '是') AS init_, "
-        f"MAX({_RECORD_DATE_EXPR}) AS lastd "
-        f"FROM aftersale_records{where_rank} "
-        f"GROUP BY {group} ORDER BY {order} LIMIT ?",
-        list(params) + [max(1, int(limit))])
-
-    # summary：同 WHERE 全量口径（三条轻量聚合，均不受 TOP N 截断影响）
-    row = conn.execute(
-        "SELECT COUNT(*), SUM(resolved = '否'), "
-        "COUNT(DISTINCT CASE WHEN TRIM(room_name) != '' "
-        f"THEN TRIM(room_name) END) FROM aftersale_records{where}",
-        params).fetchone()
-    total_n = int(row[0] or 0)
-    unresolved_n = int(row[1] or 0)
-    rooms_n = int(row[2] or 0)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT DISTINCT TRIM(room_name), "
-        f"TRIM(table_no) FROM aftersale_records{where} "
-        "AND TRIM(room_name) != '' AND TRIM(table_no) != '') t",
-        params).fetchone()
-    tables_n = int(row[0] or 0)
-
-    rows = []
-    for i, r in enumerate(cur.fetchall(), 1):
-        rn, tn = str(r[0] or ""), str(r[1] or "")
-        n = int(r[2] or 0)
-        rows.append({
-            "rank": i, "room_name": rn, "table_no": tn,
-            "name": f"{rn} · {tn}" if level == "table" else rn,
-            "total": n,
-            "share": int(round(n * 100 / total_n)) if total_n else 0,
-            "unresolved": int(r[3] or 0),
-            "our_problem": int(r[4] or 0),
-            "initiative": int(r[5] or 0),
-            "last_occurred": str(r[6] or ""),
-        })
-    return {"rows": rows,
-            "summary": {"total": total_n, "unresolved": unresolved_n,
-                        "rooms": rooms_n, "tables": tables_n}}
+    """球房/球桌排行（实现见 database.aftersale_queries）。"""
+    return aftersale_queries.query_rank(
+        level, limit, sort, start, end, cycle_start, resolved, is_initiative,
+        is_our_problem, region, room_name, keyword)
 
 
 def get_cycle_options() -> list:
-    """周期下拉选项：库中记录实际归属的周期（按 occurred_at 动态计算，
-
-    缺失回退 created_at），按起始日降序。仅返回库中确实存在数据的周期，
-    不额外插入库中不存在的当前周期（当前周期无数据则不出现）。
-
-    性能（P2，2026-08-28）：周期是记录日期的函数，故只需取 DISTINCT 日期
-    （最多几百个唯一值）再逐个映射周期——旧实现全表取回 (occurred_at,
-    created_at) 两列并在 Python 逐行算周期，100k 下每次面板加载数百毫秒。
-    """
-    from datetime import datetime
-    conn = _conn()
-    cur = conn.execute(
-        f"SELECT DISTINCT {_RECORD_DATE_EXPR} AS d FROM aftersale_records")
-    cycles = set()
-    for (d,) in cur.fetchall():
-        if not d:
-            continue
-        try:
-            dt = datetime.strptime(d, "%Y-%m-%d")
-        except ValueError:
-            continue
-        c = cycle_start_of(dt)
-        if c:
-            cycles.add(c)
-    cycles.discard(None)
-    return sorted(cycles, reverse=True)
+    """周期下拉选项（实现见 database.aftersale_queries）。"""
+    return aftersale_queries.get_cycle_options()
 
 
-# ---------------- 上次填写记忆（重新打开面板时恢复填写人/解决人） ----------------
-_LAST_CREATOR_KEY = "aftersale_last_creator"
-_LAST_RESOLVER_KEY = "aftersale_last_resolver"
+
+# ---------------- 填写记忆 / 自动刷新（实现见 database.aftersale_settings） ----------------
 
 
 def _load_settings_str(key: str) -> str:
-    """读取配置中指定字符串键（非空字符串返回，否则空串）"""
-    v = app_settings.get(key)
-    if isinstance(v, str) and v.strip():
-        return v.strip()
-    return ""
+    """读取配置中指定字符串键（兼容旧私有入口）。"""
+    return aftersale_settings.load_settings_str(key)
 
 
 def load_last_creator() -> str:
-    """上次填写的填写人（config/aftersale.json，无则空串）"""
-    return _load_settings_str(_LAST_CREATOR_KEY)
+    """上次填写的填写人（config/aftersale.json，无则空串）。"""
+    return aftersale_settings.load_last_creator()
 
 
 def load_last_resolver() -> str:
-    """上次填写的解决人（config/aftersale.json，无则空串）"""
-    return _load_settings_str(_LAST_RESOLVER_KEY)
+    """上次填写的解决人（config/aftersale.json，无则空串）。"""
+    return aftersale_settings.load_last_resolver()
 
 
 def save_last_people(creator: str, resolver: str) -> None:
-    """记住本次填写的填写人/解决人，供下次打开面板恢复（非空才写）"""
-    creator = (creator or "").strip()
-    resolver = (resolver or "").strip()
-    if not creator and not resolver:
-        return
-    if creator:
-        app_settings.set(_LAST_CREATOR_KEY, creator)
-    if resolver:
-        app_settings.set(_LAST_RESOLVER_KEY, resolver)
-
-
-# ---------- 「记住上次发生日期」（2026-09-16 需求：上一条填 9/14，下一条默认仍 9/14） ----------
-_REMEMBER_OCCURRED_KEY = "aftersale_remember_occurred"
-_LAST_OCCURRED_KEY = "aftersale_last_occurred"
+    """记住本次填写的填写人/解决人，供下次打开面板恢复（非空才写）。"""
+    return aftersale_settings.save_last_people(creator, resolver)
 
 
 def remember_occurred_enabled() -> bool:
-    """「记住上次发生日期」开关（config/aftersale.json，缺省开启）"""
-    return bool(app_settings.get(_REMEMBER_OCCURRED_KEY, True))
+    """「记住上次发生日期」开关（config/aftersale.json，缺省开启）。"""
+    return aftersale_settings.remember_occurred_enabled()
 
 
 def load_last_occurred() -> str:
-    """上次新增记录的发生日期（yyyy-MM-dd）；开关关闭或无记录返回空串。
-
-    供 AftersaleForm 计算发生时间默认值——表单层据此沿用上次的日期，
-    而非每次重置回当天（连续补录同一天的多条售后时免重复拨日期）。
-    """
-    if not remember_occurred_enabled():
-        return ""
-    return _load_settings_str(_LAST_OCCURRED_KEY)
+    """上次新增记录的发生日期（yyyy-MM-dd）；开关关闭或无记录返回空串。"""
+    return aftersale_settings.load_last_occurred()
 
 
 def save_last_occurred(occurred: str) -> None:
-    """记住本次新增记录的发生日期（开关关闭 / 空值时不写）"""
-    occurred = (occurred or "").strip()
-    if not occurred or not remember_occurred_enabled():
-        return
-    app_settings.set(_LAST_OCCURRED_KEY, occurred)
+    """记住本次新增记录的发生日期（开关关闭 / 空值时不写）。"""
+    return aftersale_settings.save_last_occurred(occurred)
 
 
 def set_remember_occurred(enabled: bool) -> None:
-    """写「记住上次发生日期」开关（统一设置-面板设置-售后 联动入口）。
-
-    关闭时一并清除已记住的日期：重新打开后从「当日」重新开始，
-    不会复活几天前的旧日期。
-    """
-    app_settings.set(_REMEMBER_OCCURRED_KEY, bool(enabled))
-    if not enabled:
-        app_settings.remove(_LAST_OCCURRED_KEY)
-
-
-# ---------- 记录自动刷新（2026-09-16 需求：他人填写免手动同步） ----------
-_AUTO_REFRESH_KEY = "aftersale_auto_refresh"
-_AUTO_REFRESH_INTERVAL_KEY = "aftersale_auto_refresh_interval"
+    """写「记住上次发生日期」开关；关闭时一并清除已记住日期。"""
+    return aftersale_settings.set_remember_occurred(enabled)
 
 
 def auto_refresh_enabled() -> bool:
-    """「自动刷新记录」开关（config/aftersale.json，缺省关闭）"""
-    return bool(app_settings.get(_AUTO_REFRESH_KEY, False))
+    """「自动刷新记录」开关（config/aftersale.json，缺省关闭）。"""
+    return aftersale_settings.auto_refresh_enabled()
 
 
 def auto_refresh_interval() -> int:
-    """自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数，防误配高频轮询）"""
-    try:
-        v = int(app_settings.get(_AUTO_REFRESH_INTERVAL_KEY, 30))
-    except (TypeError, ValueError):
-        return 30
-    return v if v >= 5 else 30
+    """自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数）。"""
+    return aftersale_settings.auto_refresh_interval()
 
 
 def set_auto_refresh(enabled: bool) -> None:
-    """写「自动刷新记录」开关（统一设置-面板设置-售后 联动入口）"""
-    app_settings.set(_AUTO_REFRESH_KEY, bool(enabled))
+    """写「自动刷新记录」开关（统一设置-面板设置-售后 联动入口）。"""
+    return aftersale_settings.set_auto_refresh(enabled)
 
 
 def set_auto_refresh_interval(seconds: int) -> None:
-    """写自动刷新间隔秒数（<5 秒的入参按 5 秒下限钳制）"""
-    try:
-        v = int(seconds)
-    except (TypeError, ValueError):
-        return
-    app_settings.set(_AUTO_REFRESH_INTERVAL_KEY, max(5, v))
+    """写自动刷新间隔秒数（<5 秒的入参按 5 秒下限钳制）。"""
+    return aftersale_settings.set_auto_refresh_interval(seconds)
 
 
 def change_fingerprint() -> tuple:
@@ -1169,259 +714,38 @@ def get_field_candidates() -> dict:
     return out
 
 
-# ==================== 导出 / 导入 ====================
+# ==================== Excel 导出 / 导入（database.aftersale_excel） ====================
+
 
 def _safe_sheet_title(title: str) -> str:
-    r"""Excel sheet 名约束：≤31 字符且不含 : \ / ? * [ ]，非法字符转 -"""
-    for ch in ':/\\?*[]':
-        title = title.replace(ch, "-")
-    return title[:31] or "未分类"
+    """Excel sheet 名约束（实现见 database.aftersale_excel）。"""
+    return aftersale_excel._safe_sheet_title(title)
 
 
 def _write_export_sheet(ws, rows):
-    """写导出 sheet 公共逻辑：表头（加粗浅青底）+ 数据行 + 列宽 + 冻结首行
-
-    周期列按发生时间动态归属，与列表筛选口径一致。
-    """
-    from openpyxl.styles import Font, PatternFill, Alignment
-
-    header_font = Font(bold=True)
-    header_fill = PatternFill("solid", fgColor="D9F2F4")
-    for c, (_key, header) in enumerate(_EXPORT_HEADERS, 1):
-        cell = ws.cell(row=1, column=c, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center")
-    for r, rec in enumerate(rows, 2):
-        for c, (key, _h) in enumerate(_EXPORT_HEADERS, 1):
-            val = rec.get(key) or ""
-            if key == "cycle_start":
-                cs = _record_cycle(rec.get("occurred_at"),
-                                   rec.get("created_at"))
-                val = cycle_label(cs) if cs else ""
-            ws.cell(row=r, column=c, value=str(val))
-    widths = (12, 24, 10, 8, 28, 30, 10, 30, 10, 12, 18, 12, 10, 16)
-    for c, w in enumerate(widths, 1):
-        ws.column_dimensions[ws.cell(row=1, column=c).column_letter].width = w
-    ws.freeze_panes = "A2"
+    """写导出 sheet 公共逻辑（实现见 database.aftersale_excel）。"""
+    return aftersale_excel._write_export_sheet(ws, rows)
 
 
 def _write_stats_sheet(wb, rows):
-    """统计图表 sheet：类型×状态数据表 + 类型数量柱状图 + 解决状态饼图
-
-    布局：A1:D{last} 数据表（含合计行），F2 起柱状图；
-    数据表下方 A 列放 已解决/未解决 两行供饼图引用，饼图锚定 D 列。
-    """
-    if not rows:
-        return
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.chart import BarChart, PieChart, Reference
-
-    ws = wb.create_sheet("统计图表")
-    # 统计各类型 总数/已解决/未解决
-    counts = {}
-    for rec in rows:
-        t = str(rec.get("issue_type") or "未分类")
-        item = counts.setdefault(t, [0, 0, 0])
-        item[0] += 1
-        if rec.get("resolved") == "是":
-            item[1] += 1
-        else:
-            item[2] += 1
-    ordered = sorted(counts.items(), key=lambda kv: kv[1][0], reverse=True)
-
-    header_font = Font(bold=True)
-    header_fill = PatternFill("solid", fgColor="D9F2F4")
-    for c, h in enumerate(("类型", "数量", "已解决", "未解决"), 1):
-        cell = ws.cell(row=1, column=c, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center")
-    total = total_yes = total_no = 0
-    for r, (t, (n, yes, no)) in enumerate(ordered, 2):
-        ws.cell(row=r, column=1, value=t)
-        ws.cell(row=r, column=2, value=n)
-        ws.cell(row=r, column=3, value=yes)
-        ws.cell(row=r, column=4, value=no)
-        total += n
-        total_yes += yes
-        total_no += no
-    last = len(ordered) + 1  # 合计行号
-    ws.cell(row=last, column=1, value="合计").font = header_font
-    ws.cell(row=last, column=2, value=total)
-    ws.cell(row=last, column=3, value=total_yes)
-    ws.cell(row=last, column=4, value=total_no)
-
-    # 柱状图：各问题类型数量（不含合计行）
-    bar = BarChart()
-    bar.type = "col"
-    bar.style = 10
-    bar.title = "各问题类型数量"
-    bar.y_axis.title = "数量"
-    bar.add_data(Reference(ws, min_col=2, max_col=2,
-                           min_row=1, max_row=last - 1),
-                 titles_from_data=True)
-    bar.set_categories(Reference(ws, min_col=1, min_row=2,
-                                 max_row=last - 1))
-    bar.width = 16
-    bar.height = 9
-    ws.add_chart(bar, "F2")
-
-    # 饼图：已解决/未解决占比（数据表下方单独两行，避免混入类型行）
-    pr = last + 2  # 饼图数据起始行
-    ws.cell(row=pr - 1, column=1, value="状态").font = header_font
-    ws.cell(row=pr - 1, column=2, value="数量").font = header_font
-    ws.cell(row=pr, column=1, value="已解决")
-    ws.cell(row=pr, column=2, value=total_yes)
-    ws.cell(row=pr + 1, column=1, value="未解决")
-    ws.cell(row=pr + 1, column=2, value=total_no)
-    pie = PieChart()
-    pie.title = "解决状态占比"
-    pie.add_data(Reference(ws, min_col=2, min_row=pr - 1, max_row=pr + 1),
-                 titles_from_data=True)
-    pie.set_categories(Reference(ws, min_col=1, min_row=pr, max_row=pr + 1))
-    pie.width = 12
-    pie.height = 9
-    ws.add_chart(pie, f"D{pr}")
+    """写统计图表 sheet（实现见 database.aftersale_excel）。"""
+    return aftersale_excel._write_stats_sheet(wb, rows)
 
 
 def export_xlsx(path: str, keyword: str = "", cycle_start: str = "",
                 issue_type: str = "", resolved: str = "",
                 is_initiative: str = "", is_our_problem: str = "") -> int:
-    """按筛选条件导出全部记录（不分页）为 xlsx，返回导出条数
-
-    表头与 售后问题汇总8月.xlsx 对齐，附加 填写时间/填写人/周期 三列。
-    导出结构：
-    - Sheet「售后记录」：全部记录（原样）
-    - 每个有数据的问题类型一个 Sheet（如「硬件问题」），便于按类型分发
-    - Sheet「统计图表」：类型数量柱状图 + 解决状态饼图
-    """
-    from openpyxl import Workbook
-
-    conn = _conn()
-    where, params = _build_where(keyword, issue_type, resolved,
-                                 is_initiative, is_our_problem)
-    # P2（2026-08-28）：周期筛选 SQL 化（与列表/统计同口径），
-    # 导出前不再全量取回后 Python 过滤
-    where, params = _append_cycle_where(where, params, cycle_start)
-    cur = conn.execute(
-        f"SELECT {', '.join(RECORD_FIELDS)} FROM aftersale_records"
-        f"{where} ORDER BY id DESC", params)
-    cols = [d[0] for d in cur.description]
-    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-
-    wb = Workbook()
-    # 主 sheet：全部记录
-    ws = wb.active
-    ws.title = "售后记录"
-    _write_export_sheet(ws, rows)
-
-    # 按问题类型分类：预置枚举顺序在前，库中额外类型排后
-    by_type = {}
-    for rec in rows:
-        by_type.setdefault(str(rec.get("issue_type") or "未分类"),
-                           []).append(rec)
-    for t in ISSUE_TYPES:
-        if t in by_type:
-            ws_t = wb.create_sheet(_safe_sheet_title(t))
-            _write_export_sheet(ws_t, by_type.pop(t))
-    for t, group in by_type.items():
-        ws_t = wb.create_sheet(_safe_sheet_title(t))
-        _write_export_sheet(ws_t, group)
-
-    # 统计图表 sheet
-    _write_stats_sheet(wb, rows)
-
-    out_dir = os.path.dirname(os.path.abspath(path))
-    os.makedirs(out_dir, exist_ok=True)
-    wb.save(path)
-    return len(rows)
+    """按筛选条件导出 xlsx（实现见 database.aftersale_excel）。"""
+    return aftersale_excel.export_xlsx(
+        path, keyword, cycle_start, issue_type, resolved,
+        is_initiative, is_our_problem)
 
 
 def parse_excel_rows(xlsx_path: str) -> tuple:
-    """解析售后汇总 Excel，返回 (Excel 表头列表, 记录字典列表)；不写库
-
-    与 import_excel_rows 共用同一解析逻辑，供导入预览与正式导入使用。
-    规则：
-    - 表头按中文名定位（类型/球房/桌号/地区/问题/发生原因/是否解决/解决方案/解决人/响应时间）
-    - 类型列在 Excel 中为分组首行标记，逐行向下填充
-    - 跳过全空行；是否解决空值默认「否」
-    - created_at 填解析时间，creator 标记「Excel导入」，周期按当前配置归属
-    """
-    from openpyxl import load_workbook
-
-    wb = load_workbook(xlsx_path, data_only=True)
-    ws = wb.worksheets[0]  # 取第一个工作表（Sheet1 正式表）
-
-    # 表头定位：首行按中文名匹配列号
-    header_map = {}
-    excel_headers = []
-    for c in range(1, ws.max_column + 1):
-        h = str(ws.cell(row=1, column=c).value or "").strip()
-        if h:
-            header_map[h] = c
-            excel_headers.append(h)
-    need = ("类型", "球房", "桌号", "地区", "问题")
-    missing = [h for h in need if h not in header_map]
-    if missing:
-        raise ValueError(f"表头缺少必需列: {'、'.join(missing)}")
-
-    def _val(row_idx, header):
-        c = header_map.get(header)
-        if not c:
-            return ""
-        v = ws.cell(row=row_idx, column=c).value
-        return str(v or "").strip()
-
-    now = datetime.now()
-    created_at = now.strftime("%Y-%m-%d %H:%M:%S")
-    occurred = created_at[:10]  # 历史导入无发生时间，默认取导入当日
-    cycle = cycle_start_of(now)
-    last_type = ""
-    data = []
-    for r in range(2, ws.max_row + 1):
-        issue_type = _val(r, "类型") or last_type
-        if _val(r, "类型"):
-            last_type = issue_type
-        room = _val(r, "球房")
-        table_no = _val(r, "桌号")
-        problem = _val(r, "问题")
-        if not room and not table_no and not problem:
-            continue  # 全空行跳过
-        resolved = _val(r, "是否解决") or "否"
-        if resolved not in ("是", "否"):
-            resolved = "否"
-        data.append({
-            "created_at": created_at, "occurred_at": occurred,
-            "creator": "Excel导入", "issue_type": issue_type,
-            "table_no": table_no, "room_name": room,
-            "region": _val(r, "地区"), "problem": problem,
-            "cause": _val(r, "发生原因"), "resolved": resolved,
-            "solution": _val(r, "解决方案"), "resolver": _val(r, "解决人"),
-            "response_time": _val(r, "响应时间"), "cycle_start": cycle,
-        })
-    return excel_headers, data
+    """解析售后汇总 Excel（实现见 database.aftersale_excel）。"""
+    return aftersale_excel.parse_excel_rows(xlsx_path)
 
 
 def import_excel_rows(xlsx_path: str) -> int:
-    """一次性导入历史 Excel（售后问题汇总 格式），返回导入条数
-
-    解析规则见 parse_excel_rows；解析结果批量写入数据库。
-    """
-    _headers, data = parse_excel_rows(xlsx_path)
-    if not data:
-        return 0
-    order = ("created_at", "occurred_at", "creator", "issue_type", "table_no",
-             "room_name", "region", "problem", "cause", "resolved",
-             "solution", "resolver", "response_time", "cycle_start")
-    conn = _conn()
-    conn.executemany(
-        "INSERT INTO aftersale_records "
-        "(created_at, occurred_at, creator, issue_type, table_no, room_name, "
-        "region, problem, cause, resolved, solution, resolver, response_time, "
-        "snk_code, device_code, cycle_start) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [tuple(rec[k] for k in order) + ("", "") for rec in data])
-    conn.commit()
-    _invalidate_field_cands_cache()
-    return len(data)
+    """一次性导入历史 Excel（实现见 database.aftersale_excel）。"""
+    return aftersale_excel.import_excel_rows(xlsx_path)

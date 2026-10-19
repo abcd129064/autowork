@@ -50,9 +50,10 @@
       P0-1（workers 惰性导出）、UIMixin 第一刀（main_window/ui/ 迁出）、
       G18（core/ui_scale.py）、G15（main_window/ui/qss_runtime.py）、
       G1（main_window/ui/status_bar.py）、外观（main_window/ui/appearance.py）、
-      G2+G3（main_window/ui/context_menus.py）与 G4（main_window/ui/menu_actions.py）
-      已完成；下一项 G5/G6 设置对话框，之后删死代码（需用户确认）。A2 评估后暂缓，
-      再之后 A3、B4、B1、B2、B3、C2-C5。
+      G2+G3（main_window/ui/context_menus.py）、G4（main_window/ui/menu_actions.py）、
+      G5+G6（main_window/ui/settings_dialogs.py）与 G8+G11（main_window/ui/navigation.py）
+      已完成；G7/G9/G10/G12 死代码删除需用户确认。A3（cycle/settings/query SQL/query 执行层/Excel）与 B4（main_window 关闭清理）已完成；
+      B1 已开始（core/perf_settings.py 纯解析 + core/perf_diagnostics.py 文本格式化已下沉），下一步 B1 patch 层（Mica/亚克力/hover/switch/menu 已下沉）/ B2、B3、C2-C5。A2 评估后暂缓。
 - [ ] **`frpc.exe`（16MB，tracked 但被 .gitignore 命中）是否 `git rm --cached`**（AGENTS.md §7）。
 - [ ] **`tools/*/_archive/` 未入库一次性脚本**：提交还是删除（AGENTS.md §7）。
 

@@ -94,7 +94,7 @@ import core.acrylic_patch  # noqa: F401
 
 ### core.perf
 
-运行时性能开关中心（亚克力/动画/表格平滑滚动，切换即时生效，经 `core.app_settings` 门面持久化到 `config/perf.json`；兼容旧字段 `performance_mode` 与旧 settings.json 键位自动迁移）。
+运行时性能开关中心（亚克力/动画/表格平滑滚动，切换即时生效，经 `core.app_settings` 门面持久化到 `config/perf.json`；兼容旧字段 `performance_mode` 与旧 settings.json 键位自动迁移）。纯配置解析已下沉 `core.perf_settings`，诊断文本格式化已下沉 `core.perf_diagnostics`，Mica/亚克力/hover/页面切换/菜单补丁执行已分别下沉对应 `core.perf_patch_*` 模块；本模块保留读取/缓存、环境探测、阈值判定与旧 API。
 
 #### 全局开关
 
@@ -137,6 +137,80 @@ import core.acrylic_patch  # noqa: F401
 | `set_lean_delegate_enabled(enabled)` | 设置轻量委托开关并持久化；已打开的表格一并切换（即时生效） |
 | `patch_lean_table_delegate()` | 新建的 qfluentwidgets 表格自动挂轻量委托（幂等，启动时调用一次） |
 | `apply_lean_delegate_globally()` | 按当前开关刷新所有已存在表格的委托（设置页切换后立即生效） |
+
+---
+
+### core.perf_settings
+
+性能选项纯解析（B1 第一步），从 `core/perf.py` 下沉。不 import Qt / qfluentwidgets / core.perf；core.perf 负责读取 `app_settings` 与维护缓存，本模块只做纯函数。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `default_global_settings()` | `() -> dict` | 默认全局开关副本（亚克力/动画开，表格平滑关，轻量委托开） |
+| `resolve_global_settings(data)` | `(dict) -> dict` | 解析 perf 域顶层键，兼容旧 `performance_mode`；返回 acrylic/animation/table_smooth/lean_delegate |
+| `panel_overrides(data, keys)` | `(dict, dict) -> dict` | 提取面板级覆盖 `{panel: bool}`，未设置的面板不出现 |
+| `effective_value(global_value, overrides, panel)` | `(bool, dict, str) -> bool` | 指定面板有覆盖则用覆盖，否则回退全局 |
+
+---
+
+### core.perf_diagnostics
+
+性能诊断文本纯格式化（B1 第二步），从 `core/perf.py` 下沉。不 import Qt / core.perf；core.perf 负责采集状态与异常兜底。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `format_table_blit_status(status)` | `(dict) -> str` | 表格滚动加速状态行：关闭文案/已生效计数/未取底色提示 |
+| `format_degrade_diagnostics(limit, explicit, auto_pixels, raster_rate, ref_ms_per_mpx, bigscreen)` | `-> str` | 自动降级阈值诊断行：关闭/配置指定/自适应/静态默认 + 大屏模式后缀 |
+
+---
+
+### core.perf_patch_mica
+
+Mica 云母环境兜底补丁（B1 patch 层第一片），从 `core/perf.py` 下沉。只接收已判定的 `reason`，不探测系统环境、不读配置；`core.perf` 保留 `patch_mica_policy` 旧入口。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_mica_policy(reason, log=None)` | `(str, callable?) -> None` | reason 为空时保持库原行为；非空时短路 `FluentWidget.setMicaEffectEnabled` 与 `WindowsWindowEffect.setMicaEffect`，并通过 `log` 记录 |
+
+---
+
+### core.perf_patch_acrylic
+
+亚克力模糊降采样补丁（B1 patch 层第二片），从 `core/perf.py` 下沉。只安装 `AcrylicBrush.setImage` 补丁，不依赖 core.perf / 配置。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_acrylic_downsample_patch()` | `() -> None` | 幂等安装：`blurPicSize is None` 时置 `(450,450)`，避免主线程全分辨率高斯模糊 |
+
+---
+
+### core.perf_patch_table_hover
+
+表格 hover 条带重绘补丁（B1 patch 层第三片），从 `core/perf.py` 下沉。不依赖 core.perf / 配置。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_table_hover_patch()` | `() -> None` | 幂等替换 `TableBase._setHoverRow`：hover 行变化时只重绘新旧两行水平条带，而非整视口 |
+
+---
+
+### core.perf_patch_switch
+
+大屏页面切换直切补丁（B1 patch 层第四片），从 `core/perf.py` 下沉。阈值判定由 core.perf 注入，保留 `_over_dpi_degrade` monkeypatch 点。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_switch_animation_patch(over_degrade)` | `(callable) -> None` | 幂等替换 `PopUpAniStackedWidget.setCurrentIndex`：over_degrade 回调为真时走 `QStackedWidget` 基类直切，跳过 250ms 滑入动画 |
+
+---
+
+### core.perf_patch_menu
+
+菜单弹出动画降级补丁（B1 patch 层第五片），从 `core/perf.py` 下沉。判定回调由 core.perf 注入，保留 `get_animation` / `_over_dpi_degrade` monkeypatch 点。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_menu_animation_patch(animation_enabled, over_degrade)` | `(callable, callable) -> None` | 幂等替换 `MenuAnimationManager.make`：动画关或超阈值 → NONE；否则 DROP_DOWN/PULL_UP → FADE_IN_* |
 
 ---
 
@@ -583,6 +657,20 @@ SFTP 传输**两侧大小校验**（零 Qt/零 paramiko/零磁盘）：上传/�
 ## workers/ 后台线程层
 
 所有 Worker 均继承 `QThread`，通过 Qt 信号与 GUI 线程通信。
+
+### workers.kd_status_worker
+
+后台反查 kd 记录分类（B4 从 `main_window.main_window` 迁出）。原主线程同步查询在 MySQL 空闲连接断开时会阻塞至 60s，迁入 QThread 后慢/失败不卡 UI。
+
+#### 类 `_KdStatusQueryWorker`
+
+```python
+_KdStatusQueryWorker(device_code, date_str, clip_base, parent=None)
+```
+
+**信号**：`done` Signal(object)——查询结果 dict；失败/未命中为 None。`run()` 调用 `table_db.find_kd_file_status` 后发射结果。
+
+---
 
 ### workers.network_workers
 
@@ -1180,6 +1268,95 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 
 ---
 
+### database.aftersale_cycle
+
+售后周期计算纯逻辑（无 DB / 无 Qt / 无 app_settings），A3 第一步从 `aftersale_db` 下沉。周期模式以显式 dict 传入（`{type, start, span}`），`aftersale_db` 保留同名包装函数并注入当前周期模式，外部调用与 monkeypatch 点不变。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `parse_occurred(value)` | `(str) -> datetime|None` | 解析记录日期 `YYYY-MM-DD`（允许带时间，取前 10 位），非法返回 None |
+| `parse_cycle_start(value)` | `(str) -> datetime|None` | 解析周期起点，兼容 `yyyy-MM-dd` 与 `yyyy/MM/dd` |
+| `span_days(mode, today=None)` | `(dict, datetime=None) -> int` | 周期天数：tue/mon 固定 7，custom 取配置（≥1），month 取当月天数 |
+| `start_of(dt, mode)` | `(datetime, dict) -> str` | 计算所属周期起始日 `yyyy/MM/dd` |
+| `current_start(mode, now=None)` | `(dict, datetime=None) -> str` | 当前周期起始日 |
+| `label(cycle_start, mode)` | `(str, dict) -> str` | 周模式区间标签；month 模式 `YYYY-MM` |
+| `date_range(cycle_start, mode)` | `(str, dict) -> (date, date)` | month 为整月，其余为起始日 + span-1 天 |
+| `record_cycle(occurred_at, created_at, mode)` | `(str, str, dict) -> str|None` | 记录归属周期：优先 occurred_at，回退 created_at |
+| `match_cycle(record, cycle_start, mode)` | `(dict, str, dict) -> bool` | 记录是否属于所选周期，空周期不过滤 |
+| `is_valid_start(cycle_start, mode)` | `(str, dict) -> bool|None` | 周期起点合法性：True/False/None（不可解析） |
+
+---
+
+### database.aftersale_settings
+
+售后面板设置读写（无 DB / 无 Qt），A3 settings 切片从 `aftersale_db` 下沉。只依赖 `core.app_settings`，配置写 `config/aftersale.json`；`aftersale_db` 保留同名包装函数，配置键与调用方不变。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `load_settings_str(key)` | `(str) -> str` | 读取非空字符串配置，空/非字符串返回空串 |
+| `load_quick_phrases()` / `add_quick_phrase(text)` | `() -> list` / `(str) -> list` | 常用句读取/新增（新句置顶、去重、空白忽略） |
+| `load_last_creator()` / `load_last_resolver()` | `() -> str` | 上次填写人 / 解决人 |
+| `save_last_people(creator, resolver)` | `(str, str) -> None` | 记住填写人/解决人（仅非空写） |
+| `remember_occurred_enabled()` | `() -> bool` | 「记住上次发生日期」开关，缺省开启 |
+| `load_last_occurred()` / `save_last_occurred(occurred)` | `() -> str` / `(str) -> None` | 上次发生日期读取/记忆；开关关闭或空值不写 |
+| `set_remember_occurred(enabled)` | `(bool) -> None` | 写开关；关闭时清除已记住日期 |
+| `auto_refresh_enabled()` / `set_auto_refresh(enabled)` | `() -> bool` / `(bool) -> None` | 「自动刷新记录」开关，缺省关闭 |
+| `auto_refresh_interval()` / `set_auto_refresh_interval(seconds)` | `() -> int` / `(int) -> None` | 自动刷新间隔（缺省 30，读写均按 ≥5 钳制；非法入参不写） |
+
+---
+
+### database.aftersale_query_sql
+
+售后查询 SQL 构造纯逻辑（无 DB / 无 Qt / 无 app_settings），A3 queries 第一步从 `aftersale_db` 下沉。`aftersale_db` 直接导入这些名字，既有的 `adb._build_where` / `adb._build_order` / `adb.LIST_SORT_KEYS` 访问路径不变。
+
+#### 常量
+
+| 常量 | 说明 |
+|------|------|
+| `_SEARCH_FIELDS` | 关键词搜索覆盖列（桌号/球房/问题/地区/原因/方案/解决人/填写人） |
+| `_RECORD_DATE_EXPR` | 记录日期表达式：优先合法 `occurred_at`，否则回退 `created_at`，取前 10 位 |
+| `LIST_SORT_KEYS` | 列表可排序键集合（未知键回退 id DESC） |
+
+#### 函数
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `_build_where(keyword, issue_type, resolved, is_initiative="", is_our_problem="")` | `-> (str, list)` | 构造 `deleted=0` + 类型/状态/判定/关键词 WHERE 与参数 |
+| `_yes_no_rank(col)` | `(str) -> str` | 是/否文字列转 1/0/-1 数值排序表达式 |
+| `_build_order(sort_key, sort_order)` | `(str, str) -> str` | 排序白名单 → ORDER BY；末尾统一 `id DESC` 防跨页漂移 |
+
+---
+
+### database.aftersale_queries
+
+售后查询执行层（A3 queries 第二步），从 `aftersale_db` 下沉：周期筛选拼接、分页/统计/排行/周期下拉。查询 SQL 构造在 `database.aftersale_query_sql`；周期物化与模式读取仍由 `aftersale_db` 持有，函数内延迟取用，保证既有 monkeypatch 点继续生效。`aftersale_db` 保留同名包装函数。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `_append_cycle_where(where, params, cycle_start)` | `-> (str, list)` | 周期物化列等值过滤；非法起点追加 `1=0`，触发存量兜底回填 |
+| `query_page(page_no, page_size, keyword="", cycle_start="", issue_type="", resolved="", is_initiative="", is_our_problem="", sort_key="", sort_order="desc")` | `-> (total, rows)` | 分页查询；COUNT/LIMIT/OFFSET 与排序下沉 SQL |
+| `query_with_stats(...)` | `-> (total, rows, stats)` | 分页 + 同口径统计（total/resolved/unresolved/initiative/our_problem/rate） |
+| `query_stats_detail(keyword="", cycle_start="", issue_type="", trend_start="", trend_end="")` | `-> dict` | 统计弹窗 summary/daily/regions/types 聚合 |
+| `query_rank(level="room", limit=10, sort="total", start="", end="", cycle_start="", resolved="", is_initiative="", is_our_problem="", region="", room_name="", keyword="")` | `-> dict` | 球房/球桌售后排行，与 Web 端同口径 |
+| `get_cycle_options()` | `-> list` | 库中实际存在数据的周期下拉选项 |
+
+---
+
+### database.aftersale_excel
+
+售后 Excel 导出/导入（A3 excel 切片），从 `aftersale_db` 下沉：表头样式、按问题类型分 sheet、统计图表、按筛选导出、历史 Excel 解析与批量导入。连接/周期/字段常量仍由 `aftersale_db` 单一维护，函数内延迟取用；`aftersale_db` 保留同名包装函数。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `_safe_sheet_title(title)` | `(str) -> str` | Excel sheet 名约束：≤31 字符，`: \ / ? * [ ]` 转 `-`，空串回退「未分类」 |
+| `_write_export_sheet(ws, rows)` | `(Worksheet, list) -> None` | 表头加粗浅青底 + 数据行 + 列宽 + 冻结首行；周期列按发生时间动态归属 |
+| `_write_stats_sheet(wb, rows)` | `(Workbook, list) -> None` | 统计图表 sheet：类型×状态数据表 + 数量柱状图 + 解决状态饼图 |
+| `export_xlsx(path, keyword="", cycle_start="", issue_type="", resolved="", is_initiative="", is_our_problem="")` | `-> int` | 按筛选导出全部记录；主 sheet + 按类型分 sheet + 统计图表，返回条数 |
+| `parse_excel_rows(xlsx_path)` | `-> (headers, rows)` | 解析售后汇总 Excel（不写库）：中文表头定位、类型向下填充、空行跳过、解决默认「否」 |
+| `import_excel_rows(xlsx_path)` | `-> int` | 解析后批量写入数据库，返回导入条数；成功后失效候选缓存 |
+
+---
+
 ### database.aftersale_db
 
 售后记录数据层（SQLite / MySQL 双后端，自动跟随 MySQL 测试开关）。连接复用 `table_db` 双后端路由（SQLite 单连接 / MySQL thread-local）；MySQL 模式下多人各自提交即提交即落库，其他用户刷新/手动同步后可见。
@@ -1194,6 +1371,8 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `RECORD_FIELDS` | 记录字段元组（与建表 DDL 一致，不含 id） |
 
 #### 面板设置联动（记住日期 / 自动刷新，config/aftersale.json）
+
+以下为兼容包装，实现见 `database.aftersale_settings`。
 
 | 函数 | 说明 |
 |------|------|
@@ -1212,8 +1391,8 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 |------|------|------|
 | `load_cycle_mode()` | `() -> dict` | 读取周期模式 `{type, start, span}`，缺省/非法回退周二起。**进程内缓存**（`_cycle_mode_cache`），`save_cycle_mode` 成功后失效重读；外部手改配置文件需 `app_settings.invalidate_cache()` |
 | `save_cycle_mode(mode)` | `(dict) -> dict` | 经门面合并写（域内其余键不动），成功后失效缓存并置重算待办标志 `aftersale_cycle_recalc_pending=true`，返回规范化配置 |
-| `cycle_span_days()` | `() -> int` | 当前模式周期天数：tue/mon 固定 7，custom 取配置值（≥1），month 取当月实际天数 |
-| `cycle_start_of(dt)` | `(datetime) -> str` | 计算给定时间所属周期起始日（`yyyy/MM/dd`），按当前模式分发 |
+| `cycle_span_days()` | `() -> int` | 当前模式周期天数；包装 `database.aftersale_cycle.span_days(load_cycle_mode())` |
+| `cycle_start_of(dt)` | `(datetime) -> str` | 计算给定时间所属周期起始日；包装 `database.aftersale_cycle.start_of(dt, load_cycle_mode())` |
 | `current_cycle_start()` | `() -> str` | 当前周期起始日 |
 | `cycle_label(cycle_start)` | `(str) -> str` | 周期展示标签：周模式 `08/18 - 08/24`；month 模式 `2026-08` |
 | `cycle_date_range(cycle_start)` | `(str) -> (date, date)` | 周期起止日期：month 模式为整月，其余为起始日 + span-1 天 |
@@ -1233,6 +1412,8 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `mark_resolved_batch(rec_ids)` | `(list) -> int` | 批量标记已解决（resolved=是 + resolved_at 戳），返回受影响行数 |
 
 #### 查询与统计
+
+以下为兼容包装，实现见 `database.aftersale_queries`。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
@@ -1258,6 +1439,8 @@ kd_status 历史分区保留 60 天（`_KD_KEEP_DAYS`），每次保存后自动
 | `load_last_creator()` / `load_last_resolver()` / `save_last_people(creator, resolver)` | `-> str` | 上次填写的填写人/解决人记忆（非空才写，下次打开面板预填） |
 
 #### 导出 / 导入
+
+以下为兼容包装，实现见 `database.aftersale_excel`。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
@@ -1836,7 +2019,7 @@ PortFakeWidget(parent=None)
 class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin, FluentWindow)
 ```
 
-内部还有 `_DbSettingsDialog`（MessageBoxBase，内嵌 `MysqlSyncCard` 的数据库设置弹窗）、`_LogLoadWorker`（后台读日志 + 高亮匹配）、`_KdStatusQueryWorker`（后台反查 kd 记录分类）三个私有类。
+内部还有 `_DbSettingsDialog`（MessageBoxBase，内嵌 `MysqlSyncCard` 的数据库设置弹窗）与 `_LogLoadWorker`（后台读日志 + 高亮匹配）两个私有类；原 `_KdStatusQueryWorker` 已迁至 `workers.kd_status_worker`。
 
 #### 核心公开方法
 
@@ -1854,9 +2037,25 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 | `on_log_selected(item)` / `on_log_double_clicked(item)` | 日志选中 / 双击（解析日志、更新 cfg.json，双击额外启动程序） |
 | `_apply_startup_default_page()` | 启动时按配置 `startup_default_page` 切换默认展示界面（`_build_hub_pages` 末尾 singleShot(0) 调用；非法值回退工作台，2026-09-19） |
 | `_show_info_bar(message, message_type="info", title=None, duration=2500)` | 统一 InfoBar 提示（兼容入口，内部转调 `core.utils.show_info_bar`，位置 BOTTOM_RIGHT、标题自动映射） |
-| `closeEvent(event)` | 主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程 |
+| `closeEvent(event)` | 主窗口关闭清理：转调 `main_window.shutdown.shutdown_main_window(self)` 后执行父类 closeEvent；释放 Hub worker、弹出面板、远程会话、三端进程与各类 worker |
 
 > 进程管理方法（启动/结束/三端）见 [ProcessMixin](#main_windowprocess_mixin)，设置方法见 [SettingsMixin](#main_windowsettings_mixin)，UI/主题方法见 [UiMixin](#main_windowui_mixin)，远程方法见 RemoteMixin，更新方法见 [UpdateMixin](#main_windowupdate_mixin)——各自实现于对应 Mixin 模块。
+
+---
+
+### main_window.shutdown
+
+主窗口关闭清理（B4）。从 `main_window/main_window.py` 的 `closeEvent` 下沉，按原顺序释放：
+
+- Hub 子页 `detach_workers`、`_hub_popouts` 弹窗、`_table_panel`
+- 远程会话中心 shutdown 方法、host._save_remote_sessions 方法（必须先于远程窗口 close）
+- 运行中的 SnookerTracking / 三端 QProcess
+- `_tcp_worker`、`_log_worker`、NewLog/单杆 worker、`_decode_process`
+- `_upload_collect_workers` 短等待并清空
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `shutdown_main_window(host)` | `(object) -> None` | 执行关闭前资源清理；不调用父类 closeEvent，Qt 事件链仍由 MainWindow 负责 |
 
 ---
 
@@ -1952,15 +2151,21 @@ UI 辅助（状态栏、菜单栏 Action、右键菜单、主题切换、布局�
 | `_apply_theme()` | 应用深色/浅色主题 |
 | `_parse_theme_color(settings)` | [静态] 解析主题强调色：优先 `theme_color`（HEX），兼容旧 `highlight_color`（RGB 列表） |
 | `_apply_theme_color()` | 从配置加载主题强调色到内存（`_apply_theme` 时应用） |
-| `_on_theme_color()` | 弹出主题强调色选择对话框（功能菜单「主题颜色设置」），选色后经 `_apply_theme_color_set` 生效 |
-| `_on_theme_color_reset()` | 还原默认主题强调色（功能菜单「还原默认主题色」），已是默认色时提示不重复执行 |
-| `_apply_theme_color_set(color)` | 应用主题强调色：持久化 `theme_color` + `setThemeColor` 全局即时生效 + 日志/InfoBar |
+| `_on_modify_shortcuts()` | 快捷键修改对话框（实现见 `main_window.ui.settings_dialogs`） |
+| `_on_theme_color()` | 弹出主题强调色选择对话框（实现见 `main_window.ui.settings_dialogs`），选色后经 `_apply_theme_color_set` 生效 |
+| `_on_theme_color_reset()` | 还原默认主题强调色（实现见 `main_window.ui.settings_dialogs`），已是默认色时提示不重复执行 |
+| `_apply_theme_color_set(color)` | 应用主题强调色：持久化 `theme_color` + `setThemeColor` 全局即时生效 + 日志/InfoBar（实现见 `main_window.ui.settings_dialogs`） |
+| `_set_font_size_inline(val)` / `_set_font_family_inline(family)` / `_set_dpi_scale_inline(val)` | 设置页外观行的内联回调（实现见 `main_window.ui.settings_dialogs`） |
 | `_apply_font_size()` / `_apply_font_family()` | 应用字号 / 字体设置 |
 | `apply_dpi_scale(settings)` | [静态] 在 QApplication 创建后应用 DPI 缩放（settings 为合并配置 dict） |
 | `_effective_is_dark(settings)` | [静态] 判断是否深色主题 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
 | `_on_open_single_video()` | 工具菜单「单杆视频」回退兜底（正常路径为 `_on_open_tool_hub("single_video_work")` 跳工具页）：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调 |
-| `_on_open_tool_hub(work=None)` | 工具类入口统一跳转二期独立工具页（`main_window.tool_hub`）；`work` 为工作区 objectName（single_video_work / port_fake_work / upload_list_work / newlog_work） |
+| `_panel_entry_popout_enabled()` | 面板入口弹出策略：读取 `panel_entry_popout`（默认 True），异常回落 True；实现见 `main_window.ui.navigation` |
+| `_on_open_table_panel()` | 打开球桌管理（弹出独立面板或跳转运维页）；实现见 `main_window.ui.navigation` |
+| `_on_open_aftersale()` | 打开售后面板（弹出独立面板或跳转售后页）；实现见 `main_window.ui.navigation` |
+| `_on_open_conn_diag()` | 打开连接诊断单例窗口；实现见 `main_window.ui.navigation` |
+| `_on_open_tool_hub(work=None)` | 工具类入口统一跳转二期独立工具页（`main_window.tool_hub`）；`work` 为工作区 objectName（single_video_work / port_fake_work / upload_list_work / newlog_work）；实现见 `main_window.ui.navigation` |
 | `_on_open_port_fake()` | 工具菜单「端口占用」：弹窗真实监听指定端口模拟服务占用（`PortFakeWidget`） |
 | `_on_newlog_organize()` | 工具菜单「视频/日志批量整理」：按 Excel 署名筛选批量归类（`NewLogDialog` + `NewLogWorker`），支持一键打包上传 |
 
@@ -1978,6 +2183,8 @@ UI 辅助（状态栏、菜单栏 Action、右键菜单、主题切换、布局�
 | `main_window/ui/status_bar.py` | `init_statusbar` / `show_status_message` / `update_status_device/running/idle/paused/logs`（底部状态栏，host 持原属性名 `_statusbar_widget` 等） |
 | `main_window/ui/context_menus.py` | `init_context_menus` / `build_id_list_menu` / `build_log_list_menu` / `build_video_list_menu` / `id_list_context_menu` / `log_list_context_menu` / `local_video_list_context_menu` / `add_file_to_upload` / `on_upload_collect_done`（三个列表右键菜单与上传目录收集，host 暴露 `ui` 与日志/提示回调） |
 | `main_window/ui/menu_actions.py` | `init_menubar`（只创建 `_menubar_widget` 空壳与 5 个跨页面 QAction：`_act_theme_auto` / `_act_theme_light` / `_act_theme_dark`、`_act_layout_classic` / `_act_layout_panel`；这 5 个属性名是 `main_window/hub_pages.py:341-342,413-415` 的直接访问契约，不可改名） |
+| `main_window/ui/navigation.py` | `panel_entry_popout_enabled` / `open_table_panel` / `open_aftersale` / `open_conn_diag` / `open_tool_hub`（面板入口弹出策略、球桌/售后/工具页导航、连接诊断单例；host 提供 `_load_settings`、`switchTo`、`open_hub_popout` 与 `*_hub` 属性） |
+| `main_window/ui/settings_dialogs.py` | `modify_shortcuts` / `theme_color` / `theme_color_reset` / `apply_theme_color_set` / `set_font_size_inline` / `set_font_family_inline` / `set_dpi_scale_inline`（G5/G6 设置对话框与设置页内联外观回调；host 提供设置读写、日志与 InfoBar） |
 | `main_window/ui/appearance.py` | `apply_theme` / `apply_global_font` / `set_widget_font_recursive` / `apply_theme_color` / `init_system_theme_monitor` / `sync_theme_polling` / `poll_system_theme` / `on_theme_selected` / `on_layout_selected` / `apply_layout`（主题/字体/轮询/布局；host 提供设置读写与主题策略方法） |
 
 ---

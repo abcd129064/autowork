@@ -168,6 +168,13 @@ autowork/
 │   ├── log_rules.py           #   日志高亮规则引擎（原设置对话框迁入）
 │   ├── ops_link_delegate.py   #   运维表格链接/操作列委托
 │   ├── perf.py                #   性能开关中心（亚克力/动画/表格平滑滚动 + 中央补丁）
+│   ├── perf_settings.py       #   性能选项纯解析（B1 第一步：默认值/旧字段/面板覆盖）
+│   ├── perf_diagnostics.py    #   性能诊断文本纯格式化（B1 第二步）
+│   ├── perf_patch_mica.py     #   Mica 云母环境兜底补丁（B1 patch 第一片）
+│   ├── perf_patch_acrylic.py  #   亚克力模糊降采样补丁（B1 patch 第二片）
+│   ├── perf_patch_table_hover.py # 表格 hover 条带重绘补丁（B1 patch 第三片）
+│   ├── perf_patch_switch.py   #   大屏页面切换直切补丁（B1 patch 第四片）
+│   ├── perf_patch_menu.py     #   菜单弹出动画降级补丁（B1 patch 第五片）
 │   ├── secrets.py             #   配置加解密（DPAPI，SSH/upload/AI 凭据）
 │   ├── switch_cn_patch.py     #   SwitchButton 中文「开/关」文本补丁
 │   ├── theme_qss.py           #   窗口级 QSS 应用（apply_window_qss/current_accent_hex）
@@ -188,6 +195,7 @@ autowork/
 │   ├── mysql_sync_worker.py   #   MySQL 连接测试 Worker
 │   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
 │   ├── newlog_worker.py       #   NewLog 批量整理 Worker（日志逐行转发 GUI）
+│   ├── kd_status_worker.py    #   kd 记录分类后台反查（B4 从主窗口迁出）
 │   ├── single_video_worker.py #   单杆视频生成 Worker（日志解析 + 计分水印）
 │   └── table_worker.py        #   球桌/设备数据 API Worker（拉取/迁移/登录测试）
 │
@@ -195,7 +203,12 @@ autowork/
 │   ├── backend.py             #   数据库后端切换层（MySQL 替代 SQLite 路由 + 方言适配）
 │   ├── table_db.py            #   球桌/设备数据存取（FTS5 搜索、按日期分区）
 │   ├── data_retention.py      #   数据保留自动清理（过期分区 + 按大小清理，双后端）
-│   ├── aftersale_db.py        #   售后记录数据层（周期计算、筛选统计、导入导出）
+│   ├── aftersale_db.py        #   售后记录数据层（筛选统计、导入导出；周期计算已下沉）
+│   ├── aftersale_cycle.py     #   售后周期计算纯逻辑（无配置/无 DB，A3 第一步）
+│   ├── aftersale_settings.py  #   售后面板设置读写（常用句/人员/日期记忆/自动刷新）
+│   ├── aftersale_query_sql.py #   售后查询 SQL 构造纯逻辑（WHERE/排序白名单）
+│   ├── aftersale_queries.py   #   售后查询执行层（分页/统计/排行/周期下拉）
+│   ├── aftersale_excel.py     #   售后 Excel 导出/导入（表头/图表/解析）
 │   ├── ledger_db.py           #   跑视频记录数据层（分类筛选统计、署名统计、导出）
 │   ├── schema.py              #   表结构单一来源（双方言 DDL + 迁移注册表）
 │   ├── merge_back.py          #   兜底增量 LWW 合并回写（恢复后执行）
@@ -234,7 +247,8 @@ autowork/
 │   ├── setting_cards.py       #   统一设置页卡片组件（SettingGroup/SettingRow）
 │   ├── settings_mixin.py      #   配置读写、快捷键
 │   ├── process_mixin.py       #   三端进程管理（启动/关闭/暂停/分辨率）
-│   ├── ui/                    #   可独立拆分的 UI 资产（关于/亚克力菜单/快捷键/批量整理/状态栏/右键菜单/菜单 Action/QSS/主题）
+│   ├── shutdown.py            #   主窗口关闭清理（B4：closeEvent 资源释放）
+│   ├── ui/                    #   可独立拆分的 UI 资产（关于/亚克力菜单/快捷键/批量整理/状态栏/右键菜单/菜单 Action/导航/设置对话框/QSS/主题）
 │   └── ui_mixin.py            #   状态栏/菜单栏 Action/右键菜单/主题
 │
 ├── tools/                     # 开发/运维脚本（一律不参与运行时，规范见 AGENTS.md）

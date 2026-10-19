@@ -12,9 +12,9 @@ import ctypes
 
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QFontDatabase
-from qfluentwidgets import (setThemeColor,
-    MessageBox, MessageBoxBase, ColorDialog, SpinBox, ComboBox, LineEdit,
+from PySide6.QtGui import QFontDatabase
+from qfluentwidgets import (
+    MessageBox, MessageBoxBase, SpinBox, ComboBox, LineEdit,
     BodyLabel, CaptionLabel, TitleLabel, SwitchButton,
     PushButton, ScrollArea, TextEdit, ProgressBar)
 
@@ -27,7 +27,8 @@ from workers.single_video_worker import SingleVideoWorker
 from core.log_rules import DEFAULT_LOG_RULES, compile_log_rules
 
 # 模块级 UI 资产已迁出；此处 re-export 保持 main_window.ui_mixin.X 旧路径可用
-from .ui import appearance, context_menus, menu_actions, qss_runtime, status_bar
+from .ui import (appearance, context_menus, menu_actions, navigation,
+    settings_dialogs, status_bar)
 from .ui.about_dialog import (APP_VERSION, ABOUT_LINKS, ABOUT_OSS_LIBS,
     GITHUB_REPO, AboutDialog)
 from .ui.acrylic_menu import (_ensure_menu_fit, _patch_acrylic_exec,
@@ -160,100 +161,32 @@ class UIMixin:
     # ==================== 设置对话框（Fluent 风格） ====================
 
     def _on_modify_shortcuts(self):
-        """弹出快捷键修改对话框（Fluent MessageBoxBase）"""
-
-        class ShortcutDialog(MessageBoxBase):
-            def __init__(self, parent, fields):
-                super().__init__(parent)
-                self.titleLabel = BodyLabel("修改快捷键", self)
-                self.viewLayout.addWidget(self.titleLabel)
-                self.editors = {}
-                for label, key, default in fields:
-                    row = QHBoxLayout()
-                    lbl = BodyLabel(label + ":", self)
-                    lbl.setFixedWidth(80)
-                    row.addWidget(lbl)
-                    edit = _ShortcutKeyEdit(default, self)
-                    edit.setMinimumWidth(180)
-                    row.addWidget(edit)
-                    self.editors[key] = edit
-                    self.viewLayout.addLayout(row)
-
-        sc = self._get_shortcut_settings()
-        fields = [
-            ("刷新", "shortcut_flush", sc["shortcut_flush"]),
-            ("播放/结束", "shortcut_start", sc["shortcut_start"]),
-            ("打开目录", "shortcut_open_dir", sc["shortcut_open_dir"]),
-            ("暂停/恢复", "shortcut_pause", sc["shortcut_pause"]),
-            ("聚焦帧输入", "shortcut_focus_frame", sc["shortcut_focus_frame"]),
-            ("启动三端", "shortcut_start_three", sc["shortcut_start_three"]),
-            ("查看CPP日志", "shortcut_open_daily", sc["shortcut_open_daily"]),
-            ("打开配置", "shortcut_open_config", sc["shortcut_open_config"]),
-            ("P2P面板", "shortcut_p2p_panel", sc["shortcut_p2p_panel"]),
-            # 需求21：新面板快捷入口
-            ("跑视频面板", "shortcut_ledger_panel", sc["shortcut_ledger_panel"]),
-            ("售后面板", "shortcut_aftersale_panel", sc["shortcut_aftersale_panel"]),
-            ("运维面板", "shortcut_table_panel", sc["shortcut_table_panel"]),
-        ]
-        dlg = ShortcutDialog(self, fields)
-        dlg.yesButton.setText("确定")
-        dlg.cancelButton.setText("取消")
-        dlg.widget.setMinimumWidth(340)
-        if dlg.exec():
-            new_sc = {k: v.keySequence().toString() for k, v in dlg.editors.items()}
-            self._save_settings(new_sc)
-            self._init_shortcuts()
-            self._append_log(f"[配置] 已更新快捷键: {new_sc}")
+        """弹出快捷键修改对话框（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.modify_shortcuts(self)
 
     def _on_theme_color(self):
-        """弹出主题强调色选择对话框（Fluent ColorDialog）：选择后全局即时生效并持久化"""
-        current = QColor(self._theme_color)
-        dlg = ColorDialog(current, "选择主题强调色", self)
-        if dlg.exec():
-            self._apply_theme_color_set(dlg.color.name())
+        """弹出主题强调色选择对话框（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.theme_color(self)
 
     def _on_theme_color_reset(self):
-        """还原默认主题强调色：立即应用并持久化"""
-        from main_window.settings_mixin import SettingsMixin
-        default = SettingsMixin.DEFAULT_THEME_COLOR
-        if self._theme_color.lower() == default.lower():
-            self._append_log("[配置] 主题强调色已是默认色，无需还原")
-            self._show_info_bar("当前已是默认主题强调色", "info")
-            return
-        self._apply_theme_color_set(default)
+        """还原默认主题强调色（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.theme_color_reset(self)
 
     def _apply_theme_color_set(self, color):
-        """应用主题强调色：持久化 + 全局即时生效 + 日志/通知（选色与还原默认共用）"""
-        self._theme_color = color
-        self._save_settings({"theme_color": color})
-        setThemeColor(color, lazy=True)
-        # QSS 中的强调色锚点需按新色重新替换应用
-        self._apply_theme()
-        self._append_log(f"[配置] 已更新主题强调色: {color}")
-        self._show_info_bar(f"[配置] 已更新主题强调色: {color}")
+        """应用主题强调色（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.apply_theme_color_set(self, color)
 
     def _set_font_size_inline(self, val):
-        """内联字号回调（设置页 SpinBox 直接改动；字号弹窗确定也走此单源逻辑）"""
-        val = int(val)
-        self._save_settings({"font_size": val})
-        self._apply_font_size()
-        self._append_log(f"[配置] 已更新字号: {val}pt")
-        self._show_info_bar(f"[配置] 已更新字号: {val}pt")
+        """内联字号回调（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.set_font_size_inline(self, val)
 
     def _set_font_family_inline(self, family):
-        """内联字体回调（family 传空串 = 恢复默认字体族；字体弹窗确定同源）"""
-        self._save_settings({"font_family": family})
-        self._apply_font_family()
-        label = family if family else "默认"
-        self._append_log(f"[配置] 已更新字体: {label}")
-        self._show_info_bar(f"[配置] 已更新字体: {label}")
+        """内联字体回调（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.set_font_family_inline(self, family)
 
     def _set_dpi_scale_inline(self, val):
-        """内联缩放回调：持久化 + info bar 重启提示（2026-09-07 由弹窗改为内联）"""
-        val = int(val)
-        self._save_settings({"dpi_scale": val})
-        self._append_log(f"[配置] 已设置缩放: {val}%（重启后生效）")
-        self._show_info_bar(f"[配置] 已设置缩放: {val}%,需重启")
+        """内联缩放回调（实现见 ui.settings_dialogs）。"""
+        return settings_dialogs.set_dpi_scale_inline(self, val)
 
     def _on_font_size(self):
         """弹出字号选择对话框（Fluent SpinBox）"""
@@ -347,59 +280,20 @@ class UIMixin:
         self._append_log("[添加] 手动添加一条球桌记录到本地数据库")
 
     def _panel_entry_popout_enabled(self):
-        """工具栏面板入口（跑视频/售后/球桌管理）是否默认弹出独立面板。
-
-        设置项 panel_entry_popout（ui 域，默认 True，2026-09-20）：
-        开 = 点入口弹出独立面板窗口（open_hub_popout）；
-        关 = 回落为主窗口内导航跳转（switchTo）。
-        """
-        try:
-            return bool(self._load_settings().get("panel_entry_popout", True))
-        except Exception:
-            return True
+        """面板入口是否弹出独立窗口（实现见 ui.navigation）。"""
+        return navigation.panel_entry_popout_enabled(self)
 
     def _on_open_table_panel(self):
-        """打开球桌管理：默认弹出独立面板（2026-09-20 设置项
-        panel_entry_popout，默认开）；关闭该设置时回落为跳转主窗口
-        「运维管理」页（单窗口导航版）。
-
-        原 FluentWindow 独立面板保留（windows/management_panel.py shim 仍可
-        独立进程启动）。
-        """
-        hub = getattr(self, "management_hub", None)
-        if hub is None:
-            return
-        if self._panel_entry_popout_enabled():
-            self.open_hub_popout(hub)
-        else:
-            self.switchTo(hub)
+        """打开球桌管理（实现见 ui.navigation）。"""
+        return navigation.open_table_panel(self)
 
     def _on_open_aftersale(self):
-        """打开售后面板：默认弹出独立面板（2026-09-20 设置项
-        panel_entry_popout，默认开）；关闭该设置时回落为跳转主窗口
-        「售后」页（单窗口导航版）。
-
-        原 AftersalePanelWindow 独立面板保留（windows/aftersale_panel.py shim
-        仍可独立进程启动）。
-        """
-        hub = getattr(self, "aftersale_hub", None)
-        if hub is None:
-            return
-        if self._panel_entry_popout_enabled():
-            self.open_hub_popout(hub)
-        else:
-            self.switchTo(hub)
+        """打开售后面板（实现见 ui.navigation）。"""
+        return navigation.open_aftersale(self)
 
     def _on_open_conn_diag(self):
-        """打开连接诊断面板（非模态独立窗口，单例：已打开则激活）"""
-        from windows.remote_session.conn_diag_panel import ConnDiagPanel
-        if not hasattr(self, '_conn_diag') or self._conn_diag is None:
-            self._conn_diag = ConnDiagPanel()
-            self._conn_diag.destroyed.connect(
-                lambda: setattr(self, '_conn_diag', None))
-        self._conn_diag.show()
-        self._conn_diag.raise_()
-        self._conn_diag.activateWindow()
+        """打开连接诊断面板（实现见 ui.navigation）。"""
+        return navigation.open_conn_diag(self)
 
     # ==================== 端口占用（工具菜单） ====================
 
@@ -751,21 +645,8 @@ class UIMixin:
         self._reactivate_newlog_dlg(dlg)
 
     def _on_open_tool_hub(self, work=None):
-        """工具入口统一跳转二期独立工具页（main_window.tool_hub）。
-
-        work 可为工作区属性名（single_video_work/port_fake_work/
-        upload_list_work/newlog_work），缺省保持当前页。2026-09-07：
-        菜单栏/设置-工具的 4 条旧弹窗入口全部改走本方法（弹窗代码保留
-        不删，作为回退兜底）。
-        """
-        hub = getattr(self, "tool_hub", None)
-        if hub is None:
-            return
-        self.switchTo(hub)
-        if work:
-            page = getattr(hub, work, None)
-            if page is not None:
-                hub.switchTo(page)
+        """工具入口统一跳转工具页（实现见 ui.navigation）。"""
+        return navigation.open_tool_hub(self, work)
 
     def _on_open_settings(self):
         """统一设置入口：跳转底部设置 Hub（2026-09-07 弹窗废止）

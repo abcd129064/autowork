@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
     QListWidgetItem, QSplitter)
-from PySide6.QtCore import Slot, QTimer, Qt, QDate, QDateTime, QProcess, QThread, Signal
+from PySide6.QtCore import Slot, QTimer, Qt, QDate, QDateTime, QThread, Signal
 from PySide6.QtGui import QColor, QBrush, QShortcut, QKeySequence, QTextCharFormat
 from qfluentwidgets import (FluentTitleBar, FluentIcon,
     MessageBoxBase, BodyLabel, ComboBox, isDarkTheme)
@@ -28,6 +28,8 @@ from .process_mixin import ProcessMixin
 from windows.remote_session.remote_mixin import RemoteMixin
 from .ui_mixin import UIMixin
 from .update_mixin import UpdateMixin
+from .shutdown import shutdown_main_window
+from workers.kd_status_worker import _KdStatusQueryWorker
 from qfluentwidgets import Dialog
 
 
@@ -97,30 +99,7 @@ class _LogLoadWorker(QThread):
             self.error.emit(str(e))
 
 
-class _KdStatusQueryWorker(QThread):
-    """后台反查 kd 记录分类（C6 正向，需求19）
 
-    原实现主线程同步调 table_db.find_kd_file_status：MySQL 空闲连接被
-    服务器断开（wait_timeout / 网络抖动）后，pymysql 查询会阻塞至
-    read_timeout(60s) 才抛 2013，界面假死。移入后台线程后即使慢/失败
-    也不卡 UI；结果经 done 信号回主线程更新状态栏。
-    """
-    done = Signal(object)  # info dict；查询失败/未命中传 None
-
-    def __init__(self, device_code, date_str, clip_base, parent=None):
-        super().__init__(parent)
-        self._device_code = device_code
-        self._date_str = date_str
-        self._clip_base = clip_base
-
-    def run(self):
-        try:
-            from database import table_db
-            info = table_db.find_kd_file_status(
-                self._device_code, self._date_str, self._clip_base)
-        except Exception:
-            info = None
-        self.done.emit(info)
 
 
 class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin, FluentWindow):
@@ -1943,137 +1922,6 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
 
     def closeEvent(self, event):
         """主窗口关闭时统一释放所有子进程和远程会话资源，防止孤儿进程"""
-        # -1. 先停掉迁入侧边导航的业务子页后台线程
-        # 运维/售后/跑视频各 Hub 子页的 worker 挂页面属性上，原先由各
-        # FluentWindow 面板的 closeEvent 统一 detach；迁入主窗口后必须在此
-        # 补上，否则关闭时线程仍在跑会报 QThread: Destroyed while running
-        for hub_name in ("management_hub", "aftersale_hub", "ledger_hub"):
-            hub = getattr(self, hub_name, None)
-            if hub is not None:
-                try:
-                    hub.detach_workers()
-                except Exception:
-                    pass
-        # 弹出面板窗口一并关闭（先于 worker 等待，closeEvent 会各自 detach）
-        for win in list(getattr(self, "_hub_popouts", {}).values()):
-            try:
-                win.close()
-            except (RuntimeError, OSError):
-                pass
-        # 一次性短等待：给所有 worker 200ms 自行收尾。绝不在关闭路径上串行
-        # wait（旧实现对每个运行中 worker 各 wait(2000)，是无事件循环线程的
-        # 干等，累积出 ~2s 关闭卡顿的根因）
-        try:
-            QThread.msleep(200)
-        except Exception:
-            pass
-
-        # 0. 关闭运维管理面板（独立窗口，不随主窗口自动销毁）
-        panel = getattr(self, '_table_panel', None)
-        if panel is not None:
-            self._table_panel = None
-            try:
-                panel.close()
-            except (RuntimeError, OSError):
-                pass
-
-        # 1. 关闭统一远程会话中心（单一 frpc 进程 + 全局隧道/会话窗口）
-        try:
-            from core.frp_remote import get_session_manager
-            get_session_manager().shutdown()
-        except (RuntimeError, OSError):
-            pass
-
-        # 2. 保存远程会话信息（在关闭窗口之前）
-        # 必须先落盘再走第 3 步：_save_remote_sessions 是从 win._panels 提取会话的，
-        # 而 win.close() 触发的 shutdown_all 会清空面板列表，顺序反了就存不到任何会话
-        self._save_remote_sessions()
-
-        # 3. 关闭远程会话标签容器（触发各面板 shutdown：SFTP/SSH/RDP）
-        win = getattr(self, '_remote_session_window', None)
-        if win is not None:
-            self._remote_session_window = None
-            try:
-                win.close()  # closeEvent → shutdown_all()
-            except (RuntimeError, OSError):
-                pass
-
-        # 4. 终止正在运行的 SnookerTracking 程序
-        rp = getattr(self, 'running_process', None)
-        if rp is not None:
-            self.running_process = None
-            try:
-                rp.kill()
-                rp.waitForFinished(1000)
-            except (RuntimeError, OSError):
-                pass
-
-        # 5. 终止三端进程
-        for attr in ('_tracking_process', '_backend_process', '_front_process'):
-            p = getattr(self, attr, None)
-            if p is not None:
-                setattr(self, attr, None)
-                try:
-                    if p.state() != QProcess.NotRunning:
-                        p.kill()
-                        p.waitForFinished(1000)
-                except (RuntimeError, OSError):
-                    pass
-
-        # 6. 清理 TCP worker
-        tw = getattr(self, '_tcp_worker', None)
-        if tw is not None:
-            self._tcp_worker = None
-            try:
-                if tw.isRunning():
-                    # lambda 包装必须：PySide6 C++ 直连不持有 Python 引用
-                    tw.finished.connect(lambda w=tw: w.deleteLater())
-                else:
-                    tw.deleteLater()
-            except RuntimeError:
-                pass
-
-        # 7. 清理日志加载 worker
-        lw = getattr(self, '_log_worker', None)
-        if lw is not None:
-            self._log_worker = None
-            try:
-                if lw.isRunning():
-                    lw.requestInterruption()
-                    lw.wait(1000)
-            except RuntimeError:
-                pass
-
-        # 7b. 清理批量整理 worker（NewLog 整理 / 打包上传，中断并短等待）
-        for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker'):
-            nw = getattr(self, attr, None)
-            if nw is not None:
-                setattr(self, attr, None)
-                try:
-                    if nw.isRunning():
-                        nw.requestInterruption()
-                        nw.wait(1000)
-                except (RuntimeError, OSError):
-                    pass
-
-        # 8. 终止异步解码进程
-        dp = getattr(self, '_decode_process', None)
-        if dp is not None:
-            self._decode_process = None
-            try:
-                if dp.state() != QProcess.NotRunning:
-                    dp.kill()
-                    dp.waitForFinished(1000)
-            except (RuntimeError, OSError):
-                pass
-
-        # 9. 等待上传收集 worker 结束（文件复制任务，短等待即可）
-        for cw in list(getattr(self, '_upload_collect_workers', [])):
-            try:
-                if cw.isRunning():
-                    cw.wait(1500)
-            except (RuntimeError, OSError):
-                pass
-        self._upload_collect_workers = []
+        shutdown_main_window(self)
 
         super().closeEvent(event)
