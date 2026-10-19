@@ -64,6 +64,8 @@ def _http_get(url: str, user: str, password: str,
     对其端口不可达且会伪造 502，ProxyHandler({}) 绕过一切代理。
     """
     req = urllib.request.Request(url, method="GET")
+    # frps 面板用标准 BasicAuth；口令只在内存里拼这一次 header，不落日志、
+    # 不进异常信息（urllib 的异常 repr 会带 URL，但不会带 header）。
     token = base64.b64encode(f"{user}:{password}".encode()).decode()
     req.add_header("Authorization", f"Basic {token}")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -102,6 +104,8 @@ def _parse_proxies(body: str) -> dict | None:
         if not name:
             continue
         conf = it.get("conf") if isinstance(it.get("conf"), dict) else {}
+        # 数值字段在旧版/异常响应里可能是 null 或字符串，统一在这里收口成
+        # int，避免每个展示点各自做防御；status 统一小写便于比较。
         result[name] = {
             "status": str(it.get("status") or "").lower(),
             "curConns": int(it.get("curConns") or 0),
@@ -128,6 +132,8 @@ def _parse_serverinfo(body: str) -> dict | None:
         data = json.loads(body)
     except ValueError:
         return None
+    # version 是 serverinfo 的必填字段，也用来区分「frps 正常响应」与反向
+    # 代理/门户页返回的 HTML-JSON 混合体——缺它一律判为结构异常。
     if not isinstance(data, dict) or "version" not in data:
         return None
 
@@ -211,7 +217,11 @@ def _parse_clients(body: str) -> dict | None:
 
 
 def _load_config() -> dict:
-    """读 frps_admin 配置（credentials 域，门面已透明解密）"""
+    """读 frps_admin 配置（credentials 域，门面已透明解密）。
+
+    配置门面不可用或返回非 dict 时一律当空配置，让上层走「未配置」分支，
+    而不是把异常抛给周期定时器（抛出去会让感知线程静默死亡）。
+    """
     try:
         from core import app_settings
         cfg = app_settings.get("frps_admin") or {}
@@ -221,6 +231,11 @@ def _load_config() -> dict:
 
 
 def _load_quality() -> dict:
+    """读感知刷新配置，间隔夹在 5–600 秒。
+
+    上限 600 秒给「手动配了极大值」兜底：间隔再长，面板上的在线态就
+    基本等于缓存快照；下限 5 秒防止把 frps 打成高频轮询。
+    """
     try:
         from core import app_settings
         q = app_settings.get("frp_quality") or {}
@@ -284,6 +299,8 @@ class FrpsAdminClient(QObject):
         self.request_refresh()
 
     def stop(self):
+        """停周期感知。只停定时器、不清缓存：重新 start 后首轮请求落地前，
+        旧缓存仍受 _CACHE_TTL_SEC 约束，不会被当成新鲜的。"""
         self._running = False
         self._timer.stop()
 
@@ -311,6 +328,8 @@ class FrpsAdminClient(QObject):
         给一次性回执（2026-09-22 反馈：改异步后按钮"看起来没反应"——
         感知成功但数据无变化时缺完成提示）。
         """
+        # 定时器与「立即感知」按钮可能撞在一起：同一时刻只允许一个后台
+        # 线程，否则并发 GET 会让熔断计数与状态机互相覆盖。
         if self._bg_busy:
             return
         self._bg_busy = True
@@ -340,6 +359,8 @@ class FrpsAdminClient(QObject):
         now = time.monotonic()
         if now < self._circuit_until:
             return self._state
+        # 同步 refresh 也会被直接调用（单测/冒烟），与后台入口共用同一把
+        # 重入开关，保证同一时刻只有一条请求在飞。
         if self._refreshing:
             return self._state
         self._refreshing = True
@@ -379,6 +400,11 @@ class FrpsAdminClient(QObject):
         return self._state
 
     def _on_fail(self, why: str, state: str = "unreachable"):
+        """记一次失败并按阈值熔断。
+
+        why 只用于语义表达，是否记日志由调用方决定；成功后 refresh 显式
+        清零 _fails，所以这里只管累加与触发静默。
+        """
         self._fails += 1
         if self._fails >= _CIRCUIT_FAILS:
             self._fails = 0
@@ -455,11 +481,21 @@ class FrpsAdminClient(QObject):
         self.all_proxies_changed.emit(dict(result))
 
     def _set_state(self, state: str):
+        """状态去重后再发信号。
+
+        周期感知每 30 秒跑一次，若每次成功都无条件发 channel_state_changed，
+        UI 会被同值信号反复唤醒重绘，等于凭空制造卡顿。
+        """
         if state != self._state:
             self._state = state
             self.channel_state_changed.emit(state)
 
     def _fresh(self) -> bool:
+        """缓存是否仍在可信期内。
+
+        超期即当「感知不可用」返回 None，而不是拿旧数据继续判在线——设备
+        刚掉线时旧快照仍写 online，误放行比不显示更糟。
+        """
         with self._lock:
             return (self._fetched_at > 0
                     and time.monotonic() - self._fetched_at < _CACHE_TTL_SEC)
@@ -473,6 +509,8 @@ class FrpsAdminClient(QObject):
             return None
         with self._lock:
             proxies = self._proxies
+        # frps 的 proxy 名允许带 user 前缀（"{user}.{snk}"），调用方拿到的往往是
+        # 裸 snk；精确匹配落空后按后缀兜底，避免误判成「查不到 = unregistered」。
         info = proxies.get(snk)
         if info is None:
             suffix = "." + snk
@@ -486,6 +524,8 @@ class FrpsAdminClient(QObject):
         """感知 snk 在线态：online/offline/unregistered；感知不可用返回 None"""
         if not str(snk or "").strip():
             return None
+        # 通道非 ok 或缓存过期都按「未知」处理：调用方必须回退一期纯本地
+        # 行为，不能因为感知缺失就拒绝连接。
         if self._state != "ok" or not self._fresh():
             return None
         info = self._lookup(snk)
@@ -514,6 +554,8 @@ class FrpsAdminClient(QObject):
         """
         if self._state != "ok" or not self._fresh():
             return {}
+        # 返回深一层的副本：调用方（UI 表格模型）会就地排序/裁剪，共享内部
+        # list 会把展示顺序写回感知缓存。
         with self._lock:
             return {k: list(v) for k, v in self._all_proxies.items()}
 
@@ -540,6 +582,8 @@ class FrpsAdminClient(QObject):
         }
 
     def configured(self) -> bool:
+        """是否填了 base_url。只判「有没有配」，不判「通不通」——可达性由
+        channel_state 表达，两者混用会让配置页把网络故障误报成配置缺失。"""
         return bool(str(_load_config().get("base_url") or "").strip())
 
 

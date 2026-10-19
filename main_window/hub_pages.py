@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """业务域容器页（Hub）—— 把原独立 FluentWindow 面板降层嵌入主窗口
 
-导航形态（2026-09-06 需求修订）：
+导航形态：
     ⌂ 工作台 │ ▤ 运维管理 │ ☺ 售后 │ ▶ 跑视频        底部：⚙ 设置 │ ⓘ 关于
 
   - ManagementHub / AftersaleHub / LedgerHub：Pivot 二级容器，
@@ -31,10 +31,10 @@ from main_window.setting_cards import (SettingGroup, SettingRow, make_switch,
 class ManagementHub(PivotPage):
     """运维管理：六页 Pivot（球桌/安装清单/设备/健康度/组件测试/小游戏）
 
-    「管理设置」页已迁入统一设置界面（2026-09-06）；本类保留表格平滑
+    「管理设置」页已迁入统一设置界面；本类保留表格平滑
     滚动的刷新方法，由主窗口把统一设置页的开关信号转发到这里。
     「健康趋势」页原面板即注释隐藏（window.py L94），保持一致不迁。
-    安装清单页（2026-10-11）与弹出面板 ManagementPanelWindow 双宿主
+    安装清单页与弹出面板 ManagementPanelWindow 双宿主
     注册（各自实例化，同组件）。
     """
 
@@ -42,6 +42,8 @@ class ManagementHub(PivotPage):
         super().__init__(parent)
         self.setObjectName("managementHub")
 
+        # 子页延迟导入：windows.* 会反向依赖主窗口服务，顶层导入直接成环；
+        # 顺带把图表组件的导入开销摊到首次进入运维页
         from windows.management.table_page import TablePage
         from windows.management.install_page import InstallPage
         from windows.management.device_page import DevicePage
@@ -63,6 +65,8 @@ class ManagementHub(PivotPage):
         self.game_page = GamePage(self)
         self.game_page.setObjectName("gamePage")
 
+        # 注册顺序即标签顺序；lock_pivot_width 固定标签宽度，否则各页标题
+        # 字数不同会让导航条在切换时左右抖动
         self.addPage(self.table_page, "球桌管理", FluentIcon.LIBRARY)
         self.addPage(self.install_page, "安装清单", FluentIcon.CALENDAR)
         self.addPage(self.device_page, "设备状态", FluentIcon.IOT)
@@ -72,7 +76,11 @@ class ManagementHub(PivotPage):
         self.lock_pivot_width()
 
     def _apply_table_smooth_all(self):
-        """刷新各子页表格滚动模式（按 覆盖→全局 生效）"""
+        """刷新各子页表格滚动模式（按 覆盖→全局 生效）。
+
+        子页只有部分实现该钩子，故按可选方法探测；单个子页抛错不能拦住
+        其余页面，否则一处异常就让整批表格停在旧滚动模式上。
+        """
         for page in (self.table_page, self.install_page, self.device_page,
                      self.health_page):
             fn = getattr(page, "_apply_smooth_mode", None)
@@ -83,7 +91,11 @@ class ManagementHub(PivotPage):
                     pass
 
     def _apply_remote_table_smooth(self):
-        """刷新已打开的远程会话窗口表格（隧道列表/连接诊断）"""
+        """刷新已打开的远程会话窗口表格（隧道列表/连接诊断）。
+
+        这些窗口不在主窗口导航树里，只能遍历顶层窗口去找；按类名判型
+        而不是 import，避免本模块反向依赖远程会话包。
+        """
         from PySide6.QtWidgets import QApplication
         for w in QApplication.topLevelWidgets():
             if type(w).__name__ in ("TunnelPanelWindow", "ConnDiagPanel"):
@@ -110,6 +122,8 @@ class AftersaleHub(PivotPage):
         super().__init__(parent)
         self.setObjectName("aftersaleHub")
 
+        # 三个子页共享同一批数据库连接与筛选状态，因此跳转只在本 Pivot
+        # 内切页；独立弹出的 AftersalePanelWindow 是另一套实例
         from windows.aftersale.entry import EntryPage
         from windows.aftersale.rank import RankPage
         from windows.aftersale.records import RecordsPage
@@ -124,38 +138,58 @@ class AftersaleHub(PivotPage):
         self.addPage(self.entry_page, "填写录入", FluentIcon.EDIT)
         self.addPage(self.records_page, "记录与统计", FluentIcon.LIBRARY)
         self.addPage(self.rank_page, "售后排行", FluentIcon.CERTIFICATE)
+        # 排行页只发关键词、不碰记录页实例：两页可以各自替换，
+        # 也不需要把记录页的刷新接口暴露给排行页
         self.rank_page.jump_to_records.connect(self._on_rank_jump_records)
         self.lock_pivot_width()
 
     def _on_rank_jump_records(self, keyword: str):
-        """排行页「明细」跳转：本 Pivot 内切记录页并按关键词预筛选"""
+        """排行页「明细」跳转：本 Pivot 内切记录页并按关键词预筛选。
+
+        先写关键词再切页：切页会触发记录页的首次查询，顺序反了会先用旧
+        关键词查一遍再查新关键词，表格白闪一次全量数据。
+        """
         self.records_page.set_keyword(keyword)
         self.switchTo(self.records_page)
         self.records_page.refresh_async()
 
     def reload_cycles(self):
-        """周期设置保存成功：记录页重建周期下拉并重查（原 window.py:72-75）；
-        排行页账期下拉选项置旧"""
+        """周期设置保存成功：记录页重建周期下拉并重查，排行页选项重置。
+
+        必须先清 _cycles_loaded 再调加载：只有该标志为 False 才会重新拉
+        周期列表，否则新周期进了下拉、表格却还停在旧账期。
+        """
         self.records_page._cycles_loaded = False
         self.records_page._load_cycles_then_data()
         self.rank_page.reload_options()
 
     def apply_auto_refresh(self):
-        """自动刷新开关/间隔变更：记录页即时启停定时器（2026-09-16）"""
+        """自动刷新开关/间隔变更：记录页即时启停定时器。
+
+        记录页可能晚于设置页构建完成，这里吞掉异常，保证设置开关本身
+        永远不会因为子页未就绪而报错。
+        """
         try:
             self.records_page._sync_auto_timer()
         except Exception:
             pass
 
     def refresh_smooth(self):
-        """表格平滑滚动开关变更后刷新记录页表格"""
+        """表格平滑滚动开关变更后刷新记录页表格。
+
+        与自动刷新同理：记录页尚未构建时刷新失败，不能连累设置保存。
+        """
         try:
             self.records_page._apply_smooth_mode()
         except Exception:
             pass
 
     def open_records_for_table(self, table_no: str):
-        """球桌管理右键入口：跳转记录页并按桌号预筛选（原 window.py:98-102）"""
+        """球桌管理右键入口：跳转记录页并按桌号预筛选。
+
+        复用记录页的通用关键词过滤而不新增筛选参数：右键只传桌号，
+        记录页不必知道调用方来自球桌页还是排行页。
+        """
         self.records_page.set_keyword(table_no)
         self.switchTo(self.records_page)
         self.records_page.refresh_async()
@@ -164,7 +198,10 @@ class AftersaleHub(PivotPage):
 # ==================== 跑视频 ====================
 
 class LedgerHub(PivotPage):
-    """跑视频：两页 Pivot（填写录入/记录与统计）；设置已迁统一设置界面"""
+    """跑视频：两页 Pivot（填写录入 / 记录与统计）。
+
+    设置项已迁到统一设置界面，本类只留业务页，不再自建配置卡片。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -183,20 +220,31 @@ class LedgerHub(PivotPage):
         self.lock_pivot_width()
 
     def _apply_table_smooth_all(self):
+        """刷新记录页表格滚动模式；与其他 Hub 同名，供主窗口统一回调。
+
+        主窗口只按方法名广播，同名是这套协议的约定，改名会让该页静默漏刷。
+        """
         try:
             self.records_page._apply_smooth_mode()
         except Exception:
             pass
 
     def apply_auto_refresh(self):
-        """自动刷新开关/间隔变更：记录页即时启停定时器（需求4，售后同款）"""
+        """自动刷新开关/间隔变更：记录页即时启停定时器。
+
+        与售后页同名方法保持同一套计时口径，改一处时另一处要跟着改。
+        """
         try:
             self.records_page._sync_auto_timer()
         except Exception:
             pass
 
     def open_entry_with_context(self, ctx: dict):
-        """主界面「跑视频」入口：切到填写录入页并预填会话上下文（原 window.py:54-61）"""
+        """主界面「跑视频」入口：切到填写录入页并预填会话上下文。
+
+        空 ctx 也要走 prefill：录入页靠这次调用清掉上一条记录的桌面号等
+        残留字段，跳过会在换入口时把旧上下文带进新记录。
+        """
         self.switchTo(self.entry_page)
         self.entry_page.prefill(ctx or {})
 
@@ -222,9 +270,9 @@ class _PersistentCheckableMenu(CheckableMenu):
 class SettingsHubPage(QWidget):
     """统一设置页：左标题 + 右 SegmentedWidget 分页切换（Watt Toolkit 式）
 
-    页签（2026-09-07 三期衔接：远程连接 独立分页）：
+    页签：
         应用配置 │ 远程连接 │ 工具 │ 性能 │ 数据库 │ 面板设置 │ 外观
-        - 应用配置 = 路径 / 启动（默认启动页面，2026-09-19）/ 日志高亮 /
+        - 应用配置 = 路径 / 启动（默认启动页面）/ 日志高亮 /
           配置文件（自工具页迁入）
         - 远程连接 = SSH/SFTP/FRP（为二期远程会话页预留落点）
         - 工具 = 快捷键与工具
@@ -237,6 +285,9 @@ class SettingsHubPage(QWidget):
         aftersale_auto_refresh_changed —— 自动刷新开关/间隔变更（主窗口
             转发售后记录页即时启停定时器，2026-09-16）
         table_smooth_changed —— 任意表格平滑开关变更（主窗口转发各 Hub 刷新）
+
+    本页不持有任何 Hub 引用：跨页刷新一律发信号交给主窗口转发。这样设置页
+    能独立构建，也不会和业务页形成双向依赖。
     """
 
     aftersale_cycle_saved = Signal()
@@ -248,6 +299,8 @@ class SettingsHubPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("settingsHub")
+        # 父对象就是主窗口：读写配置、触发菜单 Action 全走主窗口门面，
+        # 本页不自持配置句柄，保证「改完即存」只有一条落盘路径
         self._win = parent
 
         outer = QVBoxLayout(self)
@@ -289,6 +342,8 @@ class SettingsHubPage(QWidget):
                                     self._group_management)),
             ("appearance", "外观", (self._group_appearance,)),
         )
+        # key 只作 SegmentedWidget 的路由标识，页面位置由 pages 顺序决定；
+        # 调整分页顺序不需要动路由名
         self._keys = []
         for index, (key, text, builders) in enumerate(pages):
             self._keys.append(key)
@@ -308,7 +363,11 @@ class SettingsHubPage(QWidget):
         outer.addWidget(self._stack, 1)
 
     def _make_page(self, builders):
-        """一组构建函数 → 独立滚动页（各页高度不同，互不牵拉）"""
+        """一组构建函数 → 独立滚动页（各页高度不同，互不牵拉）。
+
+        每页一个 QScrollArea：共用滚动条时，切到更高的页会把滚动位置带
+        过去，短页立刻露出大片空白。
+        """
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -336,7 +395,8 @@ class SettingsHubPage(QWidget):
         settings = win._load_settings()
         g = SettingGroup("外观", parent)
 
-        # 主题模式（跟随系统/浅色/深色 → 复用菜单 Action 对象回调）
+        # 主题模式下拉复用菜单栏的 Action 回调，不另写一套；两处入口共用
+        # 同一个 Action 对象，勾选状态才不会一处改、另一处还停在旧值
         mode = win._get_theme_mode(settings)
         acts = {"auto": win._act_theme_auto, "light": win._act_theme_light,
                 "dark": win._act_theme_dark}
@@ -347,7 +407,8 @@ class SettingsHubPage(QWidget):
                        list(acts).index(mode if mode in acts else "auto"),
                        lambda m: win._on_theme_selected(acts[m]))))
 
-        # 主题颜色：色块 + 更改 + 还原默认（选色天然需要弹窗，保持按钮）
+        # 主题色用「色块 + 按钮」而非内联控件：选色必须弹系统取色器，
+        # 色块只负责回显，避免用户改完看不到结果
         self._color_chip = QFrame(parent)
         self._color_chip.setFixedSize(22, 22)
         self._color_chip.setStyleSheet(
@@ -360,7 +421,8 @@ class SettingsHubPage(QWidget):
              make_button("更改…", win._on_theme_color, width=76),
              make_button("还原默认", win._on_theme_color_reset, width=88)]))
 
-        # 字号大小：SpinBox 内联直接调节（2026-09-07 由「更改…」弹窗内联化）
+        # 字号限定 10-20pt：更小中文会糊，更大设置页自身排版先溢出，
+        # 上下限是实测结论而不是随手取的
         self._spin_font_size = make_spinbox(
             int(settings.get("font_size", 10)), 10, 20, " pt",
             win._set_font_size_inline)
@@ -373,6 +435,8 @@ class SettingsHubPage(QWidget):
         current_family = settings.get("font_family", "")
         font_items = [("默认", "")]
         cur_idx = 0
+        # 首位「默认」代表空串（跟随主题字体），所以字体族下标要 +1，
+        # 否则回显会错位到上一个字体
         for i, fam in enumerate(families):
             font_items.append((fam, fam))
             if fam == current_family:
@@ -384,10 +448,11 @@ class SettingsHubPage(QWidget):
             FluentIcon.FONT, "字体", "界面文字使用的字体",
             self._combo_font_family))
 
-        # 界面缩放：ComboBox 内联（保存后提示重启生效，同上内联化）
+        # 缩放只给固定档位：Qt 在非整数比例下会出现半像素边框错位，
+        # 档位制是绕过该渲染缺陷最省事的做法
         dpi = int(settings.get("dpi_scale", 100))
         dpi_options = [100, 125, 150, 175, 200]
-        # P1-2（2026-09-25）：系统缩放 ≥150% 且应用内也设了缩放时行内告警
+        # 系统缩放 ≥150% 且同时设了应用内缩放时，说明文案里加一句告警
         # （告警在 apply_dpi_scale 启动时经注册表探测写入，见 core/perf.py）
         dpi_desc = "整体缩放界面，重启后生效"
         try:
@@ -405,6 +470,7 @@ class SettingsHubPage(QWidget):
             FluentIcon.ZOOM, "界面缩放", dpi_desc,
             self._combo_dpi))
 
+        # 默认经典布局：老用户升级后按钮位置保持不变，面板布局作为可选项
         classic = bool(settings.get("classic_layout", True))
         g.addRow(SettingRow(
             FluentIcon.TILES, "布局模式", "面板布局或经典布局",
@@ -430,6 +496,8 @@ class SettingsHubPage(QWidget):
         # 全局，具体面板=单独覆盖），按钮文本为状态摘要
         g = SettingGroup("性能", parent)
 
+        # 效果类开关一律即改即生效、不设「应用」按钮：看不到结果就无法
+        # 判断该不该开，也让调参变成反复开关的试错
         g.addRow(SettingRow(
             FluentIcon.TRANSPARENT, "亚克力效果",
             "导航栏背景模糊效果，低配电脑建议关闭",
@@ -453,15 +521,15 @@ class SettingsHubPage(QWidget):
             "观感不对可关掉完全回退",
             make_switch(is_table_blit_enabled(), set_table_blit_enabled)))
 
-        # 表格平滑滚动：下拉勾选各面板子选项，点击后菜单维持可连续勾选
-        # （2026-09-07 用户反馈定稿）：「全部面板」为主控——勾选=全部开启
-        # 并清空面板覆盖，取消=全部取消并清空覆盖（消除主控关而子项开的
-        # 无意义组合）；后续可单独勾选某面板开启（写面板覆盖）
+        # 表格平滑滚动：「全部面板」为主控——勾选=全部开启并清空面板覆盖，
+        # 取消=全部关闭并清空覆盖；单独勾选某面板则只写该面板的覆盖
         scopes = (("全部面板", None), ("售后面板", "aftersale"),
                   ("跑视频面板", "video"), ("运维管理", "management"),
                   ("远程会话", "remote"))
 
         def _summary_text():
+            # 只统计各面板的生效值，不把主控的全局值算进来：面板覆盖优先
+            # 于全局，主控开而面板关时摘要必须显示「自定义」而不是「全部开启」
             n = sum(get_table_smooth(p) for _l, p in scopes[1:])
             if n == 0:
                 return "全部关闭"
@@ -503,7 +571,9 @@ class SettingsHubPage(QWidget):
         for label, panel in scopes:
             act = Action(label, smooth_menu)
             act.setCheckable(True)
-            act.setChecked(get_table_smooth(panel))  # 初值近似，弹出前必刷
+            # 初值只求近似：菜单每次弹出前都会按最新配置重刷，这里不特意
+            # 读盘，避免构建设置页时反复访问配置文件
+            act.setChecked(get_table_smooth(panel))
             act.toggled.connect(lambda on, p=panel: _apply(p, on))
             smooth_menu.addAction(act)
 
@@ -540,12 +610,14 @@ class SettingsHubPage(QWidget):
             _MenuShowFilter(smooth_menu, _refresh_checked, smooth_menu))
         smooth_btn.setMenu(smooth_menu)  # mouseReleaseEvent 自动弹出
 
+        # 按钮定宽 170：摘要文本在「全部关闭 / 自定义 · N 项」之间变长变短，
+        # 不定宽会让整行在每次勾选时左右跳动
         g.addRow(SettingRow(
             FluentIcon.SPEED_HIGH, "表格平滑滚动",
             "下拉勾选各面板的平滑滚动，可多选；全部面板为总控",
             smooth_btn))
 
-        # 渲染加速状态（2026-10-06 可观测性）：把两处「静默生效」的机制
+        # 渲染加速状态：把两处「静默生效」的机制
         # 摊开——自适应降级阈值（本机光栅速率标定值、是否被配置/大屏模式
         # 接管）与表格滚动加速的实际命中张数。按钮点开时实时读取，避免
         # 静态文本随页面切换过期（命中数随当前打开的表格变化）。
@@ -579,11 +651,15 @@ class SettingsHubPage(QWidget):
         g = SettingGroup("快捷键与工具", parent)
 
         def row(icon, title, desc, btn_text, cb):
+            """同形状的动作行；按钮定宽 76 让左侧图标列纵向对齐。
+
+            按钮列宽度不一致时，右侧按钮的左边线会参差，整组看起来像没对齐。
+            """
             return g.addRow(SettingRow(
                 icon, title, desc, make_button(btn_text, cb, width=76)))
 
-        # 2026-09-07 二期：单杆视频/端口占用/上传清单/批量整理已迁独立
-        # 「工具」页（main_window.tool_hub），此处仅保留纯动作入口
+        # 单杆视频/端口占用/上传清单/批量整理已迁到独立的「工具」页
+        # （main_window.tool_hub），这里只留纯动作入口，不再重复造按钮
         row(FluentIcon.EDIT, "修改快捷键", "自定义全局快捷键",
             "修改…", win._on_modify_shortcuts)
         row(FluentIcon.DEVELOPER_TOOLS, "连接诊断", "查看连接日志与失败记录",
@@ -596,6 +672,8 @@ class SettingsHubPage(QWidget):
         settings = win._load_settings()
 
         def _persist(key, value):
+            # 统一转 bool：SwitchButton 部分版本回传 int，直接落盘会让配置里
+            # 出现 1/0，读回时类型与开关语义对不上
             win._save_settings({key: bool(value)})
 
         g.addRow(SettingRow(
@@ -612,9 +690,9 @@ class SettingsHubPage(QWidget):
 
     def _group_database(self, parent):
         g = SettingGroup("数据库与接口", parent)
-        # 原管理设置页迁入（数据源/接口1·2 账号/MySQL 配置）；2026-09-07
-        # 收集上传先迁「应用配置」再并入「面板设置→运维」组、手动添加球桌迁
-        # 「面板设置→运维」，embedded 模式不再构建这三张卡
+        # 内嵌原管理设置页，复用同一份表单实现；embedded=True 时它不构建收集
+        # 上传与手动添加球桌两张卡——这两张已挂在面板设置页，重复构建会出现
+        # 两个控件写同一个配置键，互相覆盖
         from windows.management.settings_page import AdminSettingsPage
         self.admin_settings = AdminSettingsPage(parent, embedded=True)
         self.admin_settings.table_smooth_changed.connect(
@@ -631,14 +709,14 @@ class SettingsHubPage(QWidget):
         self.cycle_page = CycleSettingsPage(parent)
         self.cycle_page.saved.connect(self.aftersale_cycle_saved.emit)
         g.addWidget(self.cycle_page)
-        # 记住上次发生日期（2026-09-16）：上一条填 9/14，下一条新增默认仍 9/14
+        # 记住上次发生日期：上一条填 9/14，下一条新增默认仍是 9/14
         g.addRow(SettingRow(
             FluentIcon.CALENDAR, "记住上次发生日期",
             "新增售后记录时，「发生时间」默认沿用上一条填写的日期，"
             "而不是回到当天（关闭后恢复默认当日）",
             make_switch(aftersale_db.remember_occurred_enabled(),
                         aftersale_db.set_remember_occurred)))
-        # 自动刷新（2026-09-16）：定时比对全表指纹，有变化即静默重查，
+        # 自动刷新：定时比对全表指纹，有变化即静默重查，
         # 免手动点同步即可看到他人新填记录；开关/间隔变更即时转发记录页生效
         def _apply():
             self.aftersale_auto_refresh_changed.emit()
@@ -651,6 +729,8 @@ class SettingsHubPage(QWidget):
                                     _apply()))))
         _interval_items = [("15 秒", 15), ("30 秒", 30),
                            ("1 分钟", 60), ("5 分钟", 300)]
+        # 配置里存了预设之外的间隔（旧版本或手改）时回落到 30 秒：比 15 秒
+        # 更接近历史默认，也少一份数据库轮询压力
         _cur_iv = aftersale_db.auto_refresh_interval()
         _iv_idx = next((i for i, (_l, v) in enumerate(_interval_items)
                         if v == _cur_iv), 1)
@@ -688,6 +768,7 @@ class SettingsHubPage(QWidget):
                                     _apply()))))
         _interval_items = [("15 秒", 15), ("30 秒", 30),
                            ("1 分钟", 60), ("5 分钟", 300)]
+        # 与售后同款：间隔值不在预设列表里时回落到 30 秒
         _cur_iv = ledger_db.auto_refresh_interval()
         _iv_idx = next((i for i, (_l, v) in enumerate(_interval_items)
                         if v == _cur_iv), 1)
@@ -700,7 +781,10 @@ class SettingsHubPage(QWidget):
         return g
 
     def _group_management(self, parent):
-        """运维（手动添加球桌记录 + 收集与上传，2026-09-07 上传自应用配置并入）"""
+        """运维组：手动添加球桌记录与收集上传。
+
+        两者都是运维跑现场的即时动作，放在一组便于与只读的设备数据分开找。
+        """
         from windows.management.settings_page import AddTableRecordCard
         g = SettingGroup("运维", parent)
         self.add_record_card = AddTableRecordCard(parent)
@@ -713,6 +797,8 @@ class SettingsHubPage(QWidget):
         g = SettingGroup("配置文件", parent)
 
         def row(icon, title, desc, name):
+            # 只提供「用外部程序打开」：这些配置里混有 DPAPI 密文，
+            # 内嵌编辑器改坏一行就会让整域配置读回失败
             return g.addRow(SettingRow(
                 icon, title, desc,
                 make_button("打开", lambda: win._open_config_file(name),
@@ -726,18 +812,26 @@ class SettingsHubPage(QWidget):
             "frpc_xtcp_panel.toml")
         return g
 
-    # ---------- 应用配置（2026-09-07 弹窗 7 配置域迁入） ----------
+    # ---------- 应用配置（原独立设置弹窗的配置域迁入） ----------
 
     @staticmethod
     def _safe_int(value, default):
-        """安全整数转换，失败时返回默认值"""
+        """安全整数转换，失败时返回默认值。
+
+        端口字段允许随手输入，抛异常会中断整个编辑结束回调，连带丢掉
+        同一次写回里的其他字段。
+        """
         try:
             return int(value)
         except (TypeError, ValueError):
             return default
 
     def _group_paths(self, parent):
-        """路径配置：程序/视频/工具路径与批量整理目录，编辑即存"""
+        """路径配置：程序/视频/工具路径与批量整理目录，编辑即存。
+
+        默认值取自主窗口 DEFAULT_PATHS：没存过也要显示真实可用路径，
+        否则首次打开是一排空行，用户不知道该填什么。
+        """
         from main_window.setting_cards import make_path_row
         win = self._win
         settings = win._load_settings()
@@ -806,6 +900,8 @@ class SettingsHubPage(QWidget):
                                  placeholder="认证 Token", password=True)
 
         def _save_frpc():
+            # 三个控件共用一份 frpc_server 嵌套 dict：任一控件编辑结束都基于
+            # 原副本整份写回，只写当前键会把另外两个键抹掉
             merged = dict(frpc)
             merged.update({
                 "serverAddr": e_addr.text().strip(),
@@ -871,6 +967,8 @@ class SettingsHubPage(QWidget):
         url_row = SettingRow(FluentIcon.GLOBE, "接口地址",
                              provider["base_url"])
 
+        # initial 区分「首次回显」与「用户手动切厂商」：两种情况都要刷新 Key，
+        # 但只有后者才该把模型重置成官方默认值
         state = {"vendor": provider["id"], "initial": True}
 
         def _apply_vendor(vendor_id):
@@ -915,11 +1013,10 @@ class SettingsHubPage(QWidget):
         return g
 
     def _add_upload_rows(self, g):
-        """收集与上传行（2026-09-07 自应用配置并入「运维」组）
+        """收集与上传行：精度/问题文件打包上传的 SFTP 目标。
 
-        精度/问题文件收集打包上传的 SFTP 目标；键与旧卡同（upload_*，
-        credentials 域落盘自动 DPAPI），独立窗口模式的管理设置页仍保留
-        原集中保存卡，两处写同一批配置键。
+        沿用旧卡的 upload_* 键，独立窗口模式的管理设置页仍在写同一批键；
+        换键名会让老用户已存好的服务器与密码全部读回空值。
         """
         from main_window.setting_cards import make_line_edit
         win = self._win
@@ -965,10 +1062,10 @@ class SettingsHubPage(QWidget):
                            "上传密码", password=True)))
 
     def _group_startup(self, parent):
-        """启动：设定打开程序时默认展示的界面（2026-09-19 需求）
+        """启动：设定打开程序时默认展示的界面。
 
-        下拉选项 = 六个一级导航页；存 objectName（与主窗口导航路由解耦，
-        改名/换序不影响持久值）。非法/缺失值回退「工作台」。
+        持久值存页面 objectName 而不是索引或标题：改名、换序、插新页都
+        不会把用户上次的选择指到别的页面上。
         """
         win = self._win
         settings = win._load_settings()
@@ -1005,14 +1102,18 @@ class SettingsHubPage(QWidget):
         return g
 
     def _group_log_rules(self, parent):
-        """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效"""
+        """日志高亮规则：列表 + 添加/编辑/删除，变更即时落盘并重编译生效。
+
+        列表顺序就是匹配优先级，顺序一变同样输入的高亮结果也会变。
+        """
         from PySide6.QtWidgets import QListWidget, QListWidgetItem, QDialog
         from PySide6.QtWidgets import QFormLayout as _QForm
         from core.log_rules import DEFAULT_LOG_RULES, compile_log_rules
         win = self._win
         settings = win._load_settings()
         g = SettingGroup("日志高亮", parent)
-        # 2026-09-21 需求：首页日志工作台可排除 frp 日志（frpc 进程噪音量大）
+        # 首页日志工作台可单独排除 frp 日志：frpc 进程输出噪音量大，会淹没
+        # 业务日志；该开关只影响首页展示，不改日志文件也不影响远程页状态
         g.addRow(SettingRow(
             FluentIcon.REMOVE, "排除 frp 日志",
             "首页日志工作台不再显示 [frpc] 进程输出与 [远程会话] 操作日志"
@@ -1025,13 +1126,17 @@ class SettingsHubPage(QWidget):
             "规则按序匹配，命中行整行着色；开启「命中通知」后弹提示"
             "（每规则 10 秒去重）。正则写法与 Python re 一致，"
             "如 ERROR|Exception。", parent)
+        # 说明必须换行：窄窗口下不换行会被直接截断，用户看不到正则写法约定
         tip.setWordWrap(True)
         tip.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         g.addWidget(tip)
 
+        # 编辑副本而不是配置里的原列表：弹窗取消或正则非法时要能回到改动前，
+        # 直接改配置对象会让半成品规则立刻参与匹配
         self._log_rules_state = list(
             settings.get("log_highlight_rules") or DEFAULT_LOG_RULES)
         rules_list = QListWidget(parent)
+        # 固定高度：规则条数从 1 条到十几条都会变，不定高会把整页布局顶来顶去
         rules_list.setFixedHeight(150)
         g.addWidget(rules_list)
 
@@ -1046,7 +1151,10 @@ class SettingsHubPage(QWidget):
         g.addWidget(btn_host)
 
         def _persist():
-            """规则变更落盘 + 重编译（渲染与通知共用，不刷新则旧规则仍生效）"""
+            """规则变更落盘 + 重编译（渲染与通知共用，不刷新则旧规则仍生效）。
+
+            重编译不能省：渲染与通知各自缓存了一份编译后的规则对象。
+            """
             win._save_settings(
                 {"log_highlight_rules": list(self._log_rules_state)})
             win._log_rules = compile_log_rules(
@@ -1098,7 +1206,10 @@ class SettingsHubPage(QWidget):
             _persist()
 
         def _edit_rule_dialog(rule):
-            """规则编辑弹窗：确定返回新规则 dict，取消或正则非法返回 None"""
+            """规则编辑弹窗：确定返回新规则 dict，取消或正则非法返回 None。
+
+            非法正则返回 None 而不是抛错：调用方据此保持原规则，不会清空已有高亮。
+            """
             import re as _re
             from qfluentwidgets import ColorDialog
             dlg = QDialog(self)
@@ -1200,6 +1311,8 @@ class AboutPage(QWidget):
         title = TitleLabel("AutoWork", card)
         v.addWidget(title)
 
+        # 版本模块缺失不能让整页崩：关于页是报障前最常打开的一页，宁可显示
+        # 占位版本号，也要把更新检查入口留在屏上
         try:
             from core.version import APP_VERSION
         except Exception:
@@ -1245,17 +1358,28 @@ class AboutPage(QWidget):
     # ---------- 检查更新接线（由主窗口驱动状态） ----------
 
     def _on_check_update(self):
+        """转发到主窗口注入的回调；未注入时静默无操作。
+
+        检查逻辑在 update_dialog 里，关于页只做入口转发，不自己发网络请求。
+        """
         if self.on_check_update is not None:
             self.on_check_update()
 
     def set_checking(self, checking: bool):
-        """检查中：禁用按钮 + 转圈文案"""
+        """检查中：禁用按钮并写「正在检查」文案。
+
+        只禁用不换文案，用户会以为点击没生效，于是反复点、并发起多次检查。
+        """
         self.btn_check_update.setEnabled(not checking)
         if checking:
             self.update_status.setText("正在检查更新…")
 
     def show_check_result(self, text: str, kind: str = "info"):
-        """回写检查结果文案（kind: info/success/warning/error 仅用于语义标记）"""
+        """回写检查结果文案。
+
+        kind 目前只作语义标记，结果配色由调用方另行控制；这里保持纯文本，
+        避免与用户自选主题色冲突。
+        """
         self.update_status.setText(str(text))
 
     @property

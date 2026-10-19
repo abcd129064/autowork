@@ -36,7 +36,12 @@ from windows.stat_charts import StatsOpener, _ledger_options
 
 
 class RecordsPage(QWidget):
-    """记录与统计页：四分类指标卡 + 筛选/分页 + 行内编辑/删除 + 署名统计 + 导出"""
+    """记录与统计页：四分类指标卡 + 筛选/分页 + 行内编辑/删除 + 署名统计 + 导出
+
+    页面只做「读控件值 → 交给 controller → 把结果铺进表格」三段式，
+    数据库与导出调用都在 RecordsController 的后台线程里跑，
+    因此槽函数里看不到阻塞代码，也不允许出现。
+    """
 
     # 面板标识：供 core.perf 面板级覆盖取值与全局刷新发现使用（跑视频面板）
     _PERF_PANEL_KEY = "video"
@@ -351,6 +356,10 @@ class RecordsPage(QWidget):
     # ---------- 指标卡 ----------
 
     def _make_stats_card(self, layout, title) -> tuple:
+        """建一张指标卡并返回 (卡片, 标题, 数字标签)。
+
+        数字标签要留引用给 _on_stats_loaded 逐卡 setText，因此不能只返回卡片。
+        """
         card = CardWidget(self)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
@@ -439,7 +448,10 @@ class RecordsPage(QWidget):
             self._repro_seg.value())  # 全部→"" / 否 / 是
 
     def _on_date_mode_changed(self):
-        """日期模式切换：仅「自定义」显示结束日期控件，随后重查"""
+        """日期模式切换：仅「自定义」显示结束日期控件，随后重查。
+
+        切回快捷档只隐藏结束日、不清空它的值，用户再切回自定义时不用重选。
+        """
         self._date_to.setVisible(
             self._date_mode_combo.currentText() == "自定义")
         self._on_filter_changed()
@@ -464,9 +476,14 @@ class RecordsPage(QWidget):
             self._date_to.date.toPython())
 
     def _on_search_input(self, _text):
+        """关键词输入防抖：只重启 300ms 定时器，到期才统一走 _on_filter_changed。"""
         self._search_timer.start()
 
     def _on_filter_changed(self):
+        """任一筛选条件变化：回第 1 页并重查列表与指标卡。
+
+        做成统一入口，各控件才不必各自记得重置页码——条件变了页码必然失效。
+        """
         self._page_no = 1
         self._load()
 
@@ -527,6 +544,10 @@ class RecordsPage(QWidget):
             self._auto_refresh_tick()
 
     def hideEvent(self, event):
+        """页面隐藏：停自动刷新定时器，省掉没人看的后台查询。
+
+        指纹基线与开关状态保留，下次 showEvent 直接续上，不必重建。
+        """
         super().hideEvent(event)
         # 页面隐藏（切页/关窗）：停轮询省查询；开关与指纹基线保留，
         # 下次 showEvent 恢复（需求4，售后同款）
@@ -535,7 +556,10 @@ class RecordsPage(QWidget):
     # ---------- 自动刷新（需求4：他人填写免手动同步，售后同款范式） ----------
 
     def _sync_auto_timer(self):
-        """按当前配置启停轮询定时器（开关/间隔变更后调用，也用于构造时初始化）"""
+        """按当前配置启停轮询定时器，开关/间隔变更后调用，构造时也用于初始化。
+
+        读配置失败按「关闭 + 30 秒」兜底：宁可少刷新，也不能让异常打断页面构造。
+        """
         try:
             enabled = ledger_db.auto_refresh_enabled()
             interval = ledger_db.auto_refresh_interval()
@@ -566,7 +590,11 @@ class RecordsPage(QWidget):
         self._controller.check_fingerprint()
 
     def _on_fingerprint(self, fp):
-        """指纹回来：与上次快照比对，一致则完全不动表格，变化才静默重查"""
+        """指纹回来：与上次快照比对，一致则完全不动表格，变化才静默重查。
+
+        指纹是「行数 + 最大 id」一类的轻量摘要，比全量查询便宜得多，
+        自动刷新敢用 30 秒间隔就是靠它兜住成本。
+        """
         if fp is None:
             return
         fp = tuple(fp)
@@ -583,7 +611,10 @@ class RecordsPage(QWidget):
         self._load()
 
     def _capture_view(self) -> int:
-        """捕获当前阅读位置：表格垂直滚动偏移"""
+        """捕获当前阅读位置：表格垂直滚动偏移。
+
+        滚动条在首帧可能还没建好，取不到时按 0 处理。
+        """
         sb = self._table.verticalScrollBar()
         return sb.value() if sb is not None else 0
 
@@ -605,26 +636,39 @@ class RecordsPage(QWidget):
     # ---------- 加载 ----------
 
     def _on_open_stats_chart(self):
-        """打开 pygwalker 自助分析窗口。"""
+        """打开 pygwalker 自助分析窗口。
+
+        按钮先禁用：窗口要异步拉数据再起浏览器，重复点击会叠开多个页面。
+        """
         self._btn_stats_chart.setEnabled(False)
         self._stats_opener.open_analysis(self._current_filters())
 
     def _on_stats_finished(self, ok, msg):
+        """pygwalker 窗口关闭：恢复按钮并按成败提示，失败多是缺依赖或端口被占。"""
         self._btn_stats_chart.setEnabled(True)
         show_info_bar(msg, message_type="success" if ok else "error",
                       parent=self)
 
     def _on_refresh(self):
-        """手动刷新：重查数据 + 署名选项 + 指标卡，完成弹 infobar"""
+        """手动刷新：重查数据 + 署名选项 + 指标卡，完成弹 infobar。
+
+        _manual_refresh 只影响反馈方式（弹提示还是静默），不改变查询内容。
+        """
         self._manual_refresh = True
         self._load()
 
     def refresh_async(self):
-        """其他页面提交后静默刷新（不弹 infobar）"""
+        """其他页面提交后静默刷新，不弹 infobar。
+
+        与 _on_refresh 共用 _load，区别只在 _manual_refresh 标志。
+        """
         self._load()
 
     def _load(self):
-        """异步分页查询 + 指标卡 + 署名选项刷新（worker 全在 controller）"""
+        """异步分页查询 + 指标卡 + 署名选项刷新，worker 全在 controller。
+
+        每发起一轮就自增两个代际号：列表与指标卡各自比对，慢的一路不拖住另一路。
+        """
         self._update_source_label()
         self._load_signers()
         filters = self._current_filters()
@@ -637,11 +681,18 @@ class RecordsPage(QWidget):
             filters["date_from"], filters["date_to"], self._stats_seq)
 
     def _load_signers(self):
-        """刷新署名候选：查询在 controller，结果由 _on_signers_ready 填控件。"""
+        """刷新署名候选：查询在 controller，结果由 _on_signers_ready 填控件。
+
+        署名来自历史数据，每次加载都重查，别人刚填的名字才能出现在下拉里。
+        """
         self._controller.load_signers()
 
     def _on_signers_ready(self, signers):
-        """填署名下拉并保留当前选中项；失败静默（controller 不发错误）。"""
+        """填署名下拉并保留当前选中项；失败静默，controller 不发错误。
+
+        重填期间 blockSignals：clear/addItems 会连发 currentIndexChanged，
+        不挡就会把一次数据刷新放大成多次查询。
+        """
         cur = self._signer_combo.currentText().strip()
         self._signer_combo.blockSignals(True)
         self._signer_combo.clear()
@@ -654,7 +705,11 @@ class RecordsPage(QWidget):
         self._signer_combo.blockSignals(False)
 
     def _on_loaded(self, result, seq=None):
-        """分页结果回填；seq 不是最新一帧就直接丢弃（防止旧筛选覆盖新筛选）。"""
+        """分页结果回填；seq 不是最新一帧就直接丢弃（防止旧筛选覆盖新筛选）。
+
+        先铺表格再夹页码：总数可能因他人新增/删除而变小，夹完再渲染分页控件，
+        避免出现「第 3/2 页」这种非法状态。
+        """
         if seq is not None and seq != self._seq:
             return
         self._update_source_label()
@@ -680,6 +735,10 @@ class RecordsPage(QWidget):
             self._restore_view(pv)
 
     def _on_load_error(self, msg, seq=None):
+        """查询失败：只有手动刷新才弹提示，自动刷新的失败一律静默。
+
+        自动刷新 30 秒一轮，失败多是瞬时锁或网络抖动，弹窗会变成骚扰。
+        """
         if seq is not None and seq != self._seq:
             return
         if self._manual_refresh:
@@ -688,6 +747,10 @@ class RecordsPage(QWidget):
                           parent=self, duration=4000)
 
     def _on_stats_loaded(self, counts, seq=None):
+        """指标卡回填；seq 同样是代际号，旧统计结果不得覆盖新筛选下的数字。
+
+        计数与列表是两条独立查询，慢的一路晚到就该丢弃，否则卡片会与表格打架。
+        """
         if seq is not None and seq != self._stats_seq:
             return
         for key, lbl in self._cards.items():
@@ -755,6 +818,10 @@ class RecordsPage(QWidget):
     # ---------- 右键菜单 ----------
 
     def _show_context_menu(self, pos):
+        """右键菜单：编辑/删除，直接复用行记录对象，不按行号二次取值。
+
+        点在空白处直接返回：无效行没有记录可操作，弹空菜单只会让用户困惑。
+        """
         idx = self._table.indexAt(pos)
         if not idx.isValid():
             return
@@ -802,6 +869,7 @@ class RecordsPage(QWidget):
             self._controller.update_record(int(row["id"]), dlg.collected)
 
     def _on_delete(self, row):
+        """删除确认后交给 controller 异步执行，成败由 mutation 回调统一提示。"""
         box = MessageBox("删除确认",
                          f"确定删除这条跑视频记录吗？\n"
                          f"{row.get('category')} / {row.get('kind')} / "
@@ -824,6 +892,7 @@ class RecordsPage(QWidget):
                           parent=self, duration=2500)
 
     def _on_mutation_failed(self, tag, msg):
+        """写库失败：按 tag 区分标题，正文直接用后端错误文本便于定位。"""
         title = "保存失败" if tag == "edit" else "删除失败"
         show_info_bar(msg, "error", title=title, parent=self, duration=4000)
 
@@ -834,29 +903,38 @@ class RecordsPage(QWidget):
         self._controller.signer_stats()
 
     def _on_signer_stats_ready(self, stats):
+        """署名统计结果到手：弹出模态表；空结果也照常打开，让用户看到「没有数据」。
+
+        用 exec 而非 show，是为了挡住背后的自动刷新，避免统计窗口开着时表格被换掉。
+        """
         SignerStatsDialog(stats or [], self).exec()
 
     def _on_signer_stats_failed(self, msg):
+        """署名统计失败：只提示不重试，通常是数据库瞬时不可用，手动再点即可。"""
         show_info_bar(msg, "error", title="统计失败",
                       parent=self, duration=4000)
 
     def _on_export(self):
+        """导出 xlsx：先选路径再交给 controller 后台生成，主线程不写文件。"""
         path, _sel = QFileDialog.getSaveFileName(
             self, "导出跑视频记录", "跑视频_export.xlsx", "Excel 文件 (*.xlsx)")
         if path:
             self._controller.export_xlsx(path)
 
     def _on_export_done(self, count):
+        """导出成功：只报条数，文件位置就是用户刚在文件对话框里选的那个。"""
         show_info_bar(f"已导出 {count} 条", "success",
                       title="导出成功", parent=self, duration=3000)
 
     def _on_export_failed(self, msg):
+        """导出失败：文件被占用或磁盘不可写都由后端给原因，原样展示即可。"""
         show_info_bar(msg, "error", title="导出失败",
                       parent=self, duration=4000)
 
     # ---------- 分页 ----------
 
     def _step_page(self, delta: int):
+        """翻页（delta=±1）：越界直接忽略，末页用 pages_of 现算而不缓存。"""
         new_page = self._page_no + delta
         if 1 <= new_page <= pages_of(self._total, self._page_size):
             self._page_no = new_page

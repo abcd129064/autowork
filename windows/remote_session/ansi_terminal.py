@@ -29,24 +29,36 @@ from core.vt_screen import (DEFAULT_ATTRS, DEFAULT_BG, DEFAULT_FG, VTScreen,
 _BG = "#1e1e1e"
 # 默认前景（VTScreen 里 "default" 是哨兵值，这里换回真实颜色）
 _FG = "#e5e5e5"
+# 光标用反色 span 画成方块：QTextEdit 自带光标会随系统闪烁，且无法固定成终端样式
 _CURSOR_STYLE = f"background-color:#00ff00;color:{_BG};"
 # 与 QFont("Consolas", 10) 配套；line-height 必须与 _metrics() 的行高换算一致
 _PRE_STYLE = ("margin:0; font-family:Consolas,'Courier New',monospace; "
               "font-size:10pt; line-height:1.3;")
+# 必须与 _PRE_STYLE 里的 line-height 一致；只改一处会让网格行数与显示行数错位
 _LINE_HEIGHT = 1.3
+# 默认 120x40 只是首帧兜底；控件显示后会立即按真实尺寸重算
 _DEFAULT_COLS = 120
 _DEFAULT_ROWS = 40
+# 下限防止窗口被拖到极小时算出 0 列/0 行，把屏幕模型除零
 _MIN_COLS, _MIN_ROWS = 20, 4
 
 
 def _escape(text: str) -> str:
-    """HTML 转义 + 空格转 &nbsp;（先转义再换空格，避免把 &nbsp; 二次转义）"""
+    """HTML 转义 + 空格转 &nbsp;（先转义再换空格，避免把 &nbsp; 二次转义）。
+
+    <pre> 会折叠连续空格，而终端恰恰靠空格对齐；不转 &nbsp; 时表格线
+    与缩进会整体塌掉，nano/vim 的界面直接看不出结构。
+    """
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return text.replace(" ", "&nbsp;")
 
 
 def _wrap_span(text: str, attrs) -> str:
-    """把已转义文本包进带样式的 span（attrs 为 VTScreen 的不可变元组）"""
+    """把已转义文本包进带样式的 span（attrs 为 VTScreen 的不可变元组）。
+
+    默认色不直接写 "default"：VTScreen 用哨兵表示"用终端默认"，渲染层
+    必须换成真实色值，否则浏览器/Qt 会把 default 当非法颜色忽略。
+    """
     if attrs is None or attrs == DEFAULT_ATTRS:
         return f'<span style="color:{_FG}">{text}</span>'
     fg, bg, bold, underline, reverse = attrs
@@ -65,9 +77,10 @@ def _wrap_span(text: str, attrs) -> str:
 
 
 class ANSITerminalWidget(QTextEdit):
-    """支持 ANSI 序列解析 + 键盘直接输入的终端控件
+    """支持 ANSI 序列解析 + 键盘直接输入的终端控件。
 
-    用户按键 → key_input 信号发射对应字节 → 远端 shell 回显 → write_output 渲染
+    用户按键 → key_input 信号发射对应字节 → 远端 shell 回显 → write_output 渲染。
+    控件本身不持有连接：所有上行字节都走信号，便于同一控件接本地/远端两种壳。
     """
 
     # 用户键盘输入通过此信号发射（str 为要发送给 shell 的原始字节）
@@ -78,7 +91,9 @@ class ANSITerminalWidget(QTextEdit):
     cwd_changed = Signal(str)
 
     def __init__(self, parent=None):
+        """构造屏幕模型、渲染定时器与增量缓存；此阶段不连接任何远端。"""
         super().__init__(parent)
+        # 只读是相对 QTextEdit 的编辑能力而言：键盘输入由 keyPressEvent 接管后发往远端
         self.setReadOnly(True)
         self.setFont(QFont("Consolas", 10))
         self.setStyleSheet(
@@ -107,6 +122,7 @@ class ANSITerminalWidget(QTextEdit):
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render)
         # 增量渲染状态
+        # 双版本号：revision 管内容，structure_revision 管行数/宽高结构
         self._row_html_cache: list = []          # 每行 HTML 缓存（按渲染行号）
         self._rendered_revision = -1
         self._rendered_structure = -1
@@ -128,30 +144,45 @@ class ANSITerminalWidget(QTextEdit):
         return self._screen.cwd
 
     def set_input_enabled(self, enabled: bool):
-        """设置是否允许键盘输入（连接成功后启用）"""
+        """设置是否允许键盘输入（连接成功后启用）。
+
+        关闭时只改标志并让缓存失效：正在渲染的光标要立刻消失，
+        但屏幕内容保留，重连后仍能看到断线前的输出。
+        """
         if self._input_enabled != enabled:
             self._input_enabled = enabled
             self._invalidate_render()
 
     def write_output(self, data: str):
-        """写入终端数据（解析 ANSI 序列，延迟合并渲染）"""
+        """写入终端数据（解析 ANSI 序列，延迟合并渲染）。
+
+        解析是同步的，渲染才合并：PTY 一次 read 可能带回几十条序列，
+        每条都 setHtml 会把 UI 拖死，因此只重置 50ms 定时器。
+        """
         if not data:
             return
         self._screen.feed(data)
         self._schedule_render()
 
     def clear_terminal(self):
-        """清屏并清空回滚"""
+        """清屏并清空回滚；清完立即重绘，避免残留上一屏的 HTML 缓存。"""
         self._screen.clear()
         self._invalidate_render()
         self._render()
 
     def grid_size(self):
-        """当前网格 (cols, rows)——上层用它设置远端 PTY 尺寸"""
+        """当前网格 (cols, rows)——上层用它设置远端 PTY 尺寸。
+
+        必须返回屏幕模型的实际值而不是按控件现算：PTY 与显示要一致。
+        """
         return self._screen.cols, self._screen.rows
 
     def set_grid_size(self, cols: int, rows: int):
-        """显式设置网格尺寸（面板/冒烟脚本可用；尺寸变化会发 grid_resized）"""
+        """显式设置网格尺寸（面板/冒烟脚本可用；尺寸变化会发 grid_resized）。
+
+        尺寸相同直接返回，避免每个 resize 事件都触发一次远端 PTY 调整；
+        下限在这里再夹一次，防止调用方传入非法值。
+        """
         cols = max(_MIN_COLS, int(cols))
         rows = max(_MIN_ROWS, int(rows))
         if (cols, rows) == (self._screen.cols, self._screen.rows):
@@ -162,7 +193,11 @@ class ANSITerminalWidget(QTextEdit):
         self._schedule_render()
 
     def screen_text(self, strip: bool = True):
-        """把当前屏幕（含回滚）导出为纯文本，调试/冒烟断言用"""
+        """把当前屏幕（含回滚）导出为纯文本，调试/冒烟断言用。
+
+        strip=True 去掉行尾填充空格，断言时不必关心 cols 宽度；
+        需要逐格比对（如宽字符占位）时传 False。
+        """
         return [self._screen.row_text(i, strip) for i in range(self._screen.total_rows())]
 
     @property
@@ -185,7 +220,11 @@ class ANSITerminalWidget(QTextEdit):
     # ─── 网格同步 ─────────────────────────────────────────────────────────
 
     def _metrics(self):
-        """(字符宽, 行高)，单位与控件逻辑像素一致"""
+        """(字符宽, 行高)，单位与控件逻辑像素一致。
+
+        宽取 "M" 而不是平均值：等宽字体下所有字形同宽，用 M 最直观；
+        行高只用于光标定位与粗算，精确网格以 _line_height 的实测值为准。
+        """
         fm = QFontMetricsF(self.font())
         char_w = fm.horizontalAdvance("M")
         return max(1.0, char_w), max(1.0, fm.lineSpacing() * _LINE_HEIGHT)
@@ -206,6 +245,11 @@ class ANSITerminalWidget(QTextEdit):
         return max(1.0, (doc.size().height() - margin) / 4.0)
 
     def _line_height(self) -> float:
+        """返回实测行高，并按字体/缩放签名缓存，避免每次绘制都建文档测量。
+
+        签名里带 devicePixelRatio：同名字体在 125%/150% 缩放下像素高不同，
+        只比 family 会拿到过期的缓存值。
+        """
         fm = QFontMetricsF(self.font())
         sig = (self.font().family(), round(fm.height(), 2), round(self.devicePixelRatioF(), 3))
         if self._line_px is None or self._line_sig != sig:
@@ -233,13 +277,16 @@ class ANSITerminalWidget(QTextEdit):
         return cols, rows
 
     def _sync_grid(self):
+        """内部入口：按当前尺寸对齐网格（不强制，未显示时走宽松分支）。"""
         self.sync_grid(force=False)
 
     def resizeEvent(self, event):
+        """窗口尺寸变化就重算网格，让远端 PTY 与可见区域保持同步。"""
         super().resizeEvent(event)
         self._sync_grid()
 
     def showEvent(self, event):
+        """首次显示后视口尺寸才可信；置 _ever_shown 并强制对齐一次网格。"""
         super().showEvent(event)
         self._ever_shown = True
         self._sync_grid()
@@ -301,6 +348,7 @@ class ANSITerminalWidget(QTextEdit):
             return
 
         # ── 普通可打印字符 ──
+        # Alt+字符 前置 ESC 是 readline 的 meta 约定（Alt+B 退词等依赖它）
         text = event.text()
         if text:
             if alt:
@@ -325,6 +373,7 @@ class ANSITerminalWidget(QTextEdit):
 
     @staticmethod
     def _mod_code(modifiers) -> int:
+        """xterm 修饰键编码：1 + Shift(1) + Alt(2) + Ctrl(4)，无修饰为 1。"""
         code = 1
         if modifiers & Qt.ShiftModifier:
             code += 1
@@ -335,7 +384,12 @@ class ANSITerminalWidget(QTextEdit):
         return code
 
     def _special_key_seq(self, key: int, modifiers) -> str | None:
-        """把特殊键映射为终端转义序列（含 DECCKM 应用模式与修饰键组合）"""
+        """把特殊键映射为终端转义序列（含 DECCKM 应用模式与修饰键组合）。
+
+        方向键/Home/End 在应用模式下走 SS3（ESC O x），普通模式走 CSI；
+        这个分支由 smkx/rmkx 控制，ncurses 全靠它决定能否收到方向键。
+        带修饰键时统一用 CSI 1;mod 形式，不再受 DECCKM 影响。
+        """
         mod = self._mod_code(modifiers)
         plain = (mod == 1)
         if key in self._CURSOR_FINAL:
@@ -368,7 +422,11 @@ class ANSITerminalWidget(QTextEdit):
         return None
 
     def inputMethodEvent(self, event):
-        """处理 IME 输入法（中文等）"""
+        """处理 IME 输入法（中文等）：只发 commitString，忽略预编辑串。
+
+        预编辑串是输入法候选阶段的临时文本，发给远端会出现"拼音上屏"；
+        accept() 阻止基类再把同一段文本插进只读文档。
+        """
         if self._input_enabled:
             commit = event.commitString()
             if commit:
@@ -378,7 +436,11 @@ class ANSITerminalWidget(QTextEdit):
             super().inputMethodEvent(event)
 
     def mousePressEvent(self, event):
-        """点击终端区域时立即获取键盘焦点；远端开了鼠标上报则把事件发过去"""
+        """点击终端区域时立即获取键盘焦点；远端开了鼠标上报则把事件发过去。
+
+        先 setFocus 是有意的：鼠标上报会 return，若焦点没拿到，用户接着
+        敲键盘就没有任何反应，看起来像终端卡死。
+        """
         self.setFocus()
         if self._reporting_mouse(event.modifiers()):
             button = {Qt.LeftButton: 0, Qt.MiddleButton: 1, Qt.RightButton: 2}.get(
@@ -388,6 +450,7 @@ class ANSITerminalWidget(QTextEdit):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """松开按键也上报（kind='m'），否则远端拖选/绘图会一直停在按下状态。"""
         if self._reporting_mouse(event.modifiers()):
             button = {Qt.LeftButton: 0, Qt.MiddleButton: 1, Qt.RightButton: 2}.get(
                 event.button(), 0)
@@ -410,6 +473,7 @@ class ANSITerminalWidget(QTextEdit):
         super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
+        """滚轮上报：上滚按钮码 64、下滚 65；未上报时交回基类做本地滚动。"""
         if self._reporting_mouse(event.modifiers()):
             code = 64 if event.angleDelta().y() > 0 else 65
             self._send_mouse('M', code, event.position())
@@ -417,11 +481,13 @@ class ANSITerminalWidget(QTextEdit):
         super().wheelEvent(event)
 
     def focusInEvent(self, event):
+        """焦点进入时按 ?1004 上报 CSI I，供 vim 等判断窗口切换。"""
         if self._input_enabled and self._screen.focus_events:
             self.key_input.emit('\x1b[I')
         super().focusInEvent(event)
 
     def focusOutEvent(self, event):
+        """焦点离开时上报 CSI O；与 focusIn 成对，缺一个会让应用状态错乱。"""
         if self._input_enabled and self._screen.focus_events:
             self.key_input.emit('\x1b[O')
         super().focusOutEvent(event)
@@ -432,7 +498,11 @@ class ANSITerminalWidget(QTextEdit):
                     and not (modifiers & Qt.ShiftModifier))
 
     def _mouse_cell(self, pos):
-        """控件坐标 → 终端 (列, 行)，1 基（SGR 鼠标协议要求）"""
+        """控件坐标 → 终端 (列, 行)，1 基（SGR 鼠标协议要求）。
+
+        结果夹到屏幕范围内：点在滚动条/边距上会算出越界行列，
+        不夹会让远端收到非法坐标（部分 shell 会直接断开）。
+        """
         char_w, _ = self._metrics()
         line_h = self._line_height()
         margin = self.document().documentMargin()
@@ -441,7 +511,11 @@ class ANSITerminalWidget(QTextEdit):
         return min(col, self._screen.cols), min(row, self._screen.rows)
 
     def _send_mouse(self, kind: str, button: int, pos):
-        """按 ?1006(SGR) 或传统 X10 编码上报一次鼠标事件"""
+        """按 ?1006(SGR) 或传统 X10 编码上报一次鼠标事件。
+
+        X10 只支持 223 列/行且用单字节 +32 编码，超出必须夹住，
+        否则 chr() 会产出非 ASCII 字符把转义序列冲坏。
+        """
         col, row = self._mouse_cell(pos)
         if self._screen.mouse_sgr:
             self.key_input.emit(f'\x1b[<{button};{col};{row}{kind}')
@@ -466,7 +540,10 @@ class ANSITerminalWidget(QTextEdit):
         self._ctx_menu.exec(event.globalPos())
 
     def _paste_from_clipboard(self):
-        """将剪贴板文本粘贴（发送）到远端 shell"""
+        """将剪贴板文本粘贴（发送）到远端 shell。
+
+        换行统一成 \\r：终端里 Enter 就是 CR，发 \\n 时 bash 只当普通字符。
+        """
         text = QApplication.clipboard().text()
         if not text:
             return
@@ -525,13 +602,23 @@ class ANSITerminalWidget(QTextEdit):
             self._render_timer.start()
 
     def _invalidate_render(self):
-        """外部状态（输入使能/网格）变化：强制下一帧重建缓存"""
+        """外部状态（输入使能/网格）变化：强制下一帧重建缓存。
+
+        只重置版本号与行缓存，不清 _cached_html：下一帧会因 revision
+        不同而重算，若真没变化再比较 HTML 即可跳过 setHtml。
+        """
         self._rendered_revision = -1
         self._rendered_structure = -1
         self._rendered_cursor_row = None
         self._row_html_cache = []
 
     def _render(self):
+        """把屏幕模型渲染成 HTML：结构变则全量、否则只重画脏行。
+
+        setHtml 会重建整个文档，因此选区与滚动位置必须手动保存恢复；
+        备用屏幕还要固定滚动条策略，否则全屏应用会随滚动漂移。
+        无变化时直接返回，这是滚动与高频输出下最有效的省时点。
+        """
         screen = self._screen
         if (screen.revision == self._rendered_revision
                 and screen.structure_revision == self._rendered_structure):
@@ -603,6 +690,10 @@ class ANSITerminalWidget(QTextEdit):
             scrollbar.setValue(min(scroll_value, scrollbar.maximum()))
 
     def _row_html_for(self, index: int, is_cursor_row: bool) -> str:
+        """渲染指定行；只有光标所在行才把 cursor_col 传给 _row_html。
+
+        光标还要求输入使能与可见性同时成立：连接前或失焦时不该出现方块。
+        """
         cells = self._screen.row_cells(index)
         show_cursor = (is_cursor_row and self._input_enabled
                        and self._screen.cursor_visible)
@@ -613,7 +704,8 @@ class ANSITerminalWidget(QTextEdit):
         """渲染一行；cursor_col >= 0 时在该列画绿色方块光标。
 
         宽字符占两格（第二格是续格哨兵），渲染时只输出一次字形；
-        光标落在宽字符上时方块要盖满两格。
+        光标落在宽字符上时方块要盖满两格。行尾空白要先裁掉，否则
+        120 列全输出 &nbsp; 会让每行 HTML 体积翻十几倍。
         """
         if not cells:
             return '&nbsp;'

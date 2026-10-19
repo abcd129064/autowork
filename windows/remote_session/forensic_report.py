@@ -28,7 +28,8 @@ from core.secrets import decrypt_settings
 from core.utils import cleanup_log_dir
 
 # ─── 预置诊断命令组（模块级常量，便于维护） ─────────────────────────────
-# 元素为 (报告分节标题, shell 命令)
+# 元素为 (分节标题, shell 命令)；只读采集（写操作会改变现场），每条自带
+# journalctl→syslog→messages→echo 降级链，因为老设备上三种日志系统不总在。
 FORENSIC_COMMANDS = (
     ("系统时间与运行时长", "date; uptime"),
     ("内核日志错误/警告（最近 50 条）", "dmesg --level=err,warn | tail -50"),
@@ -50,6 +51,8 @@ CONN_LOG_ENTRIES = 30         # 连接日志截取条数
 
 # ─── AI 智能分析配置（厂商注册表见 core/ai_providers.py） ──────────────────────────────────────
 AI_REQUEST_TIMEOUT = 120         # AI 请求超时（秒）
+# 两个截断上限是成本闸门：dmesg/top 动辄上万行，原样送模型会让单次分析
+# 的 token 费用不可控，也容易把关键结论挤出上下文窗口。
 AI_CMD_OUTPUT_MAX_CHARS = 2000   # 单条命令输出送 AI 的最大字符数
 AI_EVIDENCE_MAX_CHARS = 12000    # 证据文本总长度上限（控制 token 成本）
 
@@ -133,7 +136,12 @@ def lookup_kd_status(table_id: str, snk: str) -> dict:
 # ─── 日志采集 ────────────────────────────────────────────────────────────
 
 def read_session_tail(path: str, n: int = SESSION_TAIL_LINES) -> str:
-    """读取会话日志文件最近 n 行；文件不存在/读取失败返回空串"""
+    """读取会话日志文件最近 n 行；文件不存在/读取失败返回空串。
+
+    用 errors='replace' 而不是严格解码：设备端日志可能混入 GBK 片段或被
+    截断在半个多字节字符上，严格模式会抛 UnicodeDecodeError，让整份取证
+    报告因为几行乱码而生成失败。
+    """
     if not path or not os.path.isfile(path):
         return ""
     try:
@@ -149,6 +157,10 @@ def collect_conn_log(host: str, limit: int = CONN_LOG_ENTRIES) -> str:
 
     按时间顺序（.3 最旧 → 当前文件最新）扫描，含 host:port 的行作为一条
     记录的开头，紧随的缩进行（异常调用栈详情）归并到同一条。
+
+    轮转文件按 (.3, .2, .1, 当前) 排列是日志的年龄顺序，反着读会把
+    "最近 30 条"拼成跨越几周的老记录。归并缩进行是因为连接异常通常带多行
+    traceback，只留首行等于丢掉最关键的报错位置。
     """
     host = str(host or "").strip()
     if not host:
@@ -179,6 +191,8 @@ def collect_conn_log(host: str, limit: int = CONN_LOG_ENTRIES) -> str:
                     entries.append(current)
         except OSError:
             continue
+    # 先按条截取再拼接：逐行截断会把一条多行记录的中间截断，报告里剩下
+    # 半截 traceback，读起来比没有更误导。
     tail = entries[-limit:]
     return "".join("".join(e) for e in tail).rstrip()
 
@@ -196,7 +210,11 @@ def _load_forensic_settings() -> dict:
 
 def build_ai_evidence(cmd_results: list) -> str:
     """拼装送 AI 的取证证据文本：仅取执行成功的命令输出，
-    单条截断到 AI_CMD_OUTPUT_MAX_CHARS，总量截断到 AI_EVIDENCE_MAX_CHARS"""
+    单条截断到 AI_CMD_OUTPUT_MAX_CHARS，总量截断到 AI_EVIDENCE_MAX_CHARS。
+
+    失败命令不进证据：它们的内容是「执行超时」这类本模块自己的错误文案，
+    送进模型只会被当成设备异常来分析，反而污染结论。
+    """
     parts = []
     for title, cmd, ok, output in cmd_results:
         if not ok:
@@ -227,6 +245,8 @@ def analyze_with_ai(evidence: str) -> str:
         raise RuntimeError(
             f"未配置 {cfg['label']} API Key，"
             f"或设置环境变量 {cfg['env_key']}）")
+    # openai 是可选依赖：取证主流程（命令组 + 报告）不依赖它，只有 AI 分析
+    # 需要。放在函数内 import，缺包时只让这一节失败，不拖垮整个取证线程。
     try:
         from openai import OpenAI, BadRequestError
     except ImportError:
@@ -240,6 +260,8 @@ def analyze_with_ai(evidence: str) -> str:
         {"role": "system", "content": _AI_SYSTEM_PROMPT},
         {"role": "user", "content": evidence},
     ]
+    # 先带思考参数试一次，是对"多数厂商已兼容 OpenAI 扩展字段"的下注；
+    # 400 说明当前模型/网关不认这些字段，降级为最朴素的调用仍能拿到答案。
     try:
         resp = client.chat.completions.create(
             model=cfg["model"], messages=messages, stream=False,
@@ -280,6 +302,8 @@ def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
         ai_error: AI 分析未完成的原因（失败时非空）
         ai_label: AI 厂商展示名（如 DeepSeek/通义千问，用于章节标题）
     """
+    # 纯函数只读入参、不碰网络与磁盘：单测可以喂构造好的 cmd_results 直接
+    # 断言 Markdown 结构，不需要真机 SSH。
     now = datetime.now()
     host = str(meta.get("host") or "")
     port = meta.get("port", "")
@@ -300,6 +324,8 @@ def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
     if server_name:
         lines.append(f"| 会话别名 | {server_name} |")
 
+    # 关联球桌查不到时也要写一行「未关联」并说明原因：报告要发给同事看，
+    # 缺行会让人以为报告漏了一段，而不是"这台设备本来就不在球桌库里"。
     if table_info:
         t_snk = str(table_info.get("snk_code") or "").strip() or "(无)"
         lines.append(
@@ -318,6 +344,8 @@ def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
         lines += ["| 字段 | 值 |", "| --- | --- |"]
         for field, label in _KD_REPORT_FIELDS:
             val = str(kd_info.get(field) or "").strip() or "(空)"
+            # status 落库是数字，报告里必须带中文含义：只有 "1" 的一行没人
+            # 看得懂是空闲还是使用中。
             if field == "status":
                 desc = _KD_STATUS_DESC.get(str(kd_info.get("status") or "").strip())
                 if desc:
@@ -335,6 +363,8 @@ def build_forensic_report(meta: dict, cmd_results: list, table_info: dict,
         lines.append("")
         lines.append(f"$ {cmd}")
         lines.append("")
+        # 命令原文与输出分开：排障时先看执行的到底是哪条命令、再看结果，
+        # 比把两者揉在一段里更容易核对设备上实际发生了什么。
         if ok:
             lines.append(_md_code_block(output or "(无输出)"))
         else:
@@ -398,7 +428,11 @@ class ForensicWorker(QThread):
     # ── 命令执行 ──────────────────────────────────────────────────────
 
     def _exec_one(self, cmd: str):
-        """独立 channel 执行单条命令，返回 (ok, 输出文本)"""
+        """独立 channel 执行单条命令，返回 (ok, 输出文本)。
+
+        不设置 get_pty：诊断命令没有交互需求，分配伪终端反而会让 systemctl
+        等命令输出颜色控制符，污染报告里的纯文本。
+        """
         try:
             stdin, stdout, stderr = self._client.exec_command(
                 cmd, timeout=FORENSIC_CMD_TIMEOUT)
@@ -408,6 +442,8 @@ class ForensicWorker(QThread):
             if err.strip():
                 text += ("\n[stderr]\n" + err) if text.strip() else err
             return True, text.strip()
+        # 超时单独归类只为给最常见的一种情况更明确的文案；paramiko 也可能
+        # 抛 SSHException，落到下面的 Exception 分支同样会标记为失败。
         except socket.timeout:
             return False, f"执行超时（>{FORENSIC_CMD_TIMEOUT} 秒）"
         except Exception as e:
@@ -436,6 +472,8 @@ class ForensicWorker(QThread):
 
             # 2. 反查球桌信息 / 设备 kd 状态
             self.progress.emit(total, total, "汇总本地数据")
+            # 反查顺序：先用会话别名里的 snk/球桌号，命中不了再用 host 兜底；
+            # 球桌库查不到不影响报告，只是少了「关联球桌」那一行。
             snk = self._extract_snk()
             table_id = self._extract_table_id()
             table_info = lookup_table_info(snk, self._host)

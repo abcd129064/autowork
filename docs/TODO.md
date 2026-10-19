@@ -53,7 +53,7 @@
       G2+G3（main_window/ui/context_menus.py）、G4（main_window/ui/menu_actions.py）、
       G5+G6（main_window/ui/settings_dialogs.py）与 G8+G11（main_window/ui/navigation.py）
       已完成；G7/G9/G10/G12 与余留 G3/G8/G11/零引用共 26 个死方法已删除（ui_mixin 275 行/52 方法）。A3、B4 已完成；
-      B1 已开始（settings/diagnostics + Mica/亚克力/hover/switch/menu patch 已下沉），下一步 B1 可拆部分已完成（settings/diagnostics + 7 个 patch 模块），下一步 B2、B3、C2-C5。A2 评估后暂缓。
+      B1 已开始（settings/diagnostics + Mica/亚克力/hover/switch/menu patch 已下沉），下一步 B1 可拆部分已完成；B2 已完成（tunnel_notice 信号 + session_ui UI 工厂两步，core 已无 windows import）；下一步 B3，之后 C2-C5。A2 评估后暂缓。
 - [ ] **`frpc.exe`（16MB，tracked 但被 .gitignore 命中）是否 `git rm --cached`**（AGENTS.md §7）。
 - [ ] **`tools/*/_archive/` 未入库一次性脚本**：提交还是删除（AGENTS.md §7）。
 

@@ -28,7 +28,11 @@ from workers.aftersale_worker import AftersaleDBWorker
 
 
 class RecordsController(QObject):
-    """售后记录页的后台任务编排器"""
+    """售后记录页的后台任务编排器，也是本页所有 QThread 的唯一归属地。
+
+    页面只连信号、不持有线程，切页或关窗时停掉本对象即可；
+    线程若挂在页面上，页面先被销毁而线程还在跑，回调就会触到死 Qt 对象。
+    """
 
     rows_ready = Signal(object, object)
     load_failed = Signal(str, object)
@@ -47,8 +51,8 @@ class RecordsController(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # worker 属性名保留 "_worker" 后缀：既符合本仓库既有命名直觉，也让
-        # 若页面没实现 detach_workers 此为pivot_page.detach_workers 的目录扫描，仍能兜底扫到。
+        # 属性名统一以 _worker 结尾，stop_all 靠 dir() 扫这个后缀；
+        # 少一个后缀，关窗时那个线程就没人中断，页面销毁后回调会崩
         self._query_worker = None
         self._cycles_worker = None
         self._recalc_worker = None
@@ -63,6 +67,11 @@ class RecordsController(QObject):
 
     @staticmethod
     def _running(worker) -> bool:
+        """判断 worker 是否还在跑；底层 C++ 对象已销毁时按未运行处理。
+
+        线程收尾后去 isRunning 一个已 deleteLater 的包装对象会抛
+        RuntimeError，这里吞掉，调用方才不用每次判断都套 try。
+        """
         if worker is None:
             return False
         try:
@@ -71,7 +80,11 @@ class RecordsController(QObject):
             return False
 
     def is_running(self, *attrs) -> bool:
-        """给定 worker 属性名中是否有在跑的attr 可带或不带前导下划线"""
+        """给定的 worker 属性名里是否有正在运行的，名字可带或不带前导下划线。
+
+        调用方按业务叫 "query" 更直观，属性上却带下划线；统一在这里补，
+        免得每个调用点各写一次 "_query_worker" 字面量。
+        """
         for attr in attrs:
             name = attr if attr.startswith("_") else "_" + attr
             if self._running(getattr(self, name, None)):
@@ -79,7 +92,11 @@ class RecordsController(QObject):
         return False
 
     def stop_all(self):
-        """请求中断所有后台线程只 interrupt 不 wait，与主窗口口径一致"""
+        """请求中断所有后台线程，只 interrupt 不 wait，与主窗口口径一致。
+
+        扫 dir(self) 找 *_worker 后缀而不是逐个点名：新加线程时漏改这份
+        清单不会报错，只会在关窗时崩，所以让扫描自动覆盖更安全。
+        """
         for attr in dir(self):
             if not attr.endswith("_worker"):
                 continue
@@ -143,7 +160,11 @@ class RecordsController(QObject):
         worker.start()
 
     def check_fingerprint(self):
-        """自动刷新用的变更指纹探测；已有在跑则跳过（返回 False）"""
+        """自动刷新用的变更指纹探测；已有在跑则跳过（返回 False）。
+
+        探测失败一律静默：下一轮定时还会再探，弹错误框只会把偶发的
+        锁表噪声变成用户可见的打扰。
+        """
         if self._running(self._auto_worker):
             return False
         worker = AftersaleDBWorker(aftersale_db.change_fingerprint)
@@ -157,6 +178,11 @@ class RecordsController(QObject):
     # ---------- 写操作 ----------
 
     def _start_mutation(self, attr: str, tag: str, func, args) -> bool:
+        """起一个写操作 worker，结果按 tag 回给页面，并写回 attr 保活。
+
+        tag 说明这是编辑、删除还是批量，页面据它决定怎么收尾；
+        写回 attr 是防止局部变量出栈后 worker 被回收、线程中途断掉。
+        """
         worker = AftersaleDBWorker(func, *args)
         worker.result_ready.connect(
             lambda payload, _t=tag: self.mutation_done.emit(_t, payload))
@@ -171,7 +197,11 @@ class RecordsController(QObject):
         return self._start_mutation("_mutate_worker", tag, func, args)
 
     def batch_mutate(self, tag: str, func, *args) -> bool:
-        """批量写操作；已有批量任务在跑则忽略本次触发"""
+        """批量写操作；已有批量任务在跑则忽略本次触发。
+
+        批量必须挡重复：同一批数据并发写会互相覆盖，而且进度只有一个
+        信号来源，同时跑两份就没法判断何时算结束。
+        """
         if self._running(self._batch_worker):
             return False
         return self._start_mutation("_batch_worker", tag, func, args)
@@ -196,7 +226,11 @@ class RecordsController(QObject):
         return True
 
     def parse_excel(self, path: str) -> bool:
-        """导入第一步：后台解析（不写库），成功后由页面弹预览确认"""
+        """导入第一步：后台解析文件但不写库，成功后由页面弹预览确认。
+
+        解析与落库拆两步，是为了让用户在写库前看到行数与异常行；
+        合成一步就只能等写完了才发现解析错了，回滚成本高得多。
+        """
         if self._running(self._import_worker):
             return False
         worker = AftersaleDBWorker(aftersale_db.parse_excel_rows, path)
@@ -221,10 +255,16 @@ class RecordsController(QObject):
     # ---------- 表单动态候选 ----------
 
     def fetch_candidates(self) -> bool:
+        """拉取表单动态候选字段；已有请求在跑则跳过并返回 False。
+
+        候选只是输入框下拉的增强项，打开表单时拉一次即可，
+        空结果由页面用内置默认值兜底。
+        """
         if self._running(self._cand_worker):
             return False
         worker = AftersaleDBWorker(aftersale_db.get_field_candidates)
         worker.result_ready.connect(
+            # 不接 error：候选是增强项，失败时页面按内置默认值继续，不必打扰用户
             lambda data: self.candidates_ready.emit(data))
         self._cand_worker = worker
         worker.start()

@@ -134,7 +134,11 @@ class RecordsPage(QWidget):
     # ---------- 信号接线（controller → 视图） ----------
 
     def _connect_controller(self):
-        """把后台任务的结果统一接到视图槽（页面侧唯一的线程入口）"""
+        """把后台任务的结果统一接到视图槽，本页与后台线程的唯一接口。
+
+        在构造里、任何查询发出之前就连好，避免首帧结果回来时没有槽接住
+        而被静默丢弃。
+        """
         c = self._controller
         c.rows_ready.connect(self._on_loaded)
         c.load_failed.connect(self._on_load_error)
@@ -151,7 +155,11 @@ class RecordsPage(QWidget):
         c.import_failed.connect(self._on_import_error)
 
     def detach_workers(self):
-        """关窗/切页：请求中断本页所有后台线程（pivot_page 统一调用）"""
+        """请求中断本页所有后台线程，关窗或切页时由 pivot_page 调用。
+
+        页面自己不再持有线程对象，全部转交 controller 统一停；漏停一条
+        线程会让它回摸已销毁的控件，崩在 C++ 层且没有栈可看。
+        """
         self._controller.stop_all()
 
     # 写操作完成后的 InfoBar 文案（tag → (标题, 文案模板)）与失败标题
@@ -173,7 +181,11 @@ class RecordsPage(QWidget):
     }
 
     def _on_mutation_done(self, tag, payload):
-        """写操作成功：按 tag 弹 InfoBar 并重查当前页"""
+        """写操作成功：按 tag 弹 InfoBar，然后重查当前页。
+
+        成功后无条件重查而不是就地改单元格：写操作可能影响排序键和周期
+        归属，就地改会让界面顺序与数据库对不上。
+        """
         if tag == "duplicate":
             # 复制新增成功后同样记住该发生日期（保持「下一条=这条的日期」）
             aftersale_db.save_last_occurred(getattr(self, "_dup_occurred", ""))
@@ -185,11 +197,21 @@ class RecordsPage(QWidget):
         self._load()
 
     def _on_mutation_failed(self, tag, msg):
+        """写操作失败：按操作类型给标题，原样展示后台的原因。
+
+        标题要能区分删除失败还是保存失败，一句「操作失败」看不出该去
+        查什么；停留 4 秒是留出读原因的时间。
+        """
         show_info_bar(msg, "error",
                       title=self._MUTATION_ERROR_TITLE.get(tag, "操作失败"),
                       parent=self, duration=4000)
 
     def _init_ui(self):
+        """搭界面：概览卡行、工具栏、批量条、表格、底部分页，自上而下排。
+
+        只有表格拿伸缩因子 1 吃剩余高度，其余固定高：窗口拉高时该变长的
+        是表格，工具栏跟着长会让首屏少显示好几行记录。
+        """
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 14, 20, 12)
         root.setSpacing(8)
@@ -419,7 +441,11 @@ class RecordsPage(QWidget):
     # ---------- 概览卡与批量条构造 ----------
 
     def _make_stats_card(self, layout) -> tuple:
-        """单张指标卡：标签 + 大数字 + 辅助说明，返回 (card, 数字label, 说明label)"""
+        """造一张指标卡：小标题、大数字、辅助说明，返回四元组供后续改文案。
+
+        数字用原生 QLabel 而不是 BodyLabel：qfluentwidgets 的标签样式跟着
+        主题字号走，24px 的大数字会被覆盖回正文大小。
+        """
         card = CardWidget(self)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
@@ -463,7 +489,11 @@ class RecordsPage(QWidget):
 
     @staticmethod
     def _short_dt(val: str) -> str:
-        """2026-08-22 21:14:33 → 08-22 21:14"""
+        """把完整时间截成「月-日 时:分」，供表格单元格使用。
+
+        单元格宽度只够放这个长度，带年份会把列撑宽；完整时间仍留在行
+        tooltip 里。转换规则下沉在 query_state，便于脱离 Qt 单测。
+        """
         return qs.short_dt(val)
 
     # ---------- 筛选条件 ----------
@@ -479,9 +509,19 @@ class RecordsPage(QWidget):
             self._search_edit.text())
 
     def _on_search_input(self, _text):
+        """搜索框每次输入只重启防抖表，不立刻查库。
+
+        连打五六个字会排出一串查询，先发后到还会让表格闪回旧结果；
+        防抖到静默 300ms 后只留最后一次，与类型/周期筛选共用一个入口。
+        """
         self._search_timer.start()
 
     def _on_filter_changed(self):
+        """筛选条件变化：回到第一页重新查询。
+
+        页码必须重置：筛选后总条数变小，停在第 5 页很可能直接越界，
+        查回来是空表，用户会以为筛选把数据筛没了。
+        """
         self._page_no = 1
         self._load()
 
@@ -577,11 +617,19 @@ class RecordsPage(QWidget):
                       title="统计联动", parent=self, duration=2000)
 
     def _on_open_stats_chart(self):
-        """打开 pygwalker 自助分析窗口。"""
+        """打开 pygwalker 自助分析窗口，并让按钮置灰到窗口关闭。
+
+        起分析服务要几秒，不置灰的话用户会连点，开出多个浏览器标签页。
+        """
         self._btn_stats_chart.setEnabled(False)
         self._stats_opener.open_analysis(self._current_filters())
 
     def _on_stats_finished(self, ok, msg):
+        """分析窗口结束：恢复按钮，失败时把原因交给用户。
+
+        成功也弹提示，因为图表在独立的浏览器标签里打开，
+        主窗口这边没有别的反馈能说明「已经开了」。
+        """
         self._btn_stats_chart.setEnabled(True)
         show_info_bar(msg, message_type="success" if ok else "error",
                       parent=self)
@@ -596,13 +644,21 @@ class RecordsPage(QWidget):
         self._load_cycles_then_data()
 
     def refresh_async(self):
-        """其他页面提交后静默刷新（不重置周期选择）"""
+        """其他页面提交后的静默刷新，不重置周期选择。
+
+        必须保留周期：用户可能正看着历史周期，静默刷新把筛选重置回
+        当前周期，等于替用户改了视图。
+        """
         self._load()
 
     # ---------- 自动刷新（2026-09-16：他人填写免手动同步） ----------
 
     def _sync_auto_timer(self):
-        """按当前配置启停轮询定时器（开关/间隔变更后调用，也用于构造时初始化）"""
+        """按当前配置启停轮询定时器，开关或间隔改动后调用，构造时也调一次。
+
+        读配置失败按「关闭、30 秒」兜底：配置读不出来时宁可不同步，
+        也不要拿一个猜出来的间隔一直查库。
+        """
         try:
             enabled = aftersale_db.auto_refresh_enabled()
             interval = aftersale_db.auto_refresh_interval()
@@ -651,7 +707,11 @@ class RecordsPage(QWidget):
         self._preserve_view = cap + (self._query_seq,)
 
     def _capture_view(self):
-        """捕获当前阅读位置：垂直滚动偏移 + 已勾选记录 id 集合"""
+        """记下当前阅读位置：垂直滚动偏移加已勾选记录 id 集合。
+
+        存 id 而不是行号：重查后行可能被排序或插入挤走，按 id 才能原样
+        勾回复选框。
+        """
         sb = self._table.verticalScrollBar()
         offset = sb.value() if sb is not None else 0
         return (offset, set(self._checked_ids()))
@@ -756,6 +816,11 @@ class RecordsPage(QWidget):
         self._controller.fetch_cycles()
 
     def _on_cycles_loaded(self, cycle_starts):
+        """周期列表回来：重建下拉、恢复原选择，再加载数据。
+
+        重建期间必须 blockSignals，否则 clear/addItem 会逐条触发筛选重查，
+        一次重载能起十几条查询。
+        """
         self._cycles_loaded = True
         prev = self._cycle_combo.currentData()
         self._cycle_combo.blockSignals(True)
@@ -793,6 +858,11 @@ class RecordsPage(QWidget):
             self._query_seq, self._sort_key(), self._sort_order())
 
     def _on_loaded(self, result, seq=None):
+        """查询结果落地：填表、刷分页与数据源、更新概览，再做两种延迟反馈。
+
+        seq 与当前代数不符说明结果已被更新的筛选取代，直接丢弃；手动刷新
+        与静默重查的收尾也集中在这里，避免两条加载路径各写一份。
+        """
         if seq is not None and seq != getattr(self, "_query_seq", None):
             return  # 过期查询结果（已被更新的筛选/翻页取代），丢弃
         total, rows, stats = result
@@ -823,6 +893,11 @@ class RecordsPage(QWidget):
                 self._restore_view(pv)
 
     def _on_load_error(self, msg, seq=None):
+        """查询失败：原因写进状态栏，手动刷新时再额外弹一条错误提示。
+
+        自动轮询失败不弹窗：网络抖动时每 30 秒弹一次，会把正在填表的人
+        逼疯；状态栏留着原因，需要时自己看。
+        """
         if seq is not None and seq != getattr(self, "_query_seq", None):
             return  # 过期查询的错误，丢弃
         self._lbl_stats.setText(f"查询失败: {msg}")
@@ -1021,10 +1096,18 @@ class RecordsPage(QWidget):
         self._sync_batch_bar()
 
     def _on_clear_selection(self):
+        """清空本页勾选，复用全选逻辑并传「未勾选」。
+
+        另写一遍循环容易漏掉「循环结束后统一同步批量条」这一步，
+        表现是勾选没了、批量条还挂着。
+        """
         self._on_toggle_all(Qt.CheckState.Unchecked)
 
     def _on_batch_resolve(self):
-        """批量标记已解决（最小化更新，仅改 resolved）"""
+        """批量标记已解决：确认后只改 resolved 字段。
+
+        走最小化更新而不是整行重写，免得把别人同时改的其他字段覆盖掉。
+        """
         ids = self._checked_ids()
         if not ids:
             return
@@ -1038,7 +1121,10 @@ class RecordsPage(QWidget):
             "batch_resolve", aftersale_db.mark_resolved_batch, ids)
 
     def _on_batch_delete(self):
-        """批量删除（确认后走 delete_records）"""
+        """批量删除：二次确认后按 id 一起删。
+
+        确认文案里必须写明条数，删除不可恢复，用户还有机会发现勾错了。
+        """
         ids = self._checked_ids()
         if not ids:
             return
@@ -1117,6 +1203,11 @@ class RecordsPage(QWidget):
             [rec.get("id")])
 
     def _update_pager(self):
+        """按总条数刷新页码文案与翻页按钮状态。
+
+        顺手把页码夹回有效范围：删除或筛选后总数变小，停在越界页时
+        必须回到最后一页，否则用户看到的是空白表格。
+        """
         pages = qs.pages_of(self._total, self._page_size)
         self._page_no = min(self._page_no, pages)
         self._lbl_page.setText(
@@ -1131,12 +1222,22 @@ class RecordsPage(QWidget):
     # ---------- 右键菜单与编辑 ----------
 
     def _selected_row(self):
+        """取选中行里最靠上的一行，没有选中时返回 -1。
+
+        右键与快捷键都可能选中多行，而编辑、复制只作用于一条，取首行
+        与资源管理器「右键作用于首个选中项」的习惯一致。
+        """
         rows = sorted({i.row() for i in self._table.selectedIndexes()})
         if rows and rows[0] < len(self._rows):
             return rows[0]
         return -1
 
     def _show_context_menu(self, pos):
+        """在点击的单元格上弹右键菜单，先把该行选中再弹。
+
+        「标记已解决」只对未解决记录出现：已解决行再点一次是空操作，
+        菜单里留着只会让人怀疑点了没生效。
+        """
         idx = self._table.indexAt(pos)
         if not idx.isValid():
             return
@@ -1179,7 +1280,11 @@ class RecordsPage(QWidget):
         self._load()
 
     def _on_duplicate(self, row: int = -1):
-        """复制当前行：按原记录内容新增一条相同记录（填写时间/周期重算）"""
+        """复制当前行：去掉几个由系统重算的字段后，原样插入一条新记录。
+
+        id 必须去掉，否则撞主键；填写时间与周期留给 insert_record 重算，
+        复制出来的记录才算发生在新的一天。
+        """
         if row < 0:
             row = self._selected_row()
         rec = self._rec_at_row(row)
@@ -1218,6 +1323,11 @@ class RecordsPage(QWidget):
             self._run_update(collected)
 
     def _run_update(self, record):
+        """把编辑后的记录交给后台更新，提示与重查由完成信号统一处理。
+
+        不在页面里直接调数据库，是为了和其他写操作共用同一条
+        「完成后提示并重查」的链路。
+        """
         self._controller.mutate("update", aftersale_db.update_record, record)
 
     def _on_delete(self, row: int = -1):
@@ -1248,6 +1358,11 @@ class RecordsPage(QWidget):
     # ---------- 导出 / 导入 ----------
 
     def _on_export(self):
+        """导出当前筛选结果：先让用户定路径，再交给后台写 xlsx。
+
+        导出期间按钮置灰，防止连点起两条任务写同一个文件；导出范围是
+        全部筛选结果而不是当前页，所以默认文件名里不带页码。
+        """
         if self._controller.is_running("_export_worker"):
             return
         f = self._current_filters()
@@ -1260,15 +1375,30 @@ class RecordsPage(QWidget):
         self._controller.export_xlsx(path, f)
 
     def _on_export_done(self, count):
+        """导出成功：恢复按钮并提示实际写入的条数。
+
+        条数取后台统计的写入量，不取当前页行数——导出的是全部筛选结果，
+        两者口径不同。
+        """
         self._btn_export.setEnabled(True)
         show_info_bar(f"已导出 {count} 条记录", "success",
                       title="导出成功", parent=self, duration=3000)
 
     def _on_export_error(self, msg):
+        """导出失败：恢复按钮并原样展示原因。
+
+        不吞异常文本：写文件失败的原因（无权限、文件正被 Excel 占用）
+        只能靠原文区分，统一翻成「导出失败」等于没给信息。
+        """
         self._btn_export.setEnabled(True)
         show_info_bar(msg, "error", title="导出失败", parent=self, duration=4000)
 
     def _on_import(self):
+        """选好文件后先解析、弹预览，用户确认才写库。
+
+        拆成解析与提交两步，是因为历史表格的列名和系统字段不一定对得上，
+        直接入库会把错列数据写进正式表，事后回滚很麻烦。
+        """
         if self._controller.is_running("_import_worker"):
             return
         path, _sel = QFileDialog.getOpenFileName(
@@ -1281,7 +1411,11 @@ class RecordsPage(QWidget):
         self._controller.parse_excel(path)
 
     def _on_import_preview_ready(self, result):
-        """解析完成：弹预览对话框，确认后真正写库"""
+        """解析完成：弹预览让用户核对，确认后才真正写库。
+
+        按钮在这里先解锁、提交前再锁上：预览是模态的，它弹着的时候
+        不需要防连点，否则取消一次就得等下次才能再点。
+        """
         self._btn_import.setEnabled(True)
         excel_headers, rows = result
         dlg = ImportPreviewDialog(excel_headers, rows, self)
@@ -1291,6 +1425,10 @@ class RecordsPage(QWidget):
         self._controller.commit_import(self._preview_path)
 
     def _on_import_done(self, count):
+        """导入完成：恢复按钮、提示条数，并重拉周期选项。
+
+        新导入的记录可能落在下拉里还没有的周期上，不刷新周期就筛不到它们。
+        """
         self._btn_import.setEnabled(True)
         show_info_bar(f"已导入 {count} 条历史记录", "success",
                       title="导入成功", parent=self, duration=3000)
@@ -1298,5 +1436,10 @@ class RecordsPage(QWidget):
         self._load_cycles_then_data()
 
     def _on_import_error(self, msg):
+        """导入失败：恢复按钮并展示后台给出的原因。
+
+        解析失败与写库失败都会走到这里，具体是哪种看消息内容，
+        所以不再加统一前缀。
+        """
         self._btn_import.setEnabled(True)
         show_info_bar(msg, "error", title="导入失败", parent=self, duration=4000)

@@ -9,6 +9,10 @@
     ts | LEVEL | [OP] host:port user=xxx | ErrType | msg
     - host/user/ErrType 均可缺省（如 QT 消息行：ts | QT-FATAL | [QT] | msg）
     - 异常记录后跟 4 空格缩进的多行调用栈（归属上一条记录）
+
+不做文件监听是有意的：诊断面板打开频率低，watchdog 会常驻一个线程，
+而"打开时读一次 + 刷新"已够用，也避免日志轮转时漏事件。
+归档按 .3→.2→.1→当前 的旧到新顺序读，保证合并后的 seq 与真实时间同向。
 """
 
 import os
@@ -32,37 +36,50 @@ from core.theme_qss import apply_window_qss
 
 
 def _popup_ani_type():
-    """按主界面「性能选项-动画效果」开关决定菜单弹出动画类型（与其他面板一致）"""
+    """按主界面「性能选项-动画效果」开关决定菜单弹出动画类型（与其他面板一致）。
+
+    取不到配置时按"开"处理：动画是锦上添花，不该因为读配置失败就禁用。
+    """
     return (MenuAnimationType.DROP_DOWN if is_animation_enabled()
             else MenuAnimationType.NONE)
 
 
 # ==================== 日志解析 ====================
 
+# 日志文件名固定：归档直接拼 .1/.2/.3，改名会同时丢掉历史归档
 LOG_NAME = 'autowork_conn.log'
 
 # 主记录行：ts | LEVEL | [OP] 剩余部分
+# 整行匹配主记录；展开多行的调用栈不满足此正则，会走下面的续行分支
 _LINE_RE = re.compile(
     r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \| (\S+) \| \[([^\]]*)\]\s?(.*)$')
 # 目标段：host:port [user=xxx]
+# 目标段只认 host:port 形式，user= 可选；主机名里出现 '|' 即视为无目标
 _TARGET_RE = re.compile(r'^(\S+):(\d+)(?:\s+user=(\S+))?$')
 # 错误类型：纯标识符（如 SSHException / AuthenticationException），
 # 用于区分 "[OP] target | ErrType | msg" 与 "[OP] target | msg"
 _ETYPE_RE = re.compile(r'^[A-Za-z_][\w.]*$')
 
 # 视为失败的级别（ERROR/FATAL/CRITICAL 及 QT- 前缀变体）
+# 用后缀匹配而不是全等，是为了兼容 QT-ERROR / SSH-FATAL 这类带前缀的级别
 _FAIL_SUFFIXES = ('ERROR', 'FATAL', 'CRITICAL')
 
 
 def _is_fail_level(level: str) -> bool:
+    """级别是否算失败：只认 ERROR/FATAL/CRITICAL 及其带前缀变体。
+
+    WARN 不算失败：重试前常先打警告，把它计入失败会虚高失败率。
+    """
     lv = level.upper()
     return any(lv == s or lv.endswith('-' + s) for s in _FAIL_SUFFIXES)
 
 
 def parse_log_text(text: str, source: str):
-    """解析单个日志文件文本 → 记录列表（保持文件内时序）
+    """解析单个日志文件文本 → 记录列表（保持文件内时序）。
 
-    记录字段：ts/dt/level/op/host/port/user/etype/msg/detail/source/raw/fail
+    记录字段：ts/dt/level/op/host/port/user/etype/msg/detail/source/raw/fail。
+    detail 收集紧跟其后的缩进续行（调用栈），不单独成记录；raw 保留原行，
+    供右键复制时还原最完整的信息。
     """
     records = []
     cur = None
@@ -86,6 +103,7 @@ def parse_log_text(text: str, source: str):
             # 错误类型仅当有 2 段以上且首段为异常标识符时提取
             if len(body) >= 2 and _ETYPE_RE.match(body[0]):
                 etype, msg = body[0], ' | '.join(body[1:])
+            # 时间戳坏掉也不能丢记录：用 datetime.min 让它排到最旧，内容仍可见
             try:
                 dt = datetime.strptime(ts_s, '%Y-%m-%d %H:%M:%S.%f')
             except ValueError:
@@ -105,21 +123,27 @@ def parse_log_text(text: str, source: str):
 
 
 def load_all_records(log_dir: str):
-    """按从旧到新顺序读取归档（.3→.2→.1）+ 当前日志，合并为全局时序列表"""
+    """按从旧到新顺序读取归档（.3→.2→.1）+ 当前日志，合并为全局时序列表。
+
+    单文件读取失败直接跳过：归档可能正被写或被杀软占用，不能因此让
+    整个面板打不开；seq 在合并后统一编号，供表格的稳定倒序使用。
+    """
     base = os.path.join(log_dir, LOG_NAME)
     files = [f'{base}.{i}' for i in (3, 2, 1)] + [base]
     records = []
     for path in files:
         if not os.path.isfile(path):
             continue
+        # 读失败只跳过该文件，保留其余归档的可诊断性
         try:
             with open(path, 'r', encoding='utf-8', errors='replace') as f:
                 text = f.read()
         except Exception:
             continue
         records.extend(parse_log_text(text, os.path.basename(path)))
+    # 全局序号（旧→新）：排序时用 -seq 即可得到"最新在前"，不必比较残缺时间
     for i, r in enumerate(records):
-        r['seq'] = i  # 全局时序序号（旧→新），用于排序
+        r['seq'] = i
     return records
 
 
@@ -135,10 +159,12 @@ _RETRY_MARK = '将重试'
 
 
 def is_success_record(r) -> bool:
+    """成功 = 非失败级别 + 消息含「连接成功」；两个条件缺一不可。"""
     return (not r['fail']) and _SUCCESS_MARK in r['msg']
 
 
 def is_conn_fail_record(r) -> bool:
+    """连接失败 = 失败级别 + 消息含「连接失败」，用于把重试和其他错误区分开。"""
     return r['fail'] and _FAIL_MARK in r['msg']
 
 
@@ -150,15 +176,21 @@ def aggregate_stats(records):
              按成功率升序（最差在前），同率按失败多者优先
       etypes: [(错误类型, 次数)] 失败原因 TOP 排行（仅连接失败记录）
       retries: [(host, 重试次数)] 按重试次数降序；空列表表示无重试记录
+
+    total 统计的是"有目标主机"的记录，因此 ok/fail 不一定等于 total：
+    超时、认证失败等也算 total，但没有落在成功或连接失败的标记里。
+    rate 用 ok/total 而非 ok/(ok+fail)，避免把其他错误藏起来。
     """
     by_host = {}
     etypes = Counter()
     retries = Counter()
     for r in records:
         host = r['host']
+        # 重试先于主机判空：某些重试日志没带目标串，但重试次数仍要算
         if _RETRY_MARK in r['msg']:
             if host:
                 retries[host] += 1
+        # 无主机的 QT-FATAL 等记录只参与重试统计，进设备表会把主机名画成空行
         if not host:
             continue
         h = by_host.setdefault(host, {
@@ -185,6 +217,7 @@ def aggregate_stats(records):
             'top_etype': (f"{top[0][0]} ×{top[0][1]}" if top else '—'),
             'last_ts': h['last_ts'],
         })
+    # 成功率升序（最差在前）；同率按失败数降序，最后用主机名保证排序稳定
     hosts.sort(key=lambda h: (h['rate'], -h['fail'], h['host']))
     return {
         'hosts': hosts,
@@ -195,7 +228,7 @@ def aggregate_stats(records):
 
 # ==================== 面板窗口 ====================
 
-# 表格列：(表头, 宽度)
+# 表格列：(表头, 宽度)；宽度只是初始值，用户可拖动，最后一列自动铺满
 _COLUMNS = [
     ("时间", 150),
     ("级别", 70),
@@ -207,8 +240,10 @@ _COLUMNS = [
     ("来源文件", 130),
 ]
 
+# 索引与 _time_cutoff 的分支一一对应，增删项必须同步改那个方法
 _TIME_RANGES = ["全部时间", "今天", "最近 1 小时", "最近 24 小时", "最近 7 天"]
 
+# 只为失败和警告着色；INFO/DEBUG 沿用默认前景，避免整表花掉
 _LEVEL_COLORS = {
     'ERROR': QColor(229, 57, 53),
     'FATAL': QColor(229, 57, 53),
@@ -218,7 +253,11 @@ _LEVEL_COLORS = {
 
 
 def _level_color(level: str):
-    """级别着色（失败红色/警告琥珀），深色主题略微提亮"""
+    """级别着色（失败红色/警告琥珀），深色主题略微提亮。
+
+    深色下提亮是因为原色在暗底上对比不足；先 split('-') 再查表，
+    让 QT-ERROR 这类带前缀的级别也能命中同一套颜色。
+    """
     key = level.upper().split('-')[-1]
     color = _LEVEL_COLORS.get(key)
     if color is None:
@@ -231,9 +270,14 @@ def _level_color(level: str):
 
 
 class ConnDiagWidget(QWidget):
-    """连接诊断主体（可嵌入 RemoteHub 等容器；2026-09-07 自 QDialog 抽出）"""
+    """连接诊断主体，可直接嵌入 RemoteHub 等容器。
+
+    从独立窗口抽成 widget，是为了让"设置页弹窗"与"远程会话内页"复用
+    同一套逻辑；两者只在承载容器上不同。
+    """
 
     def __init__(self, parent=None):
+        """建立三个缓存字段并加载一次日志，构造期不做任何网络操作。"""
         super().__init__(parent)
 
         self._records = []      # 全量记录（未过滤）
@@ -245,7 +289,10 @@ class ConnDiagWidget(QWidget):
         self.reload()
 
     def _apply_smooth_mode(self):
-        """按当前生效的平滑滚动设置刷新表格（远程会话设置页联动）"""
+        """按当前生效的平滑滚动设置刷新表格（远程会话设置页联动）。
+
+        设置页改完开关会回调到这里，不必重开面板才生效。
+        """
         apply_table_smooth_mode(self._table, panel="remote")
 
     # ==================== UI 构建 ====================
@@ -259,7 +306,7 @@ class ConnDiagWidget(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
 
-        # 明细 / 统计 视图切换
+        # 明细 / 统计 视图切换：用 Pivot 与远程会话其他页保持同一种导航语汇
         self._pivot = Pivot(self)
         self._pivot.addItem('detail', '明细')
         self._pivot.addItem('stats', '统计')
@@ -267,6 +314,7 @@ class ConnDiagWidget(QWidget):
         self._pivot.currentItemChanged.connect(self._on_view_switch)
         toolbar.addWidget(self._pivot)
 
+        # 搜索只做客户端过滤；日志已全量在内存，再查一次文件反而更慢
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText("设备过滤：host / snk / 关键词")
         self._search_edit.setFixedWidth(240)
@@ -282,6 +330,7 @@ class ConnDiagWidget(QWidget):
         toolbar.addWidget(self._range_combo)
 
         toolbar.addWidget(QLabel("只看失败:", self))
+        # 开关文案必须显式设置：默认 ON/OFF 会在中文界面里露英文
         self._sw_fail = SwitchButton(self)
         self._sw_fail.setOnText("开")
         self._sw_fail.setOffText("关")
@@ -307,7 +356,7 @@ class ConnDiagWidget(QWidget):
 
         # 页 0：明细表格
         self._table = TableWidget(self)
-        # 性能（2026-08-26）：远程会话表格接入平滑滚动开关（覆盖→全局）
+        # 滚动模式跟随全局性能开关，远程会话各表共用同一套平滑策略
         apply_table_smooth_mode(self._table, panel="remote")
         self._table.setColumnCount(len(_COLUMNS))
         self._table.setHorizontalHeaderLabels([c[0] for c in _COLUMNS])
@@ -320,6 +369,7 @@ class ConnDiagWidget(QWidget):
         self._table.customContextMenuRequested.connect(self._show_row_menu)
 
         # Ctrl+C 复制选中行完整内容
+        # 快捷键挂在表格上而不是窗口：避免与记录页等其它 Ctrl+C 抢焦点
         QShortcut(QKeySequence.StandardKey.Copy, self._table).activated.connect(
             self._copy_selected_row)
 
@@ -331,7 +381,8 @@ class ConnDiagWidget(QWidget):
 
         self._stack.addWidget(self._table)
 
-        # 页 1：统计视图（滚动容器，内容由 _refresh_stats 重建）
+        # 页 1：统计视图。容器只建一次，内容由 _refresh_stats 按需重建
+        # 用滚动区而不是整页替换：设备多时统计表会超出窗口高度
         self._stats_body = QVBoxLayout()
         self._stats_body.setContentsMargins(0, 0, 6, 0)
         self._stats_body.setSpacing(10)
@@ -344,7 +395,7 @@ class ConnDiagWidget(QWidget):
         scroll.setWidget(holder)
         self._stack.addWidget(scroll)
 
-        # --- 底部状态栏 ---
+        # --- 底部状态栏：左侧计数与右侧操作提示各更新各的，互不覆盖 ---
         status = QHBoxLayout()
         self._lbl_info = QLabel("正在加载...", self)
         status.addWidget(self._lbl_info)
@@ -354,7 +405,7 @@ class ConnDiagWidget(QWidget):
         status.addWidget(self._lbl_hint)
         root.addLayout(status)
 
-        # --- 右键菜单（预构建缓存） ---
+        # --- 右键菜单预构建：右键只 exec，避免每次现建造成首帧闪烁 ---
         menu = RoundMenu(parent=self)
         act_copy = Action(FluentIcon.COPY, "复制完整内容", self)
         act_copy.triggered.connect(self._copy_selected_row)
@@ -364,7 +415,11 @@ class ConnDiagWidget(QWidget):
     # ==================== 数据加载 / 过滤 ====================
 
     def reload(self):
-        """重新读取日志文件（打开面板 / 手动刷新时调用）"""
+        """重新读取日志文件（打开面板 / 手动刷新时调用）。
+
+        全量重读而不是增量追尾：日志可能被轮转或清空，增量游标会错位；
+        文件总量在 MB 级，重读一次的代价可以接受。
+        """
         start = datetime.now()
         self._records = load_all_records(self._log_dir)
         self._apply_filter()
@@ -374,7 +429,11 @@ class ConnDiagWidget(QWidget):
             f"共 {len(self._records)} 条记录（失败 {fail_cnt} 条），加载耗时 {cost_ms:.0f} ms")
 
     def _time_cutoff(self):
-        """按时间范围下拉框计算截止时刻（早于该时刻的记录被过滤）"""
+        """按时间范围下拉框计算截止时刻（早于该时刻的记录被过滤）。
+
+        返回 None 表示不限时间；"今天"取本地零点而不是 24 小时前，
+        这样凌晨查看时不会把昨天下午的记录算进今天。
+        """
         idx = self._range_combo.currentIndex()
         now = datetime.now()
         if idx == 1:      # 今天
@@ -388,7 +447,11 @@ class ConnDiagWidget(QWidget):
         return None       # 全部
 
     def _apply_filter(self):
-        """按设备关键词 + 时间范围 + 只看失败过滤，失败记录置顶后刷新表格"""
+        """按设备关键词 + 时间范围 + 只看失败过滤，失败记录置顶后刷新表格。
+
+        关键词同时匹配 host/user/msg/etype：诊断时用户往往只记得其中一段。
+        seq 是全局旧→新序号，取负后即为"最新在前"，比解析时间戳稳。
+        """
         kw = self._search_edit.text().strip().lower()
         cutoff = self._time_cutoff()
         only_fail = self._sw_fail.isChecked()
@@ -412,7 +475,11 @@ class ConnDiagWidget(QWidget):
             self._refresh_stats()
 
     def _populate(self, rows):
-        """记录列表 → 表格（批量填充，关闭重绘避免逐行刷新开销）"""
+        """记录列表 → 表格（批量填充，关闭重绘避免逐行刷新开销）。
+
+        updates 关闭期间仍会 setItem，只是不触发重绘；finally 必须恢复，
+        否则后续过滤会看到一张"永远不刷新"的表。
+        """
         table = self._table
         table.setUpdatesEnabled(False)
         try:
@@ -439,14 +506,21 @@ class ConnDiagWidget(QWidget):
 
     @staticmethod
     def _record_full_text(r) -> str:
-        """记录完整内容：原始行 + 多行详情（调用栈）"""
+        """记录完整内容：原始行 + 多行详情（调用栈）。
+
+        不做字段重排：原始行本就是日志里的样子，改顺序会让用户对不上文件。
+        """
         text = r['raw']
         if r['detail']:
             text += '\n' + '\n'.join(r['detail'])
         return text
 
     def _copy_selected_row(self):
-        """复制选中行的完整内容到剪贴板"""
+        """复制选中行的完整内容到剪贴板。
+
+        表格行与 _filtered 一一对应，但仍做越界判断：排序/过滤切换的
+        瞬间可能取到已失效的行号。
+        """
         row = self._table.currentRow()
         if row < 0 or row >= len(self._filtered):
             return
@@ -456,14 +530,21 @@ class ConnDiagWidget(QWidget):
         self._lbl_info.setText(f"已复制到剪贴板: {first_line}...")
 
     def _show_row_menu(self, pos):
-        """表格右键菜单（预构建缓存，动画类型跟随全局开关）"""
+        """表格右键菜单（预构建缓存，动画类型跟随全局开关）。
+
+        没有选中行时不弹：菜单只有"复制"，对空行执行没有意义。
+        """
         if self._table.currentRow() < 0:
             return
         self._ctx_menu.exec_(self._table.viewport().mapToGlobal(pos),
                              aniType=_popup_ani_type())
 
     def _open_log_dir(self):
-        """在资源管理器中打开日志目录"""
+        """在资源管理器中打开日志目录。
+
+        优先 os.startfile（走系统关联，路径含空格也不用转义）；
+        失败再退回 explorer 命令，兼容被安全软件拦截 startfile 的机器。
+        """
         try:
             if os.path.isdir(self._log_dir):
                 os.startfile(self._log_dir)
@@ -475,7 +556,10 @@ class ConnDiagWidget(QWidget):
     # ==================== 统计视图 ====================
 
     def _on_view_switch(self, route_key):
-        """明细/统计切换：进入统计页时按需重建（脏标记避免重复计算）"""
+        """明细/统计切换：进入统计页时按需重建（脏标记避免重复计算）。
+
+        切走再切回不重建：统计只依赖过滤结果，过滤没变就没有重算的必要。
+        """
         if route_key == 'stats':
             if self._stats_dirty:
                 self._refresh_stats()
@@ -488,8 +572,13 @@ class ConnDiagWidget(QWidget):
                 "失败记录置顶 · 右键行可复制完整内容（含调用栈）")
 
     def _refresh_stats(self):
-        """按当前过滤后的记录重建统计视图（刷新/过滤变化后调用）"""
-        while self._stats_body.count() > 1:  # 保留尾部 stretch
+        """按当前过滤后的记录重建统计视图（刷新/过滤变化后调用）。
+
+        先摘除旧控件再插入新控件，且保留尾部 stretch：直接清空布局会
+        让统计块全部顶到上边，滚动区也会算错内容高度。
+        """
+        # 循环条件 >1 是刻意保留尾部 stretch，否则统计块会顶到顶部
+        while self._stats_body.count() > 1:
             w = self._stats_body.takeAt(0).widget()
             if w is not None:
                 w.deleteLater()
@@ -506,7 +595,10 @@ class ConnDiagWidget(QWidget):
 
     @staticmethod
     def _make_table(headers, widths, row_count):
-        """创建只读、整行选中、隔行变色的统计子表"""
+        """创建只读、整行选中、隔行变色的统计子表。
+
+        统计表不允许编辑也不允许多选：数据是聚合结果，改它没有意义。
+        """
         t = QTableWidget(row_count, len(headers))
         t.setHorizontalHeaderLabels(headers)
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -523,6 +615,7 @@ class ConnDiagWidget(QWidget):
 
     @staticmethod
     def _fill_cell(t, row, col, text, color=None, bold=False):
+        """向统计子表写一格，并统一处理 tooltip/前景色/加粗。"""
         item = QTableWidgetItem(text)
         item.setToolTip(text)
         if color is not None:
@@ -534,7 +627,11 @@ class ConnDiagWidget(QWidget):
         t.setItem(row, col, item)
 
     def _build_host_table(self, hosts):
-        """设备连接质量汇总（成功率升序，最差在前）；双击行跳明细并过滤"""
+        """设备连接质量汇总（成功率升序，最差在前）；双击行跳明细并过滤。
+
+        三档阈值（<60% 红 / <90% 橙 / 其余绿）只是视觉分诊，
+        真正的判断仍看百分比数字；双击联动让"哪台最差"能立刻落到明细。
+        """
         headers = ["设备", "连接总次数", "成功", "失败", "成功率",
                    "失败原因 TOP1", "最近连接时间"]
         widths = [180, 90, 70, 70, 90, 240, 160]
@@ -571,7 +668,10 @@ class ConnDiagWidget(QWidget):
         return wrap
 
     def _build_etype_table(self, etypes, top_n=10):
-        """失败原因 TOP N（按 ErrType 聚合连接失败次数）"""
+        """失败原因 TOP N（按 ErrType 聚合连接失败次数）。
+
+        默认只取前 10：长尾错误类型往往各出现一次，列全了反而看不清主因。
+        """
         rows = etypes[:top_n]
         t = self._make_table(["错误类型", "失败次数"], [360, 100], len(rows))
         for i, (et, cnt) in enumerate(rows):
@@ -588,7 +688,10 @@ class ConnDiagWidget(QWidget):
         return wrap
 
     def _build_retry_table(self, retries):
-        """重试分布（日志中含「将重试」的记录按设备聚合）"""
+        """重试分布（日志中含「将重试」的记录按设备聚合）。
+
+        只有存在重试记录时才渲染这张表；无重试是正常状态，不该占版面。
+        """
         t = self._make_table(["设备", "重试次数"], [360, 100], len(retries))
         for i, (host, cnt) in enumerate(retries):
             self._fill_cell(t, i, 0, host)
@@ -604,7 +707,10 @@ class ConnDiagWidget(QWidget):
         return wrap
 
     def _jump_to_detail(self, host):
-        """从统计视图跳转明细：设置设备过滤关键词并切回明细页"""
+        """从统计视图跳转明细：设置设备过滤关键词并切回明细页。
+
+        复用搜索框而不是另设隐藏过滤：跳转后用户能直接看到并改这个条件。
+        """
         self._search_edit.setText(host)
         self._apply_filter()
         self._pivot.setCurrentItem('detail')
@@ -612,10 +718,14 @@ class ConnDiagWidget(QWidget):
 
 
 class ConnDiagPanel(QDialog):
-    """连接诊断独立窗口（菜单/设置页入口保留；UI 主体在 ConnDiagWidget，
-    RemoteHub「连接诊断」视图直接嵌入该 widget 不再走本窗口）"""
+    """连接诊断独立窗口：菜单与设置页入口使用，弹窗形态包一层 ConnDiagWidget。
+
+    远程会话的「连接诊断」视图直接嵌入 widget 而不走本窗口；这里只保留
+    窗口外壳与旧引用的兼容属性。
+    """
 
     def __init__(self, parent=None):
+        """窗口只负责外壳：QSS、尺寸约束与内嵌 widget，逻辑全部下沉。"""
         super().__init__(parent)
         apply_window_qss(self)
         self.setWindowTitle("连接诊断")
@@ -632,10 +742,11 @@ class ConnDiagPanel(QDialog):
         self._table = self._body._table
 
     def _apply_smooth_mode(self):
-        """按当前生效的平滑滚动设置刷新表格（远程会话设置页联动）"""
+        """转发到内嵌 widget；保留此方法是为了让旧调用方无需改导入。"""
         self._body._apply_smooth_mode()
 
     def reload(self):
+        """转发到内嵌 widget 的 reload，供旧入口沿用同一套调用方式。"""
         self._body.reload()
 
 

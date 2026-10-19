@@ -35,13 +35,17 @@ _DEFAULT_TIMEOUT_MS = 800
 _DEFAULT_INTERVAL_SEC = 30
 _DEFAULT_FAIL_BAD = 3
 _MAX_INTERVAL_SEC = 600
-# 冷洞首拍长超时（2026-09-23 P1-3）：从未预热/连过的隧道，首个本地 connect
-# 要承担 1~3s XTCP 打洞，800ms RTT 口径必然"超时"；首拍用 3s 长超时给打洞
-# 留足时间（顺带把洞打穿），且其结果不进质量样本（见 _record）
+# 冷洞首拍长超时：从未连过的隧道首个 connect 要承担 1~3s XTCP 打洞，
+# 套 800ms 口径必然判超时；给足 3s 顺带把洞打穿，结果不进质量样本
 _COLD_FIRST_TIMEOUT_MS = 3000
 
 
 def _load_quality() -> dict:
+    """读取 frp_quality 配置并夹逼到安全区间，坏配置一律回落默认值。
+
+    探测是旁路功能，任何一项配错都不该影响被观测的隧道本身，
+    因此这里吞掉异常、逐项夹逼，而不是校验失败就抛给调用方。
+    """
     try:
         from core import app_settings
         q = app_settings.get("frp_quality") or {}
@@ -49,6 +53,8 @@ def _load_quality() -> dict:
         q = {}
     if not isinstance(q, dict):
         q = {}
+    # 夹逼而非只做类型转换：手改配置可能写出 0 或 99999，
+    # 前者让探测空转，后者会把每一轮都拖成分钟级
     def _int(key, default, lo, hi):
         try:
             v = int(q.get(key) or default)
@@ -65,12 +71,17 @@ def _load_quality() -> dict:
 
 
 def tcp_connect_rtt_ms(host: str, port: int, timeout_ms: int) -> float | None:
-    """TCP connect 计时（ms）；失败/超时返回 None
+    """测一次到目标端口的 TCP connect 耗时（ms），失败或超时返回 None。
 
-    模块级函数：单测 monkeypatch 注入假结果，不碰真实网络。
+    XTCP 直连时 connect 完成等于打洞与端到端握手都已完成，这个耗时就是
+    用户 SSH 建连的体感；frps 看不到 visitor 侧流量，服务端拿不到该指标。
+    失败不抛异常：探测需要区分「离线」与「在线但不可达」，抛异常会让整轮中断。
+    计时用 perf_counter 而非 time.time，避免系统时钟回拨把 RTT 算成负数。
+    模块级函数是刻意的：单测 monkeypatch 它即可注入假结果，不碰真实网络。
     """
     deadline = timeout_ms / 1000.0
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # 关掉 Nagle：握手只有一两个往返，等凑包只会虚增 RTT 读数
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.settimeout(deadline)
     start = time.perf_counter()
@@ -87,10 +98,12 @@ def tcp_connect_rtt_ms(host: str, port: int, timeout_ms: int) -> float | None:
 
 
 class VisitorProber(QObject):
-    """visitor RTT 探测调度器（进程级单例）
+    """visitor RTT 探测调度器，进程级唯一实例，由 get_prober() 持有。
 
     targets provider 约定：可调用 → {snk: bindPort}，返回当前应探测的隧道
     （默认接 RemoteSessionManager：仅 frpc 运行中且已注册的 visitor）。
+    探测放在独立守护线程：一轮里每条隧道都要阻塞等 connect，
+    放到 UI 线程会直接把界面冻住。
     """
 
     sample = Signal(str, object)   # (snk, rtt_ms 或 None=超时)
@@ -100,6 +113,7 @@ class VisitorProber(QObject):
     def __init__(self, targets_provider=None, parent=None):
         super().__init__(parent)
         self._targets_provider = targets_provider or self._default_targets
+        # 探测线程写、UI 线程读，deque 本身不保证跨线程安全，必须配锁
         self._lock = threading.Lock()
         # snk -> {"rtts": deque[float|None], "bad_streak": int, "verdict": str}
         self._data: dict = {}
@@ -113,10 +127,12 @@ class VisitorProber(QObject):
 
     def start(self):
         q = _load_quality()
+        # 未启用或已在运行就直接返回：重复 start 不能起出第二个线程
         if not q["enabled"] or self._thread is not None:
             return
         self._timeout_ms = q["timeout_ms"]
         self._fail_bad = q["fail_bad"]
+        # 先清停止标志再起线程，否则新线程第一轮 wait 立刻返回就直接退出
         self._stop.clear()
         self._interval = q["interval_sec"]
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -125,6 +141,7 @@ class VisitorProber(QObject):
 
     def stop(self):
         self._stop.set()
+        # join 必须带超时：探测可能正卡在一次 connect 上，无限等待会拖住退出流程
         th, self._thread = self._thread, None
         if th is not None and th.is_alive():
             th.join(timeout=2.0)
@@ -134,9 +151,8 @@ class VisitorProber(QObject):
         return self._thread is not None
 
     def _run(self):
-        # 启动后先短等 2s 探首轮（frpc 通常在跑，秒级出样本），之后按 interval
-        # 轮询；未运行窗口 run_once 内 targets 为空自动 no-op，不刷 0/0。
-        # 旧实现「先等满 interval 才探」致刚开页 RTT 卡恒空 30s（2026-09-22 反馈）。
+        # 启动只短等 2s 就探首轮：等满 interval 会让刚打开的页面空转半分钟，
+        # frpc 通常已在运行，秒级就能出样本；targets 为空时 run_once 自然 no-op。
         if self._stop.wait(2.0):
             return
         while not self._stop.is_set():
@@ -150,6 +166,11 @@ class VisitorProber(QObject):
     # ---------- 探测 ----------
 
     def _default_targets(self) -> dict:
+        """返回 {snk: bindPort}，只含 frpc 运行中且已注册的 visitor。
+
+        任一环取不到（frpc 没跑、frp_remote 导入失败）都返回空字典，
+        让 run_once 退化成 no-op；探测失败不该反过来影响会话管理。
+        """
         try:
             from core.frp_remote import get_session_manager
             m = get_session_manager()
@@ -170,6 +191,7 @@ class VisitorProber(QObject):
         语义 = 完整一轮，与调度线程启停无关（_stop 置位时手动轮次照样
         执行——QualityWork 的「立即探测一轮」不要求先启动后台线程）。
         """
+        # 先拷一份：provider 可能返回共享字典，探测期间被改会在迭代时抛异常
         targets = dict(self._targets_provider() or {})
         # 模块级名延迟解析：单测 monkeypatch visitor_probe.tcp_connect_rtt_ms
         # 注入假结果（不碰真实网络）
@@ -180,6 +202,7 @@ class VisitorProber(QObject):
             for k in stale:
                 self._data.pop(k, None)  # 隧道消失：样本随之清理
                 seen_stale = True
+        # 本轮没有可探隧道：只有清理过样本时才通知 UI，否则会刷出大量空刷新
         if not targets:
             if seen_stale:
                 self.changed.emit()
@@ -193,6 +216,8 @@ class VisitorProber(QObject):
             timeout_ms = (max(self._timeout_ms, _COLD_FIRST_TIMEOUT_MS)
                           if cold else self._timeout_ms)
             try:
+                # 固定连本地回环：visitor 的 bindPort 只监听 127.0.0.1，
+                # 连远端地址测到的是链路质量而不是打洞质量
                 rtt = probe("127.0.0.1", port, timeout_ms)
             except Exception:
                 rtt = None
@@ -201,6 +226,11 @@ class VisitorProber(QObject):
         self.changed.emit()
 
     def _record(self, snk: str, rtt, cold: bool = False):
+        """把一次探测结果并入样本，并在判定翻转时通知界面。
+
+        判定是有状态的：连续 fail_bad 次超时才置 bad，任意一次成功立刻回 ok；
+        中间的超时样本保留为 None 用来算丢失率，因此不能直接丢弃。
+        """
         flip = None
         with self._lock:
             ent = self._data.setdefault(snk, {
@@ -220,6 +250,7 @@ class VisitorProber(QObject):
             else:
                 ent["bad_streak"] = 0
             bad = ent["bad_streak"] >= self._fail_bad
+            # 未达阈值时的超时不改写判定：一次抖动不该把「良」直接打成「异常」
             new_v = "bad" if bad else ("ok" if rtt is not None
                                        else ent["verdict"])
             if new_v != ent["verdict"]:
@@ -231,7 +262,11 @@ class VisitorProber(QObject):
     # ---------- 查询（主线程 UI 侧） ----------
 
     def stats(self, snk: str) -> dict:
-        """单隧道质量快照：verdict/avg_ms/p95_ms/ok_rate/recent"""
+        """返回单隧道质量快照，grade 由平均 RTT 与丢失率共同决定。
+
+        p95 取排序后的近似秩位，样本少于 20 条时只是参考值；
+        verdict 为 bad 时直接压过 RTT 分级，不再用平均值粉饰成「良」。
+        """
         with self._lock:
             ent = self._data.get(snk)
             rtts = list(ent["rtts"]) if ent else []
@@ -241,9 +276,11 @@ class VisitorProber(QObject):
         avg = sum(good) / len(good) if good else None
         p95 = None
         if good:
+            # 近似秩位而不是插值：样本量小时插值会显得比实测更平滑
             srt = sorted(good)
             p95 = srt[min(len(srt) - 1, int(round(0.95 * (len(srt) - 1))))]
         grade = "unknown"
+        # 判过异常就直接压到最差档：连不上不该因为历史均值漂亮而显示为良
         if verdict == "bad":
             grade = "bad"
         elif avg is not None and n:
@@ -261,6 +298,11 @@ class VisitorProber(QObject):
                 "recent": rtts[-20:]}
 
     def verdict(self, snk: str) -> str:
+        """读当前判定，从未探测过的隧道返回 unknown。
+
+        调用方据此显示「未测」，与「已测且正常」区分开，
+        否则新建隧道会被误报成绿色。
+        """
         with self._lock:
             ent = self._data.get(snk)
             return ent["verdict"] if ent else "unknown"
@@ -270,6 +312,11 @@ _prober: VisitorProber | None = None
 
 
 def get_prober() -> VisitorProber:
+    """取进程级探测单例，首次调用时创建。
+
+    单例是刻意的：探测线程会向所有窗口发信号，多实例会重复打洞并互相覆盖样本，
+    还会让每个页面各自维护一条停不掉的线程。
+    """
     global _prober
     if _prober is None:
         _prober = VisitorProber()

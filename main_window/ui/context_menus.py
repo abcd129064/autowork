@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""主窗口右键菜单与“添加到上传目录”链。
+"""主窗口右键菜单与「添加到上传目录」链。
 
-从 main_window/ui_mixin.py 下沉：三个列表的右键菜单预构建/弹出，以及日志/视频
-收集到 {videos_dir}/upload/{设备}/ 的异步链路。只用 host 暴露的属性与方法，
-不 import 主窗口，也不持有窗口引用。
+从 main_window/ui_mixin.py 下沉而来，职责只有两块：三个列表控件的右键菜单
+预构建/弹出，以及把日志或视频收进 {videos_dir}/upload/{设备}/ 的异步链路。
+
+只用 host 暴露的属性与方法，不 import 主窗口、不持有窗口引用。这样 ui_mixin
+可以随时替换菜单实现，也不会形成 main_window → 本模块 → main_window 的循环导入。
+
+菜单必须在初始化时构建完毕。Qt 每次新建 Action/菜单都要分配原生对象并连信号，
+右键是高频交互，现场构建会让弹出有明显延迟，因此这里全部预构建后缓存到 host。
 """
 
 import os
@@ -20,7 +25,11 @@ from .acrylic_menu import _create_menu, _exec_menu
 
 
 def init_context_menus(host):
-    """为列表控件设置自定义右键菜单策略，并预构建缓存菜单（避免每次右键重建）"""
+    """接管三个列表的右键菜单：改策略、预构建、把菜单挂在 host 上。
+
+    Qt 默认由控件自己处理右键，页面拿不到业务上下文；改成 CustomContextMenu
+    后，contextMenuRequested 信号才能接到下面的 *_context_menu 函数。
+    """
     host.ui.id_list.setContextMenuPolicy(Qt.CustomContextMenu)
     host.ui.log_list.setContextMenuPolicy(Qt.CustomContextMenu)
     host.ui.local_video_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -33,7 +42,11 @@ def init_context_menus(host):
 
 
 def build_id_list_menu(host):
-    """预构建：设备列表右键菜单（完全静态，可安全缓存复用）"""
+    """预构建设备列表菜单：两个动作都在触发瞬间才读取 host 状态。
+
+    「打开目录」取设备列表当前项，「查看 CPP 日志」取当前日志路径，都不依赖
+    构建时选中的行，所以菜单对象可以常驻复用，不会拿到过期数据。
+    """
     menu = _create_menu(parent=host)
     action_open_dir = Action(FluentIcon.FOLDER, "打开目录", host)
     action_cpp_log = Action(FluentIcon.DOCUMENT, "查看 CPP 日志", host)
@@ -45,13 +58,19 @@ def build_id_list_menu(host):
 
 
 def build_log_list_menu(host):
-    """预构建：日志内容列表右键菜单（触发时动态获取当前行）"""
+    """预构建日志内容菜单：所有动作在触发时重新读取 log_list 的当前行。
+
+    行数据不能绑进闭包，菜单是常驻对象，绑定的行会过期；每次触发重新取
+    currentItem() 才能跟上用户当前的选择。
+    """
     menu = _create_menu(parent=host)
     action_copy = Action(FluentIcon.COPY, "复制此行", host)
     action_copy_frame = Action(FluentIcon.LIBRARY, "复制帧数", host)
     action_locate = Action(FluentIcon.PEOPLE, "在文件管理器中定位", host)
 
     def _do_copy():
+        # 日志行本身已是纯文本，整行进剪贴板即可；空选择静默返回，
+        # 不弹提示条，避免用户误触右键菜单时被打扰
         item = host.ui.log_list.currentItem()
         if not item:
             return
@@ -63,6 +82,8 @@ def build_log_list_menu(host):
         item = host.ui.log_list.currentItem()
         if not item:
             return
+        # 只复制编号本身，方便直接粘进检索框；行内没有 frame_id 时只记日志，
+        # 这类「该行不适用」属于常态，弹提示条会显得吵
         frame_match = re.search(r'frame_id:(\d+)', item.text())
         if frame_match:
             frame_id = frame_match.group(1)
@@ -73,11 +94,14 @@ def build_log_list_menu(host):
             host._append_log("[提示] 当前行未找到 frame_id")
 
     def _do_locate():
+        # 资源管理器没有 Qt API，只能拉起 explorer /select 让目标文件高亮；
+        # 路径失效时降级为提示，不拉起一个空窗口冒充成功
         if host._current_log_path and os.path.exists(host._current_log_path):
             subprocess.run(['explorer', '/select,', host._current_log_path])
         else:
             host._append_log("[提示] 无法定位日志文件")
 
+    # 用 lambda 延迟取值：菜单构建时通常还没有选中日志，触发时才读当前路径
     action_add_upload_log = Action(FluentIcon.SEND, "添加到上传目录", host)
     action_add_upload_log.triggered.connect(
         lambda: add_file_to_upload(host, host._current_log_path))
@@ -94,7 +118,11 @@ def build_log_list_menu(host):
 
 
 def build_video_list_menu(host):
-    """预构建：日志文件列表右键菜单（触发时动态获取当前项）"""
+    """预构建日志文件菜单：复制名称、定位视频、复制路径，全部按当前行现算。
+
+    这一列展示的是本地日志文件名，视频路径要由文件名反推，所以每个动作都先
+    调用 _resolve_video_path()，而不是把某个具体路径缓存下来。
+    """
     menu = _create_menu(parent=host)
     action_copy_name = Action(FluentIcon.COPY, "复制视频名", host)
     action_open_video_loc = Action(FluentIcon.FOLDER, "打开视频位置", host)
@@ -104,13 +132,19 @@ def build_video_list_menu(host):
         item = host.ui.local_video_list.currentItem()
         if not item:
             return
+        # 去掉 .log 后缀再复制：用户要的通常是设备/视频名，后缀反而碍事
         pure_name = os.path.splitext(item.text())[0]
         QApplication.clipboard().setText(pure_name)
         host._show_status_message(f"文件名 {pure_name} 已复制到剪贴板", 2000)
         host._append_log(f"[复制] 文件名 {pure_name} 已复制到剪贴板")
 
     def _resolve_video_path():
-        """根据当前选中的日志文件名推断视频完整路径"""
+        """把当前日志名换成同名 mp4，返回最可能存在的完整路径。
+
+        历史上有两种落盘布局：早期按 videos_dir/videos 平铺，后期按设备目录
+        归档。先查平铺再查设备目录，最后仍回退平铺路径，让调用方用
+        os.path.exists 自行判断，避免返回 None 丢掉「视频本该在哪」的信息。
+        """
         item = host.ui.local_video_list.currentItem()
         if not item:
             return None
@@ -119,6 +153,7 @@ def build_video_list_menu(host):
         video_path_primary = os.path.join(host.videos_dir, "videos", video_name)
         if os.path.exists(video_path_primary):
             return video_path_primary
+        # 平铺布局没有命中时才退到设备目录，避免同名视频跨设备误取
         current_device = host.ui.id_list.currentItem()
         if current_device:
             device_code = current_device.text()
@@ -131,6 +166,8 @@ def build_video_list_menu(host):
         video_path = _resolve_video_path()
         if not video_path:
             return
+        # 文件存在就定位到文件本身；已被清理时退化为打开所在目录，
+        # 这比只弹一句「不存在」有用，用户还能看到同批次的其它文件
         if os.path.exists(video_path):
             subprocess.run(['explorer', '/select,', video_path])
             host._append_log(f"[定位] 已定位视频: {video_path}")
@@ -151,7 +188,11 @@ def build_video_list_menu(host):
         host._append_log(f"[复制] 视频路径: {video_path}")
 
     def _do_add_to_upload():
-        """第二列右键：将当前日志文件（及对应视频）添加到上传目录"""
+        """第二列右键：把当前日志及其配套视频收进上传目录。
+
+        设备必须先在左侧选中，否则无法确定 upload 下的子目录；路径按
+        「设备/日期/文件」拼，未命中再退到「设备/文件」，兼容旧的平铺归档。
+        """
         item = host.ui.local_video_list.currentItem()
         if not item:
             return
@@ -195,6 +236,7 @@ def id_list_context_menu(host, pos):
 
 def log_list_context_menu(host, pos):
     """日志内容列表右键菜单（预构建缓存，直接弹出）"""
+    # 没有当前行时不弹菜单：空菜单只剩分隔线，用户会以为界面卡住
     if host.ui.log_list.currentItem() is None:
         return
     _exec_menu(host._ctx_log_menu, host.ui.log_list.mapToGlobal(pos))
@@ -208,20 +250,25 @@ def local_video_list_context_menu(host, pos):
 
 
 def add_file_to_upload(host, file_path):
-    """将指定日志/文本文件添加到上传收集目录
+    """把一个日志/文本文件收进 upload/{设备} 目录。
 
-    .log 文件走 CollectFilesWorker：连带收集对应视频、detect.bin、
-    CPP 日志（daily_*.txt），缺失项完成后警告提示；
-    .txt 等其他文件直接复制文件本身（已存在跳过）。
+    .log 走 CollectFilesWorker：除日志本身还要带上对应视频、detect.bin 和
+    daily_*.txt，缺哪个由 worker 汇总后提示。配套文件分散在日期子目录，
+    在 UI 线程逐个查找会卡顿，所以整条链路交给后台线程。
+    其它后缀没有配套关系，直接复制文件本身，已存在则跳过。
     """
+    # 入参来自右键菜单，可能指向已被外部删除的文件；先判存在再收集，
+    # 否则 worker 会在后台抛出一串难以理解的 FileNotFoundError
     if not file_path or not os.path.isfile(file_path):
         host._append_log("[上传] 文件不存在或未被选中，无法添加到上传目录")
         host._show_info_bar("文件不存在，无法添加到上传目录", "warning")
         return
+    # videos_dir 是页面配置项，未配置时没有可写的收集根，明确提示比静默失败好
     videos_dir = getattr(host, "videos_dir", "") or ""
     if not videos_dir or not os.path.isdir(videos_dir):
         host._show_info_bar("videos_dir 未配置或目录不存在", "warning")
         return
+    # 上传目录按设备分桶，没有设备就没有目标目录；strip 同时挡住空白伪选中
     device_item = host.ui.id_list.currentItem()
     device_code = device_item.text().strip() if device_item else ""
     if not device_code or not os.path.isdir(os.path.join(videos_dir, device_code)):
@@ -229,14 +276,19 @@ def add_file_to_upload(host, file_path):
                             "warning")
         return
 
+    # 分支依据是后缀而不是文件内容：收集规则完全由文件类型决定，扩展名是
+    # 唯一稳定且零成本的信号
     fname = os.path.basename(file_path)
     if fname.lower().endswith(".log"):
         base = os.path.splitext(fname)[0]
+        # done 用默认参数绑定 w=worker，避免回调晚到时 self 已指向别的实例
         worker = CollectFilesWorker(videos_dir, device_code, [base])
         worker.done.connect(
             lambda dev, n, miss, w=worker: on_upload_collect_done(host, dev, n, miss, w))
         worker.error.connect(
             lambda msg: host._show_info_bar(msg.split(chr(10))[0], "error", duration=4000))
+        # 必须由 host 持有 worker 引用：局部变量出栈后 Qt 对象可能被回收，
+        # 线程还在跑就会出现信号发不出、日志停在「正在收集」
         if not hasattr(host, "_upload_collect_workers"):
             host._upload_collect_workers = []
         host._upload_collect_workers.append(worker)
@@ -247,6 +299,7 @@ def add_file_to_upload(host, file_path):
     # .txt 等其他文件：异步复制文件本身到 upload/{设备}/
     upload_dir = os.path.join(videos_dir, "upload", device_code)
     os.makedirs(upload_dir, exist_ok=True)
+    # 同名文件已存在视为重复添加，不覆盖：用户可能已手工改过那份拷贝
     dst = os.path.join(upload_dir, fname)
     if os.path.exists(dst):
         host._show_info_bar(f"{fname} 已在上传目录中（跳过）", "info")
@@ -254,6 +307,7 @@ def add_file_to_upload(host, file_path):
     else:
         worker = FileCopyWorker(file_path, dst)
         def _on_copy_ok(w=worker, d=dst, n=fname):
+            # 回调结束即摘掉引用，worker 可被 GC 回收，不会随 host 生命周期累积
             if hasattr(host, '_file_copy_workers') and w in host._file_copy_workers:
                 host._file_copy_workers.remove(w)
             host._show_info_bar(f"{n} 已添加到上传目录", "success")
@@ -272,10 +326,15 @@ def add_file_to_upload(host, file_path):
 
 
 def on_upload_collect_done(host, device_id, copied, missing, worker):
-    """右键收集完成：复制数 + 缺失项警告（视频/日志未找到时明确提示）"""
+    """收集线程结束后回报结果，并把该 worker 从 host 的持有列表里摘除。
+
+    缺失项是常态而不是错误：旧日志可能本来就没有对应视频。警告条只列前三个
+    再标注总数，既说明缺了什么，也不会把提示条撑成一面墙。
+    """
     workers = getattr(host, "_upload_collect_workers", [])
     if worker in workers:
         workers.remove(worker)
+    # 缺文件不算失败，只降级提示；全部命中时才用 success 语气
     if missing:
         shown = ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else "")
         host._append_log(

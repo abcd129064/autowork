@@ -60,6 +60,10 @@ _GHOST_FG = ("#c8d0dc", "#333333")
 
 
 def _link_color(key: str, dark: bool) -> QColor:
+    """色键 → 实际颜色：primary 跟随当前强调色，danger 固定，余下按 ghost 灰取。
+
+    ghost 灰在深浅主题下取值相反，取错方向会让文字与底色同色而「隐身」。
+    """
     if key == "primary":
         return QColor(current_accent_hex())
     if key == "danger":
@@ -68,7 +72,11 @@ def _link_color(key: str, dark: bool) -> QColor:
 
 
 class _OpsLinkMixin:
-    """为表格委托追加「单元格内文字链接」的绘制与命中（不含任何子控件）"""
+    """为表格委托追加「单元格内文字链接」的绘制与命中（不含任何子控件）
+
+    mixin 必须写在基类之前，否则基类的 paint/editorEvent 会覆盖链接绘制与
+    命中断言，操作列直接画不出来。
+    """
 
     # 类级默认值：即便未走 init_ops_links 也不会 AttributeError
     _ops_handler = None
@@ -104,6 +112,8 @@ class _OpsLinkMixin:
 
     def _ops_invalidate(self, *_args):
         """主题切换：颜色缓存作废并整表重绘（链接色随之更新）"""
+        # 颜色对象缓存在委托实例上，主题或强调色一变必须整体作废；
+        # 只重绘不失效缓存会让链接继续用旧色，切主题后整列颜色不对
         self._color_cache = None
         vp = self._viewport()
         if vp is not None:
@@ -119,6 +129,10 @@ class _OpsLinkMixin:
     # ---------------- 字体与字测（按基础字体缓存一份） ----------------
 
     def _font_for(self, option):
+        """取链接专用字体与字测，只在基础字体三元组变化时重建。
+
+        QFontMetrics 构造不便宜，绘制与命中又都要用；不缓存等于滚动时每格重建。
+        """
         base = option.font
         key = (base.family(), base.pointSizeF(), base.bold())
         if self._link_font_key != key:
@@ -130,6 +144,7 @@ class _OpsLinkMixin:
         return self._link_font, self._link_fm
 
     def _color(self, key, dark):
+        """按 (色键, 主题) 缓存 QColor，避免 60 行 × 3 段逐格构造"""
         if self._color_cache is None:
             self._color_cache = {}
         ck = (key, dark)
@@ -176,6 +191,7 @@ class _OpsLinkMixin:
 
     @staticmethod
     def _links_of(index):
+        """取单元格链接清单；非链接格与空清单一律返回 None，调用方只判一次"""
         links = index.data(LINKS_ROLE)
         if isinstance(links, (list, tuple)) and links:
             return links
@@ -189,6 +205,7 @@ class _OpsLinkMixin:
         links = self._links_of(index)
         if links is None:
             return
+        # 主题态每帧现取：同一个委托实例跨主题切换复用，不能在 init 时缓存一次
         dark = bool(isDarkTheme())
         hover = self._hover_link
         hovered = (hover[2] if hover is not None
@@ -198,6 +215,7 @@ class _OpsLinkMixin:
         geom = self._link_geom(option, links)
         painter.save()
         painter.setClipRect(option.rect)
+        # 关抗锯齿是为了与基类文本的像素栅格对齐；开了链接字会比整表其余文字发虚
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setFont(font)
         for i, (text, ckey, _act, r) in enumerate(geom):
@@ -213,6 +231,7 @@ class _OpsLinkMixin:
 
     def _hit(self, option, links, pos):
         """鼠标点 → 链接序（-1=未命中）；纵向放开到整格高，比按钮更好点"""
+        # 纵向放开到整格高、横向外扩 pad：纯文字比按钮难点中，命中区要补偿
         pad = min(_HIT_PAD, max(2, _GAP // 2))
         rect = option.rect
         for i, (_t, _c, _a, r) in enumerate(self._link_geom(option, links)):
@@ -224,6 +243,7 @@ class _OpsLinkMixin:
 
     @staticmethod
     def _event_pos(event):
+        """Qt6 用 position()、Qt5 只有 pos()；两种事件对象都要取得到坐标"""
         try:
             return event.position().toPoint()
         except AttributeError:
@@ -272,7 +292,11 @@ class _OpsLinkMixin:
     # ---------------- 悬停通道：直接过滤视口鼠标事件 ----------------
 
     def _watch_viewport(self, on):
-        """在视口上装/卸事件过滤器（同一个视口不重复装）"""
+        """在视口上装/卸事件过滤器（同一个视口不重复装）
+
+        挂视口而不是视图：视口才是鼠标真正落在的控件，挂在外层视图上收不到
+        整块的 MouseMove/Leave。
+        """
         vp = self._viewport()
         if vp is None:
             return
@@ -354,6 +378,11 @@ class _OpsLinkMixin:
         return index, option
 
     def editorEvent(self, event, model, option, index):
+        """链接格的点击与悬停：按下只记账，抬起时与按下同段才回调
+
+        按下时不 accept，整行选中与拖选滚动仍走视图默认路径；一旦在按下就
+        吞掉事件，用户拖选多行时鼠标经过操作列就会被打断。
+        """
         links = self._links_of(index) if index.isValid() else None
         if links is None:
             self._set_hover(None)
@@ -399,13 +428,24 @@ class OpsLeanDelegate(_OpsLinkMixin, LeanTableDelegate):
 
 
 class OpsPlainDelegate(_OpsLinkMixin, TableItemDelegate):
-    """库委托绘制 + 操作列文字链接（轻量委托关闭时的回退形态）"""
+    """库委托绘制 + 操作列文字链接（轻量委托关闭时的回退形态）
+
+    不能与 Lean 版合并：两者基类不同（绘制快慢与行高行为不同），
+    设置页开关切换时由 install_ops_links 选类重建。
+    """
 
 
-_KEEP = object()  # 「沿用现有回调」哨兵
+# 「沿用现有回调」哨兵：区分「没传 handler」与「显式传 None 清空」，
+# 二者都用 None 表示的话，性能开关重建后会把绑定的点击回调悄悄抹掉
+_KEEP = object()
 
 
 def _lean_enabled() -> bool:
+    """读 P0-1 轻量委托开关；读不到按「开启」处理
+
+    导入或读配置异常时退到 Lean 形态只是少一层文本加速、功能不受影响；
+    反过来退成库委托，会在开关本该开启的场景白丢性能。
+    """
     try:
         from core.perf import is_lean_delegate_enabled
         return bool(is_lean_delegate_enabled())
@@ -423,6 +463,7 @@ def install_ops_links(table, handler=_KEEP):
     """
     lean = _lean_enabled()
     cls = OpsLeanDelegate if lean else OpsPlainDelegate
+    # 表可能还没设过委托，用 getattr 兜底；qfluentwidgets 的 TableBase 一定有该属性
     cur = getattr(table, "delegate", None)
     if isinstance(cur, cls):
         if handler is not _KEEP:
@@ -458,6 +499,7 @@ def rebuild_ops_delegate(table):
     if not isinstance(cur, _OpsLinkMixin):
         return False
     lean = _lean_enabled()
+    # isinstance 返回布尔单例，与开关直接用 is 比较即等价于相等判断
     if lean is isinstance(cur, OpsLeanDelegate):
         return True  # 形态已与开关一致，不必重建
     install_ops_links(table)

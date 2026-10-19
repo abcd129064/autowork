@@ -35,7 +35,14 @@ FONT_BOLD = "bold"
 
 
 class CellSpec(object):
-    """一个单元格的呈现描述（不持有任何 Qt 控件）"""
+    """一个单元格的呈现描述（不持有任何 Qt 控件）
+
+    用 __slots__ 是因为一张表几百行 × 十几列会产生上千个实例，
+    少一份 __dict__ 在滚动时能明显降低内存抖动。
+
+    链接清单直接引用模块级元组、不复制：元组不可变，视图侧不会误改到
+    其他行的配置，也省掉每行一份新列表。
+    """
 
     __slots__ = ("text", "font", "fg", "bg", "align_center", "links")
 
@@ -53,6 +60,7 @@ def row_background(rec: dict):
     """行底色：重要标记行随主题淡黄/暗黄，其余 None"""
     if not bool(rec.get("is_important")):
         return None
+    # 深浅两套都偏暗黄而不是纯黄：纯黄在深色主题下会刺眼到看不清文字
     return _IMPORTANT_BG_DARK if isDarkTheme() else _IMPORTANT_BG_LIGHT
 
 
@@ -72,6 +80,7 @@ def _badge_cell(key: str, rec: dict, row_bg) -> CellSpec:
     is_yes = str(rec.get(key) or "") == "是"
     color = _badge_color(key, is_yes)
     bg = None
+    # 重要行已有淡黄底，再垫徽章底会互相打架，所以只在普通行上给「是」加底
     if row_bg is None and is_yes:
         bgc = QColor(color)
         bgc.setAlpha(20)  # ~8% 透明度，更淡的徽章底（仅「是」）
@@ -96,7 +105,7 @@ def cell_for(key: str, rec: dict, row_bg=None) -> CellSpec:
                                   str(rec.get("table_no") or "")),
             font=FONT_SMALL)
     if key == "response_time":
-        # 显示文本混入解决人次行，排序仍按原始 response_time 列
+        # 显示文本混入解决人行，排序仍按原始 response_time 列
         return CellSpec(
             text="%s\n%s" % (str(rec.get("response_time") or "—"),
                              str(rec.get("resolver") or "")),
@@ -114,8 +123,13 @@ def cell_for(key: str, rec: dict, row_bg=None) -> CellSpec:
 
 
 def data_cells(rec: dict):
-    """一条记录的整行单元格描述（顺序与 TABLE_COLUMNS 一致，不含勾选列）"""
+    """一条记录的整行单元格描述（顺序与 TABLE_COLUMNS 一致，不含勾选列）
+
+    表头、列宽、单元格三处共用 TABLE_COLUMNS 这一份定义，加列时只改一处，
+    不会出现表头多一列、数据整体错位。
+    """
     row_bg = row_background(rec)
+    # 先算行底色再逐列取规格：徽章需要知道行底色才能决定要不要加底
     return [cell_for(key, rec, row_bg) for key, _h, _w in TABLE_COLUMNS]
 
 

@@ -12,7 +12,11 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 
 def init_statusbar(host):
-    """初始化底部状态栏，并显示 3 秒“就绪”。"""
+    """初始化底部状态栏并显示 3 秒「就绪」，超时由定时器自动清空。
+
+    五个属性名沿用 ui_mixin 时代的命名，main_window 的 addWidget 与
+    smoke 断言都按这些名字取控件，改名会连带炸掉外层布局。
+    """
     host._statusbar_widget = QWidget()
     host._statusbar_widget.setObjectName(u"statusbar_widget")
     host._statusbar_widget.setFixedHeight(24)
@@ -25,6 +29,7 @@ def init_statusbar(host):
     host.status_state = QLabel("状态: 空闲")
     host.status_logs = QLabel("日志: 0 行")
     layout.addWidget(host.status_device)
+    # 分隔符用独立 QLabel 写死「 | 」，不靠布局间距：三段文本刷新时不会漂移。
     layout.addWidget(QLabel(" | "))
     layout.addWidget(host.status_state)
     layout.addWidget(QLabel(" | "))
@@ -33,7 +38,11 @@ def init_statusbar(host):
 
 
 def show_status_message(host, msg, timeout=0):
-    """状态栏临时消息：到时自清（仅当未被新消息覆盖）。"""
+    """显示一条临时消息，timeout 毫秒后清空；timeout 为 0 表示常驻。
+
+    定时器只在文本仍等于自己写的 msg 时才清空：期间若来了新消息，
+    无条件清空会把那条新消息一起抹掉。
+    """
     host._status_message.setText(msg)
     if timeout > 0:
         QTimer.singleShot(timeout, lambda: (
@@ -44,6 +53,7 @@ def show_status_message(host, msg, timeout=0):
 def update_status_device(host, device_code):
     """同步状态栏与日志面板头的当前设备。"""
     host.status_device.setText(f"设备: {device_code}")
+    # 两处各写一次而不是共享控件：面板头在另一个容器里，漏写会一直显示旧设备。
     host.ui.log_status_device.setText(f"设备: {device_code}")
 
 
@@ -64,5 +74,6 @@ def update_status_paused(host, exe_name):
 
 def update_status_logs(host, count):
     """同步日志行数到状态栏与日志面板头。"""
+    # 状态栏用「行」、面板头用「条」是既有文案，两处断言都按现状写死。
     host.status_logs.setText(f"日志: {count} 行")
     host.ui.log_status_count.setText(f"日志: {count} 条")

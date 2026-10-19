@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""MainWindow 设置管理 Mixin：配置读写、路径加载、快捷键配置"""
+"""MainWindow 设置管理 Mixin：配置读写、路径加载、快捷键配置。
+
+拆成 Mixin 是为主窗口类减负；本层只做配置与快捷键编排、不构建界面，
+便于在没有窗口的情况下直接对方法做单测。
+"""
 
 import os
 import json
@@ -14,7 +18,11 @@ from core.theme_policy import DEFAULT_THEME_COLOR as _DEFAULT_THEME_COLOR
 
 
 class SettingsMixin:
-    """设置管理相关方法"""
+    """设置管理相关方法，由 MainWindow 多继承混入。
+
+    依赖宿主提供 self.ui（含 choose_exe 下拉框）与 self._append_log；
+    本类不定义它们，因此不能脱离 MainWindow 单独实例化。
+    """
 
     # 默认路径配置，首次运行时自动写入 settings.json
     DEFAULT_PATHS = {
@@ -48,7 +56,11 @@ class SettingsMixin:
 
     @staticmethod
     def _get_app_dir():
-        """获取应用程序所在目录（兼容 PyInstaller 打包后的路径）"""
+        """获取程序所在目录，兼容 PyInstaller 打包后的路径。
+
+        打包后 __file__ 指向临时解包目录，必须走 core.app_paths 统一判定，
+        否则 settings.json 会写进临时目录，退出即丢。
+        """
         return get_app_dir()
 
     def _get_settings_path(self):
@@ -60,7 +72,11 @@ class SettingsMixin:
         return os.path.join(self._get_app_dir(), "settings.json")
 
     def _reload_settings_cache(self):
-        """从配置门面一次性加载合并视图到内存缓存（敏感字段透明解密）"""
+        """从配置门面一次性加载合并视图到内存缓存，敏感字段已透明解密。
+
+        门面异常时保留默认值而不抛出：配置损坏或首次运行都不应阻止
+        主窗口启动，宁可先显示默认路径，让用户进设置里改。
+        """
         self._settings_cache = dict(self.DEFAULT_PATHS)  # 默认值作为基础
         try:
             from core import app_settings
@@ -120,7 +136,11 @@ class SettingsMixin:
     # ==================== 快捷键 ====================
 
     def _get_shortcut_settings(self):
-        """从 settings.json 获取快捷键配置，缺失字段用默认值"""
+        """按字段取快捷键配置，缺失的键回落到默认值。
+
+        逐键 get 而不是整字典 update，是为了让旧配置文件也能拿到
+        新增快捷键的默认值，不会因为少一个键就整体失效。
+        """
         settings = self._load_settings()
         return {
             "shortcut_flush": settings.get("shortcut_flush", self.DEFAULT_SHORTCUTS["shortcut_flush"]),
@@ -141,7 +161,11 @@ class SettingsMixin:
         }
 
     def _init_shortcuts(self):
-        """绑定全局快捷键（从 settings.json 读取配置）"""
+        """绑定全局快捷键，重复调用时先丢弃旧对象再重建。
+
+        旧 QShortcut 只解引用不释放仍挂在窗口上响应按键，会造成
+        一次按键触发两次槽函数，因此这里每次都重建 self._shortcuts。
+        """
         # 清除旧快捷键引用
         self._shortcuts = []
         sc = self._get_shortcut_settings()
@@ -195,13 +219,21 @@ class SettingsMixin:
         self._shortcuts.append(s_table)
 
     def _on_pause_shortcut(self):
-        """暂停/恢复快捷键：焦点在输入框时不触发，避免打字误触"""
+        """暂停/恢复快捷键；焦点在输入框时直接忽略。
+
+        全局快捷键先于控件拿到按键，不拦这一下，用户输入帧号时
+        敲到 P 就会误暂停采集。
+        """
         if isinstance(self.focusWidget(), QLineEdit):
             return
         self._on_pause_clicked()
 
     def _on_focus_frame_shortcut(self):
-        """聚焦帧数输入框并全选，便于直接输入新帧号（自动切换为自定义模式，记住原焦点位置，回车可恢复）"""
+        """聚焦帧数输入框并全选，方便直接键入新帧号。
+
+        会切到自定义模式并记住原焦点，回车后由
+        _on_frame_input_confirmed 还回去，紧接着按空格仍能播放。
+        """
         w = self.focusWidget()
         if w is not self.ui.input_frame:
             self._frame_prev_focus = w

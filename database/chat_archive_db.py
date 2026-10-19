@@ -30,11 +30,14 @@ from datetime import datetime
 from database import table_db
 
 # 采集来源标识（入站契约 source 字段；来源可插拔，下游零分支）
+# 存的是字符串不是枚举：库里已有历史行，改名等于让旧数据失去来源标签
 SOURCE_CLIP = "wecom_clip"      # 企微客户端剪贴板采集器（本仓库自研）
 SOURCE_MANUAL = "manual"        # 人工导出/手工粘贴导入
 SOURCE_OFFICIAL = "official"    # 企微官方会话内容存档 SDK（需超管开通）
 
 # 消息字段（与 chat_archive_messages DDL 一致；created_at 由本模块统一维护）
+# 拼 INSERT 的列名与占位符都按这个元组展开，schema.py 改列时必须同步这里，
+# 否则写入会「列数对不上」，而错误信息只会说 SQL 语法错
 MESSAGE_FIELDS = (
     "msg_id", "source", "room_id", "room_name",
     "sender_id", "sender_name", "sender_raw", "sender_kind",
@@ -57,14 +60,18 @@ _LOOKUP_CHUNK = 400
 
 
 def _now_str() -> str:
+    """统一的入库时间串；与 msg_ts 同格式，两者能直接按字典序比较"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _clean(value) -> str:
+    """None → 空串：表列都是 NOT NULL 默认空，写入侧不再逐列判空"""
     return "" if value is None else str(value)
 
 
 def _to_int(value, default: int = 0) -> int:
+    """宽松转 int：入站契约里的数字可能来自 JSON 文本，转不动就落默认值，
+    不能因为一条消息的 media_count 异常让整批导入失败"""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -72,6 +79,7 @@ def _to_int(value, default: int = 0) -> int:
 
 
 def _row_to_dict(cursor, row) -> dict:
+    """按 cursor.description 生成列名；不手写列序，SELECT * 也能安全取字段"""
     cols = [d[0] for d in cursor.description]
     return dict(zip(cols, row))
 
@@ -91,6 +99,8 @@ def existing_msg_ids(msg_ids) -> set:
         return set()
     conn = table_db.get_conn()
     found = set()
+    # 分块查询只为绕开 SQLite 的变量数上限，MySQL 侧同样按块执行，
+    # 单块 400 个占位符在两边都远低于限制
     for i in range(0, len(ids), _LOOKUP_CHUNK):
         chunk = ids[i:i + _LOOKUP_CHUNK]
         marks = ", ".join(["?"] * len(chunk))
@@ -107,10 +117,15 @@ def normalize_row(row: dict, default_room_id: str = "",
 
     接受 ChatMessage 转出的 dict；缺失字段取默认空值。mentions 统一序列化
     为 JSON 数组文本（写入侧唯一来源，读取侧 json.loads 兼容空串）。
+
+    序列化只在写入这一处做：各采集器各自 dump 迟早出现「有时是数组有时是
+    逗号串」的脏数据，读取侧再想统一就晚了。
     """
     out = {}
     for f in MESSAGE_FIELDS:
         out[f] = _clean(row.get(f))
+    # 默认值兜底：采集侧偶尔取不到群标识/群名（窗口切换瞬间），用调用方给的
+    # 上一层默认值补齐，否则这批数据会因 room_id 为空而无法按群查询
     if not out["room_id"]:
         out["room_id"] = _clean(default_room_id)
     if not out["room_name"]:
@@ -134,6 +149,9 @@ def insert_messages(rows, default_room_id: str = "",
                     default_room_name: str = "", default_batch: str = "") -> dict:
     """幂等写入归档消息，返回 {"inserted": n, "skipped": n, "invalid": n}
 
+    一次前置查询拿全「已存在」的 msg_id，再只插新行：逐行试插虽然也幂等，
+    但几千条消息就是几千次往返，且拿不到准确的 skipped 计数。
+
     - msg_id 为空的行计入 invalid 并跳过（指纹是去重的唯一依据）
     - 已存在的 msg_id 计入 skipped
     - 同一批次内部重复的 msg_id 只写一次
@@ -147,6 +165,8 @@ def insert_messages(rows, default_room_id: str = "",
         if not item["msg_id"]:
             invalid += 1
             continue
+        # 批内重复计入 invalid 而不是静默丢弃：同一批里出现重复 msg_id
+        # 说明采集侧把同一段扫了两遍，计数能让这种异常在报告里露头
         if item["msg_id"] in seen:
             invalid += 1
             continue
@@ -161,12 +181,14 @@ def insert_messages(rows, default_room_id: str = "",
     conn = table_db.get_conn()
     cols = ", ".join(MESSAGE_FIELDS)
     marks = "(" + ", ".join(["?"] * len(MESSAGE_FIELDS)) + ")"
+    # 多行 VALUES 一次写入：逐行 INSERT 在 MySQL 侧每行一次往返，几千条要几十秒
     for i in range(0, len(fresh), _INSERT_CHUNK):
         chunk = fresh[i:i + _INSERT_CHUNK]
         conn.execute(
             f"INSERT INTO chat_archive_messages ({cols}) "
             f"VALUES {', '.join([marks] * len(chunk))}",
             [r[f] for r in chunk for f in MESSAGE_FIELDS])
+    # 整批一次提交：sqlite 每条 commit 都是一次 fsync，MySQL 则是一次往返
     conn.commit()
     return {"inserted": len(fresh), "skipped": len(normalized) - len(fresh),
             "invalid": invalid}
@@ -175,7 +197,11 @@ def insert_messages(rows, default_room_id: str = "",
 # ==================== 采集断点（断档自愈依据） ====================
 
 def get_cursor(scope: str) -> dict:
-    """读采集断点；不存在时返回各字段为空串的字典（调用方无需判 None）"""
+    """读采集断点；不存在时返回各字段为空串的字典（调用方无需判 None）
+
+    空串即「首次采集」的语义：调用方拿 next_cursor 直接拼请求参数，
+    多一层 None 判断反而容易漏。
+    """
     conn = table_db.get_conn()
     cur = conn.execute(
         "SELECT scope, next_cursor, last_msg_ts, last_success_ts, updated_at "
@@ -198,6 +224,8 @@ def set_cursor(scope: str, next_cursor: str = "", last_msg_ts: str = "",
     conn = table_db.get_conn()
     scope = _clean(scope)
     now = _now_str()
+    # 没传成功时间就按「本次即成功」记：否则断档自愈会把一次真实的成功采集
+    # 当成「从没成功过」，下次启动又从头拉一遍
     last_success_ts = _clean(last_success_ts) or now
     cur = conn.execute("SELECT 1 FROM chat_archive_cursor WHERE scope = ?",
                        (scope,))
@@ -218,7 +246,11 @@ def set_cursor(scope: str, next_cursor: str = "", last_msg_ts: str = "",
 
 
 def latest_msg_ts(source: str = "", room_id: str = "") -> str:
-    """已归档消息的最大 msg_ts（空串 = 该范围内无记录）"""
+    """已归档消息的最大 msg_ts（空串 = 该范围内无记录）
+
+    返回空串而不是 None：调用方拿它直接拼「有没有新消息」的判断，
+    多一处 None 判空就多一处漏判。
+    """
     sql = "SELECT MAX(msg_ts) FROM chat_archive_messages WHERE 1 = 1"
     params = []
     if source:
@@ -260,6 +292,8 @@ def _msg_where(room_id: str = "", date_from: str = "", date_to: str = "",
         sql += " AND msg_ts <= ?"
         params.append(f"{date_to} 23:59:59")
     if keyword:
+        # 两侧带 % 的 LIKE 吃不到索引，只在前端已限定时间/群的场景下用；
+        # 全库模糊搜索在 MySQL 侧会退化成全表扫，报告页不给这个入口
         sql += " AND content LIKE ?"
         params.append(f"%{keyword}%")
     return sql, params
@@ -268,7 +302,11 @@ def _msg_where(room_id: str = "", date_from: str = "", date_to: str = "",
 def count_messages(room_id: str = "", date_from: str = "", date_to: str = "",
                    keyword: str = "", source: str = "",
                    msg_type: str = "") -> int:
-    """按条件统计归档消息条数"""
+    """按条件统计归档消息条数
+
+    与 query_messages 分开而不是查完再 len()：报告页要先拿到总数才能算页数，
+    为算页数把全量行拉进内存，几万条消息就是几十 MB。
+    """
     where, params = _msg_where(room_id, date_from, date_to, keyword, source,
                                msg_type)
     cur = table_db.get_conn().execute(
@@ -283,6 +321,8 @@ def query_messages(room_id: str = "", date_from: str = "", date_to: str = "",
     """按时间倒序分页查询归档消息（报告页消息流）"""
     where, params = _msg_where(room_id, date_from, date_to, keyword, source,
                                msg_type)
+    # 排序带上 msg_id 兜底：同一秒常有多条消息，只按 msg_ts 排序时翻页会
+    # 出现重复或漏行（两次查询的相对顺序不稳定）
     params = list(params) + [int(limit), int(offset)]
     cur = table_db.get_conn().execute(
         f"SELECT * FROM chat_archive_messages{where} "
@@ -292,7 +332,12 @@ def query_messages(room_id: str = "", date_from: str = "", date_to: str = "",
 
 def stats_by_room(date_from: str = "", date_to: str = "",
                   source: str = "") -> list:
-    """按群统计消息量（room_id 分组；room_name 取该群最新一条的展示名）"""
+    """按群统计消息量（room_id 分组；room_name 取该组内字典序最大的名字）
+
+    这里取的是 MAX(room_name)，只是「稳定可复现」而非「时间上最新」的展示名：
+    要真取最新名得再按 msg_ts 做子查询，报告页不需要这个精度，故不复用
+    after_sale 的窗口函数写法。
+    """
     sql = ("SELECT room_id, MAX(room_name) AS room_name, "
            "COUNT(*) AS msg_count, MIN(msg_ts) AS first_ts, "
            "MAX(msg_ts) AS last_ts "
@@ -306,7 +351,11 @@ def stats_by_room(date_from: str = "", date_to: str = "",
 
 def stats_by_day(room_id: str = "", date_from: str = "", date_to: str = "",
                  source: str = "") -> list:
-    """按天统计消息量（substr 取日期前 10 位，SQLite/MySQL 双方言一致）"""
+    """按天统计消息量（substr 取日期前 10 位，SQLite/MySQL 双方言一致）
+
+    不用 DATE()：两个方言对 DATE 的入参与返回类型并不一致，substr 对定长
+    "YYYY-MM-DD HH:MM:SS" 是纯字符串操作，行为完全可预期。
+    """
     where, params = _msg_where(room_id=room_id, date_from=date_from,
                                date_to=date_to, source=source)
     cur = table_db.get_conn().execute(
@@ -332,8 +381,12 @@ def query_pivot(room_id: str = "", date_from: str = "", date_to: str = "",
            "LEFT JOIN chat_archive_tags t ON t.msg_id = m.msg_id")
     where, params = _msg_where(room_id=room_id, date_from=date_from,
                                date_to=date_to, source=source)
+    # 参数顺序必须与 SQL 里占位符出现顺序严格一致：SELECT 里的 ? 在最前，
+    # 其次是 WHERE 片段，最后是 GROUP BY 的那个；顺序错会静默查空结果
     params = [UNCATEGORIZED] + params
     if category:
+        # 过滤条件必须重复写 COALESCE：写成 t.category = ? 时未打标的消息
+        # 会被 WHERE 过滤掉，与上面「未打标归未分类」的口径自相矛盾
         where += " AND COALESCE(NULLIF(t.category, ''), ?) = ?"
         params.extend([UNCATEGORIZED, category])
     cur = table_db.get_conn().execute(
@@ -349,11 +402,15 @@ def delete_room(room_id: str) -> int:
     """删除某群全部归档消息（人工纠错/重采用），返回删除条数
 
     同时清掉这些消息的标签；不动 chat_archive_cursor（断点由人工单独重置）。
+
+    不自动重置断点是有意的：断点还前进着，重采才会从上次的位置继续；
+    一并清掉会让采集器把整个群的历史从头再扫一遍。
     """
     conn = table_db.get_conn()
     cur = conn.execute(
         "SELECT msg_id FROM chat_archive_messages WHERE room_id = ?",
         (_clean(room_id),))
+    # 先删标签再删消息：两表没有外键级联，顺序反了会留下指向已删消息的孤儿标签
     ids = [r[0] for r in cur.fetchall()]
     if not ids:
         return 0
@@ -370,7 +427,11 @@ def delete_room(room_id: str) -> int:
 
 def add_tag(msg_id: str, category: str, matched_rule: str = "",
             confidence: float = 0.0, tagged_by: str = "rule") -> int:
-    """给消息打一个标签（同一 msg_id 可多标签），返回新标签 id"""
+    """给消息打一个标签（同一 msg_id 可多标签），返回新标签 id
+
+    不做去重：规则标签与人工改判要能并存，读取侧按 id 取第一条作准，
+    重复打同一条规则标签只是多一行，不影响结论。
+    """
     conn = table_db.get_conn()
     cur = conn.execute(
         "INSERT INTO chat_archive_tags "
@@ -383,7 +444,7 @@ def add_tag(msg_id: str, category: str, matched_rule: str = "",
 
 
 def tags_for(msg_id: str) -> list:
-    """取某条消息的全部标签"""
+    """取某条消息的全部标签（按 id 升序：先打的规则标签排在人工改判之前）"""
     cur = table_db.get_conn().execute(
         "SELECT * FROM chat_archive_tags WHERE msg_id = ? ORDER BY id",
         (_clean(msg_id),))

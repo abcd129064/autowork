@@ -56,6 +56,11 @@ class RemoteSessionWindow(FramelessWindow):
         self._panels: list = []
 
     def showEvent(self, event):
+        """每次显示都复位标题栏按钮状态。
+
+        窗口 hide 后复用时按钮可能停在 PRESSED，复位成本远低于
+        让用户拖不动窗口，所以宁可每次显示都跑一遍。
+        """
         super().showEvent(event)
         self._reset_titlebar_button_state()
 
@@ -78,6 +83,11 @@ class RemoteSessionWindow(FramelessWindow):
     # ------------------------------------------------------------------ 公开 API
 
     def add_session(self, panel, title: str = '', icon=None):
+        """把会话面板加为标签并切到它，同目标默认复用已有标签。
+
+        标题缺省取 panel.tab_title；按住 Ctrl 可绕过去重，用于对
+        同一主机开两个不同目录的 SFTP 会话。
+        """
         if not title:
             title = getattr(panel, 'tab_title', '会话')
         # P1-6：同目标重复标签聚焦已有而非新建（按住 Ctrl 强制新建，
@@ -103,7 +113,11 @@ class RemoteSessionWindow(FramelessWindow):
 
     @staticmethod
     def _session_key(panel):
-        """会话身份键：(面板类型, host, port, server_name)——P1-6 去重判据"""
+        """返回去重用的会话身份键：面板类型 + host + port + server_name。
+
+        port 统一转 int，避免 "22" 与 22 被当成两个不同目标；server_name
+        参与比较，是因为经不同跳板机到达同一 host/port 仍是不同会话。
+        """
         try:
             port = int(getattr(panel, '_port', 0) or 0)
         except (TypeError, ValueError):

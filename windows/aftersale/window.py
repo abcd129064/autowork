@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""window 模块"""
+"""window 模块：售后面板主窗口。
+
+只负责窗口骨架与页面编排：装配四个功能页、处理跨页跳转信号、
+关窗时收尾后台线程。各页自身逻辑在 entry / records / rank / settings 里。
+"""
 
 import os
 from datetime import datetime, timedelta
@@ -42,8 +46,11 @@ class AftersalePanelWindow(FluentWindow):
         super().__init__(parent)
         self.setWindowTitle("售后面板")
         self.resize(1680, 900)
+        # 最小宽度按记录页表格列数定：再窄会让操作列链接互相重叠
         self.setMinimumSize(900, 520)
 
+        # objectName 同时是导航路由键：switchTo() 与 _on_nav_changed 都按它匹配，
+        # 改名不会报错，只是页面切不过去
         self.entry_page = EntryPage(self)
         self.entry_page.setObjectName("aftersaleEntryPage")
         self.records_page = RecordsPage(self)
@@ -53,8 +60,8 @@ class AftersalePanelWindow(FluentWindow):
 
         self.addSubInterface(self.entry_page, FluentIcon.EDIT, "填写录入")
         self.addSubInterface(self.records_page, FluentIcon.LIBRARY, "记录与统计")
-        # 售后排行（球房/球桌两级排行，与 Web 端 /aftersale/rank 同功能）
-        # 图标 CERTIFICATE 奖章：VIEW（眼睛）在 Pivot 小尺寸下渲染似"00"，观感突兀
+        # 售后排行与 Web 端 /aftersale/rank 同功能，做球房/球桌两级排行；图标
+        # 不用 VIEW，眼睛图标在小尺寸下渲染像「00」，换奖章后辨识度正常
         self.addSubInterface(self.rank_page, FluentIcon.CERTIFICATE, "售后排行")
         # 明细跳转：排行页操作列「明细」→ 记录页关键词预筛选
         self.rank_page.jump_to_records.connect(self._on_rank_jump_records)
@@ -63,7 +70,7 @@ class AftersalePanelWindow(FluentWindow):
         self.settings_page = SettingsPage(self)
         self.settings_page.setObjectName("aftersaleSettingsPage")
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "设置")
-        # 周期设置保存后，记录页周期下拉与统计立即按新周期刷新
+        # 周期保存后记录页与排行页都要按新口径重取数据，两个页面各自订阅
         self.settings_page.cycle_page.saved.connect(self._on_cycle_saved)
         # 表格平滑滚动开关变更：实时刷新记录页表格滚动模式
         self.settings_page.table_smooth_changed.connect(
@@ -75,11 +82,13 @@ class AftersalePanelWindow(FluentWindow):
             self.navigationInterface.currentItemChanged.connect(
                 self._on_nav_changed)
         except Exception:
+            # 不同 qfluentwidgets 版本信号名有差异，连不上不影响主流程
             pass
 
     def _on_cycle_saved(self):
         """周期设置保存成功：记录页重建周期下拉并重查，统计页刷新（新周期立即生效）；
         排行页账期下拉选项置旧（可见时立即重拉，不可见时下次进入重拉）"""
+        # 置 False 让下拉丢掉旧缓存选项：周期模式变了，旧起点列表可能已不合法
         self.records_page._cycles_loaded = False
         self.records_page._load_cycles_then_data()
         self.rank_page.reload_options()
@@ -97,6 +106,11 @@ class AftersalePanelWindow(FluentWindow):
             self.settings_page.mysql_card.load()
 
     def showEvent(self, event):
+        """每次显示都校正标题栏按钮状态。
+
+        qframelesswindow 在模态框关闭后可能把关闭按钮留在 PRESSED 态，窗口
+        因此拖不动；每次 show 重置一次，比追查具体触发条件更稳。
+        """
         super().showEvent(event)
         self._reset_titlebar_button_state()
 
@@ -109,6 +123,7 @@ class AftersalePanelWindow(FluentWindow):
                 if btn.isPressed():
                     btn.setState(TitleBarButtonState.NORMAL)
         except Exception:
+            # frameless 库内部结构随版本变动，取不到按钮就跳过
             pass
 
     def open_records_for_table(self, table_no: str):
@@ -130,9 +145,13 @@ class AftersalePanelWindow(FluentWindow):
                 w.requestInterruption()
             except Exception:
                 pass
+        # 按属性名后缀找 worker：各页的 worker 命名不统一，逐个枚举太脆弱
+        # 新增页面只要 worker 仍以 _worker 结尾，这里不用跟着改
         for page in (self.entry_page, self.records_page, self.rank_page):
             for attr in dir(page):
                 if attr.endswith("_worker"):
                     _detach(getattr(page, attr, None))
+        # 只短等 200ms 而不是 wait() 到底：用户点关闭后要立刻看到窗口消失，
+        # 数据库写操作在 worker 内部已有事务兜底，不会因中断丢数据
         QThread.msleep(200)
         super().closeEvent(event)

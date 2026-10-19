@@ -53,6 +53,8 @@ from typing import List, Optional, Tuple
 HEADER_RE = re.compile(
     r"^(?P<sender>.+?)[ \t]+"
     r"(?P<month>\d{1,2})/(?P<day>\d{1,2})[ \t]+"
+    # 秒固定两位、时只限一位：企微对个位数小时不补零，补零就匹配不上；
+    # 行尾再放一点空白余量，拖选复制很容易把行尾空格一起带进来
     r"(?P<hour>\d{1,2}):(?P<minute>\d{2}):(?P<second>\d{2})[ \t]*$"
 )
 
@@ -106,6 +108,8 @@ class ChatMessage:
     source: str
     msg_id: str
     room_id: str
+    # 剪贴板里只有显示名，没有稳定账号 id，先拿归一化名顶着：
+    # 下游按人聚合时够用，等有了 openim id 再换真值
     sender_id: str
     sender_name: str          # 归一化后的显示名（去掉 @微信@微信联系人 之类后缀）
     sender_raw: str           # 剪贴板里的原始显示名，保留以便追溯
@@ -121,6 +125,11 @@ class ChatMessage:
 
 @dataclass
 class ParseWarning:
+    """解析过程中发现的可疑点，不进 messages，但要给人工核对看。
+
+    code 供脚本归类统计，detail 是给人读的一句话，line_no 指向原始文本行号。
+    """
+
     code: str
     detail: str
     line_no: int
@@ -161,6 +170,8 @@ def extract_mentions(content: str) -> List[str]:
     U+2005 是可靠的分隔符，用它切；没有 U+2005 时退回 @ + 非空白连续串。
     """
     out: List[str] = []
+    # 有 U+2005 时它是唯一可靠边界，按它切最干净；
+    # 没有就退回正则扫 @，两种形态互不信任
     if MENTION_SEP in content:
         for seg in content.split(MENTION_SEP)[:-1]:
             idx = seg.find("@")   # 用 find：@25984982603779408@openim 要整体保留
@@ -183,6 +194,8 @@ def classify_content(content: str) -> Tuple[str, str]:
         return "empty", ""
     m = PLACEHOLDER_RE.match(stripped)
     if m:
+        # 表里没有的占位符归到 placeholder 而不是 unknown：企微版本会新增占位
+        # 类型，认不出来也比整条丢掉强，detail 里还留着原文可查
         kind = PLACEHOLDER_KIND.get(m.group("kind"), "placeholder")
         return kind, stripped
     return "text", content
@@ -210,6 +223,8 @@ def infer_years(dates: List[Tuple[int, int]], collected_at: datetime) -> List[in
     这样既能处理"去年底的记录 + 今年初的记录"混在一段选区里的情况，
     也不需要用户手工输入年份。
     """
+    # 空输入直接返回而不是返回空 years 让调用方越界：
+    # 日期列表和消息列表必须等长，任何一边少一个都会错位到别人头上
     if not dates:
         return []
     years: List[int] = []
@@ -259,12 +274,15 @@ def parse_clip_text(raw: str, room_id: str = "",
             "leading_text",
             "第 1 个消息头之前还有 {} 行文本（选区可能不完整）".format(heads[0][0]), 1))
 
-    # 2) 年份推断需要先拿到全部 (月, 日)
+    # 2) 年份推断需要先拿到全部 (月, 日)：单条消息无法判断跨年，只有看到
+    #    相邻两条的月份变小，才能确定中间跨了一个年关。
     dates = [(int(m.group("month")), int(m.group("day"))) for _, m in heads]
     years = infer_years(dates, collected_at)
 
     # 3) 逐条切分
     messages: List[ChatMessage] = []
+    # 一条消息的正文 = 相邻两个消息头之间的行；尾部空行是消息间分隔符，
+    # 必须先弹掉，否则每条正文都带一个换行，指纹跟着不稳定
     for idx, (line_no, m) in enumerate(heads):
         end = heads[idx + 1][0] if idx + 1 < len(heads) else len(lines)
         body_lines = lines[line_no + 1:end]
@@ -370,6 +388,8 @@ def dedup_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
         elif len(cur) > len(_norm_for_dup(kept[hit].content)):
             kept[hit] = msg
 
+    # 输出按时间升序而非输入顺序：跨批次采集天然是乱的，CLI 与调用方都依赖
+    # 这里的顺序看消息流，line_no 只作为同一秒内的稳定次序
     kept.sort(key=lambda m: (m.msg_ts, m.line_no))
     return kept
 
@@ -436,11 +456,17 @@ def import_messages(messages, room_id: str = "", room_name: str = "",
     rows = [message_to_row(m, room_name=room_name, pull_batch=pull_batch)
             for m in messages]
     result = db.insert_messages(rows, default_room_id=room_id)
+    # 断点取本批最大时间戳而不是最后一条：跨批次采集的顺序本来就是乱的，
+    # 用「最后一条」会把断点往回拨，下次又从头采一批重复数据
     latest = ""
     for m in messages:
         if m.msg_ts > latest:
             latest = m.msg_ts
+    # 没有 room_id 的采集统一落到 default scope：断点按群推进，群标识缺失时
+    # 不能写进空串，否则会和别的无群采集互相覆盖进度
     scope = room_id or "default"
+    # 全批都撞库重复时也得断点前移，否则下次还会从同一批重头采；
+    # 反过来没有新时间戳也没插进任何一条时，不动断点才是对的
     if latest or result["inserted"]:
         prev = db.get_cursor(scope)
         db.set_cursor(scope,
@@ -454,6 +480,8 @@ def import_clip_text(raw: str, room_id: str, room_name: str = "",
                      collected_at: Optional[datetime] = None,
                      batch_index: int = 0, pull_batch: str = "") -> dict:
     """单段剪贴板文本：解析 → 幂等入库 → 推进断点"""
+    # 单段文本内部也可能重复：同一条消息被拖选覆盖两次是常事，
+    # 只靠 msg_id 去重不够，还要走一遍归一化合并
     messages, warnings = parse_clip_text(raw, room_id=room_id,
                                          collected_at=collected_at,
                                          batch_index=batch_index)
@@ -473,6 +501,8 @@ def load_batches(out_dir: str):
         if not m:
             continue
         path = os.path.join(out_dir, name)
+        # utf-8-sig 顺便吃掉 BOM；errors="replace" 让个别乱码字节不至于让整批
+        # 导入直接失败——能导进去再人工核对，比一条都导不进去强。
         with open(path, "rb") as fh:
             raw = fh.read().decode("utf-8-sig", errors="replace")
         items.append((int(m.group("idx")), raw))
@@ -488,6 +518,8 @@ def import_batches_dir(out_dir: str, room_id: str, room_name: str = "",
     """
     texts = load_batches(out_dir)
     if not texts:
+        # 目录在但一个 batch_NN.txt 都没有，多半是指错目录或采集半途停了；
+        # 必须报错返回，否则拿空列表入库会安静地什么都不做
         return {"error": "目录下没有 batch_*.txt：{}".format(out_dir)}
     messages, warnings, stats = parse_batches(texts, room_id=room_id,
                                               collected_at=collected_at)
@@ -503,6 +535,8 @@ def import_batches_dir(out_dir: str, room_id: str, room_name: str = "",
 # ---------------------------------------------------------------- CLI
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # CLI 只解析并打印，不写库：入库必须走 import_* 系列由采集脚本显式调用，
+    # 免得一次误敲的命令把半截选区灌进归档表
     ap = argparse.ArgumentParser(description="解析企微剪贴板聊天记录文本（只读，不写库）")
     ap.add_argument("path", help="剪贴板文本文件或采集产物目录")
     ap.add_argument("--room-id", default="", help="来源群标识（剪贴板里没有，需外部给）")
@@ -513,6 +547,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("找不到输入：{}".format(args.path), file=sys.stderr)
         return 2
 
+    # 目录 = 一次完整采集（多批）；单文件 = 手工核对剪贴板文本的临时场景。
     if os.path.isdir(args.path):
         messages, warnings, stats = parse_batches(
             load_batches(args.path), room_id=args.room_id)
@@ -520,6 +555,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(args.path, "rb") as fh:
             raw = fh.read().decode("utf-8-sig", errors="replace")
         messages, warnings = parse_clip_text(raw, room_id=args.room_id)
+        # 单文件也要去重：手工核对的选区常和上次导入的批次重叠，
+        # 这里的 unique 是去重后的真实条数，比 raw 小是正常的
         messages = dedup_messages(messages)
         stats = {"batches": 1, "raw": len(messages), "unique": len(messages)}
 
@@ -536,6 +573,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         stats["batches"], len(messages), len(warnings)))
     print("{:>3} {:<20} {:<15} {:<8} 正文".format("#", "时间", "发送人", "类型"))
     print("-" * 100)
+    # 正文压到 44 字再加省略号：终端里一屏要能看全十几条消息，
+    # 完整正文用 --json 输出，人工核对细节走那条路
     for i, m in enumerate(messages, 1):
         body = m.content.replace("\n", " / ")
         if len(body) > 44:

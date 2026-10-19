@@ -19,14 +19,16 @@ from core import (app_settings, perf_diagnostics, perf_patch_acrylic,
     perf_patch_dialog, perf_patch_menu, perf_patch_mica, perf_patch_switch,
     perf_patch_table_hover, perf_patch_table_scroll, perf_settings)
 
-# 模块级运行时状态（None = 尚未从配置门面加载）
+# 模块级运行时状态：None 是「尚未加载」而不是 False，用来区分「用户关掉了」
+# 与「还没读过配置」；一旦写入 True/False 就不再回读，绘制路径不必碰磁盘。
 _acrylic_enabled: bool | None = None
 _animation_enabled: bool | None = None
 _table_smooth_enabled: bool | None = None
 _lean_delegate_enabled: bool | None = None
 
 # 表格平滑滚动的「面板级覆盖」：面板开关单独影响各自面板，未设置则回退全局。
-# key 为面板标识，value 为 settings.json 字段名。
+# key 为面板标识，value 为 settings.json 字段名；用标识而不是字段名做键，
+# 调用方（各面板）因此不必知道配置键长什么样，改名只动这一张表。
 _PANEL_TABLE_KEYS = {
     "aftersale": "perf_table_smooth_aftersale",   # 售后面板（windows/aftersale）
     "video":     "perf_table_smooth_video",       # 跑视频面板（windows/run_video）
@@ -42,7 +44,12 @@ _PANEL_ANIMATION_KEYS = {
 }
 _panel_animation_overrides: dict | None = None  # {panel: bool}，None=尚未加载
 
-# 面板窗口类名 → 面板标识（菜单动画/弹窗动画中央补丁按父链识别所属面板用）
+# 这些缓存只由 GUI 线程读写（设置页、绘制、定时器回调），因此不加锁；
+# 将来若有后台线程读开关，必须改成锁或一次性快照，否则会读到半更新的组合。
+
+# 面板窗口类名 → 面板标识（菜单动画/弹窗动画中央补丁按父链识别所属面板用）。
+# 用类名字符串而不是 import 面板类：core 层不能反向依赖 windows 层，否则启动即
+# 循环导入，未装 qfluentwidgets 的解释器也会连 perf 都 import 不了。
 _PANEL_WINDOW_CLASSES = {
     "AftersalePanelWindow": "aftersale",
     "LedgerPanelWindow": "video",
@@ -53,7 +60,12 @@ _PANEL_WINDOW_CLASSES = {
 
 
 def _load_perf_settings():
-    """从配置门面 perf 域加载性能选项（首次调用时执行，含旧字段迁移）"""
+    """从配置门面 perf 域加载性能选项（首次调用时执行，含旧字段迁移）
+
+    迁移逻辑在 perf_settings.resolve_global_settings 内完成，这里只消费结果。
+    读配置失败时退回默认值而不是抛出：性能开关属于锦上添花，不能在启动链路
+    上把主窗口带崩；那一刻的开关值可能不是用户设的，invalidate_cache 会纠正。
+    """
     global _acrylic_enabled, _animation_enabled, _table_smooth_enabled
     global _lean_delegate_enabled
     try:
@@ -89,7 +101,11 @@ def is_table_smooth_scroll_enabled() -> bool:
 
 
 def set_table_smooth_scroll_enabled(enabled: bool):
-    """设置表格平滑滚动开关并立即持久化到 settings.json（即时生效）"""
+    """设置表格平滑滚动开关并立即持久化到 settings.json（即时生效）
+
+    只改内存值与配置，不动已打开的表格：刷新界面由调用方随后调
+    apply_table_smooth_globally，这样批量改多个开关时不必每改一项就全量重刷。
+    """
     global _table_smooth_enabled
     _table_smooth_enabled = bool(enabled)
     _persist("perf_table_smooth", _table_smooth_enabled)
@@ -98,7 +114,11 @@ def set_table_smooth_scroll_enabled(enabled: bool):
 # ---------------- 面板级覆盖（单独影响各自面板，未设置回退全局） ----------------
 
 def _load_panel_table_overrides():
-    """从配置门面 perf 域加载各面板的平滑滚动覆盖值（未设置的面板不在 dict 中）"""
+    """从配置门面 perf 域加载各面板的平滑滚动覆盖值（未设置的面板不在 dict 中）
+
+    未设置的面板不进 dict，是 effective_value 区分「显式 False」与「没配过」
+    的前提；若用 None 占位，两者就混在一起，面板再也回不到跟随全局。
+    """
     global _panel_table_overrides
     try:
         ov = perf_settings.panel_overrides(
@@ -109,7 +129,11 @@ def _load_panel_table_overrides():
 
 
 def get_table_smooth(panel: str | None = None) -> bool:
-    """生效的表格平滑滚动：指定面板优先读其覆盖值，未设置回退全局开关"""
+    """生效的表格平滑滚动：指定面板优先读其覆盖值，未设置回退全局开关
+
+    全局值未加载时先加载；面板覆盖按需加载（只有带 panel 的调用才会碰配置），
+    主界面等不带 panel 的路径因此不必再读一次配置文件。
+    """
     if _table_smooth_enabled is None:
         _load_perf_settings()
     if panel and _panel_table_overrides is None:
@@ -121,9 +145,9 @@ def get_table_smooth(panel: str | None = None) -> bool:
 def set_table_smooth(panel: str | None, enabled: bool | None):
     """设置面板级（panel 非空）或全局（panel=None）平滑滚动开关并持久化
 
-    2026-09-07 语义扩展：panel 非空且 enabled=None → 清除该面板覆盖
-    （运行时缓存与落盘键一并移除，回到跟随全局），供设置页「全部面板」
-    主控联动使用（勾选/取消主控时清空覆盖，消除主控关而子项开的无意义组合）
+    panel 非空且 enabled=None 表示清除该面板的覆盖：运行时缓存与落盘键一并
+    移除，回到跟随全局。设置页「全部面板」主控勾选/取消时依赖这个语义清空
+    子项，否则会留下「主控关、子项开」这种用户无法从界面理解的状态。
     """
     global _panel_table_overrides
     if panel:
@@ -148,7 +172,11 @@ def set_table_smooth(panel: str | None, enabled: bool | None):
 
 
 def apply_table_smooth_mode(table, panel: str | None = None):
-    """把当前生效的平滑滚动设置应用到 TableWidget（开=LINEAR / 关=NO_SMOOTH，即时）"""
+    """把当前生效的平滑滚动设置应用到 TableWidget（开=LINEAR / 关=NO_SMOOTH，即时）
+
+    整个应用过程吞异常：qfluentwidgets 的滚动委托在不同版本里属性名不一致，
+    为一项体验优化在表格构造期抛错会连带页面打不开，这里宁可保持库默认滚动。
+    """
     from qfluentwidgets import SmoothMode
     mode = SmoothMode.LINEAR if get_table_smooth(panel) else SmoothMode.NO_SMOOTH
     try:
@@ -170,6 +198,8 @@ def apply_table_smooth_globally():
     2. 顶层窗口._apply_table_smooth_all() —— 管理面板窗口（遍历各子页表格）
     3. 顶层窗口._apply_smooth_mode() —— 隧道/连接诊断等独立窗口（单表格）
     """
+    # 三个入口按鸭子类型探测而不是 isinstance：面板与独立窗口分属不同模块，
+    # 这里 import 它们会形成 core 与 windows 的循环依赖。
     from PySide6.QtWidgets import QApplication
     for w in QApplication.topLevelWidgets():
         rp = getattr(w, "records_page", None)
@@ -206,7 +236,11 @@ def _load_panel_animation_overrides():
 
 
 def get_animation(panel: str | None = None) -> bool:
-    """生效的弹出动画：指定面板优先读其覆盖值，未设置回退全局开关"""
+    """生效的弹出动画：指定面板优先读其覆盖值，未设置回退全局开关
+
+    与表格平滑滚动同模型，但覆盖键是独立一张表：两类动画的取舍理由不同
+    （表格关系滚动流畅度，菜单关系观感），允许面板分别关闭。
+    """
     if _animation_enabled is None:
         _load_perf_settings()
     if panel and _panel_animation_overrides is None:
@@ -231,7 +265,11 @@ def set_animation(panel: str | None, enabled: bool):
 
 
 def _window_panel_key(widget) -> str | None:
-    """沿父链向上找所属面板窗口（主界面/其它窗口返回 None 走全局）"""
+    """沿父链向上找所属面板窗口（主界面/其它窗口返回 None 走全局）
+
+    按父链而不是 QApplication.activeWindow()：菜单/弹窗可能还没有自己的窗口
+    句柄，而父链在构造完成时就已稳定；找不到面板不是错误，返回 None 即走全局。
+    """
     w = widget
     while w is not None:
         panel = _PANEL_WINDOW_CLASSES.get(type(w).__name__)
@@ -247,14 +285,22 @@ def _menu_panel_key(menu) -> str | None:
 
 
 def patch_table_hover_repaint():
-    """表格 hover 条带重绘补丁（实现见 core.perf_patch_table_hover）。"""
+    """表格 hover 条带重绘补丁（实现见 core.perf_patch_table_hover）。
+
+    本模块只做门面转发：补丁实现按目标控件拆到 perf_patch_* 子模块，既能单独
+    离线测试，也避免在本模块顶层 import Qt —— 纯逻辑单测因此不需要 GUI 依赖。
+    """
     perf_patch_table_hover.apply_table_hover_patch()
 
 
 # ==================== 轻量表格委托（P0-1） ====================
 
 def is_lean_delegate_enabled() -> bool:
-    """是否启用轻量表格委托（默认开启；关闭即回退 qfluentwidgets 自带委托）"""
+    """是否启用轻量表格委托（默认开启；关闭即回退 qfluentwidgets 自带委托）
+
+    默认开是因为库自带委托对每个单元格都走完整的富文本布局，业务表动辄上千行
+    时滚动明显掉帧；真出问题时可以关掉这一项做 A/B，不必回滚代码。
+    """
     if _lean_delegate_enabled is None:
         _load_perf_settings()
     return bool(_lean_delegate_enabled)
@@ -279,6 +325,8 @@ def patch_lean_table_delegate():
         from qfluentwidgets.components.widgets.table_view import TableBase
     except Exception:
         return
+    # 幂等标记挂在类上而不是模块变量：热重载或重复调用 patch_* 时模块变量会
+    # 重置，重复包 __init__ 会让每张表被套上两层委托。
     if getattr(TableBase, "_perf_lean_patched", False):
         return
 
@@ -313,6 +361,8 @@ def apply_lean_delegate_globally():
         from core.ops_link_delegate import rebuild_ops_delegate
     except Exception:
         rebuild_ops_delegate = None
+    # findChildren 查 QTableWidget 时也会命中同族的 QTableView 子类，用 id 去重，
+    # 否则同一张表被刷新两次，白白多一轮重绘。
     seen = set()
     tables = []
     for w in QApplication.topLevelWidgets():
@@ -436,6 +486,8 @@ def _blit_strip_width(table, orient: str = "vertical") -> int:
         # 竖向条取宽、横向条取高；构造期尚未布局时会拿到退化值，夹到 12
         size = (int(bar.width()) if vertical else int(bar.height())) \
             if bar is not None else 0
+        # 构造期尚未布局时滚动条只有 0 或离谱的默认尺寸，统一夹到 12；+1 是给
+        # 滚动条与单元格之间的 1px 缝隙，少了会在边缘留一条没人擦的旧像素。
         if size <= 0 or size > 64:
             size = 12
         return size + 1
@@ -500,6 +552,8 @@ def _sample_table_bg(table):
             if win is not None and win.isMinimized():
                 return _blit_reason(table, "窗口最小化")
             mid = geo.center()
+            # 6px 是为了避开表格边框与阴影的过渡带：贴边太近会采到抗锯齿的
+            # 半透明像素，alpha != 255 直接判失败，功能就不生效。
             pts = [QPoint(mid.x(), geo.top() - 6),
                    QPoint(mid.x(), geo.bottom() + 6),
                    QPoint(geo.left() - 6, mid.y()),
@@ -635,7 +689,11 @@ def _blit_reason(table, text):
 
 
 def _set_blit_state(table, state, reason=""):
-    """更新单表位块搬移状态（只在状态**变化**时写日志，避免重布局刷屏）"""
+    """更新单表位块搬移状态（只在状态**变化**时写日志，避免重布局刷屏）
+
+    状态只供人排查，不参与控制流：任何异常都吞掉，绝不能让一次写日志失败
+    影响表格布局或绘制。
+    """
     try:
         prev = getattr(table, "_perf_blit_state", None)
         table._perf_blit_state = state
@@ -671,6 +729,8 @@ def table_blit_status() -> dict:
                 if id(t) in seen:
                     continue
                 seen.add(id(t))
+                # total 统计「存活」表格：已关闭页面里的表随父窗口销毁，不在
+                # topLevelWidgets 的子树里，所以这里现场遍历而不缓存引用。
                 out["total"] += 1
                 if not out["enabled"]:
                     out["off"] += 1
@@ -765,7 +825,11 @@ def apply_table_blit(table):
 
 
 def apply_table_blit_globally():
-    """按当前开关刷新所有已存在表格（设置页切换后立即生效）"""
+    """按当前开关刷新所有已存在表格（设置页切换后立即生效）
+
+    现场遍历而不是维护弱引用注册表：表格随页面反复创建销毁，注册表很容易拖住
+    已关闭的表格，遍历一次的成本远低于一次泄漏与一批幽灵表格。
+    """
     try:
         from PySide6.QtWidgets import QApplication, QTableView
         for w in QApplication.topLevelWidgets():
@@ -831,6 +895,10 @@ _dpi_degrade_pixels_explicit = None    # 配置里是否显式写了 perf_dpi_de
 
 def is_degrade_adaptive_enabled() -> bool:
     """自适应阈值开关（perf 域 perf_dpi_degrade_adaptive，默认开）
+
+    默认开是因为静态阈值只在标定机上验证过，其它机器需要靠倍率纠偏；真出现
+    标定异常时可以关掉它退回固定 600 万，作为应急逃生门。
+    
 
     关掉 → 完全退回静态 600 万（或 perf_dpi_degrade_pixels 显式值）。
     """
@@ -906,7 +974,12 @@ def measure_raster_rate_ms_per_mpx():
 
 
 def get_auto_degrade_pixels():
-    """自适应阈值（= 静态默认 × 基准速率/本机速率，夹取后；不可用 None）"""
+    """自适应阈值（= 静态默认 × 基准速率/本机速率，夹取后；不可用 None）
+
+    方向刻意是「基准/本机」：本机越慢，rate 越大，倍率越小，阈值越低，于是更早
+    进入降级。上下限夹取是防止一次异常标定把阈值推到 120 万以下或 2400 万以上，
+    那等于永久降级或永久不降级。
+    """
     global _auto_limit
     if _auto_limit is not None:
         return _auto_limit
@@ -984,7 +1057,11 @@ def is_bigscreen_mode() -> bool:
 
 
 def set_bigscreen_mode(enabled: bool):
-    """设置大屏性能模式并立即持久化（即时生效，无需重启）"""
+    """设置大屏性能模式并立即持久化（即时生效，无需重启）
+
+    不刷新已打开窗口：所有判定都在下次绘制/弹窗/切页时现场读取，这里重刷只会
+    重复一遍下次必然要做的工作。
+    """
     global _bigscreen_mode
     _bigscreen_mode = bool(enabled)
     _persist("perf_bigscreen_mode", _bigscreen_mode)
@@ -1128,7 +1205,11 @@ def _screen_dpr(widget) -> float:
 
 
 def window_physical_pixels(widget) -> int:
-    """widget 所属顶层窗口的物理像素数（逻辑尺寸 × DPR²）"""
+    """widget 所属顶层窗口的物理像素数（逻辑尺寸 × DPR²）
+
+    DPR 平方而不是一次方：宽高都按设备像素比放大，整窗像素数是两个方向之积，
+    所以 150% 缩放是 2.25 倍而不是 1.5 倍，这也是双重缩放会迅速压垮渲染的原因。
+    """
     try:
         win = widget.window() if widget is not None else None
         if win is None:
@@ -1438,6 +1519,8 @@ def _start_snapshot_fade(dlg, blur_radius) -> bool:
     return True
 
 
+# 下面四个 patch_* 是启动期补丁的统一入口，参数全部是回调而不是常量：
+# 补丁模块看不到 perf 的运行时缓存，必须每次判定时回调，开关才能即时生效。
 def patch_dialog_animation():
     """弹窗淡入/淡出降级补丁（实现见 core.perf_patch_dialog）。"""
     perf_patch_dialog.apply_dialog_animation_patch(
@@ -1466,7 +1549,11 @@ def patch_acrylic_downsample():
 
 
 def set_acrylic_enabled(enabled: bool):
-    """设置亚克力开关并立即持久化到 settings.json（即时生效，无需重启）"""
+    """设置亚克力开关并立即持久化到 settings.json（即时生效，无需重启）
+
+    已有窗口的亚克力不在这里重刷：绘制时每次都查 is_acrylic_enabled()，下一次
+    重绘自然换效果，省掉一次代价高昂的全窗口重建。
+    """
     global _acrylic_enabled
     _acrylic_enabled = bool(enabled)
     _persist("perf_acrylic", _acrylic_enabled)
@@ -1480,10 +1567,15 @@ def set_animation_enabled(enabled: bool):
 
 
 def _persist(key: str, value: bool):
-    """将单个性能选项写入配置门面 perf 域（其余字段不受影响）"""
+    """将单个性能选项写入配置门面 perf 域（其余字段不受影响）
+
+    写盘失败只吞掉：设置页已经改了内存值并即时生效，磁盘写不进去最多是下次
+    启动回到旧值，不值得为它弹错打断用户。
+    """
     try:
         app_settings.set(key, value)
-        # 迁移完成后移除旧字段，避免歧义
+        # 旧字段 performance_mode 与新分项字段并存时语义冲突（true 表示全关），
+        # 任何一次写入都顺手清掉它，保证文件里只剩一套权威开关。
         app_settings.remove("performance_mode")
     except Exception:
         pass
@@ -1552,7 +1644,11 @@ def mica_block_reason() -> str:
 
 
 def patch_mica_policy():
-    """云母环境兜底（幂等）：按当前环境 reason 应用双层短路（实现见 ui 无关模块）。"""
+    """云母环境兜底（幂等）：按当前环境 reason 应用双层短路（实现见 ui 无关模块）。
+
+    实现放独立模块是为了让它能在没有任何 qfluentwidgets 的环境里被单测直接调用，
+    本模块只负责把环境探测结果传进去。
+    """
     perf_patch_mica.apply_mica_policy(mica_block_reason(), _log)
 
 
@@ -1568,12 +1664,20 @@ def _log(message: str):
 # ==================== 向后兼容 ====================
 
 def is_performance_mode() -> bool:
-    """兼容旧接口：亚克力关闭即视为性能模式"""
+    """兼容旧接口：亚克力关闭即视为性能模式
+
+    旧版只有一个总开关，现在拆成亚克力/动画/表格三项；老调用方只关心「是否在
+    省性能」，用亚克力代表即可，不额外引入第二套语义。
+    """
     return not is_acrylic_enabled()
 
 
 def invalidate_cache():
-    """兼容旧接口：重新从 settings.json 加载"""
+    """兼容旧接口：重新从 settings.json 加载
+
+    这里漏掉任何一个缓存字段，症状都是「设置页改完要重启才生效」，而且很难归因；
+    新增带缓存的开关时必须同步加进下面的列表。
+    """
     global _acrylic_enabled, _animation_enabled, _table_smooth_enabled
     global _panel_table_overrides, _panel_animation_overrides
     global _lean_delegate_enabled, _dpi_degrade_pixels

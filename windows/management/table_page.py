@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""table_page 模块（从 windows/management_panel.py 拆出，逻辑未改动）"""
+"""球桌管理页：本地库分页浏览 + 服务器同步 + 行级操作入口。
+
+数据链路是「接口 → table_db → 本页表格」：页面不做业务计算，耗时 IO 全部
+交给 _DBQueryWorker 与各 FetchWorker 在后台线程跑，GUI 线程只负责把结果
+铺进表格。这样 MySQL 闪断时界面仍可翻页，不会整窗冻结。
+从 windows/management_panel.py 拆出，原有业务逻辑保持不变。
+"""
 
 import csv
 import difflib
@@ -63,13 +69,22 @@ from windows.management.dialogs import (
 # ==================== 页面1: 球桌管理 ====================
 
 class TablePage(QWidget):
-    """球桌管理页（复用原 TablePanelWindow 全部功能逻辑）"""
+    """球桌管理页（复用原 TablePanelWindow 全部功能逻辑）
+
+    右键入口依赖表格里看不见的列数据：ToDesk 开关读 item 的 UserRole 存
+    todesk_status，远程会话读 snk_code（缺省时回退解析 remark）。因此填充
+    阶段就要把这两项一起写进 item，后续动作无需按行回查数据库。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 分页三件套：查询、翻页、导出都读同一份状态，改页码必须走 _load_local
+        # 重建 Worker，否则界面显示的页号与实际结果会对不上。
         self._page_no = 1
         self._page_size = 50
         self._total = 0
+        # 每类异步任务单槽位：用 isRunning() 挡重复点击比禁用按钮可靠 ——
+        # 异常路径一旦忘了恢复，按钮会永久卡灰。
         self._worker = None
         self._query_worker = None
         self._save_worker = None
@@ -96,13 +111,17 @@ class TablePage(QWidget):
         self._frps_client.start()
         self._frps_client.proxies_changed.connect(
             lambda _d: self.update_frps_column())
-        # 异步获取元数据，判断是否需要首次同步
+        # 先查本地库总行数：为 0 说明是全新安装，直接拉一次全量，
+        # 否则用户面对空表格却不知道该点「同步数据」。
         self._meta_worker = _DBQueryWorker(table_db.get_meta)
         self._meta_worker.result_ready.connect(self._on_meta_finished)
         self._meta_worker.start()
 
     def _apply_smooth_mode(self):
-        """按当前生效的平滑滚动设置刷新本页表格（管理面板设置页联动）"""
+        """按当前生效的平滑滚动设置刷新本页表格（管理面板设置页联动）
+
+        平滑模式是全局设置，这里只被动跟随、不缓存，改完设置回来立刻生效。
+        """
         apply_table_smooth_mode(self._table, panel="management")
 
     def _init_ui(self):
@@ -113,6 +132,8 @@ class TablePage(QWidget):
         # --- 工具栏 ---
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
+        # 搜索框只转发输入事件，防抖与查询交给 _on_search_input → _search_timer；
+        # 直接在这里连 _load_local 会逐字查库，打一个字卡一次。
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText("搜索")
         self._search_edit.setFixedWidth(280)
@@ -120,16 +141,22 @@ class TablePage(QWidget):
         toolbar.addWidget(self._search_edit)
         toolbar.addStretch(1)
 
+        # 导出的是「当前搜索结果」而非全库：关键词与三个显隐开关都要带上，
+        # 与表格里看到的一致才有意义。
         self._btn_export_csv = PushButton(FluentIcon.DOWNLOAD, "导出 CSV", self)
         self._btn_export_csv.setToolTip("导出当前搜索结果（含搜索/筛选条件）为 CSV")
         self._btn_export_csv.clicked.connect(self._export_csv)
         toolbar.addWidget(self._btn_export_csv)
 
+        # 按钮本身不存状态：列显隐只存在 _hidden_cols 与三个 _show_* 标志里，
+        # 每次构建菜单时重新读取，保证勾选态与表格实际情况一致。
         self._col_btn = TransparentDropDownPushButton("筛选", self)
         self._col_btn.setIcon(FluentIcon.FILTER.qicon())
         self._build_col_menu()
         toolbar.addWidget(self._col_btn)
 
+        # 全量同步以十秒计，期间禁用按钮；并发保护另由 _sync_from_api 的
+        # isRunning 判断兜底。
         self._refresh_btn = PushButton(FluentIcon.SYNC, "同步数据", self)
         self._refresh_btn.setToolTip("从服务器拉取全量数据")
         self._refresh_btn.clicked.connect(self._sync_from_api)
@@ -137,6 +164,8 @@ class TablePage(QWidget):
         root.addLayout(toolbar)
 
         # --- 表格 ---
+        # 列定义集中在 TABLE_COLUMNS：建列、填充、导出共用同一份元数据，
+        # 新增字段只改 common.py 一处；代码里取列索引必须动态定位，不能写死数字。
         self._table = TableWidget(self)
         # 性能（2026-08-26）：管理面板表格接入平滑滚动开关（覆盖→全局）
         apply_table_smooth_mode(self._table, panel="management")
@@ -145,18 +174,26 @@ class TablePage(QWidget):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        # 只读委托 + 双击才进入编辑：普通单元格不可改，SNK 列走专用弹窗写入，
+        # 避免误触把接口同步下来的字段改脏。
         self._table.setItemDelegate(_ReadOnlySelectDelegate(self._table))
+        # 固定行高：行数上百后按内容自适应会让翻页与筛选明显掉帧，
+        # 长文本一律交给 tooltip 展示全文。
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(_FIXED_ROW_HEIGHT)
         self._table.setAlternatingRowColors(True)
         # 关闭自动换行：长文本由默认省略号截断 + tooltip 展示全文，
         # 换行会显著增加布局成本
         self._table.setWordWrap(False)
+        # 右键菜单内容取决于列类型与行数据（SNK 修改、ToDesk 开关、远程入口），
+        # 统一在 _show_copy_menu 里按需拼装。
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_copy_menu)
         QShortcut(QKeySequence.StandardKey.Copy, self._table).activated.connect(
             lambda: _copy_table_selection(self._table))
 
+        # 列宽由用户拖动覆盖，最后一列拉伸填满窗口；固定行高让拖动不触发行高重算。
+        # 首轮按 TABLE_COLUMNS 的默认宽度铺一遍，只是给用户一个合适的起点。
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
@@ -168,6 +205,8 @@ class TablePage(QWidget):
         root.addWidget(self._table, 1)
 
         # --- 分页栏 ---
+        # 分页栏控件只负责显示：页码、按钮可用性、计数文本统一由 _update_pager
+        # 刷新，翻页逻辑不散落在各个回调里。
         pager = QHBoxLayout()
         pager.setSpacing(6)
         self._lbl_info = QLabel("正在加载...", self)
@@ -176,6 +215,8 @@ class TablePage(QWidget):
         pager.addWidget(QLabel("每页:", self))
         self._size_combo = ComboBox(self)
         # 每页选项 20/50/100/300（已移除 800/1000：大页同步填充/测量开销过大）
+        # 先 blockSignals 再设初值：setCurrentText 会触发 currentTextChanged，
+        # 不挡就会在构造期白跑一次查询。
         self._size_combo.blockSignals(True)
         self._size_combo.addItems(["20", "50", "100", "300"])
         self._size_combo.setCurrentText(str(self._page_size))
@@ -237,7 +278,11 @@ class TablePage(QWidget):
         self._col_btn.setMenu(menu)
 
     def _on_meta_finished(self, result):
-        """元数据查询完成：若数据库为空则自动触发首次同步"""
+        """元数据查询完成：若数据库为空则自动触发首次同步
+
+        db_total 只统计球桌表，不含 xqzg 分区，所以这里判定的是「从没同步过」，
+        而不是「今天的实时行还没到」。
+        """
         db_total, _ = result
         if db_total == 0:
             self._sync_from_api()
@@ -245,7 +290,11 @@ class TablePage(QWidget):
     # ---------- 数据加载 ----------
 
     def _load_local(self):
-        """异步分页查询本地数据库，快速切换时取消前一个 Worker"""
+        """异步分页查询本地数据库，快速切换时取消前一个 Worker
+
+        取消用 requestInterruption 而非 terminate：Worker 在 SQL 间隙检查标志位
+        退出，强杀可能留下半开的连接；disconnect 必须带接收者，PySide6 不支持无参写法。
+        """
         if self._query_worker and self._query_worker.isRunning():
             self._query_worker.requestInterruption()
             # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
@@ -263,7 +312,11 @@ class TablePage(QWidget):
         self._query_worker.start()
 
     def _on_query_finished(self, result, keyword=""):
-        """查询完成回调：更新表格与分页（高频统计已随分页同批返回）"""
+        """查询完成回调：更新表格与分页（高频统计已随分页同批返回）
+
+        hf_stats 由 Worker 一并算好，界面线程零同步查询；同步时间另起一个 Worker，
+        晚到也不影响表格先把结果画出来。
+        """
         total, rows, hf_stats = result
         self._total = total
         self._populate(rows, hf_stats)
@@ -274,12 +327,20 @@ class TablePage(QWidget):
         self._time_worker.start()
 
     def _on_time_meta(self, result):
-        """同步时间元数据到手：状态栏展示数据时间"""
+        """同步时间元数据到手：状态栏展示数据时间
+
+        sync_time 为空说明库从没同步成功过，显示「未同步」而不是留空，
+        否则用户无从判断表格里的数据有多旧。
+        """
         _, sync_time = result
         self._lbl_time.setText(f"数据时间: {sync_time}" if sync_time else "未同步")
 
     def _sync_from_api(self):
-        """从服务器拉取全量球桌数据并落库（任务运行中忽略重复点击）"""
+        """从服务器拉取全量球桌数据并落库（任务运行中忽略重复点击）
+
+        接口返回的是全量快照，落库因此用 save_all 覆盖而非增量合并；
+        拉取与保存分成两个 Worker，接口慢也不会连带拖住界面。
+        """
         if self._worker and self._worker.isRunning():
             return
         self._refresh_btn.setEnabled(False)
@@ -290,7 +351,11 @@ class TablePage(QWidget):
         self._worker.start()
 
     def _on_sync_done(self, rows):
-        """API 同步完成：异步保存数据到本地数据库"""
+        """API 同步完成：异步保存数据到本地数据库
+
+        save_all 可能写远程 MySQL，必须离开 GUI 线程；error 也要接上，
+        否则保存失败时按钮会一直停在灰色。
+        """
         self._save_worker = _DBQueryWorker(table_db.save_all, rows)
         self._save_worker.result_ready.connect(self._on_save_finished)
         # 落库失败也必须恢复按钮（2026-09-25 修复）：此前 error 无人接收，
@@ -300,7 +365,10 @@ class TablePage(QWidget):
         self._save_worker.start()
 
     def _on_save_finished(self, count):
-        """保存完成：重置页码并重新加载；追加同步 xqzg 实时行（todesk 源）"""
+        """保存完成：重置页码并重新加载；追加同步 xqzg 实时行（todesk 源）
+
+        回第 1 页是刻意的：新数据的排序以数据库为准，留在旧页会看到错位内容。
+        """
         self._page_no = 1
         self._load_local()
         self._refresh_btn.setEnabled(True)
@@ -341,7 +409,10 @@ class TablePage(QWidget):
         self._save_worker.start()
 
     def _on_sync_error(self, msg):
-        """API 同步失败：恢复刷新按钮并展示错误"""
+        """API 同步失败：恢复刷新按钮并展示错误
+
+        这是所有失败路径的汇合点，也是按钮从灰色恢复的唯一入口。
+        """
         self._refresh_btn.setEnabled(True)
         self._lbl_info.setText(f"同步失败: {msg}")
 
@@ -461,12 +532,19 @@ class TablePage(QWidget):
                 cell.setForeground(info_fg)
 
     def update_frps_column(self):
-        """供 frps proxies_changed 信号驱动的实时刷新入口"""
+        """供 frps proxies_changed 信号驱动的实时刷新入口
+
+        页面不可见时跳过重绘：隐藏页面的行数据没人看，刷了纯属白耗 CPU。
+        """
         if self.isVisible():
             self._refresh_frps_column()
 
     def _update_pager(self, keyword=""):
-        """按总数/页大小重算页码并同步分页控件与状态文本"""
+        """按总数/页大小重算页码并同步分页控件与状态文本
+
+        总页数用 ceil 现算而不缓存：搜索或筛选一变总数就变，缓存极易失真；
+        页码再夹回 1..total_pages，防止删数据后停在空白页。
+        """
         total_pages = max(1, math.ceil(self._total / self._page_size))
         self._page_no = min(self._page_no, total_pages)
         self._lbl_page.setText(f"{self._page_no}/{total_pages}")
@@ -478,11 +556,17 @@ class TablePage(QWidget):
     # ---------- 交互 ----------
 
     def _on_search_input(self, _=""):
-        """搜索输入防抖入口：重启 300ms 定时器，连续输入合并为一次查询"""
+        """搜索输入防抖入口：重启 300ms 定时器，连续输入合并为一次查询
+
+        定时器是单次触发且每次输入都重新计时，只有停手 300ms 才真正查库。
+        """
         self._search_timer.start()
 
     def _do_search(self):
-        """搜索防抖到期：回到第一页按当前关键词重查"""
+        """搜索防抖到期：回到第一页按当前关键词重查
+
+        关键词变了旧页码就没有意义，必须回到第 1 页。
+        """
         self._page_no = 1
         self._load_local()
 
@@ -493,13 +577,19 @@ class TablePage(QWidget):
             self._load_local()
 
     def _on_next_page(self):
-        """下一页（末页保护）"""
+        """下一页（末页保护）
+
+        末页判断同样用 ceil 现算，理由与 _update_pager 一致：不缓存总页数。
+        """
         if self._page_no < max(1, math.ceil(self._total / self._page_size)):
             self._page_no += 1
             self._load_local()
 
     def _on_page_size_changed(self, text):
-        """每页条数变更：回第一页重查"""
+        """每页条数变更：回第一页重查
+
+        text 来自下拉框，理论上都是数字；int 失败直接返回，不弹错也不重查。
+        """
         try:
             size = int(text)
         except ValueError:
@@ -510,7 +600,10 @@ class TablePage(QWidget):
             self._load_local()
 
     def _toggle_col(self, col_idx, visible):
-        """列显隐切换：维护隐藏集合并同步表头"""
+        """列显隐切换：维护隐藏集合并同步表头
+
+        _hidden_cols 是唯一事实来源，菜单勾选态与表格可见性都从它派生。
+        """
         if visible:
             self._hidden_cols.discard(col_idx)
         else:
@@ -518,19 +611,28 @@ class TablePage(QWidget):
         self._table.setColumnHidden(col_idx, not visible)
 
     def _toggle_test_data(self, state):
-        """「公司测试」数据显隐切换：回到第一页重新查询"""
+        """「公司测试」数据显隐切换：回到第一页重新查询
+
+        三个 _show_* 开关都会改变 SQL 的 WHERE 条件，行集变了页码必然失效。
+        """
         self._show_test = (state == Qt.CheckState.Checked)
         self._page_no = 1
         self._load_local()
 
     def _toggle_manual_data(self, state):
-        """「手动版本」设备显隐切换：回到第一页重新查询"""
+        """「手动版本」设备显隐切换：回到第一页重新查询
+
+        判定依据是 name/roomName 含 @s，由查询层实现，本页只负责传标志位。
+        """
         self._show_manual = (state == Qt.CheckState.Checked)
         self._page_no = 1
         self._load_local()
 
     def _toggle_tuidan_data(self, state):
-        """「退单设备」显隐切换：回到第一页重新查询（接口 status=2）"""
+        """「退单设备」显隐切换：回到第一页重新查询（接口 status=2）
+
+        退单设备默认隐藏：它们已被回收，混在在用设备里会干扰日常巡检。
+        """
         self._show_tuidan = (state == Qt.CheckState.Checked)
         self._page_no = 1
         self._load_local()
@@ -670,7 +772,11 @@ class TablePage(QWidget):
         bridge.open_session(kind, snk, table_id, notifier=self, source="球桌管理")
 
     def _export_csv(self):
-        """B6 导出当前搜索结果（含搜索条件）为 CSV（utf-8-sig，Excel 中文兼容）"""
+        """B6 导出当前搜索结果（含搜索条件）为 CSV（utf-8-sig，Excel 中文兼容）
+
+        导出上限 _EXPORT_MAX_ROWS 由查询层截断，与本页分页大小无关；
+        utf-8-sig 带 BOM，否则 Excel 直接打开中文是乱码。
+        """
         keyword = self._search_edit.text().strip()
         default = f"球桌数据_{datetime.now().strftime('%Y-%m-%d')}.csv"
         path, _sel = QFileDialog.getSaveFileName(
@@ -695,7 +801,10 @@ class TablePage(QWidget):
         self._export_worker.start()
 
     def _on_export_query(self, result, path):
-        """导出查询完成：全量记录写 CSV（utf-8-sig），成功后提示并可定位文件"""
+        """导出查询完成：全量记录写 CSV（utf-8-sig），成功后提示并可定位文件
+
+        派生列（frps 实时感知）没有对应 DB 字段，收集表头时直接跳过。
+        """
         _total, rows = result
         header = []
         keys = []
@@ -717,7 +826,11 @@ class TablePage(QWidget):
         _show_export_bar(self, path, len(rows))
 
     def _edit_snk(self, table_name, current):
-        """弹窗手动写入/修改指定球桌的 snk 标识，保存后刷新当前页"""
+        """弹窗手动写入/修改指定球桌的 snk 标识，保存后刷新当前页
+
+        受影响行数为 0 说明桌号在最近一次同步里被改了，提示后不刷新表格，
+        避免用户误以为已经保存成功。
+        """
         dlg = EditSnkDialog(self, table_name, current)
         dlg.yesButton.setText("保存")
         dlg.cancelButton.setText("取消")
@@ -736,7 +849,10 @@ class TablePage(QWidget):
     # ---------- ToDesk 开关（右键指令下发 + 轮询确认） ----------
 
     def _todesk_col(self) -> int:
-        """ToDesk 号列索引（按 TABLE_COLUMNS 动态定位，防插列漂移）"""
+        """ToDesk 号列索引（按 TABLE_COLUMNS 动态定位，防插列漂移）
+
+        返回 -1 表示当前列定义里没有这一列，所有调用方都先判 -1 再取值。
+        """
         for i, (key, _, _) in enumerate(TABLE_COLUMNS):
             if key == "todesk_id":
                 return i
@@ -854,7 +970,10 @@ class TablePage(QWidget):
                       "success", title="ToDesk", parent=self, duration=3000)
 
     def _on_todesk_confirmed(self, status, worker=None):
-        """设备已上报新状态：回写本地最新分区并原地刷新着色"""
+        """设备已上报新状态：回写本地最新分区并原地刷新着色
+
+        回写失败只记日志：界面着色优先，下一次同步会以服务端数据纠正。
+        """
         ctx = self._todesk_ctx_for(worker)
         if not ctx:
             return
@@ -880,7 +999,11 @@ class TablePage(QWidget):
             "warning", title="待上报", parent=self, duration=5000)
 
     def _on_todesk_error(self, msg, worker=None):
-        """下发失败：恢复原状态显示并提示错误"""
+        """下发失败：恢复原状态显示并提示错误
+
+        回滚到指令前的 old_status，而不是回滚成「未上报」：用户需要看到的是
+        操作无效，而不是数据缺失。
+        """
         ctx = self._todesk_ctx_for(worker)
         if ctx:
             self._set_todesk_cell(ctx["row"], status=ctx.get("old_status") or "")

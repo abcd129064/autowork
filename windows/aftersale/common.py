@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""common 模块（从 windows/aftersale_panel.py 拆出，逻辑未改动）"""
+"""售后页与弹窗共享的常量、控件工厂和小工具。
+
+本模块从 windows/aftersale_panel.py 拆出，逻辑保持不变。页面与对话框模块
+用星号导入引入这里的符号，因此新增公共符号时既要加进 __all__，也要确认
+名字不与该模块内的局部变量冲突。
+"""
 
 import os
 from datetime import datetime, timedelta
@@ -26,8 +31,8 @@ from database import aftersale_db, table_db
 from workers.aftersale_worker import AftersaleDBWorker
 from windows.mysql_sync_card import MysqlSyncCard
 
-# 包内共享符号：页面/对话框模块经 ``from windows.aftersale.common import *``
-# 引入（含下划线辅助名，故显式列出 __all__）
+# 包内共享符号：页面/对话框模块用星号导入引入。星号导入默认跳过下划线名，
+# 所以 _SectionCard、_row_btn 这类内部辅助必须显式列进 __all__，否则会 NameError
 __all__ = [
     "_FIXED_ROW_HEIGHT", "_popup_ani_type", "_default_creator",
     "_CAND_LIST_QSS_TMPL",
@@ -43,14 +48,22 @@ _FIXED_ROW_HEIGHT = 32
 
 
 def _popup_ani_type():
-    """弹出菜单动画类型：按售后面板生效值（本面板覆盖→全局开关）"""
+    """弹出菜单动画类型：返回本面板覆盖值，缺省继承全局开关。
+
+    低配机器上关动画能明显减少右键菜单掉帧，所以开关按面板粒度生效；
+    禁用时返回 NONE，让 Qt 跳过整个动画管线，而不是只把时长设为 0。
+    """
     from core.perf import get_animation
     return (MenuAnimationType.DROP_DOWN if get_animation("aftersale")
             else MenuAnimationType.NONE)
 
 
 def _default_creator() -> str:
-    """填写人默认值：配置门面的 newlog_target_name"""
+    """填写人默认值：从配置门面读 newlog_target_name。
+
+    配置读取包在 try 里，因为表单构建早期就会调用本函数，此时设置模块
+    可能尚未完成初始化；失败时退回空串，表单仍能正常显示。
+    """
     try:
         from core import app_settings
         return str(app_settings.get("newlog_target_name", "") or "")
@@ -60,11 +73,11 @@ def _default_creator() -> str:
 
 # ==================== Fluent 统一下拉框样式 ====================
 
-# 注：FluentCombo 及 _COMBO_QSS_TMPL/_EDIT_LINEEDIT_QSS_TMPL 已于 2026-08-24
-# 需求13 删除——全部下拉已换 qfluentwidgets ComboBox/EditableComboBox，
-# 原生 QComboBox 样式不再需要。下方保留桌号候选列表样式（仍在用）。
+# FluentCombo 与配套的 _COMBO_QSS_TMPL/_EDIT_LINEEDIT_QSS_TMPL 已删除：
+# 下拉框已全部换成 qfluentwidgets ComboBox/EditableComboBox，下方只留候选列表样式
 
-# 桌号候选列表 QSS（与下拉框同风格：圆角边框 + 主题背景 + 强调色选中）
+# 桌号候选列表 QSS：与下拉框同风格。用占位符而非固定色值，深浅主题切换时
+# 由 _style_cand_list 重新注入，避免维护两套完整样式表
 _CAND_LIST_QSS_TMPL = """
 QListWidget {{
     background-color: {popup_bg};
@@ -100,7 +113,11 @@ def _accent_hex() -> str:
 
 
 def _style_cand_list(widget):
-    """给桌号候选列表应用主题自适应 QSS（与下拉框同风格）"""
+    """给桌号候选列表应用当前主题的 QSS。
+
+    颜色在调用时现取：qfluentwidgets 的强调色可被用户随时修改，缓存
+    样式表会让候选列表停留在旧强调色上。
+    """
     accent = _accent_hex()
     if isDarkTheme():
         c = dict(popup_bg="#2f2f2f", border="#484848", text="#e8eaed",
@@ -116,7 +133,11 @@ def _style_cand_list(widget):
 
 
 def _hex_rgba(hex_color: str, alpha: int) -> str:
-    """#rrggbb → rgba()（QSS 徽章/确认条底色用，半透明底深浅主题均清晰）"""
+    """#rrggbb 转 rgba()，供徽章与确认条的半透明底色使用。
+
+    只接受 6 位十六进制，不支持简写：调用方都传 SEMANTIC 令牌，格式稳定，
+    多写简写分支只会增加没有测试覆盖的路径。
+    """
     h = hex_color.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f"rgba({r}, {g}, {b}, {alpha})"
@@ -125,7 +146,11 @@ def _hex_rgba(hex_color: str, alpha: int) -> str:
 # ==================== 表单分组与自定义 Fluent 组件 ====================
 
 class _SectionCard(CardWidget):
-    """表单分组卡片：左侧强调色竖条 + 分组标题（设计稿三段式布局）"""
+    """表单分组卡片：左侧强调色竖条 + 分组标题，对应设计稿的三段式分组。
+
+    竖条是区分字段分组的唯一视觉线索，强调色变化时必须跟着重绘；监听
+    themeColorChanged 而不是在 paintEvent 里现算，避免每次重绘都读全局配置。
+    """
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -165,6 +190,8 @@ class YesNoSegment(SegmentedWidget):
 
     def __init__(self, default=_DEFAULT, parent=None, include_all=False):
         super().__init__(parent)
+        # 「全部」段的 routeKey 用空串，与 value() 的空串约定一致；
+        # 顺序固定为 全部/否/是，避免同一控件在不同页面里顺序漂移
         self._include_all = include_all
         if include_all:
             self.addItem("", "全部")
@@ -218,16 +245,19 @@ def _field_label(text, required=False, parent=None) -> QLabel:
 
 
 def _inline_error(text, parent=None) -> QLabel:
-    """字段级内联错误提示（默认隐藏，校验失败时显示）"""
+    """字段级内联错误提示：创建即隐藏，由表单在校验失败时显示。
+
+    用独立 QLabel 而不是改字段样式，错误文案不会把输入框撑高，用户修正后
+    也无需额外恢复边框。
+    """
     lb = QLabel(text, parent)
     lb.setStyleSheet(
         "font-size: 11px; color: #cf4452; background: transparent;")
     lb.setVisible(False)
     return lb
 
-# 表格展示列（信息整合版：球房+地区+桌号合入「位置」，填写人并入填写时间，
-# 解决人并入响应时间；发生原因/解决方案/三个是否判定直接成列，
-# 完整信息仍保留在行 tooltip）。第 0 列为勾选框（多选/批量操作），不在本定义内。
+# 表格展示列（信息整合版：位置列合并球房+地区+桌号，填写人并入填写时间，
+# 解决人并入响应时间；完整信息仍保留在行 tooltip，第 0 列为勾选列）
 TABLE_COLUMNS = (
     ("created_at", "填写时间", 128),
     ("occurred_at", "发生时间", 128),
@@ -256,7 +286,11 @@ _YES_NO_COLORS = {
 # ---------- 表格行内控件工厂（徽章 / 小按钮） ----------
 
 def _badge_label(text: str, color: str, parent=None) -> QLabel:
-    """状态徽章：圆角胶囊 + 语义色文字 + 同色半透明底"""
+    """状态徽章：圆角胶囊、语义色文字、同色半透明底。
+
+    底色用文字色的低透明度版本，深浅主题下都能保持对比度；写死浅色底
+    会在深色主题里发白，反而盖住文字。
+    """
     lb = QLabel(text, parent)
     lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lb.setFixedHeight(20)
@@ -310,7 +344,11 @@ def _prebuild_btn_css() -> dict:
 
 def _row_btn(text: str, style: str, on_click, parent=None,
              css: str | None = None) -> _QPushButton:
-    """行内操作按钮（css 可传入预构建样式，批量填充时避免重复计算）"""
+    """行内操作按钮；css 可传入预构建样式，批量填充时免去重复计算。
+
+    clicked 会带一个 checked 布尔值，lambda 用下划线参数接住丢弃，确保
+    回调始终按无参签名调用，不用为每个按钮写适配函数。
+    """
     btn = _QPushButton(text, parent)
     btn.setFixedHeight(24)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -319,7 +357,8 @@ def _row_btn(text: str, style: str, on_click, parent=None,
     return btn
 
 
-# 导入预览列定义（与导出表头对齐 + 系统附加列）
+# 导入预览列定义：前几列与导出的 Excel 表头一致，末尾附加系统字段。
+# 必须与导出表头保持同一顺序，否则用户拿导出文件回导时列会错位
 _PREVIEW_COLUMNS = (
     ("issue_type", "类型"), ("room_name", "球房"), ("table_no", "桌号"),
     ("region", "地区"), ("problem", "问题"), ("cause", "发生原因"),

@@ -4,6 +4,9 @@
 原实现依赖 loguru，收编后统一改用标准 logging（模块级 logger 名为
 "SingleShotVideo"，由 SingleVideoWorker 挂临时 Handler 逐行转发到 GUI），
 资源文件（字体/头像/底图/logo）从 autowork 的 resource/ 目录读取。
+
+渲染结果只取决于任务 json 与 resource 里的素材，服务类不持有跨任务状态：
+同一实例可以连续处理多个文件夹，出问题也能单独重跑某个 json。
 """
 import os
 import gc
@@ -75,19 +78,29 @@ class SingleShotVideoServer:
     """单杆视频渲染器：按 json 任务把比分条/头像/logo 逐帧叠加到原始视频上"""
 
     def __init__(self, source_dir, single_video_path, processed_dir, abnormal_dir):
+        """四个目录由调用方创建并保证可写；本类只拼接路径，不做 mkdir 校验。
+
+        目录缺失时会在写视频阶段才报错，因此启动前必须由 GUI 侧确认路径有效。
+        """
         self.source_dir = source_dir  # 监控目录
         self.processed_dir = processed_dir  # 已处理目录
         self.abnormal_dir = abnormal_dir  # 异常目录
         self.single_video_path = single_video_path  # 单杆路径
 
     def move_to_processed(self, file_path, type):
-        """把已处理文件移到 processed_dir，同名自动加 _1/_2 后缀"""
+        """把已处理文件移到 processed_dir，同名自动加 _1/_2 后缀
+
+        type 不为 1 时整个函数什么都不做：这是历史契约，调用方靠它区分
+        「渲染成功的成品」与「其它中间产物」，合并分支会误移未完成的文件。
+        """
         try:
             if type == 1:
                 # 目标路径已存在时自动添加 `_1`, `_2` 后缀
                 base_name = os.path.basename(file_path)
                 counter = 1
                 new_dst_path = os.path.join(self.processed_dir, base_name)
+                # 自增后缀而不是 uuid：processed 目录要能被人直接翻看，
+                # 文件名可追溯比避免碰撞更重要；同名文件数量有限，循环开销可忽略
                 while os.path.exists(new_dst_path):
                     logger.info("{}文件夹已存在".format(new_dst_path))
                     new_dst_path = os.path.join(
@@ -113,7 +126,11 @@ class SingleShotVideoServer:
                     cfg = json.load(fp)
                 # 注意：文件关闭后再删除，Windows 不允许删除仍被打开的文件
                 result = self.single_shot_video(cfg)
+                # 只在渲染成功后删 json：失败时保留任务文件，用户改完素材可直接重跑；
+                # 何况下面 logger 里还要用 result 之外的上下文，删早了无从排查
                 os.remove(json_path)
+            # 单个 json 解析失败只记日志并继续：一个坏文件不该让整个文件夹停产，
+            # 坏 json 会留在原地，人工修好后重跑即可
             except json.JSONDecodeError as e:
                 logger.error(f"JSON 解析失败: {e}")
             except FileNotFoundError:
@@ -122,7 +139,11 @@ class SingleShotVideoServer:
 
     def monitor_directory(self, target_folder=None):
         """单次处理模式：只制作目标文件夹（缺省扫 source_dir 下含 json 的
-        二级子目录，兼容 日期/代码 两级结构），处理完即退出不轮询"""
+        二级子目录，兼容 日期/代码 两级结构），处理完即退出不轮询
+
+        固定扫两级而不是递归：source_dir 下按「日期/代码」组织，再深一层
+        只可能是素材，递归进去只会白扫大量文件。
+        """
         if target_folder is not None:
             # 只制作指定文件夹
             self.process_folder(target_folder)
@@ -143,6 +164,8 @@ class SingleShotVideoServer:
         """加载头像/logo：http 地址下载解码，失败回退内置头像；
         本地路径不存在且非绝对路径时先试 resource 目录，避免 imread 盲读告警"""
         import requests
+        # 局部 import：requests 只在有 http 头像时用得上，本模块在打包环境里
+        # 被导入的路径很浅，少一个模块级重依赖就少一次启动耗时
         if image_url[:4] == "http":
             response = requests.get(image_url)
 
@@ -151,6 +174,8 @@ class SingleShotVideoServer:
                 img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
                 return img
             else:
+                # 非 200 不是致命错误：视频里缺一个头像仍可产出，
+                # 回退内置头像比整单失败对用户更划算
                 logger.error("无法从 URL 加载图像")
                 avatar = None
                 if user == 0:
@@ -176,7 +201,11 @@ class SingleShotVideoServer:
             return avatar
 
     def single_shot_video(self, task):
-        """按单个 json 任务渲染视频：每段 scores 区间叠比分条，返回是否成功"""
+        """按单个 json 任务渲染视频：每段 scores 区间叠比分条，返回是否成功
+
+        返回 False 时任务 json 会保留（见 process_folder），调用方据此提示重跑；
+        函数内部所有异常都收敛成 False，不让 worker 线程因单条任务崩掉。
+        """
         import os
         try:
             frame_count = 0
@@ -187,6 +216,8 @@ class SingleShotVideoServer:
             # 逐段视频：末尾补一条 +25 帧的同分记录，让最后一段比分条渲染到片段结束
             # 与下方 start_frame - 25 配对，首尾各延伸一截，
             # 否则尾段区间覆盖不完整，比分条会在片段结束前消失
+            # 这里直接改传入的 task["scores"]，不做深拷贝：同一 task 只渲染一次，
+            # 拷贝反而要在「改副本」与「后续用原值」两处保持同步，容易漏
             for video in videos:
                 scores = video["scores"]
                 if scores:
@@ -197,6 +228,8 @@ class SingleShotVideoServer:
 
             # 读取视频
             cap = cv2.VideoCapture(file_name)
+            # 路径含中文/空格时 OpenCV 在 Windows 上可能打不开，这里只报错不重试：
+            # 调用方会在制作前把源视频拷到纯英文临时路径
             if not cap.isOpened():
                 logger.error("无法打开视频文件")
                 return False
@@ -232,6 +265,8 @@ class SingleShotVideoServer:
                 # 获取视频的宽、高和帧率
                 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                # 取整是有损的：29.97fps 的源会按 29 写，成片比原片慢约 3%；
+                # 这是既有行为，改成浮点会让历史成片的时长口径不一致
                 fps = int(cap.get(cv2.CAP_PROP_FPS))
 
                 # 调整头像大小
@@ -247,7 +282,11 @@ class SingleShotVideoServer:
                 right_y_offset = 0
 
                 # 创建视频输出对象
+                # mp4v 是 OpenCV 内置就能编的容器，不依赖系统 ffmpeg；换成 H.264
+                # 会在没装编码器的机器上静默写出 0 字节文件
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 编码格式
+                # 目录按 session_code 前缀分两级，与既有产出目录结构保持一致；
+                # 切片口径（前 10 位 / 去尾 2 位）由命名规则决定，改动会打散历史归档
                 output_dir = os.path.join(
                     self.single_video_path, task["session_code"][:10], task["session_code"][:-2])
                 if not os.path.exists(output_dir):
@@ -293,6 +332,8 @@ class SingleShotVideoServer:
                         draw_.text((164 + 190, -1), str(current_score['score_0']), font=font_1, fill=(46, 107, 229))  # 甲得分
 
                     # 「单杆N分」拆成 中文/数字/单位 三段分别上色，数字位数决定偏移
+                    # 拆成 中文/数字/单位 三段是为了分别上色；正则依赖文案固定为
+                    # 「单杆N分」的顺序，改文案模板必须同步改这里的三段取值
                     result = re.findall(r'[\u4e00-\u9fa5]+|\d+|\w+', text)
                     if item['player'] == 0:
                         draw_.text((5, -1), result[0], font=font_1, fill="#1f4ca3")  # 蓝色--'单杆'
@@ -314,7 +355,8 @@ class SingleShotVideoServer:
                         else:
                             draw_.text((935, -1), result[2], font=font_1, fill="#1f4ca3")
 
-                    # 本杆得分（小字号，位置同样按位数微调）
+                    # 本杆得分（小字号，位置同样按位数微调）：两位/三位数的重心不同，
+                    # 固定 x 会让数字偏出槽位，故按 score_length 分档
                     if item['player'] == 1:
                         draw_.text((461 + 180, 3), str(item['scores'][index]['score']), font=font_0, fill="#f50d19")
                     else:
@@ -358,7 +400,9 @@ class SingleShotVideoServer:
                         if value['frame_id'] < frame_count <= (
                                 item['end_frame'] if index + 1 == len(item['scores']) else item['scores'][index + 1][
                                     'frame_id']):
-                            # 帧转 PIL 再转回（历史保留路径，保持与模板渲染管线一致）
+                            # 帧转 PIL 再转回（历史保留路径，保持与模板渲染管线一致）；
+                            # 这一步实际是恒等变换，但删掉会改变 BGR/RGB 往返的舍入，
+                            # 让成片与已交付批次出现肉眼可见的色差
                             pil_image = Image.fromarray(
                                 cv2.cvtColor(frame_with_text, cv2.COLOR_BGR2RGB))
                             frame_with_text = cv2.cvtColor(

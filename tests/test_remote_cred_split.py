@@ -32,6 +32,9 @@ from core import app_settings as fas
 from core.secrets import SENSITIVE_KEYS
 from core.visitor_probe import VisitorProber
 import windows.remote_session.remote_hub as rh
+# B2 起 core 不再 import windows：_do_open 通过注入的 UI 工厂构造面板，
+# 面板模块仍由各用例在 sys.modules 层换成替身（工厂方法的延迟 import 命中替身）
+from windows.remote_session.session_ui import install as _install_session_ui
 
 _RECORDS = [
     {"serverName": "snk_11601", "bindPort": 14687, "tableId": "116-01",
@@ -178,6 +181,7 @@ def mgr(monkeypatch, tmp_path):
                         lambda: {"ssh_user": "newbv", "ssh_pass": "devpw",
                                  "videos_dir": ""})
     m = fr.RemoteSessionManager()
+    _install_session_ui(m)   # 不注入的话 _do_open 只会弹「会话 UI 未安装」
     m.log_message.connect(lambda _msg: None)
     m._panels = []
     # add_session 替身与真实容器签名对齐（P0-4 起带 icon 关键字参数）

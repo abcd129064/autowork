@@ -48,6 +48,11 @@ class MysqlSyncCard(CardWidget):
     # ---------- UI ----------
 
     def _init_ui(self):
+        """搭卡片：标题/范围说明、启用开关、连接表单、测试与保存按钮。
+
+        三种 sync_scope 只在文案上不同，连接配置共用一套，避免同一份
+        凭据在多个卡片里各存一份而互相覆盖。
+        """
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(8)
@@ -111,7 +116,11 @@ class MysqlSyncCard(CardWidget):
     # ---------- 配置读写 ----------
 
     def load(self):
-        """从配置门面加载当前配置填充表单（进入页面/保存后调用）"""
+        """把配置写进表单，进入页面和保存后都会调用。
+
+        缺键时回落到默认值，避免空输入框把默认端口/库名盖掉。
+        """
+        # 每项都兜底默认值：配置缺键时表单不能显示成空字符串
         cfg = _load_settings().get("mysql_sync", {})
         self._edit_host.setText(str(cfg.get("host", "")))
         self._edit_port.setText(str(cfg.get("port", 3306)))
@@ -121,7 +130,10 @@ class MysqlSyncCard(CardWidget):
         self._switch_enabled.setChecked(bool(cfg.get("enabled", False)))
 
     def _collect_cfg(self, enabled: bool = None) -> dict:
-        """收集表单配置为 dict（端口非法时兜底 3306）"""
+        """把表单值收成配置字典，端口非法时回落 3306。
+
+        页面允许留空端口，这里统一兜底，保存与测试连接共用同一份结果。
+        """
         try:
             port = int(self._edit_port.text().strip() or 3306)
         except ValueError:
@@ -163,7 +175,10 @@ class MysqlSyncCard(CardWidget):
     # ---------- 测试连接 ----------
 
     def _on_test(self):
-        """用当前表单配置异步测试连接（进行中不重复发起）"""
+        """用当前表单配置异步测试连接，进行中不重复发起。
+
+        测试走后台线程，避免网络超时把 UI 卡住；按钮在回调里恢复。
+        """
         if self._test_worker and self._test_worker.isRunning():
             show_info_bar("已有测试进行中，请稍候", "warning",
                           title="提示", parent=self, duration=2000)
@@ -183,6 +198,10 @@ class MysqlSyncCard(CardWidget):
         self._test_worker.start()
 
     def _on_test_done(self, ok, msg):
+        """测试回调：恢复按钮，并按结果弹成功或失败提示。
+
+        失败文案原样透出，方便区分认证错误、端口不通与库不存在。
+        """
         self._btn_test.setEnabled(True)
         if ok:
             show_info_bar(msg, "success", title="MySQL 连接成功",

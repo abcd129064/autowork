@@ -7,6 +7,11 @@ TestPage 内含两个页签：
 
 布局说明：每个控件条目（_ControlItem）采用「控件在上、名称标签在下」的垂直布局，
 宽度自适应内容，避免控件与标签横向挤压重叠；名称过长时中间省略 + tooltip 全名。
+
+本页只做开发期的组件对照，不参与业务链路：控件一律用演示数据，点击行为
+只弹提示，不要把这里的写法当成可复用的业务组件来源。整页延迟到首次
+showEvent 才构建，因为图标墙一次要实例化上百张卡片、控件墙再来两百个控件，
+构建耗时以百毫秒计，跟着主窗口启动一起建会明显拖慢启动。
 """
 
 import logging
@@ -61,15 +66,28 @@ _ICON_W, _ICON_H = 104, 88
 
 
 def _elided(text: str, avail: int) -> str:
-    """按可用宽度对文本做中间省略，避免标签撑破固定宽的控件条目"""
+    """按可用宽度把名称截成中间省略的形式，避免标签撑破固定宽的卡片。
+
+    卡片宽度是写死的，而枚举名长短差异很大；不省略的话 QLabel 会把卡片
+    撑开、FlowLayout 跟着重排，整墙图标就会错位。
+    """
     fm = QFontMetrics(QApplication.font())
     return fm.elidedText(text, Qt.TextElideMode.ElideMiddle, avail)
 
 
 class _IconCard(CardWidget):
-    """单个图标卡片：图标 + 枚举名，点击复制 ``FluentIcon.XXX`` 到剪贴板"""
+    """单个图标卡片：图标 + 枚举名，整卡可点，点击把 ``FluentIcon.XXX`` 写进剪贴板。
+
+    复制的是源码里能直接粘的枚举引用而不是 unicode 码点，因为本页的用途
+    就是让人找到图标后立刻写代码；给码点还得再查一次怎么写。
+    """
 
     def __init__(self, icon, name: str, parent=None):
+        """建卡：固定尺寸 + 手型光标，按钮与卡片的提示文案共用一份。
+
+        尺寸必须固定，这是 FlowLayout 排布的前提：若每张卡各按内容
+        sizeHint 走，每行高度参差，图标墙看着像没对齐。
+        """
         super().__init__(parent)
         self._name = name
         self.setFixedSize(_ICON_W, _ICON_H)
@@ -92,21 +110,40 @@ class _IconCard(CardWidget):
         lay.addWidget(self._name_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
 
     def _copy(self):
+        """把 ``FluentIcon.枚举名`` 写进剪贴板，并弹一条短提示。
+
+        提示挂在 self.window() 而不是卡片自己：InfoBar 是窗口级浮层，
+        父级给卡片会被卡片边界裁掉。
+        """
         QApplication.clipboard().setText(f"FluentIcon.{self._name}")
         show_info_bar(f"FluentIcon.{self._name} 已复制", "success",
                       title="复制成功", parent=self.window(), duration=1500)
 
     def mouseReleaseEvent(self, event):
-        """整卡点击复制（ToolButton 上的点击由按钮自己处理）"""
+        """整卡点击也触发复制，按钮区域除外。
+
+        ToolButton 自己接了 clicked，事件在按钮上就被吃掉了，不会冒泡到
+        卡片；卡片空白处没有子控件，必须在这里补一次，否则只有点到图标
+        才复制得动。
+        """
         if event.button() == Qt.MouseButton.LeftButton:
             self._copy()
         super().mouseReleaseEvent(event)
 
 
 class _ControlItem(QWidget):
-    """控件测试条目：控件居中在上 + 名称标签居中在下（垂直布局，宽度自适应防重叠）"""
+    """控件测试条目：控件居中在上、名称标签居中在下，宽度按控件自适应。
+
+    不用「控件在左、标签在右」的横排，是因为下拉框、表格这类控件本身就宽，
+    横排时标签只能分到几十像素，中文名直接被截成省略号，等于没标注。
+    """
 
     def __init__(self, widget, name: str, parent=None, min_w=128):
+        """按控件首选宽度定条目宽度，min_w 只用来兜住过窄的小控件。
+
+        宽度取 max 而不是直接跟 sizeHint：CompactSpinBox 之类的 sizeHint
+        只有几十像素，跟着它走会让相邻条目挤在一起、标签互相压字。
+        """
         super().__init__(parent)
         # 宽度 = max(最小宽, 控件首选宽) + 边距，保证再宽的控件也不挤压标签
         hint = widget.sizeHint().width()
@@ -131,9 +168,18 @@ class _ControlItem(QWidget):
 
 
 class _IconGalleryTab(QWidget):
-    """页签1：FluentIcon 全量图标墙（搜索过滤 + 点击复制枚举名）"""
+    """页签一：FluentIcon 全量图标墙，可按名称过滤、点击复制枚举名。
+
+    卡片一次全建好，过滤时只切可见性。按关键词重建卡片看着更省内存，
+    但每敲一个字都要销毁再建上百个 QWidget，输入法连打时会明显卡顿。
+    """
 
     def __init__(self, parent=None):
+        """建图标墙：一个滚动区加 FlowLayout，按 FluentIcon 成员全量铺卡。
+
+        needAni=False 关掉布局位移动画，上百张卡片同时入场会逐帧重排，
+        首次切到本页能卡住半秒；isTight=True 让间距只由 spacing 决定。
+        """
         super().__init__(parent)
         self._cards = []  # [(卡片, 枚举名)]
 
@@ -173,6 +219,10 @@ class _IconGalleryTab(QWidget):
         self._update_count(None)
 
     def _update_count(self, matched):
+        """刷新左上角计数文案；matched 为 None 表示还没过滤，显示总数。
+
+        两种状态共用一处文案，避免格式各写一遍后数字口径对不上。
+        """
         total = len(self._cards)
         if matched is None:
             self._count_lbl.setText(f"共 {total} 个图标，点击卡片复制枚举名")
@@ -180,6 +230,11 @@ class _IconGalleryTab(QWidget):
             self._count_lbl.setText(f"匹配 {matched} / {total} 个图标，点击卡片复制枚举名")
 
     def _filter(self, text: str):
+        """按关键词切换卡片可见性，并刷新计数。
+
+        末尾必须调 invalidate()：FlowLayout 只在条目增删时自动重排，
+        单纯 setVisible 不会回收空出来的行，过滤后会留下大片空白。
+        """
         kw = text.strip().lower()
         matched = 0
         for card, name in self._cards:
@@ -190,11 +245,17 @@ class _IconGalleryTab(QWidget):
         self._update_count(matched)
 
 
-# 顶层示例窗口的强引用列表，避免弹出后被垃圾回收
+# 顶层示例窗口的强引用列表。窗口没有父级，唯一引用若只存在局部变量里，
+# 函数一返回就被垃圾回收，表现为窗口一闪而过。
 _DEMO_WINDOWS = []
 
 
 def _safe_remove(lst, obj):
+    """从强引用表里摘掉已销毁的窗口，重复摘或对象已死都不报错。
+
+    destroyed 信号与手动清理可能各来一次；对象被 C++ 侧销毁后再做成员
+    比较会抛 RuntimeError，所以两种异常都直接吞掉——清理失败没有补救动作。
+    """
     try:
         if obj in lst:
             lst.remove(obj)
@@ -203,7 +264,11 @@ def _safe_remove(lst, obj):
 
 
 class _DemoFluentWindow(FluentWindow):
-    """FluentWindow 示例：三个子接口页面的普通窗口"""
+    """FluentWindow 示例：三个子接口页面的普通窗口。
+
+    子页面必须带全局唯一的 objectName，导航栏靠它找回页面；重名时
+    addSubInterface 会直接抛异常。
+    """
 
     def __init__(self):
         super().__init__()
@@ -220,7 +285,11 @@ class _DemoFluentWindow(FluentWindow):
 
 
 class _DemoSplitWindow(SplitFluentWindow):
-    """SplitFluentWindow 示例：左右两个导航栏的分栏窗口"""
+    """SplitFluentWindow 示例：左右两栏各有导航区的分栏窗口。
+
+    两栏共用一套窗口框架，适合「主功能 + 设置/辅助」这种强分区场景；
+    这里只用两个空页面证明分栏结构，不模拟业务内容。
+    """
 
     def __init__(self):
         super().__init__()
@@ -235,9 +304,18 @@ class _DemoSplitWindow(SplitFluentWindow):
 
 
 class _SettingsDemoDialog(QDialog):
-    """SettingCard 示例弹窗：一组设置卡片，演示常用设置项的交互"""
+    """SettingCard 示例弹窗：把常用设置卡片摆成一列，可直接交互。
+
+    卡片绑的全是临时 ConfigItem，改完只动本进程内存、不会落盘：本页是
+    演示用途，真实配置项归 settings 模块，不能被测试页顺手改掉。
+    """
 
     def __init__(self, parent=None):
+        """建弹窗：临时配置项加七种设置卡片，整体放进可滚动分组。
+
+        用 SettingCardGroup 而不是裸 QVBoxLayout，是因为卡片自带圆角与
+        相邻卡片贴边处理，手摆间距会露出接缝。
+        """
         super().__init__(parent)
         self.setWindowTitle("SettingCard 示例")
         self.resize(520, 580)
@@ -275,10 +353,18 @@ class _SettingsDemoDialog(QDialog):
 
 
 class _MediaPlayerDialog(QDialog):
-    """多媒体播放器示例：基于 OpenCV 逐帧渲染 + QTimer。
+    """多媒体播放器示例：OpenCV 逐帧解码，QTimer 按帧率推进，画到 QLabel。
+
+    qfluentwidgets 新版移除了 VideoWidget/MediaPlayBar，没有现成播放控件可用，
+    这里用最小组件拼一个演示，证明解码、渲染、进度条这三段能串起来。
     """
 
     def __init__(self, parent=None):
+        """建播放器：延迟导入 cv2/numpy，然后直接进演示动画。
+
+        cv2 导入要几百毫秒，放模块顶层会拖慢整个组件测试页的构建；
+        进页面就能自己转起来，用户不必先准备视频文件看效果。
+        """
         super().__init__(parent)
         self.setWindowTitle("多媒体播放器示例")
         self.resize(680, 500)
@@ -303,6 +389,11 @@ class _MediaPlayerDialog(QDialog):
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
+        """搭界面：标题、画面区、控制条三段，画面区用黑底 QLabel 当画布。
+
+        QLabel.setPixmap 而不是 QGraphicsView：逐帧只是换一张图，
+        走图形视图会多一层场景坐标系换算，纯属浪费。
+        """
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
@@ -350,6 +441,11 @@ class _MediaPlayerDialog(QDialog):
 
     @staticmethod
     def _stop_icon():
+        """按候选名找一个存在的「停止」图标，都找不到就退回播放图标。
+
+        FluentIcon 的成员会随版本改名，写死单个名字会在升级后抛
+        AttributeError；逐个探测的代价只是图标不贴切，不至于崩。
+        """
         for name in ("CANCEL", "STOP", "DELETE", "REMOVE"):
             if hasattr(FluentIcon, name):
                 return getattr(FluentIcon, name).qicon()
@@ -357,7 +453,11 @@ class _MediaPlayerDialog(QDialog):
 
     # ------------------------------------------------------------------ 源
     def _use_demo(self):
-        """切换到内置演示动画（无需媒体文件）"""
+        """切到内置演示动画，不依赖任何媒体文件也能看到画面在动。
+
+        它与真文件走同一条 _next_frame 通道，只是帧由 _gen_demo_frame 现场画，
+        所以播放、暂停、停止不必为演示模式再写一套。
+        """
         if self._cap is not None:
             self._cap.release()
             self._cap = None
@@ -372,6 +472,11 @@ class _MediaPlayerDialog(QDialog):
         self._update_play_icon()
 
     def _open_file(self):
+        """选一个本地视频打开；打不开时提示方向是缺解码器。
+
+        OpenCV 支持哪些格式取决于打包进来的 ffmpeg，isOpened() 为假
+        多数是解码器缺失而不是路径错，提示要给到这个方向。
+        """
         path, _ = QFileDialog.getOpenFileName(
             self, "选择视频文件", "",
             "视频 (*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.ts)")
@@ -400,12 +505,21 @@ class _MediaPlayerDialog(QDialog):
 
     # ------------------------------------------------------------------ 播放
     def _toggle_play(self):
+        """播放/暂停切换：暂停只停定时器，不解码也不释放 VideoCapture。
+
+        暂停后再播要能从原帧接上，重新 open 会跳回片头；定时器停掉后
+        不再读帧，CPU 占用立刻归零。
+        """
         self._playing = not self._playing
         if self._playing and not self._timer.isActive():
             self._timer.start(int(1000 / self._fps))
         self._update_play_icon()
 
     def _stop(self):
+        """停止并把进度拉回起点，供下次从头播放。
+
+        只 seek 不 release：用户常常停一下接着看，留着句柄省一次打开开销。
+        """
         self._playing = False
         if self._cap is not None:
             self._cap.set(self._cv.CAP_PROP_POS_FRAMES, 0)
@@ -416,6 +530,10 @@ class _MediaPlayerDialog(QDialog):
         self._update_play_icon()
 
     def _next_frame(self):
+        """定时器每跳一次取一帧刷新画面，读到文件末尾就回卷实现循环。
+
+        演示模式下没有文件可读，改为现场画一帧，其余流程与真视频一致。
+        """
         if not self._playing:
             return
         cv = self._cv
@@ -440,11 +558,17 @@ class _MediaPlayerDialog(QDialog):
         self._update_time()
 
     def _gen_demo_frame(self):
+        """画一帧演示画面：深色底、横向移动的色块、帧号文字。
+
+        用 cv2 自带 Hershey 字体是因为它不依赖系统字体文件，代价是不支持
+        中文，中文会画成一串问号，所以文字只用英文。
+        """
         cv, np = self._cv, self._np
         W, H = 640, 360
         t = self._frame_count
         frame = np.zeros((H, W, 3), dtype=np.uint8)
         frame[:] = (18, 26, 34)
+        # 色块从画面左侧外(-70)滑到右侧外，取模让它无限循环，看着像在滚动
         x = int((t * 6) % (W + 140)) - 70
         cv.rectangle(frame, (x, H // 2 - 40), (x + 80, H // 2 + 40), (66, 159, 0), -1)
         cv.rectangle(frame, (10, 10), (W - 10, 46), (40, 50, 60), -1)
@@ -454,6 +578,11 @@ class _MediaPlayerDialog(QDialog):
         return frame
 
     def _show_frame(self, frame):
+        """把 BGR 帧转成 RGB 再贴到画面区。
+
+        QImage 是直接包住 numpy 缓冲区的，缓冲区被回收后图像就成了野指针内容，
+        所以必须 copy() 出一份独立像素再交给 QPixmap。
+        """
         rgb = self._cv.cvtColor(frame, self._cv.COLOR_BGR2RGB)
         h, w, _ = rgb.shape
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
@@ -461,6 +590,10 @@ class _MediaPlayerDialog(QDialog):
 
     # ------------------------------------------------------------------ 控制
     def _update_play_icon(self):
+        """按播放状态切换按钮图标，图标缺失时退回播放图标。
+
+        旧版本没有 PAUSE 成员，直接取会在切换瞬间抛 AttributeError。
+        """
         try:
             icon = FluentIcon.PAUSE.qicon() if self._playing else FluentIcon.PLAY.qicon()
         except AttributeError:
@@ -468,6 +601,11 @@ class _MediaPlayerDialog(QDialog):
         self._play_btn.setIcon(icon)
 
     def _update_time(self):
+        """刷新「当前/总时长」标签；演示模式没有总长，就用当前值顶替。
+
+        总时长按 slider 上限除以帧率换算，而不是读容器里的时长属性：
+        后者在部分封装格式上返回 0，换算反而更稳。
+        """
         fps = self._fps if self._fps > 0 else 25.0
         cur = int(self._frame_count / fps)
         if self._cap is None:
@@ -477,9 +615,18 @@ class _MediaPlayerDialog(QDialog):
         self._time_lbl.setText(f"{cur // 60:02d}:{cur % 60:02d} / {total // 60:02d}:{total % 60:02d}")
 
     def _on_slider_press(self):
+        """按住滑块时置同步标志，暂停把帧号回写滑块。
+
+        不回写是为了让拖动跟手：定时器仍在推进帧号，边拖边改滑块值
+        会把滑块弹回当前播放位置。
+        """
         self._syncing = True
 
     def _on_slider_release(self):
+        """松开滑块：以滑块位置为准 seek，并把帧号对齐过去。
+
+        演示模式没有 VideoCapture，只改帧号就能让动画从新位置继续。
+        """
         self._syncing = False
         pos = self._slider.value()
         if self._cap is not None:
@@ -487,6 +634,11 @@ class _MediaPlayerDialog(QDialog):
         self._frame_count = pos
 
     def closeEvent(self, event):
+        """关窗前释放解码器并停掉定时器。
+
+        VideoCapture 持有文件句柄，不释放的话视频会被本进程锁住，
+        用户想在资源管理器里删掉会提示占用。
+        """
         if self._cap is not None:
             self._cap.release()
         self._timer.stop()
@@ -494,9 +646,18 @@ class _MediaPlayerDialog(QDialog):
 
 
 class _DemoMessageBox(MessageBoxBase):
-    """MessageBoxBase 基类示例：自定义内容的消息框"""
+    """MessageBoxBase 基类示例：自定义标题与正文的消息框。
+
+    基类只提供按钮与遮罩，内容全由子类往 viewLayout 里塞，
+    所以连标题都要自己加。
+    """
 
     def __init__(self, parent=None):
+        """建消息框：往 viewLayout 塞标题与正文，再把按钮改成中文。
+
+        widget 要设最小宽：内容只有两行文字时默认宽度会把按钮挤成两行，
+        看起来像渲染错误。
+        """
         super().__init__(parent)
         self.titleLabel = SubtitleLabel("MessageBoxBase 示例", self)
         self.contentLabel = BodyLabel(
@@ -509,13 +670,26 @@ class _DemoMessageBox(MessageBoxBase):
 
 
 class _WidgetGalleryTab(QWidget):
-    """页签2：QFluentWidgets 常用控件分组展示（可直接交互）"""
+    """页签二：QFluentWidgets 常用控件按类别分组陈列，每个都能直接操作。
+
+    分组按「按钮、输入、展示、反馈、容器、导航、时间、窗口、菜单、提示、
+    对话框、布局、多媒体」由常用到冷门排列，找控件的人通常只看前几组。
+    """
 
     def __init__(self, parent=None):
+        """初始化后立刻构建控件墙。
+
+        控件墙内容与页签切换无关，一次建好常驻，比每次切页重建更省。
+        """
         super().__init__(parent)
         self._init_ui()
 
     def _init_ui(self):
+        """搭控件墙：整页一个平滑滚动区，里面按组挂「标题 + 流式布局」卡片。
+
+        每组独立一张 CardWidget，视觉上把类别切开；条目走流式布局而不是
+        网格，窗口变窄时自动换行，不会挤出横向滚动条。
+        """
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
@@ -547,7 +721,11 @@ class _WidgetGalleryTab(QWidget):
         v.addStretch(1)
 
     def _group_card(self, title, fill_fn, parent):
-        """分组卡片：SubtitleLabel 标题 + FlowLayout 条目流；用 fill_fn 填充"""
+        """造一张分组卡片：标题加流式布局，条目由 fill_fn 现场填充。
+
+        用回调而不是先建条目再传列表：条目的父控件必须是本卡片，
+        回调里能拿到 card 当场构造，省掉一次归属修正。
+        """
         card = CardWidget(parent)
         box = QVBoxLayout(card)
         box.setContentsMargins(16, 12, 16, 12)
@@ -562,13 +740,22 @@ class _WidgetGalleryTab(QWidget):
     # ------------------------------ 按钮组 ------------------------------
     @staticmethod
     def _demo_menu(parent):
+        """造一个两项的演示菜单，供下拉、拆分等按钮共用。
+
+        每次新建而不是共享同一个实例：菜单被 setMenu 后归属那个按钮，
+        共享会让后一个按钮把它从先前的按钮上抢走。
+        """
         menu = RoundMenu(parent=parent)
         menu.addAction(Action(FluentIcon.COPY, "复制"))
         menu.addAction(Action(FluentIcon.CUT, "剪切"))
         return menu
 
     def _fill_buttons(self, flow, card):
-        """标准/工具/透明/切换/下拉/拆分/胶囊/链接/命令按钮"""
+        """按钮组：标准、工具、透明、切换、下拉、拆分、胶囊、链接、命令。
+
+        分组按交互形态而不是类名首字母，找「能切换状态的按钮」时
+        不必把全部名字读完。
+        """
         add = flow.addWidget
         add(_ControlItem(PushButton("普通按钮", card), "PushButton", card))
         add(_ControlItem(PrimaryPushButton("主要按钮", card), "PrimaryPushButton", card))
@@ -636,7 +823,11 @@ class _WidgetGalleryTab(QWidget):
 
     @staticmethod
     def _icon_btn(cls, icon, parent, w=36, checked=False):
-        """构造等尺寸图标按钮（工具/切换类共用）"""
+        """造一个边长固定的图标按钮，工具类与切换类共用。
+
+        尺寸在这里统一：工具按钮默认按图标自适应，不同图标内边距不同，
+        混排时高矮不齐，看着像排版错位。
+        """
         b = cls(icon, parent)
         b.setFixedSize(w, w)
         if checked:
@@ -645,6 +836,11 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 输入组 ------------------------------
     def _fill_inputs(self, flow, card):
+        """输入组：单行、搜索、密码、多行、下拉、可编辑下拉、四种数字框。
+
+        输入类都给定固定宽度，宽度不统一时一行只能放下两三个，
+        整组会被拉得很长。
+        """
         add = flow.addWidget
         edit = LineEdit(card)
         edit.setPlaceholderText("输入文本")
@@ -696,6 +892,10 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 显示组 ------------------------------
     def _fill_display(self, flow, card):
+        """展示组：五级文字标签、徽标头像图标、两种进度、两种滑杆。
+
+        文字标签按字号从大到小排，方便一眼比较五档字级差多少。
+        """
         add = flow.addWidget
         # 文本标签系列
         add(_ControlItem(LargeTitleLabel("大标题", card), "LargeTitleLabel", card, 120))
@@ -753,6 +953,11 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 反馈组 ------------------------------
     def _fill_feedback(self, flow, card):
+        """反馈组：四色 InfoBar、三种对话框入口、分段控件、页码指示器。
+
+        InfoBar 的四种颜色由循环生成，类型用默认参数绑进闭包，
+        否则四个按钮都会弹最后一种颜色。
+        """
         add = flow.addWidget
         for text, mtype in (("成功 InfoBar", "success"), ("信息 InfoBar", "info"),
                             ("警告 InfoBar", "warning"), ("错误 InfoBar", "error")):
@@ -786,6 +991,11 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 容器组 ------------------------------
     def _fill_containers(self, flow, card):
+        """容器组：五种卡片、列表树表格、标签栏与标签页、滚动区。
+
+        表格、树、滚动区都限死尺寸：容器类控件没有内容时不占空间，
+        不限高会缩成一条线，看不出是什么。
+        """
         add = flow.addWidget
         # 卡片体系
         # Header/GroupHeader 卡片自带内部布局，用 setTitle 填充而非重建 layout
@@ -864,6 +1074,10 @@ class _WidgetGalleryTab(QWidget):
 
     @staticmethod
     def _mini_card(cls, text, parent):
+        """造一张只放一行文字的迷你卡片，用来展示卡片基类外观。
+
+        三种卡片基类的差别只在边框与阴影，必须给同样的内容和宽度才比得出来。
+        """
         w = cls(parent)
         lay = QHBoxLayout(w)
         lay.setContentsMargins(12, 8, 12, 8)
@@ -873,6 +1087,10 @@ class _WidgetGalleryTab(QWidget):
 
     @staticmethod
     def _mini_scroll(parent):
+        """造一个 150×64 的平滑滚动区，内部塞三行文字当内容。
+
+        高度压到 64 是为了让滚动条一定出现，否则看不出它是滚动控件。
+        """
         from qfluentwidgets import SmoothScrollArea
         sc = SmoothScrollArea(parent)
         inner = QWidget()
@@ -885,6 +1103,10 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 导航组 ------------------------------
     def _fill_navigation(self, flow, card):
+        """导航组：面包屑、三种导航按钮、Pivot、两种分段工具控件。
+
+        Pivot 与分段控件都预置三项，看的是选中态与滑动指示条的手感。
+        """
         add = flow.addWidget
         bread = BreadcrumbBar(card)
         bread.addItem(FluentIcon.HOME, "首页")
@@ -918,6 +1140,11 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 日期组 ------------------------------
     def _fill_datetime(self, flow, card):
+        """日期时间组：三种弹出式选择器，加三种内联编辑框。
+
+        选择器（弹日历/时钟）与编辑框（可直接输入）是两套组件，
+        外观相近但交互完全不同，所以并排摆出来。
+        """
         add = flow.addWidget
         add(_ControlItem(CalendarPicker(card), "CalendarPicker", card, 220))
         add(_ControlItem(DatePicker(card), "DatePicker", card, 200))
@@ -928,6 +1155,11 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 菜单 & 命令组 ------------------------------
     def _fill_menus(self, flow, card):
+        """菜单与命令组：命令条、命令条视图、三种弹出菜单。
+
+        弹出位置统一取按钮左下角的全局坐标，与库内部弹菜单的定位一致，
+        免得菜单盖住按钮本身。
+        """
         add = flow.addWidget
         cb = CommandBar(card)
         cb.addAction(Action(FluentIcon.COPY, "复制"))
@@ -970,6 +1202,10 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 提示 & 弹层组 ------------------------------
     def _fill_tips(self, flow, card):
+        """提示与弹层组：教学提示、弹出教学、飞出面、悬停过滤器。
+
+        这几种都是短暂浮层，点完或到时自动消失，不需要关闭逻辑。
+        """
         add = flow.addWidget
         tt = PushButton("TeachingTip", card)
         tt.clicked.connect(lambda: self._show_teaching_tip(tt))
@@ -990,6 +1226,10 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 对话框组 ------------------------------
     def _fill_dialogs(self, flow, card):
+        """对话框组：通用对话框、取色器、自定义消息框基类。
+
+        三种都走 exec() 模态，弹窗期间主窗口不可操作，与业务里的确认框一致。
+        """
         add = flow.addWidget
         db = PushButton("Dialog", card)
         db.clicked.connect(self._show_dialog)
@@ -1005,6 +1245,11 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 翻页 & 布局组 ------------------------------
     def _fill_flip_layout(self, flow, card):
+        """翻页与布局组：FlipView 翻页控件，外加四种只有名字的布局类。
+
+        布局类不是可视控件，摆不出来，用文字占位说明它属于本库，
+        免得有人去别处找。
+        """
         add = flow.addWidget
         fv = FlipView(card)
         imgs = []
@@ -1027,6 +1272,10 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 多媒体组 ------------------------------
     def _fill_media(self, flow, card):
+        """多媒体组：打开自制的播放器弹窗，外加一行说明标签。
+
+        VideoWidget 已从库中移除，这里明确标出来，避免照旧文档找控件。
+        """
         add = flow.addWidget
         mp = PushButton("打开媒体播放器", card)
         mp.clicked.connect(self._open_media_player)
@@ -1037,6 +1286,10 @@ class _WidgetGalleryTab(QWidget):
 
     # ------------------------------ 交互演示 ------------------------------
     def _show_message_box(self):
+        """弹 MessageBox 确认框，并把按钮文案改成中文。
+
+        默认按钮是英文，业务里统一中文，演示也保持一致。
+        """
         box = MessageBox("组件测试", "这是 MessageBox 对话框，用于确认类交互",
                          self.window())
         box.yesButton.setText("确定")
@@ -1044,6 +1297,10 @@ class _WidgetGalleryTab(QWidget):
         box.exec()
 
     def _show_message_dialog(self):
+        """弹 MessageDialog 对话框，展示纯文本提示的最简形态。
+
+        与 MessageBox 的区别是它除标题外没有自定义区域，内容只能是文字。
+        """
         from qfluentwidgets import MessageDialog
         dlg = MessageDialog("提示", "这是 MessageDialog 对话框", self.window())
         dlg.yesButton.setText("确定")
@@ -1051,13 +1308,22 @@ class _WidgetGalleryTab(QWidget):
         dlg.exec()
 
     def _show_state_tooltip(self):
+        """弹一条状态提示，2.5 秒后自动收起。
+
+        用 singleShot 收尾而不是等用户点：StateToolTip 只能手动 hide，
+        演示里没人会去点它。
+        """
         tip = StateToolTip("执行中", "正在演示 StateToolTip…", self.window())
         tip.show()
         QTimer.singleShot(2500, tip.hide)
 
     # ------------------------------ 窗口 & 设置组 ------------------------------
     def _fill_windows(self, flow, card):
-        """窗口级/重组件：嵌入控件墙会撑坏布局，改为点击按钮弹出真实示例"""
+        """窗口级组件：嵌进控件墙会撑坏布局，改成点按钮弹真实示例。
+
+        窗口、启动屏、设置卡片都带自己的尺寸策略，硬塞进 FlowLayout 会把
+        整组行高撑到整屏，前面的组全被推到看不见的位置。
+        """
         add = flow.addWidget
         add(_ControlItem(self._demo_btn("SettingCard 设置", FluentIcon.SETTING,
                                         self._show_settings_demo, card),
@@ -1077,15 +1343,28 @@ class _WidgetGalleryTab(QWidget):
 
     @staticmethod
     def _demo_btn(text, icon, handler, parent):
+        """造一个带图标、点击即执行演示回调的按钮。
+
+        图标要过 icon.qicon()：FluentIcon 成员本身不是 QIcon，直接传会崩。
+        """
         btn = PushButton(text, parent)
         btn.setIcon(icon.qicon())
         btn.clicked.connect(handler)
         return btn
 
     def _show_settings_demo(self):
+        """弹出设置卡片示例，模态执行，关掉才回到控件墙。
+
+        模态是为了让临时配置项的生命周期与弹窗一致，关窗即丢。
+        """
         _SettingsDemoDialog(self.window()).exec()
 
     def _show_splash_demo(self):
+        """先显示启动屏，1.5 秒后再显示主窗口，模拟一次冷启动。
+
+        用 singleShot 收尾而不是等启动屏自己结束：SplashScreen 没有完成
+        信号，只能按固定时长收；窗口若已被销毁，finish 会抛 RuntimeError。
+        """
         win = _DemoFluentWindow()
         win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
         _DEMO_WINDOWS.append(win)
@@ -1102,12 +1381,21 @@ class _WidgetGalleryTab(QWidget):
         QTimer.singleShot(1500, _finish)
 
     def _show_fluent_window(self):
+        """弹出普通 FluentWindow 示例，登记强引用并挂 destroyed 清理。
+
+        窗口没有父级，只靠 _DEMO_WINDOWS 持有；关掉后从表里摘掉，
+        否则反复开关会一直堆着已销毁的壳。
+        """
         win = _DemoFluentWindow()
         win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
         _DEMO_WINDOWS.append(win)
         win.show()
 
     def _show_split_window(self):
+        """弹出分栏窗口示例，同样登记强引用并在销毁时摘除。
+
+        清理与登记必须成对，漏掉清理会让列表随开关次数一直变长。
+        """
         win = _DemoSplitWindow()
         win.destroyed.connect(lambda: _safe_remove(_DEMO_WINDOWS, win))
         _DEMO_WINDOWS.append(win)
@@ -1116,6 +1404,11 @@ class _WidgetGalleryTab(QWidget):
     # ------------------------------ 新增组件交互演示 ------------------------------
     @staticmethod
     def _hint(text, parent, w=220):
+        """造一段限宽换行的说明文字，给无法直接展示的布局类占位。
+
+        固定宽度是因为 FlowLayout 按 sizeHint 排序，不设宽会先按整行算，
+        条目宽度忽大忽小，排出来参差不齐。
+        """
         lbl = QLabel(text, parent)
         lbl.setWordWrap(True)
         lbl.setFixedWidth(w)
@@ -1123,51 +1416,98 @@ class _WidgetGalleryTab(QWidget):
         return lbl
 
     def _show_teaching_tip(self, anchor):
+        """在按钮下方弹一条教学提示，2.2 秒后自动消失。
+
+        isDeleteOnClose=True 让控件关闭时自毁，否则每点一次都会在按钮上
+        留一个不可见的子控件。
+        """
         view = TeachingTipView("教学提示", "这是一条 TeachingTip 提示",
                                FluentIcon.INFO, isClosable=False)
         tip = TeachingTip(view, anchor, duration=2200, isDeleteOnClose=True)
         tip.show()
 
     def _show_popup_tip(self, anchor):
+        """弹出一条弹出式教学提示，带指向锚点的箭头。
+
+        与 TeachingTip 的差别是它浮在锚点上方且自带阴影，更适合首次引导。
+        """
         view = TeachingTipView("弹出教学", "PopupTeachingTip 弹出提示",
                                FluentIcon.INFO, isClosable=False)
         tip = PopupTeachingTip(view, anchor, duration=2200, isDeleteOnClose=True)
         tip.show()
 
     def _show_flyout(self, anchor):
+        """在按钮下方展开飞出面，点击外部区域关闭。
+
+        Flyout.make 内部自己管生命周期，不需要像教学提示那样登记引用。
+        """
         view = FlyoutView("飞出面", "这是一条 Flyout 内容", FluentIcon.INFO, isClosable=False)
         Flyout.make(view, anchor, parent=anchor)
 
     def _show_dialog(self):
+        """弹一个标准对话框，展示确定/取消两个按钮的排布。
+
+        按钮文案默认英文，这里顺手改成中文，与业务里的确认框保持一致。
+        """
         dlg = Dialog("示例对话框", "这是 qfluentwidgets 的 Dialog。", self.window())
         dlg.yesButton.setText("确定")
         dlg.cancelButton.setText("取消")
         dlg.exec()
 
     def _show_color_dialog(self):
+        """弹出取色器，只演示交互，选中的颜色不会被记录。
+
+        本页没有主题色需求，看到弹窗能选色就够了，不必接回调。
+        """
         ColorDialog(QColor("#009faa"), "选择颜色", self.window()).exec()
 
     def _show_message_box_base(self):
+        """弹出基于 MessageBoxBase 自建的消息框。
+
+        库自带的 MessageBox 只放纯文本，要放更多内容就得继承基类自己塞。
+        """
         _DemoMessageBox(self.window()).exec()
 
     def _open_media_player(self):
+        """打开多媒体播放器弹窗，进去即自动播放演示动画。
+
+        模态执行是为了关闭时可预期地释放解码器，非模态容易忘了收尾。
+        """
         _MediaPlayerDialog(self.window()).exec()
 
 
 class TestPage(QWidget):
-    """组件测试页：FluentIcon 图标库 + QFluentWidgets 控件测试（两个页签）"""
+    """组件测试页：图标库与控件测试两个页签，供开发者查图标、试控件。
+
+    整页延迟到首次显示才构建：图标墙一次建上百张卡片，跟着主窗口启动建
+    会让启动明显变慢，而多数人根本不会打开这个页面。
+    """
 
     def __init__(self, parent=None):
+        """只记惰性构建标志，控件全部留到 showEvent 里再建。
+
+        构造函数保持零成本，这样即使主窗口预先实例化本页也不影响启动。
+        """
         super().__init__(parent)
         self._lazy_built = False
 
     def showEvent(self, event):
+        """首次显示时构建整页，之后直接走基类。
+
+        放 showEvent 而不是构造函数，是因为主窗口创建页面对象的时机
+        早于任何页面真正可见，在那儿建等于白拖一次启动。
+        """
         super().showEvent(event)
         if not self._lazy_built:
             self._lazy_built = True
             self._init_ui()
 
     def _init_ui(self):
+        """搭两页签骨架：Pivot 做页签导航，QStackedWidget 装内容。
+
+        用 Pivot 加堆栈替换原生 QTabWidget，是为了跟设置对话框等页面统一成
+        Fluent 的页签观感；QTabWidget 的标签条得重画一遍才能对齐。
+        """
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1188,7 +1528,11 @@ class TestPage(QWidget):
         self.pivot.setCurrentItem("icon")
 
     def _switch_page(self, key):
-        """Pivot 页签切换：同步高亮与内容堆栈"""
+        """切换页签：同步 Pivot 高亮与内容堆栈。
+
+        Pivot 的 onClick 只给路由键，堆栈要自己切；漏掉这一步的表现是
+        高亮变了而内容不动。
+        """
         self.pivot.setCurrentItem(key)
         self.stack.setCurrentWidget(
             self.icon_tab if key == "icon" else self.widget_tab)

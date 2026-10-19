@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""common 模块（从 windows/management_panel.py 拆出，逻辑未改动）"""
+"""售后管理页共用底座（从 windows/management_panel.py 拆出）。
+
+存放列定义、状态色、迁移按钮样式、后台查询 Worker 与表格交互 Mixin。
+各页面模块用 ``from windows.management.common import *`` 引入，故 __all__
+必须显式列出带下划线的辅助名，否则拆分后的页面会缺符号。
+"""
 
 import csv
 import difflib
@@ -78,6 +83,9 @@ def _dir_similarity(name: str, candidates: list) -> int:
     精确同名 100；店号前缀相同 + 后缀归一化相等 95；前缀归一化
     相等 + 后缀相同 90；前缀相同 55；字符级相似度（difflib）最高
     60 分兜底。返回对全部候选码的最高分。
+
+    分数只用于候选排序与人工确认时的提示，不直接决定目录归属；
+    是否采用由调用方按阈值判断，避免这里隐式写死业务策略。
     """
     n = str(name or "").strip()
     best = 0
@@ -142,6 +150,7 @@ def _patch_menu_animation(menu):
 # ==================== 常量定义 ====================
 
 # 球桌管理列：(字段key, 表头, 宽度)
+# key 必须与接口字段逐字一致；宽只是初始值，用户拖动后以表头状态为准
 TABLE_COLUMNS = [
     ("name", "球桌号", 90),
     ("roomName", "球房名称", 200),
@@ -161,6 +170,7 @@ TABLE_COLUMNS = [
     ("frps_online", "frps在线", 100),
 ]
 
+# 球桌在线状态 → 前景色；键用接口中文文案而非状态码，改接口时只改这里
 _STATUS_COLORS = {
     "运行中": QColor(SEMANTIC["success"]),
     "空闲": QColor(SEMANTIC["info"]),
@@ -168,6 +178,7 @@ _STATUS_COLORS = {
 }
 
 # 设备状态列：(字段key, 表头, 宽度)
+# 设备状态列偏统计口径（数量与比率），与球桌列分开维护，互不影响列索引
 DEVICE_COLUMNS = [
     ("table_id", "球桌号码", 90),
     ("club_name", "球房名称", 150),
@@ -202,12 +213,14 @@ CATEGORY_FILE_FIELDS = {cn: field for field, cn in FILE_FIELD_CATEGORIES if cn !
 # 版本没有对应的服务器迁移目录，不是迁移目标，这里剔除防止误发起迁移
 
 # 迁移可选分类（与 CATEGORY_DIRS 一致）
+# 目录清单取自采集 Worker，避免这里再抄一份导致两边漂移
 MIGRATE_CATEGORIES = list(CATEGORY_DIRS.keys())
 
 # 文件字段 → 中文分类名（反查）
 FIELD_CATEGORY = dict(FILE_FIELD_CATEGORIES)
 
 # 迁移目标选项（面板底部四个文字按钮，点击直接迁移）
+# 只列四个有采集目录的去向：正常/版本选中后没有落点，故不出现
 MIGRATE_DEST_OPTIONS = ["使用", "精度", "问题", "废弃"]
 
 # 迁移按钮固定背景色（setCustomStyleSheet 底色 + hover/pressed 变化，深浅主题通用）
@@ -241,15 +254,18 @@ _MIGRATE_BTN_QSS = {
 }
 
 # 可迁移的文件分类字段（其余分类点开后仅查看，不显示迁移按钮）
+# 版本/正常文件不允许迁移，详情页据此决定是否渲染迁移条
 _MIGRATABLE_FIELDS = {
     "except_files", "operation_files", "accuracy_files", "already_files", "rubbish_files",
 }
 
 # 可点击查看文件列表的单元格链接色
+# 跟随主题信息色，深浅主题下都能与普通正文拉开对比
 _LINK_COLOR = QColor(SEMANTIC["info"])
 
 # 设备状态码 → (中文描述, 颜色)
 # kd 接口 status 字段：0=下线 1=空闲 2=使用
+# 空闲用警告色是有意的：空闲本身不是故障，但提示运维该去派单
 _DEVICE_STATUS_MAP = {
     "0": ("下线", QColor(SEMANTIC["neutral"])),
     "1": ("空闲", QColor(SEMANTIC["warning"])),
@@ -263,6 +279,7 @@ _DEVICE_STATUS_MAP = {
 def _load_settings() -> dict:
     """读取配置门面合并视图（门面自带进程缓存与加解密；外部手改文件后
     可调用 core.app_settings.invalidate_cache() 刷新）"""
+    # 延迟导入：本模块在启动早期被多个页面导入，顶层拉门面会拖慢冷启动
     from core import app_settings
     return app_settings.get_merged()
 
@@ -270,6 +287,7 @@ def _load_settings() -> dict:
 def _save_settings(data: dict):
     """按键合并写入配置门面（自动路由到所属域文件；敏感字段加密落盘）"""
     from core import app_settings
+    # 逐键写入而非整字典覆盖：各页面各写各的键，整覆盖会抹掉别人的改动
     for k, v in data.items():
         app_settings.set(k, v)
 
@@ -281,7 +299,10 @@ def _save_settings(data: dict):
 
 
 def _fmt_size(n: float) -> str:
-    """字节数格式化为人类可读大小（B/KB/MB/GB）"""
+    """字节数格式化为人类可读大小（B/KB/MB/GB）。
+
+    止步于 GB：本仓库只格式化抓取物与日志体积，TB 级小数没有意义。
+    """
     n = float(n)
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -293,6 +314,7 @@ def _fmt_size(n: float) -> str:
 # ==================== 远程前置检查 / CSV 导出辅助（A2 / B6） ====================
 
 # CSV 导出单次查询上限（当前搜索/筛选条件下的全部结果）
+# 上限只防失控，不防正常批量：真超过百万行应先缩筛选条件再导出
 _EXPORT_MAX_ROWS = 1_000_000
 
 # 高频问题设备：近 N 天提交 ≥ 阈值次标红（C1）
@@ -303,7 +325,10 @@ _HF_COLOR = QColor(SEMANTIC["danger"])
 
 def _query_kd_page_with_stats(page_no, page_size, keyword, date,
                               sort_key, sort_desc, hf_days):
-    """kd 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）"""
+    """kd 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）。
+
+    统计失败不能拖垮分页：远程库闪断时返回空统计，列表仍照常显示。
+    """
     total, rows = table_db.query_kd_page(
         page_no, page_size, keyword, date, sort_key, sort_desc)
     try:
@@ -315,7 +340,10 @@ def _query_kd_page_with_stats(page_no, page_size, keyword, date,
 
 def _query_xqzg_page_with_stats(page_no, page_size, keyword, date,
                                 sort_key, sort_desc, hf_days):
-    """xqzg 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）"""
+    """xqzg 分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）。
+
+    列表页只取轻量行，文件 JSON 等用户点开某行时再按 id 懒加载。
+    """
     total, rows = table_db.query_xqzg_page(
         page_no, page_size, keyword, date, sort_key, sort_desc,
         include_files=False)  # 列表页轻量行，文件 JSON 点开行时按 id 懒加载
@@ -346,7 +374,10 @@ def _query_tables_page_with_stats(page_no, page_size, keyword, hf_days,
 
 
 def _confirm_offline_connect(parent, last_report: str) -> bool:
-    """A2 离线确认：设备下线时弹醒目确认框，返回是否仍要继续连接"""
+    """A2 离线确认：设备下线时弹醒目确认框，返回是否仍要继续连接。
+
+    按钮文案必须显式改写：默认 Yes/Cancel 会以英文出现在中文界面。
+    """
     box = MessageBox(
         "设备离线", f"设备离线（最后上报时间 {last_report}），仍要尝试连接吗？", parent)
     box.yesButton.setText("仍要连接")
@@ -355,7 +386,10 @@ def _confirm_offline_connect(parent, last_report: str) -> bool:
 
 
 def _open_in_explorer(path: str):
-    """在资源管理器中定位文件（explorer /select,）；目录则直接打开"""
+    """在资源管理器中定位文件（explorer /select,）；目录则直接打开。
+
+    异常全部吞掉：这是导出后的辅助动作，失败不该反过来打断主流程。
+    """
     try:
         if os.path.isfile(path):
             subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
@@ -366,7 +400,10 @@ def _open_in_explorer(path: str):
 
 
 def _show_export_bar(parent, path: str, count: int):
-    """导出成功提示条，附「打开文件夹」动作（explorer /select, 定位文件）"""
+    """导出成功提示条，附「打开文件夹」动作（explorer /select, 定位文件）。
+
+    用 InfoBar 而不是模态弹窗：导出是后台动作，不该逼用户点掉对话框。
+    """
     bar = show_info_bar(f"共 {count} 条 → {os.path.basename(path)}", "success",
                         title="导出成功", parent=parent, duration=6000)
     btn = PushButton(FluentIcon.FOLDER, "打开文件夹")
@@ -387,11 +424,15 @@ class _DBQueryWorker(QThread):
 
     将 table_db 的同步操作移到工作线程，避免阻塞 GUI。
     通过 result_ready 信号返回结果，error 信号返回异常信息。
+
+    取消是协作式的：requestInterruption 只置标志，真正生效依赖 run()
+    在开跑前后各查一次，因此回调端必须容忍「没有结果」。
     """
     result_ready = Signal(object)  # 查询/保存结果（不能命名为 finished，会遮蔽 Qt 原生 finished）
     error = Signal(str)
 
     def __init__(self, func, *args, **kwargs):
+        """保存待执行函数并入保活集合，参数原样透传给 func。"""
         super().__init__()
         self.func = func
         self.args = args
@@ -407,6 +448,7 @@ class _DBQueryWorker(QThread):
         _running.discard(self)
 
     def run(self):
+        """执行查询；被取代的任务在开跑前与回抛前各拦一次。"""
         try:
             # 中断检查点：页面快速切换（连续翻页/改搜索词）会 requestInterruption
             # 旧的排队 Worker。它们虽然已断开信号，但若不在此拦截，仍会照常
@@ -434,9 +476,13 @@ class _SortableTableWidget(TableWidget):
     客户端模型排序（含 Qt 内部 C++ 路径），只更新表头箭头。
     注意：排序入口必须走 _on_header_clicked 直连路径，不能用 sortByColumn
     触发（Qt 内部 C++ 调用不走 Python 重写，会直接排序模型）。
+
+    同理 setSortIndicator 也要重写：库内部用它画箭头，若放行就会绕过
+    分页逻辑，只改箭头外观才是安全路径。
     """
 
     def sortByColumn(self, column, order):
+        """拦截一切客户端排序，只同步表头箭头（真正排序由页面重查数据库）。"""
         # 永远不做客户端排序，仅同步表头箭头
         hh = self.horizontalHeader()
         hh.setSortIndicatorShown(column >= 0)
@@ -449,9 +495,14 @@ class _SortableTableWidget(TableWidget):
 
 
 class _ReadOnlySelectDelegate(TableItemDelegate):
-    """双击单元格进入只读编辑态：支持光标拖选文本并复制，禁止修改"""
+    """双击单元格进入只读编辑态：支持光标拖选文本并复制，禁止修改。
+
+    QTableWidgetItem 本身不可选文本，而错误堆栈/路径常需要整段复制，
+    因此借编辑器控件承载选区，又不把结果写回模型。
+    """
 
     def createEditor(self, parent, option, index):
+        """用 QTextEdit 而非 QLineEdit：多行堆栈要能换行显示完整内容。"""
         editor = QTextEdit(parent)
         editor.setReadOnly(True)
         editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -468,12 +519,15 @@ class _ReadOnlySelectDelegate(TableItemDelegate):
         return editor
 
     def setEditorData(self, editor, index):
+        """只灌纯文本：DisplayRole 里若含富文本标记，setPlainText 会原样显示。"""
         editor.setPlainText(index.data(Qt.ItemDataRole.DisplayRole) or "")
 
     def setModelData(self, editor, model, index):
+        """空实现：控件始终只读，任何编辑结果都不该回写数据层。"""
         pass
 
     def updateEditorGeometry(self, editor, option, index):
+        """编辑器铺满单元格，避免内容被裁成一个小内嵌框。"""
         editor.setGeometry(option.rect)
 
 
@@ -526,6 +580,7 @@ class TextDragSelectTableMixin:
     # ---------- 选区工具 ----------
 
     def _has_selection(self):
+        """是否已有拖选区间（两个端点都记录才算，单击会主动清空）。"""
         return self._sel_anchor is not None and self._sel_cur is not None
 
     def _ordered_sel(self):
@@ -536,6 +591,7 @@ class TextDragSelectTableMixin:
         return (a, b) if a <= b else (b, a)
 
     def _cell_text(self, row, col):
+        """取单元格文本；空单元格按空串处理，后续切片不必再判 None。"""
         it = self.item(row, col)
         return it.text() if it is not None else ""
 
@@ -605,6 +661,7 @@ class TextDragSelectTableMixin:
         return "\t".join(self._cell_text(row, c) for c in self._TEXT_COLS)
 
     def _copy_text(self, text):
+        """写剪贴板并给轻提示；空文本直接返回，不覆盖用户已有剪贴板。"""
         if not text:
             return
         QApplication.clipboard().setText(text)
@@ -618,6 +675,10 @@ class TextDragSelectTableMixin:
     # ---------- 鼠标交互 ----------
 
     def mousePressEvent(self, event):
+        """按下时先记锚点，再把事件交给基类保留标准选中行为。
+
+        文字列内与列外走两套逻辑：列外清空自绘选区，避免旧高亮残留。
+        """
         if event.button() == Qt.MouseButton.LeftButton:
             hit = self._index_at_text_col(event.position().toPoint())
             if hit is not None:
@@ -632,6 +693,10 @@ class TextDragSelectTableMixin:
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        """拖动中只更新选区且不调基类，否则会退化成整行框选。
+
+        未按键时只切换 I 型光标，给用户一个「这里可选文本」的提示。
+        """
         if self._dragging and self._sel_anchor is not None:
             hit = self._index_at_text_col(event.position().toPoint())
             if hit is not None:
@@ -648,6 +713,7 @@ class TextDragSelectTableMixin:
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """结束拖动；起终点重合视为单击并清空，免得多出一个字符选区。"""
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
             self._dragging = False
             hit = self._index_at_text_col(event.position().toPoint())
@@ -685,6 +751,7 @@ class TextDragSelectTableMixin:
         return rows
 
     def keyPressEvent(self, event):
+        """Ctrl+C 优先复制自绘选区，无选区时回退整行；Esc 清除高亮。"""
         if event.matches(QKeySequence.StandardKey.Copy):
             text = self.selection_text() if self._has_selection() else ""
             if not text:
@@ -701,6 +768,7 @@ class TextDragSelectTableMixin:
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
+        """右键菜单按有无选区决定「复制选中」可用，另给整行复制兜底。"""
         menu = RoundMenu(parent=self)
         has_sel = bool(self.selection_text())
         act_sel = Action(FluentIcon.COPY, "复制选中", self)
@@ -720,6 +788,11 @@ class TextDragSelectTableMixin:
     # ---------- 选区高亮绘制 ----------
 
     def paintEvent(self, event):
+        """先让基类画表格，再叠加自绘选区（字体与几何同源，逐字对齐）。
+
+        只画真实字符覆盖到的区间：空串或 hi<=lo 的格子跳过，避免出现
+        宽度为 0 的杂线。
+        """
         super().paintEvent(event)
         pair = self._ordered_sel()
         if not pair:
@@ -755,7 +828,11 @@ class TextDragSelectTableMixin:
 
 
 def _copy_table_selection(table):
-    """复制表格选中内容（编辑态优先复制光标选中部分，否则复制选中单元格）"""
+    """复制表格选中内容（编辑态优先复制光标选中部分，否则复制选中单元格）。
+
+    编辑态优先：只读委托里用户拖选的可能只是长文本的一小段，
+    整格复制会把真正要的那几个字淹没。
+    """
     focus = QApplication.focusWidget()
     if focus is not None and table.isAncestorOf(focus):
         tc_getter = getattr(focus, "textCursor", None)
@@ -787,7 +864,11 @@ _FIXED_ROW_HEIGHT = 38
 
 
 def _fit_table_rows(table):
-    """统一行高（固定值，不做内容测量）"""
+    """统一行高（固定值，不做内容测量）。
+
+    固定行高后长文本只能靠省略号 + tooltip 呈现，这是换取千行表
+    滚动流畅的代价，因此列宽要留够可见字符。
+    """
     vh = table.verticalHeader()
     vh.setDefaultSectionSize(_FIXED_ROW_HEIGHT)
     for r in range(table.rowCount()):

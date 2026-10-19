@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""moyu_page 模块（从 windows/management_panel.py 拆出，逻辑未改动）"""
+"""摸鱼中心页面：小说阅读、2048、贪吃蛇、扫雷四个页签的容器。
+
+本模块从 windows/management_panel.py 拆出，只负责页签与懒装配；玩法与控件
+本体在 windows/management/moyu_widgets.py，拆开后各页面互不牵连。
+"""
 
 import csv
 import difflib
@@ -56,7 +60,10 @@ logger = logging.getLogger(__name__)
 from windows.management.common import *  # noqa: F401,F403
 
 class GamePage(QWidget):
-    """摸鱼中心：小说/2048/贪吃蛇/扫雷 页签容器"""
+    """摸鱼中心入口页：小说、2048、贪吃蛇、扫雷四个页签的容器。
+
+    只维护页签与内容堆栈的对应关系，玩法逻辑全部在 moyu_widgets。
+    """
 
     # (routeKey, 页签标题, 控件属性名)，顺序即 Pivot 与堆栈的展示顺序
     _TABS = (("reader", "小说阅读", "reader"),
@@ -66,24 +73,30 @@ class GamePage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 懒构建（2026-09-25）：打开面板时只建壳，首次显示（切到本页）才装配
-        # 4 个游戏。GamePage 全建 38ms，占 ManagementPanelWindow 构造 96ms 的
-        # ~40%，且是构造期最大可削减项；与 DevicePage/AdminSettingsPage 的
-        # _lazy_built 范式一致。游戏无跨页状态依赖，可安全延迟
+        # 懒构建：打开面板只建壳，首次 showEvent 才装配 4 个游戏。全建约 38ms，
+        # 占 ManagementPanelWindow 构造 96ms 的四成，是构造期最大可削减项。
         self._lazy_built = False
         self._pages = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
     def showEvent(self, event):
-        """首次显示时才装配 Pivot + 4 游戏堆栈（懒构建）"""
+        """首次显示时才装配 Pivot 与游戏堆栈；置位后不再重复装配。
+
+        放在 showEvent 而不是 __init__，是因为页面切换前不可见，提前装配
+        等于把构造开销转嫁给所有打开管理面板的用户。
+        """
         super().showEvent(event)
         if not self._lazy_built:
             self._lazy_built = True
             self._build_content()
 
     def _build_content(self):
-        """原 __init__ 装配逻辑：ScrollArea + Pivot + 游戏堆栈"""
+        """装配 ScrollArea、Pivot 与游戏堆栈，由 showEvent 触发且只执行一次。
+
+        与触发点分开是为了让懒构建只依赖 _lazy_built 一个布尔位，装配
+        细节的改动不会牵动显示逻辑。
+        """
         layout = self.layout()
 
         area = ScrollArea(self)
@@ -102,6 +115,8 @@ class GamePage(QWidget):
         self.game_2048 = Game2048Widget(self.stack)
         self.game_snake = SnakeWidget(self.stack)
         self.game_mines = MinesweeperWidget(self.stack)
+        # lambda 必须用 k=key 绑定当前值：否则所有回调都读循环结束后的 key，
+        # 点哪个页签都会跳到最后一个。
         for key, title, attr in self._TABS:
             page = getattr(self, attr)
             self._pages[key] = page
@@ -114,10 +129,15 @@ class GamePage(QWidget):
 
         area.setWidget(container)
         layout.addWidget(area)
+        # 点击页签与代码切换都会走 currentChanged，暂停/恢复只在这一处处理。
         self.stack.currentChanged.connect(self._on_tab_changed)
 
     def _switch_game(self, key):
-        """Pivot 页签切换：同步高亮与内容堆栈（懒构建前空表无页可切）"""
+        """页签点击：同时切 Pivot 高亮与内容堆栈，只改一个会显示错页。
+
+        Pivot 自身的 onClick 只管高亮、不设置堆栈当前页；懒构建前 _pages
+        为空，直接返回而不是抛 KeyError。
+        """
         page = self._pages.get(key)
         if page is None:
             return
@@ -125,12 +145,17 @@ class GamePage(QWidget):
         self.stack.setCurrentWidget(page)
 
     def _on_tab_changed(self, index):
-        """页签切换：游戏控件取键盘焦点；贪吃蛇/扫雷切走暂停、切回恢复"""
+        """页签切换：切走的游戏暂停、切回的恢复，其余页再接手键盘焦点。
+
+        贪吃蛇与扫雷靠定时器推进，切走后不停会继续吃 CPU 且画面与计时
+        不同步；小说页没有定时器，不需要这套暂停处理。
+        """
         current = self.stack.widget(index)
         for game in (self.game_snake, self.game_mines):
             if current is game:
                 game.auto_resume()
             else:
                 game.auto_pause()
+        # 不转移焦点时键盘事件仍落在 Pivot 上，游戏收不到方向键。
         if current is not self.reader:
             current.setFocus()
