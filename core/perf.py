@@ -16,8 +16,8 @@ settings.json 字段：
 """
 
 from core import (app_settings, perf_diagnostics, perf_patch_acrylic,
-    perf_patch_menu, perf_patch_mica, perf_patch_switch,
-    perf_patch_table_hover, perf_settings)
+    perf_patch_dialog, perf_patch_menu, perf_patch_mica, perf_patch_switch,
+    perf_patch_table_hover, perf_patch_table_scroll, perf_settings)
 
 # 模块级运行时状态（None = 尚未从配置门面加载）
 _acrylic_enabled: bool | None = None
@@ -776,62 +776,8 @@ def apply_table_blit_globally():
 
 
 def patch_table_scroll_blit():
-    """恢复 Qt 滚动「位块搬移」快路径（幂等，启动时调用一次）
-
-    背景（2026-10-06 实测，tools/perf/perf_scroll_latency.py --truth）：
-    qfluentwidgets 的 TableBase.__init__ 会给每个表格挂 QSS
-    （FluentStyleSheet.TABLE_VIEW），叠加库自绘的悬浮滚动条后，Qt 的
-    QWidget::scroll() 位块搬移快路径失效 —— 滚动条每次数值变化都整视口
-    重绘：1560x752 viewport（13 列 × 约 20 行 ≈ 260 格）每步光栅 117 万
-    px²、11.5ms/步（offscreen scale 1.0；高 DPI 按 dpr² 继续放大）。
-
-    修复：包一层 TableBase.__init__ 做首帧应用，包一层
-    QTableView.updateGeometries 保证每次重布局后条带仍然预留
-    （QTableView::updateGeometries 会重算 viewport margins 覆盖手工值）。
-    实测：绘制面积 1,173,120 → 1,547 px²/步（1/758），每步 11.5 → 1.18ms
-    （响应 0.28 + 光栅 0.90），换页 / 改列宽 / resize 后保持。
-    """
-    try:
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QPainter
-        from PySide6.QtWidgets import QTableView
-        from qfluentwidgets.components.widgets.table_view import TableBase
-    except Exception:
-        return
-    if getattr(TableBase, "_perf_blit_patched", False):
-        return
-
-    _orig_init = TableBase.__init__
-    _orig_update = QTableView.updateGeometries
-
-    def _init(self, *args, **kwargs):
-        _orig_init(self, *args, **kwargs)
-        apply_table_blit(self)
-
-    def _update_geometries(self):
-        _orig_update(self)
-        apply_table_blit(self)
-
-    TableBase.__init__ = _init
-    TableBase.updateGeometries = _update_geometries
-    TableBase._perf_blit_patched = True
-
-    # 主题切换 → 标定出的底色失效（颜色是实测像素，不能跨主题复用）
-    def _on_theme_changed(*_args):
-        try:
-            from PySide6.QtWidgets import QApplication, QTableView as _TV
-            for w in QApplication.topLevelWidgets():
-                for t in w.findChildren(_TV):
-                    t._perf_blit_bg = None
-                    apply_table_blit(t)
-        except Exception:
-            pass
-
-    try:
-        from qfluentwidgets.common.config import qconfig
-        qconfig.themeChangedFinished.connect(_on_theme_changed)
-    except Exception:
-        pass
+    """表格滚动位块搬移补丁（实现见 core.perf_patch_table_scroll）。"""
+    perf_patch_table_scroll.apply_table_scroll_blit_patch(apply_table_blit)
 
 
 def get_dpi_degrade_pixels() -> int:
@@ -1493,171 +1439,14 @@ def _start_snapshot_fade(dlg, blur_radius) -> bool:
 
 
 def patch_dialog_animation():
-    """中央拦截 MaskDialogBase 淡入/淡出动画（幂等）
-
-    背景：MessageBoxBase（含项目内 6 个弹窗：编辑售后/球桌/设备/署名统计/
-    单视频等）继承 MaskDialogBase，打开/关闭时用 QGraphicsOpacityEffect +
-    QPropertyAnimation 做**整窗**透明度渐变（根挂 effect，遮罩+卡片全走
-    离屏光栅），实测 829 万像素下单帧 ≥48ms（真机核显再放大到数百 ms），
-    是场景 C「未响应」的主源。策略（按优先级）：
-
-    1. 动画开关（面板覆盖→全局）为关 → 直显（秒开无渐变）；
-    2. 大屏性能模式（P1-4）开启 → 直显 + 阴影半径 30；
-    3. 整窗物理像素 ≥ 生效阈值（显式 perf_dpi_degrade_pixels → 自适应
-       标定 → 静态 600 万，P0-1）→ **快照淡入**（P0-1 follow-up，
-       2026-10-07；超阈值机器也保留淡入，每帧只剩一次整区半透明混合）
-       + 阴影半径 30；
-    4. 其余：'card' 淡入淡出（P1-1，默认）——effect 只挂中央卡片（离屏
-       面积从整窗缩到卡片），遮罩即时出现（WinUI ContentDialog 同款
-       行为），淡入结束恢复卡片阴影。逃生门：perf 域
-       perf_dialog_fade_mode 显式取 'card'/'snapshot'/'direct'/'opacity'。
-
-    注：qfw 弹窗是父窗内的子部件覆盖层（非独立窗口，见
-    get_dialog_fade_mode 实现注记），windowOpacity 方案不适用。
-    """
-    try:
-        from PySide6.QtCore import QEasingCurve, QPropertyAnimation
-        from PySide6.QtGui import QColor
-        from PySide6.QtWidgets import (QDialog, QGraphicsOpacityEffect)
-        from qfluentwidgets.components.dialog_box.mask_dialog_base import (
-            MaskDialogBase)
-    except Exception:
-        return
-    if getattr(MaskDialogBase, "_perf_dialog_patched", False):
-        return
-    _orig_show = MaskDialogBase.showEvent
-    _orig_done = MaskDialogBase.done
-
-    def _restore_shadow(self, blur_radius):
-        """恢复卡片阴影 effect（淡入/淡出结束后调用；Qt 单控件单 effect）
-
-        具体实现走模块级 _restore_dialog_shadow：快照淡入的收尾也在模块级
-        函数里，两处必须一致。
-        """
-        _restore_dialog_shadow(self, blur_radius)
-
-    def _stop_fade(self):
-        """停掉在途卡片淡入/淡出动画（快速连点时 show/done 互斥不残留
-        半透明卡片）
-
-        ⚠️ Qt 语义：stop() 中途打断**不触发** finished（仅在自然播完时
-        发，见 Qt 源码 QAbstractAnimationPrivate::setState 的 endTime
-        判定；PySide6 offscreen 下已实证：stop() 不发、
-        setCurrentTime(duration) 同步发）。因此所有调用方在
-        _stop_fade 之后必须自行重建/清理 effect，本函数不做任何收尾。"""
-        ani = getattr(self, "_perf_fade_ani", None)
-        if ani is not None:
-            try:
-                ani.stop()
-            except Exception:
-                pass
-        try:
-            self._perf_fade_ani = None
-        except Exception:
-            pass
-
-    def _show(self, e):
-        try:
-            anim_on = get_animation(_window_panel_key(self))
-            degrade = _over_dpi_degrade(self)
-            mode = "none" if not anim_on else resolve_dialog_fade_mode(self)
-            if mode == "snapshot":
-                # P0-1 follow-up：快照淡入（超阈值机器保留淡入）
-                blur = 30 if degrade else 60
-                _stop_fade(self)
-                _cleanup_snapshot_fade(self, show_card=False)
-                try:  # 根不挂 effect（整窗离屏源），也不给卡片留淡入 effect
-                    self.setGraphicsEffect(None)
-                except Exception:
-                    pass
-                _restore_dialog_shadow(self, blur)
-                if _start_snapshot_fade(self, blur):
-                    super(MaskDialogBase, self).showEvent(e)
-                    return
-                mode = "direct"  # 条件不足（无卡片等）→ 直显兜底
-            if mode in ("none", "direct"):
-                if degrade:
-                    try:  # P0-1：大屏阴影降半径（公开 API，重建 effect）
-                        self.setShadowEffect(30, (0, 10), QColor(0, 0, 0, 100))
-                    except Exception:
-                        pass
-                _stop_fade(self)
-                _cleanup_snapshot_fade(self)
-                self.setGraphicsEffect(None)
-                self.widget.setGraphicsEffect(None)
-                _restore_shadow(self, 30 if degrade else 60)
-                super(MaskDialogBase, self).showEvent(e)
-                return
-            if mode == "card":
-                _stop_fade(self)
-                _cleanup_snapshot_fade(self)
-                try:
-                    self.setGraphicsEffect(None)  # 根不挂 effect（整窗离屏源）
-                    _restore_shadow(self, 60)  # 先复位，替换为淡入 effect
-                    eff = QGraphicsOpacityEffect(self.widget)
-                    eff.setOpacity(0)
-                    self.widget.setGraphicsEffect(eff)
-                    ani = QPropertyAnimation(eff, b"opacity", self.widget)
-                    ani.setStartValue(0)
-                    ani.setEndValue(1)
-                    ani.setDuration(200)
-                    ani.setEasingCurve(QEasingCurve.InSine)
-                    ani.finished.connect(lambda: _restore_shadow(self, 60))
-                    self._perf_fade_ani = ani
-                    ani.start()
-                    super(MaskDialogBase, self).showEvent(e)
-                    return
-                except Exception:
-                    _restore_dialog_shadow(self, 60)
-        except Exception:
-            pass
-        _orig_show(self, e)
-
-    def _done(self, code):
-        try:
-            # 在途快照淡入：Qt 的 stop() 不触发 finished，必须显式收尾
-            _cleanup_snapshot_fade(self)
-            anim_on = get_animation(_window_panel_key(self))
-            mode = "none" if not anim_on else resolve_dialog_fade_mode(self)
-            if mode in ("none", "direct", "snapshot"):
-                _stop_fade(self)
-                self.setGraphicsEffect(None)
-                self.widget.setGraphicsEffect(None)
-                QDialog.done(self, code)
-                return
-            if mode == "card":
-                _stop_fade(self)
-                try:
-                    self.setGraphicsEffect(None)
-                    eff = QGraphicsOpacityEffect(self.widget)
-                    eff.setOpacity(1)
-                    self.widget.setGraphicsEffect(eff)
-                    ani = QPropertyAnimation(eff, b"opacity", self.widget)
-                    ani.setStartValue(1)
-                    ani.setEndValue(0)
-                    ani.setDuration(100)
-
-                    def _finish(code=code):
-                        try:
-                            self.setGraphicsEffect(None)
-                            self.widget.setGraphicsEffect(None)
-                        except Exception:
-                            pass
-                        QDialog.done(self, code)
-
-                    ani.finished.connect(_finish)
-                    self._perf_fade_ani = ani
-                    ani.start()
-                    return
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        _orig_done(self, code)
-
-    MaskDialogBase.showEvent = _show
-    MaskDialogBase.done = _done
-    MaskDialogBase._perf_dialog_patched = True
+    """弹窗淡入/淡出降级补丁（实现见 core.perf_patch_dialog）。"""
+    perf_patch_dialog.apply_dialog_animation_patch(
+        lambda w: get_animation(_window_panel_key(w)),
+        lambda w: _over_dpi_degrade(w),
+        lambda d: resolve_dialog_fade_mode(d),
+        lambda d, r: _restore_dialog_shadow(d, r),
+        lambda d, r: _start_snapshot_fade(d, r),
+        lambda d, *a, **kw: _cleanup_snapshot_fade(d, *a, **kw))
 
 
 def patch_menu_animation():

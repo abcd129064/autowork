@@ -175,6 +175,8 @@ autowork/
 │   ├── perf_patch_table_hover.py # 表格 hover 条带重绘补丁（B1 patch 第三片）
 │   ├── perf_patch_switch.py   #   大屏页面切换直切补丁（B1 patch 第四片）
 │   ├── perf_patch_menu.py     #   菜单弹出动画降级补丁（B1 patch 第五片）
+│   ├── perf_patch_table_scroll.py # 表格滚动位块搬移补丁（B1 patch 第六片）
+│   ├── perf_patch_dialog.py   #   弹窗淡入/淡出降级补丁（B1 patch 第七片）
 │   ├── secrets.py             #   配置加解密（DPAPI，SSH/upload/AI 凭据）
 │   ├── switch_cn_patch.py     #   SwitchButton 中文「开/关」文本补丁
 │   ├── theme_qss.py           #   窗口级 QSS 应用（apply_window_qss/current_accent_hex）

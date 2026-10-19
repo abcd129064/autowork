@@ -78,7 +78,7 @@ def test_newlog_dialog_idle_dispatches_start(host):
     dlg = NewLogDialog(host, "张三")
     calls = []
     dlg.on_start = lambda: calls.append("start")
-    # 构造器保持 qfw 默认 "OK"，由调用方 _on_newlog_organize 改成业务文案
+    # 构造器保持 qfw 默认 "OK"；工具页/调用方按需改成业务文案（主窗口旧链已删除）
     assert dlg._phase == "idle"
     dlg.yesButton.setText("开始整理")
     dlg._on_yes_clicked()

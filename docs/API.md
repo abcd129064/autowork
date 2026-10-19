@@ -94,7 +94,7 @@ import core.acrylic_patch  # noqa: F401
 
 ### core.perf
 
-运行时性能开关中心（亚克力/动画/表格平滑滚动，切换即时生效，经 `core.app_settings` 门面持久化到 `config/perf.json`；兼容旧字段 `performance_mode` 与旧 settings.json 键位自动迁移）。纯配置解析已下沉 `core.perf_settings`，诊断文本格式化已下沉 `core.perf_diagnostics`，Mica/亚克力/hover/页面切换/菜单补丁执行已分别下沉对应 `core.perf_patch_*` 模块；本模块保留读取/缓存、环境探测、阈值判定与旧 API。
+运行时性能开关中心（亚克力/动画/表格平滑滚动，切换即时生效，经 `core.app_settings` 门面持久化到 `config/perf.json`；兼容旧字段 `performance_mode` 与旧 settings.json 键位自动迁移）。纯配置解析已下沉 `core.perf_settings`，诊断文本格式化已下沉 `core.perf_diagnostics`，Mica/亚克力/hover/页面切换/菜单/表格滚动/弹窗补丁执行已分别下沉对应 `core.perf_patch_*` 模块；本模块保留读取/缓存、环境探测、阈值判定、快照构建/阴影恢复与旧 API。
 
 #### 全局开关
 
@@ -211,6 +211,26 @@ Mica 云母环境兜底补丁（B1 patch 层第一片），从 `core/perf.py` �
 | 函数 | 签名 | 说明 |
 |------|------|------|
 | `apply_menu_animation_patch(animation_enabled, over_degrade)` | `(callable, callable) -> None` | 幂等替换 `MenuAnimationManager.make`：动画关或超阈值 → NONE；否则 DROP_DOWN/PULL_UP → FADE_IN_* |
+
+---
+
+### core.perf_patch_table_scroll
+
+表格滚动位块搬移补丁（B1 patch 层第六片），从 `core/perf.py` 下沉。`apply_table_blit` 由 core.perf 注入，保留其 monkeypatch 点。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_table_scroll_blit_patch(apply_blit)` | `(callable) -> None` | 幂等包装 `TableBase.__init__` / `updateGeometries` 后调用 apply_blit；主题切换清空 `_perf_blit_bg` 并重应用 |
+
+---
+
+### core.perf_patch_dialog
+
+弹窗淡入/淡出降级补丁（B1 patch 层第七片），从 `core/perf.py` 下沉。快照构建、阴影恢复、模式解析与动画开关仍由 core.perf 注入，保留既有 monkeypatch 点。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `apply_dialog_animation_patch(animation_enabled, over_degrade, resolve_mode, restore_shadow, start_snapshot_fade, cleanup_snapshot_fade)` | `-> None` | 幂等替换 `MaskDialogBase.showEvent` / `done`：按 direct/snapshot/card 路径处理淡入淡出；回调由 core.perf 提供 |
 
 ---
 
@@ -1696,7 +1716,7 @@ RDPWindow(host, port, username, password,
 
 #### 类 `SingleVideoDialog`
 
-单杆视频参数对话框。继承 `MessageBoxBase`（透明模态窗口）。工具页 `SingleVideoWork` 直接从本模块导入默认值常量（`_DEFAULT_SESSION_CODE/_DEFAULT_FORMAT/_DEFAULT_USER_x/_DEFAULT_AVATAR_x` 等）内嵌表单；独立对话框形态保留为回退兜底（`UiMixin._on_open_single_video` 旧入口）。
+单杆视频参数对话框。继承 `MessageBoxBase`（透明模态窗口）。工具页 `SingleVideoWork` 直接从本模块导入默认值常量（`_DEFAULT_SESSION_CODE/_DEFAULT_FORMAT/_DEFAULT_USER_x/_DEFAULT_AVATAR_x` 等）内嵌表单；独立对话框形态保留供直接调用/测试（主窗口旧入口已随 G9 删除）。
 
 ```python
 SingleVideoDialog(parent, settings=None)
@@ -2160,14 +2180,11 @@ UI 辅助（状态栏、菜单栏 Action、右键菜单、主题切换、布局�
 | `apply_dpi_scale(settings)` | [静态] 在 QApplication 创建后应用 DPI 缩放（settings 为合并配置 dict） |
 | `_effective_is_dark(settings)` | [静态] 判断是否深色主题 |
 | `_apply_layout()` | 应用布局模式（经典/默认） |
-| `_on_open_single_video()` | 工具菜单「单杆视频」回退兜底（正常路径为 `_on_open_tool_hub("single_video_work")` 跳工具页）：校验 Worker 空闲 → 延迟导入探测 cv2/numpy → 打开 `SingleVideoDialog` 并注入 `_start` 回调 |
 | `_panel_entry_popout_enabled()` | 面板入口弹出策略：读取 `panel_entry_popout`（默认 True），异常回落 True；实现见 `main_window.ui.navigation` |
 | `_on_open_table_panel()` | 打开球桌管理（弹出独立面板或跳转运维页）；实现见 `main_window.ui.navigation` |
 | `_on_open_aftersale()` | 打开售后面板（弹出独立面板或跳转售后页）；实现见 `main_window.ui.navigation` |
 | `_on_open_conn_diag()` | 打开连接诊断单例窗口；实现见 `main_window.ui.navigation` |
 | `_on_open_tool_hub(work=None)` | 工具类入口统一跳转二期独立工具页（`main_window.tool_hub`）；`work` 为工作区 objectName（single_video_work / port_fake_work / upload_list_work / newlog_work）；实现见 `main_window.ui.navigation` |
-| `_on_open_port_fake()` | 工具菜单「端口占用」：弹窗真实监听指定端口模拟服务占用（`PortFakeWidget`） |
-| `_on_newlog_organize()` | 工具菜单「视频/日志批量整理」：按 Excel 署名筛选批量归类（`NewLogDialog` + `NewLogWorker`），支持一键打包上传 |
 
 ### main_window.ui（UI 资产包）
 
