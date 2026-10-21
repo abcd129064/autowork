@@ -17,9 +17,10 @@ import os
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout,
-                               QLabel, QScrollArea, QSizePolicy, QVBoxLayout,
+                               QLabel, QListWidget, QListWidgetItem,
+                               QScrollArea, QSizePolicy, QVBoxLayout,
                                QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, CardWidget, CheckBox,
                             FluentIcon, LineEdit, PasswordLineEdit,
@@ -166,6 +167,37 @@ def collect_cam_proxies(all_proxies: dict) -> list:
     return out
 
 
+class _PreviewFullScreen(QWidget):
+    """预览全屏窗：把 _PreviewCanvas 借进独立无边框窗口，Esc / 双击退出。
+
+    SDK 只认 HWND 直渲，所以全屏不是"复制画面"，而是搬同一块画布进新窗、
+    对新 HWND 重新 realplay_start；退出时搬回原布局并恢复原播放状态。
+    """
+
+    closed = Signal()
+
+    def __init__(self, canvas: QWidget):
+        super().__init__(None, Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setStyleSheet("background:#000;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(canvas)
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        self.close()
+
+    def closeEvent(self, event):  # noqa: N802
+        self.closed.emit()
+        super().closeEvent(event)
+
+
 class DahuaCameraWork(QWidget):
     """相机工具：登录 → 预览 → 云台（能力位自适应） → OSD 叠加"""
 
@@ -242,22 +274,15 @@ class DahuaCameraWork(QWidget):
         self._ed_frps_search.setClearButtonEnabled(True)
         self._ed_frps_search.textChanged.connect(self._frps_rebuild)
         lv.addWidget(self._ed_frps_search)
-        self._frps_rows = QWidget(login_card)
-        self._frps_v = QVBoxLayout(self._frps_rows)
-        self._frps_v.setContentsMargins(0, 0, 0, 0)
-        self._frps_v.setSpacing(4)
-        self._frps_v.addStretch(1)
-        self._frps_scroll = QScrollArea(login_card)
-        self._frps_scroll.setWidgetResizable(True)
-        self._frps_scroll.setWidget(self._frps_rows)
-        # 高度跟随登录卡剩余空间（与预览列等高），45+ 条隧道不再挤在 108px 里；
-        # 竖向滚动条按需出现，横向一律禁用——行内容可压缩，不允许水平裁切
-        self._frps_scroll.setMinimumHeight(140)
-        self._frps_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._frps_scroll.setStyleSheet(
-            "QScrollArea{border:none;background:transparent;}"
-            "QWidget{background:transparent;}")
-        lv.addWidget(self._frps_scroll, 1)
+        # 隧道列表复用售后/远程模块同款候选列表（QListWidget + _style_cand_list，
+        # 主题反色与强调色统一由共享工厂维护），点行即「选用」
+        from windows.aftersale.common import _style_cand_list
+        self._frps_list = QListWidget(login_card)
+        self._frps_list.setMinimumHeight(140)
+        self._frps_list.setFocusPolicy(Qt.NoFocus)
+        _style_cand_list(self._frps_list)
+        self._frps_list.itemClicked.connect(self._on_frps_item)
+        lv.addWidget(self._frps_list, 1)
         cols.addWidget(login_card)
         # frps 感知自动刷新（定时器在 frps_admin 单例内）→ 隧道列表跟随重建
         get_frps_client().all_proxies_changed.connect(
@@ -273,6 +298,7 @@ class DahuaCameraWork(QWidget):
         self._preview = _PreviewCanvas(preview_card)
         self._preview.setMinimumSize(560, 315)
         pv.addWidget(self._preview, 1)
+        self._pv_layout = pv  # 全屏时借出画布，退出时按索引还原
         self._lb_pv_hint = CaptionLabel(
             "连接后点击「开始预览」", preview_card)
         pv.addWidget(self._lb_pv_hint)
@@ -283,8 +309,11 @@ class DahuaCameraWork(QWidget):
         self._btn_stop_play.setEnabled(False)
         self._btn_snap = PushButton(FluentIcon.CAMERA, "抓图存档", preview_card)
         self._btn_snap.setEnabled(False)
+        self._btn_full = PushButton(FluentIcon.FULL_SCREEN, "全屏", preview_card)
+        self._btn_full.setEnabled(False)
         self._lb_snap = CaptionLabel("", preview_card)
-        for w in (self._btn_play, self._btn_stop_play, self._btn_snap):
+        for w in (self._btn_play, self._btn_stop_play, self._btn_snap,
+                  self._btn_full):
             pbar.addWidget(w)
         pbar.addStretch(1)
         pbar.addWidget(self._lb_snap)
@@ -399,7 +428,8 @@ class DahuaCameraWork(QWidget):
         osd_row = QHBoxLayout()
         osd_row.setSpacing(10)
         self._card_chn = self._build_osd_card(
-            osd_row, "chn", "通道标题", text_hint="叠加文字", has_pos=True)
+            osd_row, "chn", "通道标题", text_hint="叠加文字", has_pos=True,
+            has_blends=True)
         self._card_time = self._build_osd_card(
             osd_row, "time", "时间标题", text_hint=None, has_pos=True, has_week=True)
         self._card_custom = self._build_osd_card(
@@ -412,16 +442,24 @@ class DahuaCameraWork(QWidget):
         self._btn_play.clicked.connect(self._start_preview)
         self._btn_stop_play.clicked.connect(self._stop_preview)
         self._btn_snap.clicked.connect(self._snap)
+        self._btn_full.clicked.connect(self._on_fullscreen)
         for btn in self._iter_osd_buttons():
             btn.setEnabled(False)
         self._set_ptz_enabled(False)  # 初始置灰（能力位连接后才解禁）
+        # 切走再切回：延迟 1s 再起流（用户实测 0.5s 闪烁，等 DWM 重组完成）
+        self._resume_pending = False
+        self._resume_timer = QTimer(self)
+        self._resume_timer.setSingleShot(True)
+        self._resume_timer.setInterval(1000)
+        self._resume_timer.timeout.connect(self._resume_preview)
         QApplication.instance().aboutToQuit.connect(self._teardown)
 
     # ---------- OSD 卡构建 ----------
 
     def _build_osd_card(self, row: QHBoxLayout, key: str, title: str,
                         text_hint: str | None, has_pos: bool,
-                        has_week: bool = False) -> dict:
+                        has_week: bool = False,
+                        has_blends: bool = False) -> dict:
         card = CardWidget(self)
         v = QVBoxLayout(card)
         v.setContentsMargins(12, 10, 12, 10)
@@ -439,6 +477,13 @@ class DahuaCameraWork(QWidget):
         week_chk = CheckBox("显示周", card) if has_week else None
         if week_chk is not None:
             chk_row.addWidget(week_chk)
+        # 叠加码流：与设计稿一致，主码流/预览码流分别勾选（对应 emOsdBlendType 1/6）
+        blend_main = CheckBox("叠加到主码流", card) if has_blends else None
+        blend_pv = CheckBox("叠加到预览码流", card) if has_blends else None
+        for cb in (blend_main, blend_pv):
+            if cb is not None:
+                cb.setChecked(True)
+                chk_row.addWidget(cb)
         chk_row.addStretch(1)
         v.addLayout(chk_row)
         if has_pos:
@@ -462,6 +507,7 @@ class DahuaCameraWork(QWidget):
         btn_get.clicked.connect(lambda _=False, k=key: self._osd_get(k))
         btn_set.clicked.connect(lambda _=False, k=key: self._osd_set(k))
         return {"key": key, "edits": edits, "show": show_chk, "week": week_chk,
+                "blend_main": blend_main, "blend_pv": blend_pv,
                 "get": btn_get, "set": btn_set}
 
     def _iter_osd_buttons(self):
@@ -493,6 +539,7 @@ class DahuaCameraWork(QWidget):
         self._btn_disc.setEnabled(True)
         self._btn_play.setEnabled(True)
         self._btn_snap.setEnabled(True)
+        self._btn_full.setEnabled(True)
         for btn in self._iter_osd_buttons():
             btn.setEnabled(True)
         self._set_ptz_enabled(ptz_ok)
@@ -518,62 +565,48 @@ class DahuaCameraWork(QWidget):
     # ---------- frps 相机隧道 ----------
 
     def _frps_rebuild(self):
-        """按当前搜索词重建隧道行（数据源 frps 感知缓存，登录卡内竖列）"""
-        v = self._frps_v
-        while v.count() > 1:  # 保留末尾 stretch
-            item = v.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
+        """按当前搜索词重建隧道列表（数据源 frps 感知缓存）。
+
+        行=隧道；离线/无端口的项置 NoItemFlags 只展示不可选；
+        空态用一条不可选提示行，与售后候选列表的空态写法一致。
+        """
+        lst = self._frps_list
+        lst.clear()
         proxies = collect_cam_proxies(get_frps_client().all_proxies())
         kw = self._ed_frps_search.text().strip().lower()
         shown = [p for p in proxies
                  if not kw or kw in p["name"].lower()] if proxies else []
         if not proxies:
-            hint = CaptionLabel("暂无 _cam 相机隧道（frps 未配置/不可达，"
-                                "去 远程 → frps 代理 页配置凭据）", self._frps_rows)
-            hint.setStyleSheet("color:#9aa1b5;")
-            hint.setWordWrap(True)
-            v.insertWidget(0, hint)
+            item = QListWidgetItem("暂无 _cam 相机隧道（frps 未配置/不可达）")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            lst.addItem(item)
             self._lb_frps_cnt.setText("")
             return
         self._lb_frps_cnt.setText(
             f"{len(shown)}/{len(proxies)}" if kw else str(len(proxies)))
         if not shown:
-            hint = CaptionLabel("无匹配隧道", self._frps_rows)
-            hint.setStyleSheet("color:#9aa1b5;")
-            v.insertWidget(0, hint)
+            item = QListWidgetItem("无匹配隧道")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            lst.addItem(item)
             return
         for p in shown:
-            v.insertWidget(v.count() - 1, self._frps_row(p))
+            status, _color = _CAM_STATUS.get(p["status"], ("未知", ""))
+            item = QListWidgetItem(
+                f"{p['name']}  ·  {status} · {p['remotePort'] or '-'}")
+            item.setData(Qt.UserRole, p)
+            item.setToolTip(f"隧道: {p['name']}\n状态: {status}\n"
+                            f"远程端口: {p['remotePort'] or '-'}\n"
+                            f"当前连接数: {p['curConns']}" +
+                            (f"\n用户: {p['user']}" if p["user"] else ""))
+            if p["status"] != "online" or not p["remotePort"]:
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+            lst.addItem(item)
 
-    def _frps_row(self, p: dict) -> QWidget:
-        row = QWidget(self._frps_rows)
-        row.setStyleSheet("QWidget{background:#1f2534;border:1px solid #3a4056;"
-                          "border-radius:7px;}")
-        rh = QHBoxLayout(row)
-        rh.setContentsMargins(10, 4, 10, 4)
-        rh.setSpacing(6)
-        status, color = _CAM_STATUS.get(p["status"], ("未知", "#9aa1b5"))
-        dot = QLabel("●", row)
-        dot.setStyleSheet(f"color:{color};font-size:12px;background:transparent;"
-                          "border:none;")
-        rh.addWidget(dot)
-        # Ignored 策略：窄卡片下名称/端口可被压缩裁切，绝不把「选用」按钮挤出边界
-        nm = BodyLabel(p["name"], row)
-        nm.setStyleSheet("background:transparent;border:none;")
-        nm.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        rh.addWidget(nm, 1)
-        meta = CaptionLabel(f"{status} · {p['remotePort'] or '-'}", row)
-        meta.setStyleSheet("color:#9aa1b5;background:transparent;border:none;")
-        meta.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        rh.addWidget(meta)
-        btn = PushButton("选用", row)
-        btn.setFixedHeight(26)
-        btn.setEnabled(p["status"] == "online" and bool(p["remotePort"]))
-        btn.clicked.connect(lambda _=False, pr=p: self._frps_use(pr))
-        rh.addWidget(btn)
-        return row
+    def _on_frps_item(self, item):
+        """点行即选用：把 frps 地址+端口预填进登录卡"""
+        p = item.data(Qt.UserRole)
+        if p:
+            self._frps_use(p)
 
     def _frps_use(self, p: dict):
         addr = f"{self._frps_host()}:{p['remotePort']}"
@@ -604,6 +637,9 @@ class DahuaCameraWork(QWidget):
         self._btn_disc.setEnabled(False)
         self._btn_play.setEnabled(False)
         self._btn_snap.setEnabled(False)
+        self._btn_full.setEnabled(False)
+        self._resume_pending = False
+        self._resume_timer.stop()
         for btn in self._iter_osd_buttons():
             btn.setEnabled(False)
         self._set_ptz_enabled(False)
@@ -713,7 +749,7 @@ class DahuaCameraWork(QWidget):
 
     # ---------- 预览 / 抓图 ----------
 
-    def _start_preview(self):
+    def _start_preview(self, silent: bool = False):
         if not self._client:
             return
         # SDK 需要 HWND 直渲染：强制原生窗口
@@ -726,16 +762,17 @@ class DahuaCameraWork(QWidget):
         def work():
             client.realplay_start(hwnd, channel=0, sub_stream=True)
 
-        self._serial.submit(work, lambda _r: self._preview_on(),
+        self._serial.submit(work, lambda _r: self._preview_on(silent),
                        lambda m: (self._btn_play.setEnabled(True),
                                   _toast(self, m, error=True, duration=3500)))
 
-    def _preview_on(self):
+    def _preview_on(self, silent: bool = False):
         self._btn_play.setEnabled(False)
         self._btn_stop_play.setEnabled(True)
         self._preview.set_playing(True)  # 播放中：Qt 停止绘制，SDK 独占
         self._lb_pv_hint.hide()
-        _toast(self, "预览已开启（辅码流）", duration=1800)
+        if not silent:
+            _toast(self, "预览已开启（辅码流）", duration=1800)
 
     def _stop_preview(self):
         if not self._client:
@@ -749,6 +786,76 @@ class DahuaCameraWork(QWidget):
         self._btn_stop_play.setEnabled(False)
         self._preview.set_playing(False)  # 停止：填暗底，擦掉冻结帧
         self._lb_pv_hint.show()
+
+    # ---------- 页面显隐（防切回闪烁） ----------
+
+    def hideEvent(self, event):  # noqa: N802
+        """切走页面：停流并记下待恢复。
+
+        留最后一帧没意义：原生 HWND 再次显示时会被窗口系统重合成黑场/半帧，
+        用户看到的 0.5s 闪烁就来自这段时间差。
+        """
+        super().hideEvent(event)
+        if getattr(self, "_fs_win", None) is not None:
+            self._fs_win.close()  # 全屏中切页：先收回画布，避免孤儿窗口
+        if self._preview.playing:
+            self._resume_pending = True
+            # 立刻转暗底再异步停流：串行队列有 250ms 节流，等回调才变
+            # playing=False 会留出空绘制窗口，正是切回闪烁的来源
+            self._preview.set_playing(False)
+            self._stop_preview()
+
+    def showEvent(self, event):  # noqa: N802
+        """切回页面：先铺暗底，延迟 1s 再起流（等 DWM 合成稳定）。"""
+        super().showEvent(event)
+        if self._resume_pending:
+            self._resume_pending = False
+            self._resume_timer.start(1000)
+
+    def _resume_preview(self):
+        """延迟恢复预览：期间用户可能已手动点过开始，重复起流要跳过"""
+        if self._client and self.isVisible() and not self._preview.playing:
+            self._start_preview(silent=True)
+
+    # ---------- 全屏 ----------
+
+    def _on_fullscreen(self):
+        """进入全屏：停流 → 画布借进全屏窗 → 对新 HWND 重起流。
+
+        串行队列保证 stop 先于 start 执行；非播放态进入时不自动起流，
+        用户在全屏里点「开始预览」同样可用（按钮在全屏窗内不可及，
+        所以非播放态进入时直接起流，避免全屏后无处可点）。
+        """
+        if not self._client:
+            _toast(self, "请先连接设备", duration=3000)
+            return
+        if getattr(self, "_fs_win", None) is not None:
+            return
+        was_playing = self._preview.playing
+        if was_playing:
+            self._stop_preview()
+        self._fs_was_playing = was_playing
+        self._pv_layout.removeWidget(self._preview)
+        win = _PreviewFullScreen(self._preview)
+        win.closed.connect(self._exit_fullscreen)
+        self._fs_win = win
+        win.showFullScreen()
+        win.setFocus()
+        self._start_preview()  # stop 已排前面，新 HWND 起流
+
+    def _exit_fullscreen(self):
+        """退出全屏：停流 → 画布放回原布局 → 恢复进入前的播放状态。"""
+        was = getattr(self, "_fs_was_playing", False)
+        if self._preview.playing:
+            self._stop_preview()
+        self._fs_win = None
+        self._pv_layout.insertWidget(0, self._preview, 1)
+        self._preview.set_playing(False)
+        if was and self._client:
+            if self.isVisible():
+                self._start_preview()
+            else:
+                self._resume_pending = True  # 页面不可见：等切回再恢复
 
     def _snap(self):
         if not self._client:
@@ -807,6 +914,9 @@ class DahuaCameraWork(QWidget):
             if result.get("name"):
                 meta["edits"]["text"].setText(result["name"])
             meta["show"].setChecked(bool(result.get("show")))
+            if "show_main" in result and meta.get("blend_main"):
+                meta["blend_main"].setChecked(bool(result["show_main"]))
+                meta["blend_pv"].setChecked(bool(result["show_preview"]))
             if "show_week" in result and meta.get("week"):
                 meta["week"].setChecked(bool(result["show_week"]))
             x, y = result.get("pos", (0, 0))
@@ -830,12 +940,21 @@ class DahuaCameraWork(QWidget):
             pos = (0, 0)
         text = meta["edits"].get("text")
         text = text.text().strip() if text else ""
+        # 叠加码流白名单：未勾选的码流由 core 显式关闭（用户勾选=只在这几路显示）
+        blends = None
+        if key == "chn" and meta.get("blend_main") is not None:
+            blends = []
+            if meta["blend_main"].isChecked():
+                blends.append(DahuaClient._BLEND_MAIN)
+            if meta["blend_pv"].isChecked():
+                blends.append(DahuaClient._BLEND_EXTRA1)
         client = self._client
 
         def work():
             if key == "chn":
                 return client.osd_channel_title(0, text=text or None,
-                                                show=show, pos=pos)
+                                                show=show, pos=pos,
+                                                blends=blends)
             if key == "time":
                 client.osd_time_title(0, show=show, show_week=week, pos=pos)
             else:
@@ -843,6 +962,12 @@ class DahuaCameraWork(QWidget):
             return None
 
         def done(result):
+            if (isinstance(result, dict) and key == "chn"
+                    and blends and DahuaClient._BLEND_EXTRA1 in blends
+                    and not result.get("show_preview", True)):
+                _toast(self, "该固件不支持叠加到预览码流（仅主码流生效）",
+                       duration=4000)
+                return
             if isinstance(result, dict) and result.get("name_applied") is False:
                 _toast(self, "该固件不支持修改通道名称"
                              "开关/位置已应用", duration=4000)

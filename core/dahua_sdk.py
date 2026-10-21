@@ -12,6 +12,9 @@
 - LoginWithHighLevelSecurity 的 in/out 结构体必须显式填 dwSize，否则 0ms 秒败；
 - RealPlayEx(hwnd=原生窗口句柄) 时 SDK 内部自行解码渲染，无需自取码流；
 - 数据回调（无窗口模式）必须挂在 realplay 句柄上且 dwFlag=RAW_DATA。
+
+并发约定：bootstrap 有模块锁，保证全进程只初始化一次；DahuaClient 本身不是
+线程安全的，同一会话的抓图与云台调用必须串行，否则回调里的 login_id 会串台。
 """
 from __future__ import annotations
 
@@ -24,23 +27,36 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 三个模块级状态：已初始化标志、初始化互斥锁、模块命名空间缓存。都放在模块上
+# 而不是实例上，因为 dhnetsdk 全进程只允许一份初始化。
 _NETSDK_BOOTED = False
 _NETSDK_LOCK = threading.Lock()
 _NETSDK_MOD = None  # import 后的 NetSDK 模块命名空间缓存
 
 
 class DahuaSdkError(Exception):
-    """SDK 调用失败（含登录失败 / 配置读写失败）"""
+    """本层对外的唯一异常类型。
+
+    SDK 返回的整数错误码在这里翻成中文消息后再抛：调用方只需展示，不必
+    再理解 vendor 的错误码体系；要原始码时看打出的 GetLastErrorMessage。
+    """
 
 
 # ---------------------------------------------------------------- 加载
 
 
 def _candidate_dirs() -> list:
+    """按优先级列出可能包含 NetSDK/ 子目录的路径。
+
+    顺序即优先级：环境变量是排障用的临时覆盖，frozen 下先看解包目录再看
+    exe 同级，最后才回落仓库的 vendor 目录。
+    """
     dirs = []
     env = os.environ.get("DAHUA_NETSDK_PATH")
     if env:
         dirs.append(env)
+    # frozen 时 ROOT 指向 _MEIPASS 的临时目录，重启后路径就变了，
+    # 所以还得额外试一次 exe 同级的 dahua 目录
     if getattr(sys, "frozen", False):  # PyInstaller：资源解包目录
         meipass = getattr(sys, "_MEIPASS", "")
         if meipass:
@@ -56,6 +72,8 @@ def bootstrap() -> None:
     with _NETSDK_LOCK:
         if _NETSDK_BOOTED:
             return
+        # 命中第一个完整包含 NetSDK.py 的候选就停：多个副本同时存在时，
+        # 插进 sys.path 顺序不同会让 import 到不同版本
         for base in _candidate_dirs():
             pkg = os.path.join(base, "NetSDK")
             if not os.path.isfile(os.path.join(pkg, "NetSDK.py")):
@@ -63,6 +81,8 @@ def bootstrap() -> None:
             if base not in sys.path:
                 sys.path.insert(0, base)
             # 让系统找到 Libs/win64 下的依赖 DLL（libeay32 等）
+            # SDK 自带 libeay32/ssleay32，Python 3.8+ 不再从 PATH 里找依赖
+            # DLL，必须显式登记搜索目录
             libs = os.path.join(pkg, "Libs", "win64")
             if os.path.isdir(libs) and hasattr(os, "add_dll_directory"):
                 try:
@@ -77,6 +97,8 @@ def bootstrap() -> None:
             _NETSDK_BOOTED = True
             logger.info("Dahua NetSDK 初始化完成（%s）", base)
             return
+        # 所有候选都没命中：这是安装包缺文件而不是设备问题，
+        # 错误消息里要直接给出修复路径，否则现场只会看到"登录失败"
         raise DahuaSdkError(
             "未找到大华 NetSDK 包（vendor/dahua/NetSDK）。"
             "可设置环境变量 DAHUA_NETSDK_PATH 指向包含 NetSDK/ 子目录的路径。"
@@ -84,13 +106,21 @@ def bootstrap() -> None:
 
 
 def sdk():
-    """返回初始化好的 NetClient（首次调用自动 bootstrap）"""
+    """返回一个已初始化的 NetClient（必要时先 bootstrap）。
+
+    每次调用都新建实例：SDK 内部按句柄管理会话，复用一个实例会让多路
+    预览的句柄互相覆盖。
+    """
     bootstrap()
     return _NETSDK_MOD.NetClient()
 
 
 def module():
-    """返回 NetSDK 模块命名空间（枚举/结构体从这里取）"""
+    """返回 NetSDK 模块命名空间（枚举、结构体、sizeof 都从这里取）。
+
+    结构体类型必须与 SDK 是同一份定义，因此不额外缓存到本模块变量，统一
+    从入口取，避免出现两份互不兼容的 ctypes 类型。
+    """
     bootstrap()
     return _NETSDK_MOD
 
@@ -99,15 +129,26 @@ def module():
 
 
 class DahuaClient:
-    """单台设备会话；UI 层持有其实例，离线/换机时 close()"""
+    """单台设备的登录会话；UI 层持有实例，离线或换机时 close()。
+
+    一个实例对应一条 login 句柄，构造即登录，没有单独的 connect 步骤。
+    不保证线程安全：预览与抓图回调都直接比对 self._login_id。
+    """
 
     def __init__(self, host: str, port: int, user: str, password: str):
+        """登录设备并读取序列号与通道数；失败直接抛 DahuaSdkError。
+
+        构造即登录：会话对象存在就代表已登录，调用方不需要判断中间态，
+        也就不存在"登录了但忘了标记"这种半死状态。
+        """
         m = module()
         self._m = m
         self._sdk = m.NetClient()
         self._sdk.InitEx(None)
         in_param = m.NET_IN_LOGIN_WITH_HIGHLEVEL_SECURITY()
         in_param.dwSize = m.sizeof(in_param)  # ⚠ 必填，漏了 0ms 秒败
+        # 字符串字段按 SDK 约定传 bytes（UTF-8）；emSpecCap=TCP 表示走
+        # SDK 自己的登录握手，不是明文传输
         in_param.szIP = host.encode()
         in_param.nPort = int(port)
         in_param.szUserName = user.encode()
@@ -122,12 +163,19 @@ class DahuaClient:
             raise DahuaSdkError(f"登录失败：{err_msg}（{host}:{port}）")
         self.host, self.port = host, int(port)
         self.serial = self._decode(dev_info, ("sSerialNumber", "szSerialNumber"))
+        # 通道数缺省按 1：部分固件不回 nChanNum，按 1 处理比直接报错实用
         self.chan_num = int(getattr(dev_info, "nChanNum", 1) or 1)
+        # 预览句柄单独记：close() 里可能还没预览过，用 0 表示未开流
         self._play_id = 0
         logger.info("大华登录成功 %s:%s serial=%s", host, port, self.serial)
 
     @staticmethod
     def _decode(info, names):
+        """按候选字段名取字符串，全部缺失时返回空串。
+
+        序列号在不同固件里叫 sSerialNumber 或 szSerialNumber，逐个试；
+        bytes 尾部用 \x00 补齐，不裁掉会让序列号比较永远不相等。
+        """
         for n in names:
             v = getattr(info, n, None)
             if v is None:
@@ -139,6 +187,11 @@ class DahuaClient:
     # ---------- 生命周期 ----------
 
     def close(self) -> None:
+        """停预览并登出；重复调用无副作用。
+
+        异常一律吞掉：设备已离线时登出必然失败，此时抛出只会中断调用方的
+        关闭流程，留下更脏的状态。
+        """
         try:
             if self._play_id:
                 self._sdk.StopRealPlayEx(self._play_id)
@@ -152,14 +205,19 @@ class DahuaClient:
 
     @property
     def login_id(self) -> int:
+        """当前登录句柄；close() 之后为 0。"""
         return self._login_id
 
     # ---------- 预览 ----------
 
     def realplay_start(self, hwnd: int, channel: int = 0, sub_stream: bool = True) -> int:
         """把画面渲染到原生窗口句柄（SDK 内部解码，无需自取码流）"""
+        # 已有一路预览就复用：同会话开第二路会抢同一个 HWND，
+        # 表现为画面闪一下随即黑屏
         if self._play_id:
             return self._play_id
+        # 默认子码流：UI 只做监看，子码流分辨率低、解码压力小；要清晰画面
+        # 时由调用方显式传 sub_stream=False
         ptype = (self._m.SDK_RealPlayType.Realplay_1 if sub_stream
                  else self._m.SDK_RealPlayType.Realplay)
         play_id = self._sdk.RealPlayEx(self._login_id, channel, int(hwnd), ptype)
@@ -169,6 +227,7 @@ class DahuaClient:
         return play_id
 
     def realplay_stop(self) -> None:
+        """停止预览并丢弃句柄；没在预览时是空操作。"""
         if self._play_id:
             self._sdk.StopRealPlayEx(self._play_id)
             self._play_id = 0
@@ -183,6 +242,8 @@ class DahuaClient:
         """
         import time as _time
         m = self._m
+        # 回调跑在 SDK 自己的线程里，用 Event + dict 把结果交回当前线程；
+        # 在回调里直接写文件会与主线程抢 GIL，也无法处理超时
         done = threading.Event()
         holder: dict = {}
 
@@ -197,10 +258,12 @@ class DahuaClient:
         cb = m.fSnapRev(on_snap)
         self._sdk.SetSnapRevCallBack(cb, 0)
         self._snap_cb = cb  # 防 GC
+        # Quality=5、ImageSize=0 即原图 JPEG；InterSnap=0 表示不按间隔连拍
         par = m.SNAP_PARAMS(Channel=int(channel), Quality=5, ImageSize=0,
                             mode=0, InterSnap=0)
         if not self._sdk.SnapPictureEx(self._login_id, par):
             raise DahuaSdkError(f"抓图请求失败：{self._sdk.GetLastErrorMessage()}")
+        # 6 秒上限：走隧道时正常抓图 1~2 秒，超过 6 秒基本是设备没回包
         if not done.wait(6.0):
             raise DahuaSdkError("抓图超时（6s 未收到图像回调）")
         with open(path, "wb") as f:
@@ -213,15 +276,21 @@ class DahuaClient:
         """方向/变倍/聚焦/光圈；command 见 PTZ_MAP；方向类按住发 start、松开发 stop"""
         PTZ = self._m.SDK_PTZ_ControlType
         cmd = getattr(PTZ, command)
+        # 速度夹在 1~8：SDK 只接受这个区间，而 0 在部分固件上表示"用设备
+        # 默认值"，按住方向键会完全不动
         l1, l2, l3 = 0, max(1, min(8, int(speed))), 0
         if command in ("POINT_MOVE_CONTROL", "POINT_SET_CONTROL", "POINT_DEL_CONTROL"):
             l1, l2 = 0, l2  # param2 = 预置点序号（调用方先 ptz_preset 封装，一般不走本方法）
+        # stop=True 才是停止指令：方向类按键必须在松开时再发一次，否则镜头
+        # 会一直转下去，只能靠断电恢复
         if not self._sdk.PTZControlEx2(self._login_id, 0, cmd, l1, l2, l3, bool(stop)):
             raise DahuaSdkError(f"云台命令 {command} 失败：{self._sdk.GetLastErrorMessage()}")
 
     def ptz_preset(self, action: str, index: int) -> None:
         """预置点：action ∈ goto/set/del"""
         PTZ = self._m.SDK_PTZ_ControlType
+        # action 到控制类型的映射写死在这里：只有三种操作，而传错枚举值时
+        # SDK 不会报错，只会静默无效
         cmd = {"goto": PTZ.POINT_MOVE_CONTROL,
                "set": PTZ.POINT_SET_CONTROL,
                "del": PTZ.POINT_DEL_CONTROL}[action]
@@ -241,6 +310,8 @@ class DahuaClient:
         因该固件无名称写入接口）。
         """
         m = self._m
+        # 结构体数组在 Python 侧分配，再把指针塞进 lst：SDK 只往里填内容，
+        # 不负责分配内存，所以数组生命周期必须覆盖整个调用
         arr = (m.NET_PTZ_PRESET * self._PRESET_MAX)()
         lst = m.NET_PTZ_PRESET_LIST()
         lst.dwSize = m.sizeof(lst)
@@ -258,10 +329,13 @@ class DahuaClient:
         out = []
         for i in range(int(lst.dwRetPresetNum)):
             it = arr[i]
+            # 设备是否写过自定义名看 bSetNameEx；没写过时 szNameEx 是空的
             raw = it.szNameEx if it.bSetNameEx else it.szName
             name = bytes(raw).split(b"\x00")[0].decode("gbk",
                                                        errors="replace").strip()
             idx = int(it.nIndex)
+            # 设备默认名（"预置点1"）按未命名处理，改用本地别名；这批固件
+            # 没有名称写入接口，别名只能存本地
             if not name or name == f"预置点{idx}":
                 name = aliases.get(str(idx)) or name or f"预置点{idx}"
             out.append({"index": idx, "name": name})
@@ -275,6 +349,11 @@ class DahuaClient:
             self.serial, {})
 
     def set_preset_alias(self, index: int, name: str) -> None:
+        """写入本地预置点别名，按设备序列号隔离。
+
+        存 app_settings 而不是设备：固件没有名称写入接口，真机改名会被拒，
+        本地别名是唯一可行方案。
+        """
         from core import app_settings
         all_map = app_settings.get("dahua_preset_alias", {}) or {}
         dev = dict(all_map.get(self.serial, {}))
@@ -310,10 +389,16 @@ class DahuaClient:
 
     # ---------- OSD ----------
 
-    _BLEND_MAIN = 1      # EM_A_NET_EM_OSD_BLEND_TYPE.MAIN
-    _BLEND_PREVIEW = 6   # …PREVIEW
+    _BLEND_MAIN = 1     # EM_A_NET_EM_OSD_BLEND_TYPE.MAIN（主码流）
+    _BLEND_EXTRA1 = 2   # …EXTRA1（辅码流1=预览用码流；4238 固件不支持写入）
+    _BLEND_PREVIEW = 6  # …PREVIEW（预览模式，设备侧与主码流联动，不单独写）
 
     def _osd_cfg(self, cfg_id: int, channel: int, struct_obj=None, read: bool = False):
+        """读写一条 OSD 配置，按 read 选择 GetConfig / SetConfig。
+
+        两个分支的入参形态不同（读要缓冲区、写要结构体实例），这是官方包装
+        的硬要求，写反了会抛 TypeError 而不是返回错误码。
+        """
         m = self._m
 
         def _call():
@@ -370,14 +455,20 @@ class DahuaClient:
         st.stuFrontColor.nRed, st.stuFrontColor.nGreen, st.stuFrontColor.nBlue = r, g, b
         st.stuFrontColor.nAlpha = 255
 
-    def _fill_blend(self, st, blend_on: Optional[bool], rect_xy=None) -> None:
-        """按官方 Demo 语义：每码流一次 SetConfig；主码流+预览两条都按 blend_on 落。
-        blend_on/rect_xy 为 None 时保留结构体现值（RMW 语义，勿覆盖设备配置）"""
+    def _fill_blend(self, st, blend_on: Optional[bool], rect_xy=None,
+                    blends: Optional[list] = None) -> None:
+        """按官方 Demo 语义：每码流一次 SetConfig，主码流+预览两条都写。
+
+        blend_on/rect_xy 为 None 时保留结构体现值（RMW，勿覆盖设备配置）。
+        blends 是「叠加到哪几路」白名单：传了它就把未选中的码流显式关闭
+        （用户勾选语义=只在这几路显示），不传则两路都按 blend_on 落。
+        """
         st.dwSize = self._m.sizeof(st)
-        for blend in (self._BLEND_MAIN, self._BLEND_PREVIEW):
+        for blend in (self._BLEND_MAIN, self._BLEND_EXTRA1):
             st.emOsdBlendType = blend
             if blend_on is not None:
-                st.bEncodeBlend = bool(blend_on)
+                st.bEncodeBlend = bool(blend_on) and (
+                    blends is None or blend in blends)
             if rect_xy is not None:
                 st.stuRect.nLeft = st.stuRect.nTop = 0
                 st.stuRect.nRight = st.stuRect.nBottom = 0
@@ -388,13 +479,15 @@ class DahuaClient:
     def osd_channel_title(self, channel: int = 0, text: Optional[str] = None,
                           show: Optional[bool] = None,
                           pos: Optional[tuple] = None,
-                          front_rgb: Optional[tuple] = None) -> dict:
+                          front_rgb: Optional[tuple] = None,
+                          blends: Optional[list] = None) -> dict:
         """通道标题：开关/位置（CFG_CHANNELTITLE=1000）+ 名称文字（NewDevConfig "ChannelTitle"）
 
         ⚠ 开关/位置走**读-改-写**：先取设备现值再只改暴露字段。
         若用零初始化结构体直接 SetConfig，前景/背景色、对齐等未暴露字段会被
         清零（文字变黑）——2026-10-07 真机事故。
         front_rgb=(r,g,b) 可显式指定前景色（默认保留设备现值）。
+        blends：叠加码流白名单 [1=主码流, 6=预览码流]，None=两路同开同关。
         """
         m = self._m
         cfg_id = int(m.NET_EM_CFG_OPERATE_TYPE.CFG_CHANNELTITLE)  # 1000
@@ -402,7 +495,7 @@ class DahuaClient:
             st = self._read_osd(cfg_id, channel, m.NET_OSD_CHANNEL_TITLE)
             if front_rgb is not None:
                 self._apply_front_rgb(st, front_rgb)
-            for st_i in self._fill_blend(st, show, pos):
+            for st_i in self._fill_blend(st, show, pos, blends):
                 self._osd_cfg(cfg_id, channel, st_i)
         name_applied: Optional[bool] = None
         if text is not None:
@@ -421,13 +514,21 @@ class DahuaClient:
         return result
 
     def osd_channel_title_read(self, channel: int = 0) -> dict:
+        """读回通道标题：位置/名称 + 主码流与预览码流各自的叠加开关。"""
         m = self._m
-        st = m.NET_OSD_CHANNEL_TITLE()
-        st.dwSize = m.sizeof(st)
-        st.emOsdBlendType = self._BLEND_MAIN
-        got = self._osd_cfg(1000, channel, st, read=True)
-        return {"show": bool(got.bEncodeBlend),
-                "pos": (int(got.stuRect.nLeft), int(got.stuRect.nTop)),
+
+        def _read(blend: int):
+            st = m.NET_OSD_CHANNEL_TITLE()
+            st.dwSize = m.sizeof(st)
+            st.emOsdBlendType = blend
+            return self._osd_cfg(1000, channel, st, read=True)
+
+        got_main = _read(self._BLEND_MAIN)
+        got_pv = _read(self._BLEND_EXTRA1)
+        return {"show": bool(got_main.bEncodeBlend),
+                "show_main": bool(got_main.bEncodeBlend),
+                "show_preview": bool(got_pv.bEncodeBlend),
+                "pos": (int(got_main.stuRect.nLeft), int(got_main.stuRect.nTop)),
                 "name": self._get_channel_name(channel)}
 
     def osd_time_title(self, channel: int = 0, show: Optional[bool] = None,
@@ -445,6 +546,7 @@ class DahuaClient:
                 if show_week is not None:  # 未指定时保留设备现值，勿覆盖
                     st_i.bShowWeek = bool(show_week)
                 self._osd_cfg(1001, channel, st_i)
+            # 写完重读：设备会把位置取整、日期格式归一化，回显以设备为准
             st = self._read_osd(1001, channel, m.NET_OSD_TIME_TITLE)  # 写后取新值
         return {"show": bool(st.bEncodeBlend), "show_week": bool(st.bShowWeek),
                 "pos": (int(st.stuRect.nLeft), int(st.stuRect.nTop))}
@@ -456,13 +558,64 @@ class DahuaClient:
         st = m.NET_OSD_CUSTOM_TITLE()
         st.dwSize = m.sizeof(st)
         st.emOsdBlendType = self._BLEND_MAIN
+        # 只用第 1 条槽位：8 条是给设备端滚动告示用的，本工具只需要一条
         st.nCustomTitleNum = 1
         item = st.stuCustomTitle[0]
+        # 设备只认 GBK，字段定长 1024，超长直接截断而不是报错
         item.szText = text.encode("gbk", errors="replace")[:1024]
         item.bEncodeBlend = bool(show)
         item.stuRect.nLeft, item.stuRect.nTop = pos
+        # 矩形取同一个点：该字段实际是左上角坐标，宽高由设备按字号推算
         item.stuRect.nRight, item.stuRect.nBottom = pos
         self._osd_cfg(1002, channel, st)
+
+    # ---------- 图像属性（镜像/翻转/旋转，CFG_VIDEO_IMAGE_CTRL=9601） ----------
+
+    _CFG_IMAGE_CTRL = 9601
+
+    def _image_ctrl_struct(self, channel: int):
+        m = self._m
+        st = m.NET_EM_CFG_VIDEO_IMAGE_CTRL_INFO()
+        st.dwSize = m.sizeof(st)
+        buf = m.create_string_buffer(m.sizeof(st))
+        m.memmove(buf, m.byref(st), m.sizeof(st))
+        if not self._sdk.GetConfig(self._login_id, self._CFG_IMAGE_CTRL, channel,
+                                   buf, m.sizeof(st), 2000, None):
+            raise DahuaSdkError(
+                f"读取图像属性失败：{self._sdk.GetLastErrorMessage()}")
+        return m.NET_EM_CFG_VIDEO_IMAGE_CTRL_INFO.from_buffer_copy(buf)
+
+    def image_ctrl(self, channel: int = 0) -> dict:
+        """读镜像/翻转/旋转。bMirror/bFlip 是能力位（是否支持），
+        当前态在 bHorizontalFlip（左右镜像）/bVerticalFlip（上下翻转）/
+        nRotate90（0 无、1 顺时针 90°、2 逆时针 90°）。"""
+        g = self._with_retry(lambda: self._image_ctrl_struct(channel))
+        return {"supports_mirror": bool(g.bMirror),
+                "supports_flip": bool(g.bFlip),
+                "mirror": bool(g.bHorizontalFlip),
+                "flip": bool(g.bVerticalFlip),
+                "rotate": int(g.nRotate90)}
+
+    def set_image_ctrl(self, channel: int = 0, *, mirror=None, flip=None,
+                       rotate=None) -> dict:
+        """RMW 写镜像/翻转/旋转：只改给定字段，其余保留设备现值。"""
+        m = self._m
+
+        def _apply():
+            g = self._image_ctrl_struct(channel)
+            if mirror is not None:
+                g.bHorizontalFlip = bool(mirror)
+            if flip is not None:
+                g.bVerticalFlip = bool(flip)
+            if rotate is not None:
+                g.nRotate90 = int(rotate)
+            if not self._sdk.SetConfig(self._login_id, self._CFG_IMAGE_CTRL,
+                                       channel, g, m.sizeof(g), 2000, 0, None):
+                raise DahuaSdkError(
+                    f"写入图像属性失败：{self._sdk.GetLastErrorMessage()}")
+
+        self._with_retry(_apply)
+        return self.image_ctrl(channel)
 
     # ---------- 编码配置（码流/分辨率/帧率/码率，ConfigTool「编码配置」同源） ----------
 
@@ -475,6 +628,8 @@ class DahuaClient:
         st = m.NET_ENCODE_VIDEO_INFO()
         st.dwSize = m.sizeof(st)
         st.emFormatType = int(stream)
+        # 与 _read_osd 同款：先把填好 dwSize/emFormatType 的结构体拷进缓冲，
+        # 因为 GetConfig 会校验这两个字段是否已初始化
         buf = m.create_string_buffer(m.sizeof(st))
         m.memmove(buf, m.byref(st), m.sizeof(st))
         if not self._sdk.GetConfig(self._login_id, 1100, 0, buf,
@@ -484,6 +639,7 @@ class DahuaClient:
 
     def encode_video(self, stream: int = STREAM_MAIN) -> dict:
         """读码流视频参数。stream: 1=主码流, 4=辅码流1"""
+        # 读取也重试：隧道下背靠背 GET 同样会偶发 Protocol error
         g = self._with_retry(lambda: self._encode_video_struct(stream))
         return {"enable": bool(g.bVideoEnable),
                 "compression": int(g.emCompression),
@@ -503,6 +659,8 @@ class DahuaClient:
         bitrate 单位 kbps；image_quality: 1-6（10%~100%，VBR 下生效）。"""
         m = self._m
 
+        # 把"读-改-写"整体放进重试闭包：只重试写不重读，会拿着过期基线
+        # 覆盖掉别人刚改的字段
         def _apply():
             g = self._encode_video_struct(stream)
             if enable is not None:
@@ -528,6 +686,8 @@ class DahuaClient:
                 raise DahuaSdkError(
                     f"写入编码配置失败：{self._sdk.GetLastErrorMessage()}")
 
+        # 写成功后重新读一次：设备可能拒绝某些组合（如 4K 配高帧率）并静默
+        # 改回，回显设备真实值比回显入参更可信
         self._with_retry(_apply)
         return self.encode_video(stream)
 
@@ -539,6 +699,7 @@ class DahuaClient:
     _CFG_ENCODE_CHANNELTITLE = 1108
 
     def _get_channel_name(self, channel: int) -> str:
+        """读通道名称：优先编码配置(1108)，失败回落 NewDevConfig 文本。"""
         m = self._m
         st = m.NET_ENCODE_CHANNELTITLE_INFO()
         st.dwSize = m.sizeof(st)
@@ -549,9 +710,15 @@ class DahuaClient:
             got = m.NET_ENCODE_CHANNELTITLE_INFO.from_buffer_copy(buf)
             return bytes(got.szChannelName).split(b"\x00")[0].decode(
                 "gbk", errors="replace").strip()
+        # 老固件没有 1108 配置项，只能从 NewDevConfig 的文本回包里抠字段
         return self._extract_channel_name_field(self._get_channel_name_raw(channel))
 
     def _set_channel_name(self, channel: int, text: str) -> None:
+        """写通道名称：优先 1108 配置项，被拒时回落 NewDevConfig。
+
+        两条路径都失败才抛异常；上层 osd_channel_title 会接住并把
+        name_applied 置 False，其余 OSD 设置照常生效。
+        """
         m = self._m
         st = m.NET_ENCODE_CHANNELTITLE_INFO()
         st.dwSize = m.sizeof(st)
@@ -561,6 +728,7 @@ class DahuaClient:
             return
         # 老固件兜底：NewDevConfig（按 GET 回包格式选 JSON / table）
         raw = self._get_channel_name_raw(channel)
+        # 回包是 JSON 说明是新固件，table 文本则是老固件，两种载荷不能混用
         if raw.lstrip().startswith("{"):
             import json
             payload = json.dumps({"table": {"Name": text}},
@@ -580,6 +748,7 @@ class DahuaClient:
             raise DahuaSdkError(f"设置通道名称失败：{self._sdk.GetLastErrorMessage()}")
 
     def _get_channel_name_raw(self, channel: int) -> str:
+        """取 NewDevConfig("ChannelTitle") 的原始文本；失败返回空串。"""
         m = self._m
         buf = m.create_string_buffer(4096)
         err = m.c_int(0)
@@ -608,7 +777,11 @@ class DahuaClient:
 
     @staticmethod
     def _build_channel_name_payload(existing: str, text: str) -> str:
-        """老固件 table 格式载荷；无既有内容时给最小载荷"""
+        """拼老固件的 table 格式载荷。
+
+        已有内容时只发单行赋值：老固件收到整段 SectionCount 载荷会把其他
+        字段重置；完全没有既有内容时才发完整段。
+        """
         if existing:
             return f"ChannelName[0].Name={text}"
         return (f"ChannelTitle\r\nSectionCount=1\r\n"
@@ -619,8 +792,13 @@ class DahuaClient:
 
 
 def connect(host_port: str, user: str, password: str) -> DahuaClient:
-    """'49.235.34.253:4238' 或 '192.168.1.108'（缺省 37777）→ 已登录会话"""
+    """把 '49.235.34.253:4238' 或 '192.168.1.108' 解析成已登录会话。
+
+    纯 IP 时缺省端口 37777；用 rpartition 而不是 split，因为 IPv6 字面量里
+    也含冒号，只有最后一个冒号之后才是端口。
+    """
     host, _, port = host_port.rpartition(":")
     if not host:  # 无冒号
         host, port = host_port, 37777
+    # 顺手剥掉 IPv6 的方括号与空白，调用方不必自己规范化
     return DahuaClient(host.strip("[] "), int(port), user, password)

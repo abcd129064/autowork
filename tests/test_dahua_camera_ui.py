@@ -46,7 +46,10 @@ class _FakeClient:
         return [{"index": 1, "name": "预置点1"}]
 
     def realplay_stop(self):
-        pass
+        self.realplay_stopped = True
+
+    def realplay_start(self, hwnd, channel=0, sub_stream=True):
+        self.realplay_hwnd = hwnd
 
     # ---- 编码配置（编码页数据源，v2 双卡） ----
     def encode_video(self, stream=1):
@@ -57,6 +60,22 @@ class _FakeClient:
         else:
             base.update(width=640, height=360, bitrate=512)
         return base
+
+    # ---- 图像属性（9601） ----
+    def image_ctrl(self, channel=0):
+        return {"supports_mirror": True, "supports_flip": True,
+                "mirror": getattr(self, "img_mirror", False),
+                "flip": getattr(self, "img_flip", False),
+                "rotate": getattr(self, "img_rotate", 0)}
+
+    def set_image_ctrl(self, channel=0, **kw):
+        if kw.get("mirror") is not None:
+            self.img_mirror = bool(kw["mirror"])
+        if kw.get("flip") is not None:
+            self.img_flip = bool(kw["flip"])
+        if kw.get("rotate") is not None:
+            self.img_rotate = int(kw["rotate"])
+        return self.image_ctrl(channel)
 
     def set_encode_video(self, stream=1, **kw):
         if not hasattr(self, "encode_calls"):
@@ -444,14 +463,8 @@ def test_frps_tunnel_bar_chips_search_and_use(qapp, monkeypatch):
     qapp.processEvents()
 
     def chip_texts():
-        h = page._frps_v
-        out = []
-        for i in range(h.count()):
-            w = h.itemAt(i).widget()
-            labels = w.findChildren(QLabel) if w else []
-            if labels:
-                out.append("|".join(lb.text() for lb in labels))
-        return out
+        lst = page._frps_list
+        return [lst.item(i).text() for i in range(lst.count())]
 
     # 默认：两条 *_cam（other 被过滤），计数 2
     texts = chip_texts()
@@ -475,3 +488,82 @@ def test_frps_tunnel_bar_chips_search_and_use(qapp, monkeypatch):
     # 清空搜索 + 选用 01_cam → 预填 frps 地址
     page._ed_frps_search.setText("")
     qapp.processEvents()
+
+
+# ---- core 层：叠加码流白名单（主/预览两路独立开关） ---------------------------
+
+def test_osd_blend_whitelist_only_selected_stream():
+    """blends 白名单只放行勾选码流，未勾选的显式关闭；不传则两路同上同下"""
+    from core.dahua_sdk import DahuaClient
+    from core import dahua_sdk as sdk_mod
+
+    m = sdk_mod.module()
+    c = object.__new__(DahuaClient)
+    c._m = m
+    st = m.NET_OSD_CHANNEL_TITLE()
+
+    def snap(blend_on, blends):
+        # 生成器复用同一结构体实例（消费方边迭代边写），必须逐次快照
+        return [bool(s.bEncodeBlend)
+                for s in c._fill_blend(st, blend_on, None, blends)]
+
+    assert snap(True, None) == [True, True]
+    assert snap(True, [DahuaClient._BLEND_MAIN]) == [True, False]
+    assert snap(False, [DahuaClient._BLEND_PREVIEW]) == [False, False]
+
+
+# ---- 页面切回防闪烁（延迟 1s 恢复预览） --------------------------------------
+
+def test_preview_resume_delayed_after_page_switch(qapp, monkeypatch):
+    """切走 → 停流；切回 → 不立刻起流，约 1s 后才恢复（防 0.5s 闪烁）"""
+    fake = _FakeClient(ptz=False)
+    monkeypatch.setattr(cam_mod.dahua_sdk, "connect", lambda a, u, p: fake)
+    page = DahuaCameraWork(None)
+    page.show()
+    qapp.processEvents()
+    page._ed_addr.setText("1.2.3.4:4238")
+    page._connect()
+    assert _wait(qapp, lambda: page._client is not None)
+
+    page._start_preview()
+    assert _wait(qapp, lambda: page._preview.playing)
+
+    # 切走：立即停流且记下待恢复
+    page.hide()
+    qapp.processEvents()
+    assert not page._preview.playing
+    assert page._resume_pending is True
+
+    # 切回：立刻仍是暗底（未起流），1s 后定时器才恢复
+    page.show()
+    qapp.processEvents()
+    assert not page._preview.playing
+    assert _wait(qapp, lambda: page._preview.playing, 2500)
+    page.hide()
+
+
+def test_encode_page_image_apply(qapp, monkeypatch):
+    """图像属性应用：镜像/旋转写入走 client.set_image_ctrl 并回填"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._chk_mirror.setChecked(True)
+    _select_combo_by_data(ep._cmb_rotate, 1)
+    ep._on_apply_image()
+    assert _wait(qapp, lambda: fake.image_ctrl()["mirror"] is True)
+    assert fake.image_ctrl()["rotate"] == 1
+
+
+def _select_combo_by_data(combo, data):
+    for i in range(combo.count()):
+        if combo.itemData(i) == data:
+            combo.setCurrentIndex(i)
+            return
+
+
+def test_encode_page_transparent_scroll_and_min_width(qapp, monkeypatch):
+    """黑底回归：两个滚动区视口必须透明（否则卡片被衬成实心黑、Mica 被挡）；
+    页面最小宽要足够小，窄窗口不被撑出横向溢出"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    for sc in (ep._stream_scroll, ep._right_scroll):
+        assert not sc.viewport().autoFillBackground()
+        assert "transparent" in sc.viewport().styleSheet()
+    assert ep.minimumSizeHint().width() <= 900
