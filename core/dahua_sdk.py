@@ -569,6 +569,215 @@ class DahuaClient:
         item.stuRect.nRight, item.stuRect.nBottom = pos
         self._osd_cfg(1002, channel, st)
 
+    # ---------- 曝光 / 背光 / 音量（GetConfig 结构体，已真机可写） ----------
+
+    def _cfg_struct(self, cfg_id: int, cls, channel: int = 0, cfg_type: int = 2):
+        """通用读：cfg_type=2(NORMAL) 供带 emCfgType 的结构体使用。"""
+        m = self._m
+        st = cls()
+        st.dwSize = m.sizeof(st)
+        if hasattr(st, "emCfgType"):
+            st.emCfgType = cfg_type
+        buf = m.create_string_buffer(m.sizeof(st))
+        m.memmove(buf, m.byref(st), m.sizeof(st))
+        if not self._sdk.GetConfig(self._login_id, cfg_id, channel, buf,
+                                   m.sizeof(st), 2000, None):
+            raise DahuaSdkError(
+                f"读取配置 0x{cfg_id:x} 失败：{self._sdk.GetLastErrorMessage()}")
+        return cls.from_buffer_copy(buf)
+
+    def exposure(self, channel: int = 0) -> dict:
+        g = self._with_retry(
+            lambda: self._cfg_struct(1306, self._m.NET_VIDEOIN_EXPOSURE_NORMAL_INFO,
+                                     channel))
+        return {"mode": int(g.emExposureMode), "antiflicker": int(g.nAntiFlicker),
+                "compensation": int(g.nCompensation), "gain": int(g.nGain),
+                "gain_min": int(g.nGainMin), "gain_max": int(g.nGainMax)}
+
+    def set_exposure(self, channel: int = 0, *, mode=None, antiflicker=None,
+                     compensation=None, gain=None) -> dict:
+        m = self._m
+        cls = m.NET_VIDEOIN_EXPOSURE_NORMAL_INFO
+
+        def _apply():
+            g = self._cfg_struct(1306, cls, channel)
+            if mode is not None:
+                g.emExposureMode = int(mode)
+            if antiflicker is not None:
+                g.nAntiFlicker = int(antiflicker)
+            if compensation is not None:
+                g.nCompensation = int(compensation)
+            if gain is not None:
+                g.nGain = int(gain)
+            if not self._sdk.SetConfig(self._login_id, 1306, channel, g,
+                                       m.sizeof(g), 2000, 0, None):
+                raise DahuaSdkError(
+                    f"写入曝光失败：{self._sdk.GetLastErrorMessage()}")
+
+        self._with_retry(_apply)
+        return self.exposure(channel)
+
+    def backlight(self, channel: int = 0) -> dict:
+        g = self._with_retry(
+            lambda: self._cfg_struct(1309, self._m.NET_VIDEOIN_BACKLIGHT_INFO,
+                                     channel))
+        return {"mode": int(g.emBlackMode),
+                "wide_dynamic": int(g.nWideDynamicRange),
+                "glare": int(g.nGlareInhibition)}
+
+    def set_backlight(self, channel: int = 0, *, mode=None,
+                      wide_dynamic=None, glare=None) -> dict:
+        m = self._m
+        cls = m.NET_VIDEOIN_BACKLIGHT_INFO
+
+        def _apply():
+            g = self._cfg_struct(1309, cls, channel)
+            if mode is not None:
+                g.emBlackMode = int(mode)
+            if wide_dynamic is not None:
+                g.nWideDynamicRange = int(wide_dynamic)
+            if glare is not None:
+                g.nGlareInhibition = int(glare)
+            if not self._sdk.SetConfig(self._login_id, 1309, channel, g,
+                                       m.sizeof(g), 2000, 0, None):
+                raise DahuaSdkError(
+                    f"写入背光失败：{self._sdk.GetLastErrorMessage()}")
+
+        self._with_retry(_apply)
+        return self.backlight(channel)
+
+    def audio_volume(self, channel: int = 0) -> dict:
+        m = self._m
+        a = self._with_retry(
+            lambda: self._cfg_struct(1202, m.NET_AUDIOIN_VOLUME_INFO, channel))
+        b = self._with_retry(
+            lambda: self._cfg_struct(1203, m.NET_AUDIOOUT_VOLUME_INFO, channel))
+        return {"in": int(a.nVolume), "out": int(b.nVolume)}
+
+    def set_audio_volume(self, channel: int = 0, *, vol_in=None,
+                         vol_out=None) -> dict:
+        m = self._m
+
+        def _apply():
+            if vol_in is not None:
+                g = self._cfg_struct(1202, m.NET_AUDIOIN_VOLUME_INFO, channel)
+                g.nVolume = int(vol_in)
+                if not self._sdk.SetConfig(self._login_id, 1202, channel, g,
+                                           m.sizeof(g), 2000, 0, None):
+                    raise DahuaSdkError(
+                        f"写入输入音量失败：{self._sdk.GetLastErrorMessage()}")
+            if vol_out is not None:
+                g = self._cfg_struct(1203, m.NET_AUDIOOUT_VOLUME_INFO, channel)
+                g.nVolume = int(vol_out)
+                if not self._sdk.SetConfig(self._login_id, 1203, channel, g,
+                                           m.sizeof(g), 2000, 0, None):
+                    raise DahuaSdkError(
+                        f"写入输出音量失败：{self._sdk.GetLastErrorMessage()}")
+
+        self._with_retry(_apply)
+        return self.audio_volume(channel)
+
+    # ---------- JSON 配置（VideoColor / VideoInOptions / Lighting） ----------
+
+    def json_config(self, name: str, channel: int = 0) -> dict:
+        """GetNewDevConfig 取 JSON 配置的 params 段（失败抛异常）。"""
+        m = self._m
+        buf = m.create_string_buffer(32768)
+        err = m.c_int(0)
+        ok = self._with_retry(lambda: self._sdk.GetNewDevConfig(
+            self._login_id, name, channel, buf, 32768, err, 2000, None))
+        if not ok:
+            raise DahuaSdkError(
+                f"读取 {name} 失败：{self._sdk.GetLastErrorMessage()}")
+        import json
+        raw = buf.value.decode(errors="replace")
+        try:
+            return json.loads(raw).get("params", {})
+        except ValueError as e:
+            raise DahuaSdkError(f"{name} 回包不是 JSON：{e}") from e
+
+    def set_json_config(self, name: str, params: dict, channel: int = 0) -> None:
+        """SetNewDevConfig 写 JSON。注意部分固件“接受但不落库”，调用方须读回校验。"""
+        import json
+        m = self._m
+        payload = json.dumps(params, ensure_ascii=False)
+        data = m.create_string_buffer(payload.encode())
+        err = m.c_int(0)
+        ok = self._with_retry(lambda: self._sdk.SetNewDevConfig(
+            self._login_id, name, channel, data, len(payload), err, 0, 2000))
+        if not ok:
+            raise DahuaSdkError(
+                f"写入 {name} 失败：{self._sdk.GetLastErrorMessage()}")
+
+    def video_color(self, channel: int = 0) -> dict:
+        params = self.json_config("VideoColor", channel)
+        row = (params.get("table") or [{}])
+        row = row[0] if isinstance(row, list) and row else row
+        return {k: int(row.get(k, 0)) for k in
+                ("Brightness", "Contrast", "Saturation", "Gamma",
+                 "Hue", "ChromaSuppress")}
+
+    def set_video_color(self, channel: int = 0, **kw) -> None:
+        """改色彩：整表回写（表内按 Day/Night 分时段，仅改各时段同名字段）。"""
+        params = self.json_config("VideoColor", channel)
+        rows = params.get("table")
+        rows = rows if isinstance(rows, list) else [rows]
+        valid = {"Brightness": "Brightness", "Contrast": "Contrast",
+                 "Saturation": "Saturation", "Gamma": "Gamma",
+                 "Hue": "Hue", "ChromaSuppress": "ChromaSuppress"}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for k, field in valid.items():
+                if kw.get(k.lower()) is not None:
+                    row[field] = int(kw[k.lower()])
+        self.set_json_config("VideoColor", {"table": rows}, channel)
+
+    def video_options(self, channel: int = 0) -> dict:
+        t = self.json_config("VideoInOptions", channel).get("table") or {}
+        return {"day_night": int(t.get("DayNightColor", 0)),
+                "switch_mode": int(t.get("SwitchMode", 0)),
+                "daynight_sensitivity": int(t.get("DayNightSensitivity", 0)),
+                "daynight_delay": int(t.get("DayNightSwitchDelay", 0)),
+                "white_balance": str(t.get("WhiteBalance") or ""),
+                "color_temp": int(t.get("ColorTemperatureLevel", 0)),
+                "focus_mode": int(t.get("FocusMode", 0)),
+                "exposure_mode": int(t.get("ExposureMode", 0))}
+
+    def set_video_options(self, channel: int = 0, **kw) -> None:
+        m = {"day_night": "DayNightColor", "switch_mode": "SwitchMode",
+             "daynight_sensitivity": "DayNightSensitivity",
+             "daynight_delay": "DayNightSwitchDelay",
+             "white_balance": "WhiteBalance",
+             "color_temp": "ColorTemperatureLevel",
+             "focus_mode": "FocusMode"}
+        params = self.json_config("VideoInOptions", channel)
+        table = params.get("table") or {}
+        for k, field in m.items():
+            if kw.get(k) is not None:
+                table[field] = kw[k]
+        self.set_json_config("VideoInOptions", {"table": table}, channel)
+
+    def lighting(self, channel: int = 0) -> dict:
+        t = self.json_config("Lighting", channel).get("table") or [{}]
+        row = t[0] if isinstance(t, list) and t else t
+        return {"mode": str(row.get("Mode") or ""),
+                "correction": int(row.get("Correction", 0))}
+
+    def set_lighting(self, channel: int = 0, *, mode=None,
+                     correction=None) -> None:
+        params = self.json_config("Lighting", channel)
+        rows = params.get("table")
+        rows = rows if isinstance(rows, list) else [rows]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if mode is not None:
+                row["Mode"] = mode
+            if correction is not None:
+                row["Correction"] = int(correction)
+        self.set_json_config("Lighting", {"table": rows}, channel)
+
     # ---------- 图像属性（镜像/翻转/旋转，CFG_VIDEO_IMAGE_CTRL=9601） ----------
 
     _CFG_IMAGE_CTRL = 9601

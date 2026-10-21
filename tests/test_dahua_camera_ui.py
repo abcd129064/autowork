@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from windows.camera import camera_page as cam_mod
 from windows.camera.camera_page import DahuaCameraWork, _SerialCaller
@@ -60,6 +60,48 @@ class _FakeClient:
         else:
             base.update(width=640, height=360, bitrate=512)
         return base
+
+    # ---- P2 分组（曝光/背光/音量/JSON 配置） ----
+    def exposure(self, channel=0):
+        return {"mode": 0, "antiflicker": 0,
+                "compensation": getattr(self, "exp_comp", 50),
+                "gain": 1, "gain_min": 0, "gain_max": 50}
+
+    def set_exposure(self, channel=0, **kw):
+        if kw.get("compensation") is not None:
+            self.exp_comp = int(kw["compensation"])
+        return self.exposure()
+
+    def backlight(self, channel=0):
+        return {"mode": 1, "wide_dynamic": 50, "glare": 50}
+
+    def set_backlight(self, channel=0, **kw):
+        return self.backlight()
+
+    def audio_volume(self, channel=0):
+        return {"in": getattr(self, "vol_in", 100),
+                "out": getattr(self, "vol_out", 100)}
+
+    def set_audio_volume(self, channel=0, vol_in=None, vol_out=None):
+        if vol_in is not None:
+            self.vol_in = int(vol_in)
+        if vol_out is not None:
+            self.vol_out = int(vol_out)
+        return self.audio_volume()
+
+    def video_options(self, channel=0):
+        return {"day_night": 0, "switch_mode": 0, "daynight_sensitivity": 2,
+                "daynight_delay": 6, "white_balance": "Auto",
+                "color_temp": 100, "focus_mode": 0, "exposure_mode": 0}
+
+    def set_video_options(self, channel=0, **kw):
+        return None
+
+    def lighting(self, channel=0):
+        return {"mode": "Auto", "correction": 50}
+
+    def set_lighting(self, channel=0, **kw):
+        return None
 
     # ---- 图像属性（9601） ----
     def image_ctrl(self, channel=0):
@@ -389,12 +431,13 @@ def test_encode_page_apply_calls_set(qapp, monkeypatch):
     ep._on_read()
     assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
     main = ep._cards[1]
-    _set_combo(main["cmb_bitrate"], 2048)
+    # 6144 是设计稿主码流「码率上限」的选项之一（v6：4096/6144/8192）
+    _set_combo(main["cmb_bitrate"], 6144)
     _set_combo(main["cmb_comp"], 8)              # H.265
     ep._on_apply()
     assert _wait(qapp, lambda: len(getattr(fake, "encode_calls", [])) >= 2)
     calls = dict(fake.encode_calls)
-    assert calls[1]["bitrate"] == 2048
+    assert calls[1]["bitrate"] == 6144
     assert calls[1]["compression"] == 8
     assert calls[4]["bitrate"] == 512            # 辅码流原值照写（RMW 全字段）
 
@@ -567,3 +610,49 @@ def test_encode_page_transparent_scroll_and_min_width(qapp, monkeypatch):
         assert not sc.viewport().autoFillBackground()
         assert "transparent" in sc.viewport().styleSheet()
     assert ep.minimumSizeHint().width() <= 900
+    # 左列固定约 470px（设计稿 480 档），右列按窗口宽 1/2/3 列
+    ep.resize(1084, 640)
+    qapp.processEvents()
+    assert 440 <= ep._left_box.width() <= 540
+    assert ep._right_cols == 1
+    ep.resize(1400, 640)
+    qapp.processEvents()
+    assert ep._right_cols == 2
+    ep.resize(2000, 640)
+    qapp.processEvents()
+    assert ep._right_cols == 3
+    # 缩回窄窗必须能回到单列：卡片最小宽过大时这里会锁死在多列，
+    # 页面缩不下去，左列卡片被挤出窗口裁切（10-21 截图回归）
+    ep.resize(1084, 640)
+    qapp.processEvents()
+    assert ep._right_cols == 1
+    assert ep.minimumSizeHint().width() <= 900
+
+
+def test_encode_stream_cards_not_clipped(qapp, monkeypatch):
+    """裁切回归（10-21 截图）：左列 470px 内，码流卡实际宽必须 >= 最小宽。
+
+    分辨率下拉/微调框的 minimumSizeHint 曾把卡片最小宽顶到 718px，
+    超过左列宽度后内容被裁（应用按钮只剩一条边）。"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep.resize(1084, 640)
+    qapp.processEvents()
+    qapp.processEvents()
+    cards = [c for c in ep._stream_scroll.findChildren(QWidget)
+             if type(c).__name__ == "CardWidget"]
+    assert len(cards) == 2
+    for c in cards:
+        assert c.width() >= c.minimumSizeHint().width(), (
+            f"卡片被裁：宽 {c.width()} < 最小 {c.minimumSizeHint().width()}")
+
+
+def test_encode_group_exposure_read_apply(qapp, monkeypatch):
+    """P2 通用分组卡：读取回填 + 应用写后校验"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    grp = ep._grp_exposure
+    grp["read"].click()
+    assert _wait(qapp, lambda:
+                 grp["widgets"]["compensation"]["slider"].value() == 50)
+    grp["widgets"]["compensation"]["slider"].setValue(60)
+    grp["apply"].click()
+    assert _wait(qapp, lambda: getattr(fake, "exp_comp", None) == 60)
