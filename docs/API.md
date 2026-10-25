@@ -1964,23 +1964,44 @@ MysqlSyncCard(parent=None, sync_scope="ops")
 ### windows.remote_session.forensic_report（SSH 故障取证包）
 
 SSH 连接失败时一键生成诊断取证包（模块级函数 + `ForensicWorker` 后台线程）。
+支持两种模式：**常规诊断取证**（`FORENSIC_COMMANDS`，现状巡检）与
+**死机/异常停止取证**（`CRASH_FORENSIC_COMMANDS`，2026-10-29 D3：面向设备
+刚被重启的死机场景，采集启动/关机历史、上次 boot 日志戛然而止、非正常
+关机脏标记、OOM/MCE/内核死锁/进程崩溃/文件系统错误、pstore 残留、lockup
+开关，全部只读、命令级超时、自带 journalctl→syslog 降级链）。
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
 | `get_forensic_dir()` | `() -> str` | 取证报告目录 `{app_dir}/logs/forensic`（自动创建 + 闭环清理：保留 90 天且不超 200 个） |
+| `get_forensic_commands(crash_mode=False)` | `(bool) -> tuple` | 按模式返回命令组（常规 2 元组 / 死机 3 元组带超时） |
 | `lookup_table_info(snk, host)` | `(str, str) -> dict` | 从 billiard_tables 反查球桌信息（匹配优先级：snk_code 精确 → remark 含 snk → remark 含 host） |
 | `lookup_kd_status(table_id, snk)` | `(str, str) -> dict` | 查 kd_status 最新分区关键字段（优先 table_id TRIM 匹配，再按 snk 当 device_code） |
 | `read_session_tail(path, n=SESSION_TAIL_LINES)` | `(str, int) -> str` | 读会话日志最近 n 行 |
 | `collect_conn_log(host, limit=CONN_LOG_ENTRIES)` | `(str, int) -> str` | 从连接日志及归档中提取该 host 最近记录（时间正序） |
-| `build_ai_evidence(cmd_results)` | `(list) -> str` | 拼装送 AI 的取证证据（仅成功命令输出，单条/总量截断） |
-| `analyze_with_ai(evidence)` | `(str) -> str` | 调用所选 AI 厂商 OpenAI 兼容接口分析证据，返回 Markdown 文本 |
-| `build_forensic_report(meta, cmd_results, table_info, kd_info, session_tail, conn_log, ai_analysis="", ai_error="", ai_label="")` | `(...) -> str` | 组装完整 Markdown 报告 |
+| `build_ai_evidence(cmd_results, extra="")` | `(list, str) -> str` | 拼装送 AI 的取证证据（仅成功命令输出，单条/总量截断；extra 追加规则引擎结论） |
+| `analyze_with_ai(evidence, system_prompt="")` | `(str, str) -> str` | 调用所选 AI 厂商 OpenAI 兼容接口分析证据，返回 Markdown 文本（system_prompt 不传用常规诊断提示词） |
+| `analyze_crash_evidence(cmd_results)` | `(list) -> dict` | 死机证据确定性分析（纯函数）：`{"timeline", "findings", "verdict", "suggestions"}`；带否定守卫（「无 OOM 记录」类降级文案不触发签名） |
+| `build_forensic_report(meta, cmd_results, table_info, kd_info, session_tail, conn_log, ai_analysis="", ai_error="", ai_label="")` | `(...) -> str` | 组装常规 Markdown 报告 |
+| `build_crash_forensic_report(meta, cmd_results, crash_result, table_info, kd_info, session_tail, conn_log, ai_analysis="", ai_error="", ai_label="")` | `(...) -> str` | 组装死机 Markdown 报告（时间线 + 签名表 + 初步结论 + 建议 + AI 根因分析） |
 
 #### 类 `ForensicWorker`
 
 后台逐条执行诊断命令组并生成报告（exec_command 独立 channel，不阻塞交互）。
+`crash_mode=False`（默认）走常规组；`crash_mode=True` 走死机组（先规则引擎
+`analyze_crash_evidence`，再让 AI 基于结论复核，提示词换用
+`_AI_CRASH_SYSTEM_PROMPT`），报告文件名带 `crash_` 前缀落盘同目录。
 
-**信号**：`line` Signal(str)——逐条命令执行进度；`done` Signal(str)——报告文件路径；`error` Signal(str)——失败信息。
+```python
+ForensicWorker(client, host, port, username, server_name='',
+               session_log_path=None, parent=None, crash_mode=False)
+```
+
+**信号**：`progress` Signal(int, int, str)——(当前条序号, 总条数, 阶段描述)；
+`report_ready` Signal(str)——报告文件路径；`failed` Signal(str)——致命错误；
+`cancelled` Signal()——用户主动取消（`cancel()`，命令粒度，不生成报告）。
+
+UI 入口：`windows/remote_session/ssh_terminal.py` 底部工具条「一键取证」
+下拉按钮（主体＝常规取证，下拉箭头＝死机/异常停止取证）。
 
 ---
 

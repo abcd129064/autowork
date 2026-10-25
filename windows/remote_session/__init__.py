@@ -11,7 +11,8 @@
 - ansi_terminal.py         : ANSITerminalWidget（被 ssh_terminal 依赖）
 - rdp_window.py            : RDPWindow / RDPPanel
 - conn_diag_panel.py       : ConnDiagPanel（SSH/SFTP 连接日志诊断）
-- forensic_report.py       : SSH 故障一键取证（ForensicWorker + 报告生成）
+- forensic_report.py       : SSH 故障一键取证（常规诊断 + 死机/异常停止取证
+  双模式，ForensicWorker + 规则引擎 + 报告生成）
 - remote_hub.py            : RemoteHub 远程页（Pivot 四视图，2026-09-23 自
   main_window/ 迁入——远程页面文件统一归口本包）
 - remote_mixin.py          : RemoteMixin 主窗口远程面板 Mixin（同上迁入）
@@ -61,8 +62,11 @@ _EXPORTS = {
     "ConnDiagWidget": "windows.remote_session.conn_diag_panel",
     # forensic_report
     "FORENSIC_COMMANDS": "windows.remote_session.forensic_report",
+    "CRASH_FORENSIC_COMMANDS": "windows.remote_session.forensic_report",
     "get_forensic_dir": "windows.remote_session.forensic_report",
     "build_forensic_report": "windows.remote_session.forensic_report",
+    "build_crash_forensic_report": "windows.remote_session.forensic_report",
+    "analyze_crash_evidence": "windows.remote_session.forensic_report",
     "ForensicWorker": "windows.remote_session.forensic_report",
 }
 
@@ -85,8 +89,9 @@ __all__ = [
     "is_success_record", "is_conn_fail_record", "aggregate_stats",
     "ConnDiagPanel", "ConnDiagWidget",
     # forensic_report
-    "FORENSIC_COMMANDS", "get_forensic_dir", "build_forensic_report",
-    "ForensicWorker",
+    "FORENSIC_COMMANDS", "CRASH_FORENSIC_COMMANDS", "get_forensic_dir",
+    "build_forensic_report", "build_crash_forensic_report",
+    "analyze_crash_evidence", "ForensicWorker",
 ]
 
 

@@ -52,6 +52,7 @@ def apply_table_scroll_blit_patch(apply_blit) -> None:
             for w in QApplication.topLevelWidgets():
                 for t in w.findChildren(_TV):
                     t._perf_blit_bg = None
+                    t._perf_blit_bg_probe = None
                     apply_blit(t)
         except Exception:
             pass

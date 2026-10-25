@@ -144,9 +144,13 @@ def _strip_ansi(text: str) -> str:
 # 取证按钮提示文案只留一份：初始化与取证结束后恢复按钮都从这里取，
 # 两处各写一段长文案，迟早会漂移成一个说 A、一个说 B。
 _FORENSIC_BTN_TIP = (
-    "后台运行预置诊断命令组（含 dmesg/journalctl/syslog 系统错误日志）"
-    "并汇总会话/连接日志、设备状态，调用 AI 大模型分析生成故障取证报告"
-    "（厂商可在设置面板「AI 分析」页配置，仅连接建立后可用；运行中点击可取消）"
+    "点击按钮主体＝常规诊断取证：后台运行预置诊断命令组"
+    "（含 dmesg/journalctl/syslog 系统错误日志）并汇总会话/连接日志、设备状态，"
+    "调用 AI 大模型分析生成故障取证报告"
+    "（厂商可在设置面板「AI 分析」页配置，仅连接建立后可用；运行中点击可取消）。\n"
+    "展开下拉箭头可选「死机/异常停止取证」：针对设备刚被重启的场景，"
+    "采集启动/关机历史、上次 boot 日志戛然而止检测、非正常关机脏标记、"
+    "OOM/MCE/内核死锁记录等，本地规则引擎先给初步结论再交 AI 根因分析。"
 )
 
 
@@ -427,11 +431,25 @@ class SSHTerminalPanel(QWidget):
         self._btn_sftp_here.clicked.connect(self._open_sftp_here)
         btn_layout.addWidget(self._btn_sftp_here)
 
-        self._forensic_btn = PushButton("一键取证")
+        # DropDown 形态：按钮主体仍是常规取证（高频、零学习成本），
+        # 下拉箭头展开「死机取证」入口。进度/取消语义沿用主体按钮的
+        # 文字切换，两种模式共用一套 worker 生命周期管理。
+        self._forensic_btn = DropDownPushButton("一键取证")
         self._forensic_btn.setFocusPolicy(Qt.NoFocus)
         self._forensic_btn.setToolTip(_FORENSIC_BTN_TIP)
         self._forensic_btn.setEnabled(False)
-        self._forensic_btn.clicked.connect(self._start_forensic)
+        self._forensic_btn.clicked.connect(
+            lambda: self._start_forensic(crash_mode=False))
+        forensic_menu = RoundMenu("取证模式", self)
+        act_normal = QAction("常规诊断取证", forensic_menu)
+        act_normal.triggered.connect(
+            lambda checked=False: self._start_forensic(crash_mode=False))
+        forensic_menu.addAction(act_normal)
+        act_crash = QAction("死机/异常停止取证", forensic_menu)
+        act_crash.triggered.connect(
+            lambda checked=False: self._start_forensic(crash_mode=True))
+        forensic_menu.addAction(act_crash)
+        self._forensic_btn.setMenu(forensic_menu)
         btn_layout.addWidget(self._forensic_btn)
 
         self._session_dir_btn = PushButton("会话记录")
@@ -972,8 +990,11 @@ class SSHTerminalPanel(QWidget):
 
     # ─── 一键取证（D2） ───────────────────────────────────────────────────
 
-    def _start_forensic(self):
+    def _start_forensic(self, crash_mode: bool = False):
         """启动后台取证；按钮兼作进度显示与取消开关
+
+        crash_mode=False 走常规诊断组；True 走死机组（详见
+        forensic_report.CRASH_FORENSIC_COMMANDS）。
 
         同一个按钮承担三种语义（发起、进度、取消）是刻意的：取证只有几分钟，
         再弹一个带进度条和取消键的对话框反而更打断操作。
@@ -994,13 +1015,16 @@ class SSHTerminalPanel(QWidget):
         # 运行中保持可点：禁用会让「取消」这个唯一入口消失，
         # 用户只能等它自己跑完。
         self._forensic_btn.setEnabled(True)
-        self._forensic_btn.setText("取证中...")
+        self._forensic_mode = "死机取证" if crash_mode else "取证中"
+        self._forensic_btn.setText(f"{self._forensic_mode}...")
         self._forensic_btn.setToolTip("点击取消取证")
         # P0-3：取证开始进主窗口日志
-        self._log(f"[SSH] 取证开始: {self._target_desc()}")
+        mode_tag = "死机取证" if crash_mode else "取证"
+        self._log(f"[SSH] {mode_tag}开始: {self._target_desc()}")
         worker = ForensicWorker(
             self._client, self._host, self._port, self._username,
-            server_name=self._server_name, session_log_path=self._session_path)
+            server_name=self._server_name, session_log_path=self._session_path,
+            crash_mode=crash_mode)
         worker.progress.connect(self._on_forensic_progress)
         worker.report_ready.connect(self._on_forensic_done)
         worker.failed.connect(self._on_forensic_failed)
@@ -1013,7 +1037,8 @@ class SSHTerminalPanel(QWidget):
 
     def _on_forensic_progress(self, idx: int, total: int, title: str):
         """取证进度：按钮文字显示 (当前/总数)，保持可点（点击=取消）"""
-        self._forensic_btn.setText(f"取证中 {idx}/{total}")
+        mode = getattr(self, "_forensic_mode", "取证中")
+        self._forensic_btn.setText(f"{mode} {idx}/{total}")
 
     def _on_forensic_cancelled(self):
         """P2-3：取证被用户取消——恢复按钮（连接存活即可重新发起）"""

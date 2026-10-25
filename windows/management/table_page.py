@@ -68,6 +68,33 @@ from windows.management.dialogs import (
 
 # ==================== 页面1: 球桌管理 ====================
 
+# ToDesk 列着色唯一口径：query_page 富集后的 todesk_status 取值语义是
+# '1'=开启 / '0'=关闭 / ''=未上报（由 todesk_action 20/80 换算，见
+# docs/xqzg接口清单.md 第 8 条与 49 号球房真机核对）。这个口径由数据层
+# 定义（table_db._norm_todesk_status / TodeskToggleWorker 的期望值 /
+# update_todesk_status 的回写映射），UI 侧只能跟随，绝不能自行反转。
+_TODESK_ON = "1"
+_TODESK_OFF = "0"
+
+
+def _is_todesk_on(status) -> bool:
+    """该 todesk_status 是否按「开启」渲染成绿色
+
+    同一个单元格有两个渲染口：同步填充走 _populate、右键开关的即时反馈走
+    _set_todesk_cell。两处必须共用这一份判据而不是各写各的，否则一次重查
+    就会把刚关掉的设备重新画成绿色（两种颜色来回打架，看着像「关不掉」）。
+    """
+    return str(status or "") == _TODESK_ON
+
+
+def _todesk_state_text(status) -> str:
+    """todesk_status → 状态文案，与 _is_todesk_on 同一份判据防文案/配色分叉"""
+    s = str(status or "")
+    if s == _TODESK_ON:
+        return "开启"
+    return "关闭" if s == _TODESK_OFF else "未上报"
+
+
 class TablePage(QWidget):
     """球桌管理页（复用原 TablePanelWindow 全部功能逻辑）
 
@@ -463,14 +490,16 @@ class TablePage(QWidget):
                         cell.setData(Qt.ItemDataRole.UserRole + 1,
                                      str(item.get("code") or "").strip())
                         if val:
-                            # ToDesk 号着色：接口上报开启→绿色；关闭/未上报→默认色
-                            if todesk_status == "1":
+                            # ToDesk 号着色：上报开启→绿色；关闭/未上报→默认色
+                            state_txt = _todesk_state_text(todesk_status)
+                            if _is_todesk_on(todesk_status):
                                 cell.setForeground(QColor(SEMANTIC["success"]))
-                                cell.setToolTip(f"{tip}\nToDesk 状态：开启")
+                                cell.setToolTip(f"{tip}\nToDesk 状态：{state_txt}")
                             else:
-                                state_txt = ("关闭" if todesk_status == "0"
-                                             else "未上报")
-                                cell.setToolTip(f"{tip}\nToDesk 状态：{state_txt}（右键可开关）")
+                                # 开关入口只对非开启态提示：开启态再点就是关闭，
+                                # 文案里同样不写死状态，交给 _todesk_state_text
+                                cell.setToolTip(
+                                    f"{tip}\nToDesk 状态：{state_txt}（右键可开关）")
                     self._table.setItem(r, c, cell)
         finally:
             self._table.blockSignals(False)
@@ -877,14 +906,14 @@ class TablePage(QWidget):
             item.setToolTip(f"{tip}\nToDesk 指令下发中，等待设备确认…")
             return
         item.setData(Qt.ItemDataRole.UserRole, str(status or ""))
-        if str(status or "") == "1":
+        # 判色与文案都走模块级同一口径（见 _is_todesk_on），不在此重写规则
+        if _is_todesk_on(status):
             item.setForeground(QColor(SEMANTIC["success"]))
-            item.setToolTip(f"{tip}\nToDesk 状态：开启{suffix}")
         else:
             item.setForeground(
                 self._table.palette().color(QPalette.ColorRole.Text))
-            state_txt = "关闭" if str(status or "") == "0" else "未上报"
-            item.setToolTip(f"{tip}\nToDesk 状态：{state_txt}{suffix}")
+        item.setToolTip(
+            f"{tip}\nToDesk 状态：{_todesk_state_text(status)}{suffix}")
 
     def _toggle_todesk(self, row):
         """右键开关 ToDesk：确认 → 下发指令 → 乐观置灰 → 轮询确认后刷新着色
@@ -906,7 +935,8 @@ class TablePage(QWidget):
         name_item = self._table.item(row, 0)
         table_name = name_item.text().strip() if name_item else ""
         old_status = str(item.data(Qt.ItemDataRole.UserRole) or "")
-        turn_on = old_status != "1"
+        # 非开启态（关闭/未上报）一律按「开启」下发：未上报时设备多半是关的
+        turn_on = not _is_todesk_on(old_status)
         old_worker = self._todesk_workers.get(device_code)
         if old_worker and old_worker.isRunning():
             if old_worker.turn_on == turn_on:
@@ -962,7 +992,7 @@ class TablePage(QWidget):
         ctx = self._todesk_ctx_for(worker)
         if not ctx:
             return
-        target = "1" if ctx.get("turn_on") else "0"
+        target = _TODESK_ON if ctx.get("turn_on") else _TODESK_OFF
         self._set_todesk_cell(ctx["row"], status=target,
                               note="已下发，待设备上报")
         verb = "开启" if ctx.get("turn_on") else "关闭"
@@ -983,7 +1013,7 @@ class TablePage(QWidget):
         except Exception:
             logger.exception("回写 todesk_status 失败（不影响界面刷新）")
         self._set_todesk_cell(ctx["row"], status=str(status or ""))
-        verb = "开启" if str(status) == "1" else "关闭"
+        verb = "开启" if _is_todesk_on(status) else "关闭"
         show_info_bar(f"球桌「{ctx.get('name', '')}」ToDesk 已确认{verb}",
                       "success", title="已确认", parent=self, duration=3000)
 

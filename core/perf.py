@@ -409,6 +409,13 @@ _DEFAULT_DEGRADE_PIXELS = 6_000_000
 
 _table_blit_enabled: "bool | None" = None
 
+# 近纯黑守卫阈值：本项目真实页面底色最暗也在 qfw 深色主题 / Mica 的
+# #1e1f1f~#1e2024 一带（max 通道 ≥ 30），恰好纯黑只可能是误采。
+_BLIT_BG_MIN_CHANNEL = 10
+# 二次复核间隔：单次屏幕采样可能落在淡入动画、瞬时遮挡的画面上，
+# 间隔后再采一次、两次完全一致才启用，把瞬时误采挡在生效之前。
+_BLIT_CONFIRM_DELAY_MS = 300
+
 
 def is_table_blit_enabled() -> bool:
     """表格滚动「位块搬移」修复开关（perf 域 perf_table_scroll_blit_v2，默认开）
@@ -427,6 +434,13 @@ def is_table_blit_enabled() -> bool:
     2. `paintEvent` 包装里每次绘制前用该颜色填满 e.rect()，再交原实现画
        格子——整屏首绘、滚动新露出条带、hover 局部都走同一条路径；
     3. 再配「预留悬浮滚动条条带」，才拿到位块搬移。
+
+    2026-10-24 真机事故与第三道环节：上两条保证了「画满」，但没保证
+    「画的是对的颜色」——标定采的是屏幕上表格边缘外的实时像素，面板淡入
+    动画首帧、锁屏、全屏黑窗口都会被采进来，且标定结果终身缓存（唯主题
+    切换才重采）。真机出现过采成纯黑、整个 viewport 被填 #000 的案例。
+    现在标定必须过两道防线（见 _schedule_blit_bg）：近纯黑拒采 +
+    间隔二次复核，两次采样完全一致才启用。
 
     验收口径（本轮补齐）：**像素等价** —— 同一状态下「搬移渲染」与
     「强制整视口重绘」的结果逐字节一致（tests/test_table_blit_patch.py），
@@ -461,6 +475,7 @@ def set_table_blit_enabled(enabled: bool):
             for w in QApplication.topLevelWidgets():
                 for t in w.findChildren(QTableView):
                     t._perf_blit_bg = None
+                    t._perf_blit_bg_probe = None
         except Exception:
             pass
     apply_table_blit_globally()
@@ -636,27 +651,94 @@ def _make_blit_filter(table):
     return _BlitPaintFilter(table)
 
 
+def _commit_blit_bg(table, col):
+    """把标定结果落表并启用位块搬移（提交点，幂等）
+
+    成功路径也要把颜色写进日志：本功能历史上两次事故（叠影、纯黑）都发生
+    在标定环节，事后排查必须能回答「当时标到了什么颜色」。
+    """
+    if getattr(table, "_perf_blit_bg", None) == col:
+        return
+    table._perf_blit_bg = col
+    table._perf_blit_bg_probe = None
+    apply_table_blit(table)
+    table.viewport().update()
+    _log(f"[perf] 表格滚动加速：底色标定 {col.name()}（"
+         f"{type(table).__name__}）")
+
+
+def _reject_blit_bg(table, reason):
+    """放弃本次标定（清探针、记状态，等下次 updateGeometries 重试）"""
+    table._perf_blit_bg_probe = None
+    _set_blit_state(table, "no_bg", reason)
+
+
 def _schedule_blit_bg(table):
-    """延后标定底色（必须在事件循环里做：paint 期间 grab 父级会递归重入）"""
+    """延后标定底色（必须在事件循环里做：paint 期间 grab 父级会递归重入）
+
+    采样取的是「屏幕此刻在表格边缘外的颜色」，而屏幕内容不受我们控制：
+    面板淡入动画的首帧窗口近乎不可见、锁屏/全屏黑窗口/熄屏时整屏皆黑。
+    2026-10-24 真机事故即为此因——标定被采成纯黑并终身缓存，viewport
+    从此被填成 #000。两道防线都在采样结果的应用侧：
+    1. 近纯黑拒采：真实底色最暗也是 #1e1f1f 一带，恰好纯黑必是误采；
+    2. 二次复核：间隔 _BLIT_CONFIRM_DELAY_MS 再采一次，两次一致才启用。
+    两道都不过就保持不生效（失败安全），等下次 updateGeometries 重来。
+    """
     if getattr(table, "_perf_blit_bg_pending", False):
         return
     table._perf_blit_bg_pending = True
+
+    def _confirm(probe_col):
+        try:
+            if not is_table_blit_enabled():
+                return
+            # 已提交就不再复核：迟到的定时器无权把生效中的底色打回 no_bg
+            if getattr(table, "_perf_blit_bg", None) is not None:
+                return
+            again = _sample_table_bg(table)
+            if again is not None and again == probe_col:
+                _commit_blit_bg(table, probe_col)
+            else:
+                _reject_blit_bg(table, "复核采样与首采不一致，待重标定")
+        except Exception:
+            pass
 
     def _do():
         try:
             table._perf_blit_bg_pending = False
             if not is_table_blit_enabled():
                 return
+            if getattr(table, "_perf_blit_bg", None) is not None:
+                return
             col = _sample_table_bg(table)
             if col is None:
                 # 取不到 → 保持关闭，等下次重布局再试（原因已记录，供状态行）
-                _set_blit_state(
-                    table, "no_bg",
+                _reject_blit_bg(
+                    table,
                     getattr(table, "_perf_blit_reason", "") or "取色失败")
                 return
-            table._perf_blit_bg = col
-            apply_table_blit(table)
-            table.viewport().update()
+            if max(col.red(), col.green(), col.blue()) < _BLIT_BG_MIN_CHANNEL:
+                _reject_blit_bg(
+                    table,
+                    f"采样色 {col.name()} 近纯黑，疑似淡入/遮挡瞬间误采，"
+                    "拒绝标定")
+                return
+            prev = getattr(table, "_perf_blit_bg_probe", None)
+            if prev is None:
+                # 首采只挂探针不启用；既等复核定时器，也允许后续 _do 用
+                # 一致的采样提前确认（重布局频繁时不用干等 300ms）
+                table._perf_blit_bg_probe = col
+                try:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(_BLIT_CONFIRM_DELAY_MS,
+                                      lambda: _confirm(col))
+                except Exception:
+                    pass
+                return
+            if prev == col:
+                _commit_blit_bg(table, col)
+            else:
+                _reject_blit_bg(table, "两次采样颜色不一致，待重标定")
         except Exception:
             pass
 

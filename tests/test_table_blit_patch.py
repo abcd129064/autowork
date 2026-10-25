@@ -51,6 +51,13 @@ def qapp():
     return _ensure_qapp()
 
 
+@pytest.fixture(autouse=True)
+def _instant_blit_confirm(monkeypatch):
+    """标定二次复核间隔归零：单测里 singleShot(0) 随 processEvents 触发，
+    既有用例「apply 后 processEvents 数轮即生效」的时序保持不变"""
+    monkeypatch.setattr(perf, "_BLIT_CONFIRM_DELAY_MS", 0)
+
+
 class _PaintArea(QObject):
     """记录 viewport 每个 QPaintEvent 的矩形（面积口径区分整视口/条带）"""
 
@@ -232,11 +239,16 @@ def test_pixel_equivalence_vs_baseline(qapp, monkeypatch):
 
 
 def test_guard_catches_unfilled_opaque(qapp, monkeypatch):
-    """反证：只设不透明、不画底（第一版做法）必须被同一条判据拦下
+    """反证：填充色不对必须被同一条判据拦下
 
-    结构必须忠实：**根控件自身背景透明**（qfw 页面/Mica 窗口就是这样，
-    表格底色本来由「谁都画一下」凑出来）。若根控件自带不透明底色，
-    第一版故障在 grab() 里也看不出来，用例会假绿。
+    判据的离线代理口径：标定提交的底色与真实背景不一致时，主体必须
+    飘红。「不透明却没人画底」（第一版故障）在 offscreen grab 上观测不到
+    差异——grab 是全新渲染，透明底与「不透明但没画」合成结果相同；本用例
+    过去能绿，实际是靠「透明宿主被误采成 #000000 并填黑」这个标定 bug
+    制造的差异（2026-10-24 事故同源）。现在误采被近纯黑拒采拦在标定层，
+    「没人画底」由失败安全契约保证（取不到底色不开启不透明，见
+    test_no_bg_means_feature_off / test_near_black_sample_rejected），
+    这里用「提交了错误颜色」确定性验证判据仍然有效。
     """
     from PySide6.QtGui import QColor, QPalette
     from PySide6.QtWidgets import QVBoxLayout, QWidget, QTableWidgetItem as _Item
@@ -266,15 +278,17 @@ def test_guard_catches_unfilled_opaque(qapp, monkeypatch):
 
     img_off = host.grab().toImage()
     monkeypatch.setattr(perf, "_table_blit_enabled", True)
-    table._perf_blit_bg = None          # 故意没有底色
+    # 直接提交一个错误底色（越过标定，模拟误标定漏防线的最坏情形），
+    # 不透明会随之开启、过滤器会用它填底 —— 判据必须抓得到
+    table._perf_blit_bg = QColor(255, 0, 0)
+    table._perf_blit_bg_probe = None
+    table._perf_blit_bg_pending = False
     perf.apply_table_blit(table)
-    table.viewport().setAttribute(
-        Qt.WidgetAttribute.WA_OpaquePaintEvent, True)   # 强行开不透明
     for _ in range(4):
         qapp.processEvents()
     img_bad = host.grab().toImage()
     assert not _core_equal(img_off, img_bad), \
-        "没画底却开不透明必须被判据判为不一致（否则用例是假绿）"
+        "底色填错必须被判据判为不一致（否则判据失效，用例假绿）"
     host.close()
 
 
@@ -317,6 +331,93 @@ def test_no_bg_means_feature_off(qapp, monkeypatch):
     assert t.viewport().testAttribute(
         Qt.WidgetAttribute.WA_OpaquePaintEvent) is False
     assert t.viewportMargins().right() == 0
+
+
+# ==================== 标定误采防线（2026-10-24 纯黑事故） ====================
+
+def _apply_and_settle(qapp, table, rounds=6):
+    perf.apply_table_blit(table)
+    for _ in range(rounds):
+        qapp.processEvents()
+
+
+def _reset_blit_state(table):
+    """清掉 _make_host_table 期间真实标定留下的底色/探针/挂起标记"""
+    table._perf_blit_bg = None
+    table._perf_blit_bg_probe = None
+    table._perf_blit_bg_pending = False
+
+
+def test_near_black_sample_rejected(qapp, monkeypatch):
+    """采样色恰好纯黑必须拒采（真机事故：淡入首帧被采成 #000 终身缓存，
+    整个 viewport 被填成纯黑）——本项目底色最暗也是 #1e1f1f 一带，
+    纯黑只可能是误采，宁可功能不生效（失败安全）。"""
+    from PySide6.QtGui import QColor
+    perf.patch_table_scroll_blit()
+    monkeypatch.setattr(perf, "_table_blit_enabled", True)
+    host, t = _make_host_table(rows=5, cols=4)
+    _reset_blit_state(t)
+    monkeypatch.setattr(perf, "_sample_table_bg", lambda _t: QColor(0, 0, 0))
+    _apply_and_settle(qapp, t)
+
+    assert getattr(t, "_perf_blit_bg", None) is None, "纯黑采样不得成为底色"
+    assert t.viewport().testAttribute(
+        Qt.WidgetAttribute.WA_OpaquePaintEvent) is False
+    assert "近纯黑" in (t._perf_blit_reason or "")
+    # 拒采后必须可自愈：换回正常颜色，下一次 apply 能重新走标定
+    monkeypatch.setattr(perf, "_sample_table_bg",
+                        lambda _t: QColor(30, 32, 36))
+    _apply_and_settle(qapp, t)
+    assert t._perf_blit_bg == QColor(30, 32, 36)
+    host.close()
+
+
+def test_two_sample_confirmation_commits(qapp, monkeypatch):
+    """两次采样一致才提交：首采只挂探针，复核一致后才启用位块搬移"""
+    from PySide6.QtGui import QColor
+    perf.patch_table_scroll_blit()
+    monkeypatch.setattr(perf, "_table_blit_enabled", True)
+    host, t = _make_host_table(rows=5, cols=4)
+    _reset_blit_state(t)
+    monkeypatch.setattr(perf, "_sample_table_bg",
+                        lambda _t: QColor(30, 32, 36))
+    _apply_and_settle(qapp, t, rounds=4)
+
+    assert t._perf_blit_bg == QColor(30, 32, 36)
+    assert t._perf_blit_bg_probe is None, "提交后探针必须清掉"
+    assert t.viewport().testAttribute(
+        Qt.WidgetAttribute.WA_OpaquePaintEvent) is True
+    assert t._perf_blit_state == "applied"
+    host.close()
+
+
+def test_two_sample_conflict_rejected(qapp, monkeypatch):
+    """复核与首采不一致必须整体放弃（画面还在变 = 采样不可信）"""
+    from PySide6.QtGui import QColor
+    perf.patch_table_scroll_blit()
+    monkeypatch.setattr(perf, "_table_blit_enabled", True)
+    host, t = _make_host_table(rows=5, cols=4)
+    _reset_blit_state(t)
+    calls = {"n": 0}
+
+    def _seq(_t):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return QColor(30, 32, 36)
+        if calls["n"] == 2:
+            return QColor(60, 60, 60)
+        return None          # 之后一律取不到，杜绝「巧合的两次一致」
+
+    monkeypatch.setattr(perf, "_sample_table_bg", _seq)
+    _apply_and_settle(qapp, t, rounds=4)
+
+    assert getattr(t, "_perf_blit_bg", None) is None
+    assert getattr(t, "_perf_blit_bg_probe", None) is None, \
+        "冲突后探针必须清掉，否则下次会被旧探针值短路"
+    assert t.viewport().testAttribute(
+        Qt.WidgetAttribute.WA_OpaquePaintEvent) is False
+    assert t._perf_blit_state == "no_bg"
+    host.close()
 
 
 # ==================== 机制判据 ====================
