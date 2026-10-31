@@ -44,6 +44,7 @@ from windows.single_video_dialog import (
 from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
 from workers.collect_worker import ZipUploadWorker
+from workers.frame_extract_worker import FrameExtractWorker
 
 
 # 语义色（对齐 core/design_tokens.py：success/warning/danger/info）
@@ -1872,6 +1873,197 @@ class NewLogWork(QWidget):
         self.log_view.append(text)
 
 
+# ==================== 切帧训练集 ====================
+
+class FrameExtractWork(QWidget):
+    """切帧训练集工作区：多选视频 -> 一键批量切帧去重 -> 按视频名分文件夹
+
+    零参数设计（2026-11-07 需求）：固定粗抽 2×50 帧再去重到 50 张，
+    用户只选视频和输出目录，其余全部走 workers.frame_extract_worker 默认值。
+    """
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self.setObjectName("frameExtractWork")
+        _transparent(self)
+        self._win = win
+        self._videos = []
+        self._out_root = ""
+        # 记住上次输出目录，同一批素材分多次切时不用重选。
+        last_out = str(win._load_settings().get("frame_extract_out_dir", "") or "")
+
+        body = QWidget(self)
+        body.setAutoFillBackground(False)
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 8, 20, 12)
+        lay.setSpacing(12)
+
+        card = CardWidget(body)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+
+        cl.addWidget(BodyLabel(
+            "选择多个视频，一键切帧做球识别训练集：每个视频均匀粗抽 100 帧，"
+            "内容去重后保留 50 张，产物按「输出目录/视频名/train_0001.jpg」存放。",
+            card))
+
+        row = QHBoxLayout()
+        self.btn_pick = PushButton(FluentIcon.VIDEO, "选择视频（可多选）", card)
+        self.btn_pick.clicked.connect(self._on_pick_videos)
+        row.addWidget(self.btn_pick)
+        self.lbl_videos = CaptionLabel("未选择视频", card)
+        self.lbl_videos.setTextColor(_C_MUTED)
+        row.addWidget(self.lbl_videos, 1)
+        self.btn_clear = ToolButton(FluentIcon.DELETE, card)
+        self.btn_clear.setToolTip("清空已选视频")
+        self.btn_clear.clicked.connect(self._on_clear_videos)
+        row.addWidget(self.btn_clear)
+        cl.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(BodyLabel("输出目录:", card))
+        self.out_edit = LineEdit(card)
+        self.out_edit.setText(last_out)
+        self.out_edit.setPlaceholderText("切帧产物根目录（每个视频一个同名子文件夹）")
+        row2.addWidget(self.out_edit, 1)
+        self.btn_browse = PushButton(FluentIcon.FOLDER, "浏览", card)
+        self.btn_browse.clicked.connect(self._on_browse_out)
+        row2.addWidget(self.btn_browse)
+        cl.addLayout(row2)
+
+        btns = QHBoxLayout()
+        self.btn_go = PrimaryPushButton(FluentIcon.SEND, "开始切帧", card)
+        self.btn_go.clicked.connect(self._on_go)
+        btns.addWidget(self.btn_go)
+        self.btn_open_out = PushButton(FluentIcon.FOLDER, "打开输出目录", card)
+        self.btn_open_out.clicked.connect(self._on_open_out)
+        # 输出目录要切完才存在，与整理页同策略：完成后再显示。
+        self.btn_open_out.hide()
+        btns.addWidget(self.btn_open_out)
+        btns.addStretch(1)
+        cl.addLayout(btns)
+
+        out_card = CardWidget(body)
+        ol = QVBoxLayout(out_card)
+        ol.setContentsMargins(16, 14, 16, 14)
+        ol.setSpacing(8)
+        ol.addWidget(CaptionLabel("运行输出:", out_card))
+        self.log_view = _make_terminal(out_card, None)
+        ol.addWidget(self.log_view, 1)
+
+        self.splitter = _make_vsplitter(body, card, out_card)
+        lay.addWidget(self.splitter, 1)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(body)
+
+    # ---- 视频选择 ----
+
+    def _on_pick_videos(self):
+        """多选视频文件；扩展名覆盖常见容器，不认识的交给 ffmpeg 自己报错。"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择视频", "",
+            "视频文件 (*.mp4 *.avi *.mov *.mkv *.flv *.wmv *.ts);;所有文件 (*)")
+        if not paths:
+            return
+        # 追加去重：分多次选择同一文件不该重复切
+        for p in paths:
+            if p not in self._videos:
+                self._videos.append(p)
+        self._refresh_video_label()
+
+    def _on_clear_videos(self):
+        self._videos.clear()
+        self._refresh_video_label()
+
+    def _refresh_video_label(self):
+        """已选数量提示：0 个置灰，超过 3 个折叠显示避免占满一行。"""
+        n = len(self._videos)
+        if n == 0:
+            self.lbl_videos.setText("未选择视频")
+        elif n <= 3:
+            self.lbl_videos.setText("、".join(
+                os.path.basename(v) for v in self._videos))
+        else:
+            self.lbl_videos.setText(
+                f"{n} 个视频: " + "、".join(
+                    os.path.basename(v) for v in self._videos[:2]) + " 等")
+        self.lbl_videos.setTextColor(_C_MUTED if n == 0 else _C_DANGER)
+
+    def _on_browse_out(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输出目录",
+                                             self.out_edit.text().strip() or "")
+        if d:
+            self.out_edit.setText(d)
+
+    # ---- 切帧执行 ----
+
+    def _on_go(self):
+        """启动批量切帧：参数校验 -> 置 running 态 -> 拉起 FrameExtractWorker"""
+        win = self._win
+        worker = getattr(win, "_frame_extract_worker", None)
+        if worker is not None and worker.isRunning():
+            win._show_info_bar("切帧任务正在运行中，请等待完成", "warning")
+            return
+        if not self._videos:
+            win._show_info_bar("请先选择至少一个视频", "warning")
+            return
+        out_root = self.out_edit.text().strip()
+        if not out_root:
+            win._show_info_bar("请选择输出目录", "warning")
+            return
+        win._save_settings({"frame_extract_out_dir": out_root})
+        self.btn_go.setEnabled(False)
+        self.btn_go.setText("切帧中...")
+        self.btn_pick.setEnabled(False)
+        self.log_view.clear()
+        w = FrameExtractWorker(self._videos, out_root, keep=50)
+        win._frame_extract_worker = w
+        w.line.connect(self.log_view.append)
+        w.video_done.connect(self._on_video_done)
+        w.finished_ok.connect(self._on_finished)
+        w.error.connect(self._on_failed)
+        # lambda 绑 w 防闭包晚绑定，与整理页同一套释放套路
+        w.finished.connect(lambda w=w: win._release_worker_safe(w))
+        w.start()
+        win._append_log(f"[切帧] 批量切帧开始（{len(self._videos)} 个视频）")
+
+    def _on_video_done(self, name, outdir, kept):
+        """单个视频完成：主窗口日志同步一条，便于跨页留痕。"""
+        self._win._append_log(f"[切帧] {name} -> {outdir}（{kept} 张）")
+
+    def _on_finished(self, out_root):
+        """全部完成：恢复按钮，显示「打开输出目录」。"""
+        win = self._win
+        win._frame_extract_worker = None
+        self._out_root = out_root
+        self.btn_go.setEnabled(True)
+        self.btn_go.setText("开始切帧")
+        self.btn_pick.setEnabled(True)
+        self.btn_open_out.show()
+        win._show_info_bar("切帧完成，产物已按视频名分文件夹", "success", duration=4000)
+
+    def _on_failed(self, msg):
+        """致命失败（如 ffmpeg 缺失）：恢复按钮并提示，日志里已有逐视频明细。"""
+        win = self._win
+        win._frame_extract_worker = None
+        self.btn_go.setEnabled(True)
+        self.btn_go.setText("开始切帧")
+        self.btn_pick.setEnabled(True)
+        win._show_info_bar(msg, "error", duration=6000)
+
+    def _on_open_out(self):
+        """打开输出根目录；目录被移动或删除时静默失败（与整理页同策略）"""
+        if self._out_root and os.path.isdir(self._out_root):
+            try:
+                os.startfile(self._out_root)
+            except Exception:
+                pass
+
+
 # ==================== ToolHub 容器 ====================
 
 class ToolHub(PivotPage):
@@ -1891,6 +2083,8 @@ class ToolHub(PivotPage):
         self.port_fake_work = PortFakeWork(self._win, self)
         self.upload_list_work = UploadListWork(self._win, self)
         self.newlog_work = NewLogWork(self._win, self)
+        # 切帧训练集（2026-11-07）：多视频一键切帧去重，产物按视频名分文件夹
+        self.frame_extract_work = FrameExtractWork(self._win, self)
         # 相机工具 2026-10-07 升级为面板级「相机」（windows/camera/，见 main_window）
 
         # 文案即 Pivot 标签，顺序与设计稿一致：单杆视频 → 端口 → 上传 → 整理，按链路走。
@@ -1898,6 +2092,7 @@ class ToolHub(PivotPage):
         self.addPage(self.port_fake_work, "端口占用")
         self.addPage(self.upload_list_work, "上传清单")
         self.addPage(self.newlog_work, "视频与日志批量整理")
+        self.addPage(self.frame_extract_work, "切帧训练集")
         # 锁宽：否则切页时 Pivot 条会随当前页文字长度抖动。
         self.lock_pivot_width()
         # 默认落在工作区 1，避免首次进入是一片空白。

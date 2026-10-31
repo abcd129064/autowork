@@ -193,6 +193,7 @@ autowork/
 │   ├── backup_worker.py       #   周备份 Worker（MySQL → SQLite 兜底基线刷新）
 │   ├── cleanup_worker.py      #   数据保留清理 Worker（过期分区 + 按大小清理）
 │   ├── collect_worker.py      #   视频/日志收集与打包上传 Worker
+│   ├── frame_extract_worker.py #  多视频批量切帧 Worker（训练集：粗抽+去重，按视频名分目录）
 │   ├── merge_back_worker.py   #   兜底增量合并回写 Worker（MySQL 恢复后 LWW）
 │   ├── mysql_sync_worker.py   #   MySQL 连接测试 Worker
 │   ├── network_workers.py     #   TCP/SFTP/SSH QThread Worker 类
@@ -263,6 +264,7 @@ autowork/
 │   ├── probe/                 #   线上接口只读探测与字段抓取（probe_xqzg_*）
 │   ├── stress_test/           #   压测套件（见 tools/stress_test/README.md）
 │   ├── update_sim/            #   自动更新链路本地仿真（sim_*）
+│   ├── dataset/               #   训练数据切帧工具（extract_frames.py：均匀抽帧 + 内容去重）
 │   └── _scratch/              #   【gitignore】一切临时产物：探针脚本/截图/抓取物
 │
 ├── web/                       # 售后面板 Web 端
