@@ -87,6 +87,8 @@ docs/
 | [远程会话凭据与传输可靠性.md](远程会话凭据与传输可靠性.md) | 远程会话（SFTP/SSH）三项加固：凭据**来源**显式化与「仅本次运行」策略（`core/credentials.py`）、未完成传输队列落盘 + 两侧大小校验（`core/transfer_queue.py` / `core/transfer_verify.py`）、终端 OSC 7 远端工作目录与 SFTP↔终端互跳；含共享 Transport 的测量结论（30 任务 = 30 次认证） | 设计·已落地（2026-10-06，回归见 `tests/test_credentials.py`、`tests/test_transfer_queue.py`、`tests/test_transfer_verify.py`、`tools/smoke/smoke_remote_ssh_creds.py`） |
 | [大华相机工具集成调研2026-10-06.md](大华相机工具集成调研2026-10-06.md) | Desktop/Bin 大华 Demo 工具包能力盘点 + autowork 集成方式调研：推荐官方 Python NetSDK wheel 内嵌 + 工具页第 5 子页；登录/取流通路已实测（隧道 4236/4238），P0=搜索/初始化/抓图 | 调研快照（待实施） |
 | [相机编码设置真机接口实测2026-11-06.md](相机编码设置真机接口实测2026-11-06.md) | DH-IPC-HAC9488XY-HY @4238 逐字段实测能力矩阵：1100/1306/1309 可写、VideoColor·VideoInOptions·Lighting·音量"接受但不落库"、辅码流分辨率与 9601 旋转被拒(err 21)、1312 不支持；据此修好 core 层节流下沉、错误归类、JSON 载荷字节长度、通道参数、生效行取色与页面写后校验 | 调研报告 + 已落地（编码设置页字段口径唯一依据） |
+| [MySQL访问frp隧道实施方案2026-11-06.md](MySQL访问frp隧道实施方案2026-11-06.md) | 解决「服务器端 IP 白名单导致换网络无法连 MySQL」：客户端常驻 stcp visitor（127.0.0.1:33007）经 frps 中转访问生产 MySQL，3306 彻底退出公网；含 frps 加固、客户端 5 处代码 scope、三批执行与回滚 | 设计·待实施（混合路线批 A/B/C） |
+| [MySQL同步API化立项2026-11-06.md](MySQL同步API化立项2026-11-06.md) | MySQL 同步 API 化终态路线：六步三里程碑（契约→试点→收口），9 条语义契约清单（UpsertKd 铁律、LWW、sync_meta 水位、清库入口等必须逐条保留），过渡期由 frp 隧道先行 | 立项·待启动 |
 
 ## 四、性能调查
 
