@@ -453,6 +453,20 @@ def _lean_enabled() -> bool:
         return True
 
 
+def _delegate_classes(table):
+    """取该表的 (lean 形态, 库委托形态) 两个委托类，返回本模块基类作默认
+
+    子类（如工作留痕的自绘分组带/头像/标签胶囊）在表上挂
+    ``_OPS_DELEGATE_CLASSES = (WorklogLeanDelegate, WorklogPlainDelegate)``
+    声明自己的两种形态。不认这层覆盖的话，用户在设置页关掉「轻量委托」
+    会把子类换回基类，那些自绘列当场退化成纯文本。
+    """
+    pair = getattr(table, "_OPS_DELEGATE_CLASSES", None)
+    if isinstance(pair, tuple) and len(pair) == 2:
+        return pair
+    return OpsLeanDelegate, OpsPlainDelegate
+
+
 def install_ops_links(table, handler=_KEEP):
     """把表格当前委托换成带操作链接的同族委托，返回新委托
 
@@ -462,7 +476,8 @@ def install_ops_links(table, handler=_KEEP):
     hover/selected 状态推送随之指向新实例。
     """
     lean = _lean_enabled()
-    cls = OpsLeanDelegate if lean else OpsPlainDelegate
+    lean_cls, plain_cls = _delegate_classes(table)
+    cls = lean_cls if lean else plain_cls
     # 表可能还没设过委托，用 getattr 兜底；qfluentwidgets 的 TableBase 一定有该属性
     cur = getattr(table, "delegate", None)
     if isinstance(cur, cls):
@@ -499,8 +514,9 @@ def rebuild_ops_delegate(table):
     if not isinstance(cur, _OpsLinkMixin):
         return False
     lean = _lean_enabled()
+    lean_cls, _plain_cls = _delegate_classes(table)
     # isinstance 返回布尔单例，与开关直接用 is 比较即等价于相等判断
-    if lean is isinstance(cur, OpsLeanDelegate):
+    if lean is isinstance(cur, lean_cls):
         return True  # 形态已与开关一致，不必重建
     install_ops_links(table)
     vp = table.viewport()

@@ -170,6 +170,11 @@ KEY_DOMAIN = {
     "ledger_last_occurred": "misc",
     "ledger_auto_refresh": "misc",
     "ledger_auto_refresh_interval": "misc",
+    # 工作留痕面板（2026-11-06）：分类清单 = 内置 7 项 + 用户增改
+    # [{"name": 分类名, "active": bool}]。落 config 而非 worklog_meta 表：
+    # 分类是本机录入词汇，MySQL 模式下建表要人工 ALTER（既有红线），
+    # 且共享一份会让某人加的分类立刻出现在所有人下拉里
+    "worklog_categories": "misc",
     # 连接质量与 frps 感知调度（2026-09-22 二期）：interval_sec/enabled 等
     "frp_quality": "misc",
     # 开机静默预连（2026-09-23）：bool，启动后自动拉起 frpc 并预热打洞，

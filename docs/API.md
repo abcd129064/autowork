@@ -1018,6 +1018,22 @@ AftersaleDBWorker(func, *args, **kwargs)
 
 ---
 
+## workers/worklog_worker.py 工作留痕 Worker
+
+不另写一份 QThread 封装：复用 `workers/aftersale_worker.py` 的通用 `AftersaleDBWorker`（别名 `WorklogDBWorker`）。本模块的增量只有 `spawn()`——把 `result_ready` 与 `error` 做成两个**必填位置参数**，让「漏接 error」在调用点就写不出来；只接 result 的 worker 一旦抛异常就静默失败，界面停在旧数据上不报错。
+
+```python
+spawn(func, on_result, on_error, *args, **kwargs) -> WorklogDBWorker
+```
+
+| 函数 | 说明 |
+|------|------|
+| `spawn(func, on_result, on_error, *args, **kwargs)` | 起一个后台 DB 任务并已连接双信号，返回 worker 本体 |
+
+**线程归属**：调用方（各页签的 `WorklogController`）把返回值存到 `_xxx_worker` 属性上，`PivotPage.detach_workers` 靠这个后缀扫描并请求中断；出栈即丢引用会让线程跑到一半被 GC，触发 `QThread: Destroyed while thread is still running`。过期响应的代数守卫（带 `seq` 丢弃）由调用方在闭包里做，本函数不掺和。
+
+---
+
 ## workers/mysql_sync_worker.py MySQL 连接测试 Worker
 
 镜像推送 Worker（MysqlSyncWorker）已随机制 B 下线（2026-08-23），本模块只保留连接测试。
@@ -1523,6 +1539,83 @@ MySQL 连接工具。镜像推送（push_all/push_table/push_aftersale 及 `_DDL
 | `auto_refresh_interval()` / `set_auto_refresh_interval(seconds)` | 自动刷新间隔秒数（缺省 30；仅接受 ≥5 的整数，防误配高频轮询） |
 | `change_fingerprint()` | 全表轻量指纹 (条数, 最大 updated_at, 最大 id)——记录页自动刷新判据，指纹不变跳过重查 |
 
+### database.worklog_db
+
+工作留痕数据层（设计稿 `design/worklog_hub_v1.html`，界面落点 `windows/worklog/`）。连接复用 `table_db` 双后端路由；建表 DDL 的单一来源在 `database/schema.py` 的 `WORKLOG_TABLES`，本模块不写裸 CREATE TABLE。日期一律存 'yyyy-MM-dd' 串（字典序即时间序，双后端免日期函数分支）；**所有删除都是软删**（`deleted=1`），查询与统计自动过滤，历史可考古。
+
+**常量**
+
+| 名称 | 说明 |
+|------|------|
+| `CATEGORIES` | 内置 7 分类；稿 348-356 的标签配色按名字取，改名会打散颜色，故内置项锁名 |
+| `STATUSES` / `DONE_STATUS` | 4 态词汇与「已完成」；完成率的 SQL 只认这个字面量 |
+| `HOURS_MAX` / `PROGRESS_STEP` | 工时上限 24.0 与进度步进 5（稿 660 / 408） |
+| `RECORD_FIELDS` | 可写字段：既是 INSERT 列序也是 UPDATE 白名单，改动要同步 `schema.TABLE_COLUMNS` |
+| `PERIOD_RANGES` | 周期键 → 区间函数（day/week/month） |
+
+**周期与日期**
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `now_str()` | `() -> str` | 统一时间串 `yyyy-MM-dd HH:mm:ss`；`work_date` 取前 10 位可直接比较 |
+| `day_range(anchor)` / `week_range(anchor)` / `month_range(anchor)` | `(锚点) -> (起, 止)` | 自然日 / 自然周（周一起，与售后周期口径一致）/ 自然月 |
+| `period_range(period, anchor)` | `(str, 锚点) -> (起, 止)` | 未知键退回按天，避免条件为空打全表 |
+| `recent_days(anchor, count=7)` | `(锚点, int) -> list` | 近 count 天（含锚点当天，升序）——统计页柱图横轴刻度 |
+
+**成员（页签5）**
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `list_members(active_only=False)` | `(bool) -> list` | 成员清单（含停用行，按 `sort` 再按 id） |
+| `member_map()` | `() -> dict` | `{member_id: 成员名}`，供记录行 join 出的头像/别名 |
+| `get_member_by_name(name)` | `(str) -> dict|None` | 精确取名下成员，无则 None（可编辑下拉的历史回填） |
+| `ensure_member(name, alias='')` | `(str, str) -> int` | 按名取名下成员 id，没有就建；返回 0 表示名字为空被拒 |
+| `insert_member(name, alias='', sort=0, active=1)` | `(...) -> int` | 新增返回 id；重名不拦（由界面层提示） |
+| `update_member(member_id, fields)` | `(int, dict) -> bool` | 只更新 `_MEMBER_FIELDS` 白名单内的字段 |
+| `set_member_active(member_id, active)` | `(int, bool) -> bool` | 停用而非删除：历史记录的 `member_id` 原样保留 |
+
+**分类（页签5，存 `config/worklog.json`）**
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `list_categories(active_only=False)` | `(bool) -> list` | 内置 7 项在前，自定义追加在后 |
+| `category_names(active_only=True)` | `(bool) -> tuple` | 下拉候选用的纯名字 |
+| `add_category(name)` | `(str) -> bool` | 新增自定义分类；已存在（含内置）返回 False |
+| `set_category_active(name, active)` | `(str, bool) -> bool` | 停用而非删除（稿 632）；内置项不可停用 |
+| `rename_category(old, new)` | `(str, str) -> bool` | 仅自定义可改名，且连带把记录列一起换；内置项/重名/空名一律 False |
+| `category_usage(name)` | `(str) -> int` | 该分类被多少条未删记录使用，>0 时界面只给停用不给删 |
+| `project_candidates()` | `() -> list` | 历史项目名（去重保序）——「项目」列的可编辑下拉候选 |
+
+**记录**
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `normalize_record(record)` | `(dict) -> dict` | 入库清洗：钳位 + 去空白 + 进度 100% 自动落「已完成」；**只改副本不改入参** |
+| `insert_record(record)` | `(dict) -> int` | 返回新 id；0 表示标题/成员为空被拒 |
+| `update_record(record_id, record)` | `(int, dict) -> bool` | 只更新 `RECORD_FIELDS` 白名单，其余键静默丢弃 |
+| `get_record(record_id)` | `(int) -> dict|None` | 单条（含成员名/别名）——编辑对话框的数据源 |
+| `delete_record(record_id)` | `(int) -> bool` | 软删置 `deleted=1` |
+| `set_progress(record_id, progress)` | `(int, int) -> bool` | 改进度并回写状态（表格拖拽/双击按 5% 步进） |
+
+**查询与聚合**
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `query_records(date_from, date_to, member_id, category, status, keyword, limit, ascending)` | `-> list` | 明细整表（不分页；`limit>0` 才截断）。记录表、时间轴、思维导图、导出共用这一个出口——导出刻意不走分页，分页查询被钳在 1~500 会静默少行 |
+| `query_day(anchor, member_id, category, status, keyword)` | `-> list` | 某一天（记录页默认视图的取数口径） |
+| `totals(date_from, date_to, member_id, category, status, keyword)` | `-> dict` | 区间总计：`count/hours/members/days/done/done_rate/avg_progress/per_capita`；比率在 Python 侧算，避免双后端整数除法与 ROUND 差异 |
+| `daily_groups(date_from, date_to, member_id, category, status, keyword)` | `-> list` | 按 `work_date` 聚合（记录页分组带 + 「今日*」卡 + 统计页日口径） |
+| `stacked_daily(date_from, date_to, member_id=0)` | `-> list` | 按 (日, 成员) 聚合工时——统计页堆叠柱切片 |
+| `category_hours(date_from, date_to, member_id=0)` | `-> list` | 按分类聚合工时（工时降序）——环图与「分类占比」 |
+| `member_summary(date_from, date_to)` | `-> list` | 成员汇总行：任务数 / 已完成 / 工时 / 完成率 / 平均进度（稿 576） |
+
+**报告与导出**
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `build_report_text(date_from, date_to, member_id, title)` | `-> str` | 按成员分段的纯文本报告（复制到剪贴板，不进任何富文本控件）；段落顺序与成员管理页「排序」列一致 |
+| `export_xlsx(path, date_from, date_to, member_id)` | `(str, ...) -> int` | 导出 xlsx 并返回行数；走 `query_records` 整表路径，openpyxl 延迟 import |
+
 ### database.merge_back
 
 MySQL 从 DEGRADED 恢复 ONLINE 时把降级期间的本地增量按「时间戳 LWW」合并回 MySQL（阶段二）。与已下线的镜像推送不同：这是恢复后显式回写兜底增量。
@@ -1935,6 +2028,53 @@ LedgerPanelWindow(parent=None)
 **记录与统计**（实现于 `windows/run_video/records/`，视图 `page.py` / 异步编排 `controller.py` / 纯逻辑 `query_state.py` / 呈现 `table_adapter.py` / 弹窗 `dialogs.py`）：指标卡（总记录/问题/未复现/精度/使用）与列表同口径，随日期范围联动。日期筛选模式：全部日期/今天/近7天/近30天/本月/自定义（默认今天，基准日期可翻历史，结束日历仅自定义显示）；`_date_range` 按档计算区间（近7天=基准前推 6 天、近30天=前推 29 天、本月=自然月、自定义起止倒置自动交换），按视频日期 `occurred_at` 过滤（旧数据回退 `created_at`）。首次显示自动加载（showEvent + `_loaded_once`）；自动刷新定时器按指纹比对（`ledger_db.change_fingerprint`）跳过无变化重查。
 
 **弹窗**：`EditLedgerDialog`（MessageBoxBase）新增/编辑记录（复用共享表单，`continuous=True` 连续录入模式：保存并继续不关窗）；`SignerStatsDialog`（MessageBoxBase）署名统计（问题/未复现/精度/使用/总和）。
+
+---
+
+### windows.worklog（WorkLogHub 工作留痕面板）
+
+设计稿 `design/worklog_hub_v1.html` 的 1:1 实现，主窗口左侧导航「工作留痕」的 Hub 页（objectName=`worklogHub`）。文件分工：`hub.py` 容器 / `records·timeline·mindmap·stats·members` 五个页签包 / `common.py` 共享词汇与外壳控件 / `controller.py` 异步编排 / `delegate.py` 表格自绘委托 / `dialogs.py` 录入弹窗。
+
+#### 类 `WorkLogHub`（`windows/worklog/hub.py`）
+
+`PivotPage` 子类。两点与其他 Hub 不同：页头（标题 24px/700 + 副标题 13px + 弹出按钮）画在 Hub 层由五页签共享；Pivot 项不带图标（稿 299-303 是纯文本），图标只给弹出窗口的左侧子导航（`main_window.open_hub_popout` 的 `nav_icons`）。
+
+| 成员 | 说明 |
+|------|------|
+| `records_page` / `timeline_page` / `mindmap_page` / `stats_page` / `members_page` | 五个页签实例，注册顺序即页签顺序（稿 299-303，不可调） |
+| `_on_locate(rec)` | 时间轴点条目 → 先 `switchTo(records_page)` 再 `locate_record(rec)`，顺序不能反 |
+| `_on_options_changed()` | 成员/分类被页签5 改动后广播：逐个调用各页签的 `on_options_changed` 钩子重拉候选 |
+
+#### 类 `WorklogController`（`windows/worklog/controller.py`）
+
+五个页签所有 QThread 的归属地：页面不 new QThread，也不直接持 worker。每族查询只保留一个 worker，新查询先 `requestInterruption` 旧的再起新的；结果一律带 `seq` 代数，由页面丢弃过期帧。
+
+| 方法 | 说明 |
+|------|------|
+| `query_records(seq, **filters)` / `query_groups(seq, **filters)` / `query_totals(seq, **filters)` | 三族并发（记录表 / 分组带 / 汇总卡），凑齐同一 seq 才填表 |
+| `query_stacked(seq, date_from, date_to, member_id=0)` / `query_categories(...)` / `query_member_summary(seq, date_from, date_to)` | 统计页柱图 / 环图 / 汇总表 |
+| `fetch_options()` | 一趟取齐成员、分类、历史项目名（已有在跑则返回 False） |
+| `mutate(tag, func, *args)` | 单条写操作；`tag` 告诉页面是哪一种写，据此决定刷新哪几族查询 |
+| `export_xlsx(path, date_from, date_to, member_id)` / `build_report(date_from, date_to, member_id, title)` | 已有同类任务在跑返回 False（同一文件并发写会互相截断） |
+| `stop_all()` / `is_running(*attrs)` | 扫 `*_worker` 后缀请求中断（只 interrupt 不 wait） |
+
+信号：`rows_ready/groups_ready/totals_ready/stacked_ready/cats_ready/summary_ready`（均 `(payload, seq)`）、`load_failed(str, seq)`、`options_ready/options_failed`、`mutation_done(tag, payload)`/`mutation_failed(tag, msg)`、`export_done/export_failed`、`report_ready/report_failed`。
+
+#### 页签要点
+
+- **记录量化** `records/page.py`：稿 308-410。汇总四卡 + 流式工具栏 + 按天分组表；分组带、头像、标签胶囊、迷你进度条、操作链接全部由 `delegate.py` 自绘（不用 cellWidget）。取数口径：前三张「今日*」卡取锚点日聚合，「本周人均工时」与整张表取锚点日所在自然周。
+- **时间轴** `timeline/page.py`：稿 412-455。`QScrollArea + QWidget` 条目卡，竖线与圆点在 `_TimelineBody` 一层自绘；按天/按成员两轴共用页签1 的 `query_records`，小节汇总数字在 Python 侧聚合明细，不再加一族 SQL。点条目经 Hub 转到页签1 定位。
+- **思维导图** `mindmap/page.py`：稿 459-518。`QGraphicsView + QGraphicsScene` 自绘三级节点（根 166×48 主色 / 分支 230×48 分组色 / 叶子 330×38 白底描边）与贝塞尔连线，画布 18px 点阵在 `drawBackground` 里画；分支折叠态只存内存；双击叶子开 `EditWorklogDialog`；单次渲染节点 >500 不画，改 InfoBar 提示缩小周期。分组维度四选一（成员/项目/分类/日期），周期六档（今天/本周/上周/本月/上月/近 30 天）。
+- **统计汇总** `stats/page.py`：稿 522-595。`SegmentedWidget` 按日/按周/按月（窗口分别取近 7 天逐日、近 4 周逐周、近 6 月逐月），四卡 + QPainter 自绘堆叠柱（切片色 = 成员语义色，与页签1 头像、页签3 分支同一套 `member_color`）与分类环图 + 成员汇总表（末列「复制日报/复制周报」走 `LINKS_ROLE`）。切换即重查，不靠 `showEvent`。
+- **成员与分类** `members/page.py`：稿 598-628。成员表（新增/改名/停用）+ 分类标签流（新增/改名/停用，内置项锁名不可停用）；改动经 `changed` 信号由 Hub 广播给其余四页。
+
+#### 共享层
+
+| 名称 | 说明 |
+|------|------|
+| `common.py` | 分类/状态/成员配色、日期口径（`iso/parse_iso/weekday_zh/day_label/fmt_hours/week_scope_zh`）、页签外壳控件（`WorklogPage/CardBox/IconBlock/SummaryCard/TagPill/AvatarDot/ColorLabel/DateBox/RateRing/FlowToolbar/FlowSpacer/Hairline`）。顶层不 import qfluentwidgets，分类/日期词汇可在无 qfw 的解释器上单测 |
+| `delegate.py` | `install_worklog_delegate(table, handler, step_handler=None)` 与自绘角色 `ROLE_GROUP/ROLE_AVATAR/ROLE_TAG/ROLE_BAR`（在 `core/lean_table_delegate` + `core/ops_link_delegate` 之上加四类绘制） |
+| `dialogs.py` | `EditWorklogDialog(record=None, continuous=False, on_saved=None, members/categories/projects=None)`：新增/编辑一条记录；`continuous=True` 保存后留窗等下一条；高度取 `max(S 档, sizeHint)`（8 行字段压不进 380） |
 
 ---
 

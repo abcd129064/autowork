@@ -214,6 +214,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                                            LedgerHub, SettingsHubPage, AboutPage)
         from main_window.tool_hub import ToolHub
         from windows.remote_session.remote_hub import RemoteHub
+        from windows.worklog.hub import WorkLogHub
         try:
             # 延迟导入：NetSDK 缺失（如未随包分发 vendor/dahua）时不拖垮主窗口
             from windows.camera import CameraHub
@@ -237,6 +238,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         self.remote_hub = RemoteHub(self)
         self.camera_hub = CameraHub(self) if CameraHub is not None else None
         self.tool_hub = ToolHub(self)
+        # 工作留痕（2026-11-06，design/worklog_hub_v1.html）：五页签量化面板
+        self.worklog_hub = WorkLogHub(self)
         self.settings_hub = SettingsHubPage(self)
         self.about_page = AboutPage(self)
         # 关于页「检查更新」按钮 → 主窗口编排（worker/对话框/安装退出都在 UpdateMixin）
@@ -264,7 +267,11 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 # 相机面板（2026-10-07）：从工具页签升级为面板级导航
                 (self.camera_hub, FluentIcon.CAMERA, "相机"),
                 # 二期（2026-09-07）：工具独立工作页（design/tools_page_v2.html）
-                (self.tool_hub, FluentIcon.DEVELOPER_TOOLS, "工具")):
+                (self.tool_hub, FluentIcon.DEVELOPER_TOOLS, "工具"),
+                # 工作留痕（2026-11-06，design/worklog_hub_v1.html）：qfw 无
+                # FluentIcon.NOTEBOOK 枚举，用 EDIT 近似替代（先例：远程页缺
+                # REMOTE 用 LINK）
+                (self.worklog_hub, FluentIcon.EDIT, "工作留痕")):
             if hub is None:  # 相机面板加载失败时跳过（NetSDK 缺失等）
                 continue
             self.addSubInterface(hub, icon, text)
@@ -295,6 +302,7 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 "remoteHub": self.remote_hub,
                 "cameraHub": self.camera_hub,
                 "toolHub": self.tool_hub,
+                "worklogHub": self.worklog_hub,
             }
             # 相机面板加载失败时 camera_hub 是 None，配置项却可能仍指向它；
             # 取到 None 就停在当前页而不是抛错，避免启动流程卡在异常分支里。
@@ -387,7 +395,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 title = {"toolHub": "工具面板",
                          "remoteHub": "远程面板",
                          "cameraHub": "相机面板",
-                         "videoEnhanceHub": "画质提升工作台"}.get(key, "面板")
+                         "videoEnhanceHub": "画质提升工作台",
+                         "worklogHub": "工作留痕面板"}.get(key, "面板")
                 # 远程/工具面板（远程 2026-09-21、工具 2026-09-22 需求）：
                 # 弹出后各视图改管理面板式左侧子导航；其余 Hub 维持内嵌 Pivot
                 # ⚠️ nav_icons 的键必须覆盖该 Hub 全部注册页（hub_popout 以
@@ -412,6 +421,13 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                                         "编码输出": FluentIcon.SAVE_AS,
                                         "环境检测": FluentIcon.COMMAND_PROMPT,
                                         "质量对比": FluentIcon.PIE_SINGLE},
+                    # 工作留痕（2026-11-06）：五键必须与 WorkLogHub 的五个
+                    # addPage 文本逐字一致，少一个就退回内嵌 Pivot 形态
+                    "worklogHub": {"记录量化": FluentIcon.DOCUMENT,
+                                   "时间轴": FluentIcon.HISTORY,
+                                   "思维导图": FluentIcon.VIEW,
+                                   "统计汇总": FluentIcon.PIE_SINGLE,
+                                   "成员与分类": FluentIcon.PEOPLE},
                 }.get(key)
                 win = HubPopoutWindow(type(hub), self, title,
                                       nav_icons=nav_icons)

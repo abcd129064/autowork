@@ -199,6 +199,7 @@ autowork/
 │   ├── newlog_worker.py       #   NewLog 批量整理 Worker（日志逐行转发 GUI）
 │   ├── kd_status_worker.py    #   kd 记录分类后台反查（B4 从主窗口迁出）
 │   ├── single_video_worker.py #   单杆视频生成 Worker（日志解析 + 计分水印）
+│   ├── worklog_worker.py      #   工作留痕后台 Worker（复用通用 DB Worker，error 强制接）
 │   └── table_worker.py        #   球桌/设备数据 API Worker（拉取/迁移/登录测试）
 │
 ├── database/                  # 数据层（SQLite/MySQL 双后端）
@@ -212,6 +213,7 @@ autowork/
 │   ├── aftersale_queries.py   #   售后查询执行层（分页/统计/排行/周期下拉）
 │   ├── aftersale_excel.py     #   售后 Excel 导出/导入（表头/图表/解析）
 │   ├── ledger_db.py           #   跑视频记录数据层（分类筛选统计、署名统计、导出）
+│   ├── worklog_db.py          #   工作留痕数据层（记录/成员/分类/聚合/报告/导出，全软删）
 │   ├── schema.py              #   表结构单一来源（双方言 DDL + 迁移注册表）
 │   ├── merge_back.py          #   兜底增量 LWW 合并回写（恢复后执行）
 │   ├── fallback_backup.py     #   MySQL → SQLite 周备份（兜底基线刷新）
@@ -227,6 +229,7 @@ autowork/
 │   ├── aftersale/             #   售后面板拆分包（表单/录入/记录/设置/弹窗/统计）
 │   ├── ledger_panel.py        #   跑视频面板（re-export shim）
 │   ├── run_video/             #   跑视频面板拆分包（表单/录入/记录/设置/窗口）
+│   ├── worklog/               #   工作留痕 Hub（五页签：记录量化/时间轴/思维导图/统计/成员与分类）
 │   ├── remote_session/        #   远程会话窗口（SFTP/SSH/RDP/取证/隧道/诊断）
 │   │   ├── remote_hub.py      #       远程页（六视图：会话总览/连接/连接质量/frps 代理/隧道配置/RDP）
 │   │   └── remote_mixin.py    #       远程连接（frpc/SSH/SFTP/RDP）

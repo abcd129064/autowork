@@ -235,6 +235,12 @@ _CREATE_AFTERSALE_SQL = schema.to_sqlite_ddl("aftersale_records")
 
 _CREATE_LEDGER_SQL = schema.to_sqlite_ddl("ledger_records")
 
+# ==================== 工作留痕表（工作留痕面板，双后端） ====================
+
+# 表名取自 schema.WORKLOG_TABLES（单一来源，避免建表脚本与 DDL 漂移）
+_CREATE_WORKLOG_SQL = "\n".join(
+    schema.to_sqlite_ddl(t) for t in schema.WORKLOG_TABLES)
+
 # ==================== 企微售后群消息归档表（来源可插拔入站契约，双后端） ====================
 
 # 表名取自 schema.CHAT_ARCHIVE_TABLES（单一来源，避免建表脚本与 DDL 漂移）
@@ -296,6 +302,7 @@ def _ensure_initialized(conn):
     conn.executescript(_CREATE_HEALTH_ALERT_SQL)
     conn.executescript(_CREATE_AFTERSALE_SQL)
     conn.executescript(_CREATE_LEDGER_SQL)
+    conn.executescript(_CREATE_WORKLOG_SQL)
     conn.executescript(_CREATE_CHAT_ARCHIVE_SQL)
     # 迁移：旧库按 schema.MIGRATIONS 注册表补列（列级元数据单一来源）。
     # 简单补列表（aftersale_records / kd_status / xqzg_status）统一走

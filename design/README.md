@@ -31,6 +31,7 @@ design/
 | [dahua_camera_tool.html](dahua_camera_tool.html) | 工具页第 5 子页「相机工具」设计稿 v1（云台预览 + OSD 叠加 + 批量下发，控件↔SDK API 标注齐全） | 已升级为面板级「相机」导航（`windows/camera/`） |
 | [video_repair_tool.html](video_repair_tool.html) | 工具页「视频修复」工作区设计稿 v1（掉电截断无 moov 的 mp4 无损修复：借参考文件 VOL 头 + 按 GOP 边界裁剪 + ffmpeg 流拷贝重封装；含内嵌 Pivot 与弹出窗口左侧子导航双形态、四态、后端契约与 7 处落点清单） | `main_window/tool_hub.py`（工作区）+ `windows/tools/video_repair.py`（后端）+ `workers/video_repair_worker.py`（线程） |
 | [video_enhance_tool.html](video_enhance_tool.html) | 工具页「画质提升」工作区设计稿 v1（**纯 ffmpeg 滤镜链**，不接 Real-ESRGAN：去噪→放大→锐化→色彩→补帧→编码；内嵌页签 + 弹出工作台双形态、5 子页〔增强任务/滤镜调参/编码输出/环境检测/质量对比〕、ffmpeg 路径设置项+PATH 兜底、VMAF/PSNR/SSIM 客观评分、**8 处注册点清单**与滤镜预设表。**已落地并按实现回填**：五张画布保留原样，画布与实现的差异写在紧邻的黄色 note 与文末「已识别的风险 / 本次明确不做」里） | `windows/tools/video_enhance.py`（引擎）+ `windows/tools/video_enhance_hub.py`（5 子页 UI）+ `workers/video_enhance_worker.py`（6 stage 线程）+ `main_window/tool_hub.py` 注册（工具页第 6 项）；单测 `tests/test_video_enhance.py`、冒烟 `tools/smoke/smoke_video_enhance_hub.py` |
+| [worklog_hub_v1.html](worklog_hub_v1.html) | 工作留痕面板 · 设计稿 v1（五页签：记录量化/时间轴/思维导图/统计汇总/成员与分类，多成员量化，SP 概念映射 + 控件映射总表，**Pivot 页签可点击切换预览**） | **已实施**：`windows/worklog/`（hub + 五页签 + common/controller/delegate/dialogs）+ `database/worklog_db.py` + `workers/worklog_worker.py`；主窗口四处集成见 `docs/API.md` 的 windows.worklog 段；冒烟 `tools/smoke/smoke_worklog_hub.py`、单测 `tests/test_worklog_db.py` |
 
 同一页面的多个版本**全部保留**，用于回溯设计演进；判断当前生效版本看上表最后一列。
 
@@ -82,7 +83,17 @@ python design/generator/gen_design.py     # 脚本内部按 __file__ 定位，�
 | 文件 | 说明 |
 | --- | --- |
 | `shot_startup_setting.png` | 启动时设置页截图 |
+| `shot_worklog_records.png` | 工作留痕 · 页签1 记录量化（`design/worklog_hub_v1.html` 308-410）：四卡 + 流式工具栏 + 按天分组表 |
+| `shot_worklog_timeline.png` | 工作留痕 · 页签2 时间轴（稿 412-455）：日分组头 + 竖线圆点 + 条目卡 |
+| `shot_worklog_mindmap.png` | 工作留痕 · 页签3 思维导图（稿 459-518）：根/分支/叶子三级 + 贝塞尔连线 + 18px 点阵画布 |
+| `shot_worklog_stats.png` | 工作留痕 · 页签4 统计汇总（稿 522-595）：四卡 + 按成员堆叠柱 + 分类环图 + 成员汇总表 |
+| `shot_worklog_members.png` | 工作留痕 · 页签5 成员与分类（稿 598-628）：成员表 + 分类标签流 |
 
 真机截图脚本是 `tools/perf/shot_fluent_mainwindow.py`，其产物默认落
 `tools/_scratch/` 下的 `shots/` 子目录（不入库）；确认需要长期留档时再手动拷进
 `design/shots/` 并在本表登记。
+
+工作留痕五张图由 `tools/perf/shot_worklog_hub.py` 产出：它把库换成临时目录里的
+独立 SQLite 并灌种子数据，**不碰生产 `database/tables.db`**（worklog 两张表是懒建
+的，真库截屏会把 DDL 写进去）；offscreen 平台无中文字体回退，图里的方框是渲染环境
+限制，非界面缺陷（与 `shot_startup_setting.png` 同状态）。

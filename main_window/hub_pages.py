@@ -1082,6 +1082,7 @@ class SettingsHubPage(QWidget):
             ("远程", "remoteHub"),
             ("相机", "cameraHub"),
             ("工具", "toolHub"),
+            ("工作留痕", "worklogHub"),
         ]
         valid = {obj for _label, obj in items}
         cur = str(settings.get("startup_default_page", "homeInterface")

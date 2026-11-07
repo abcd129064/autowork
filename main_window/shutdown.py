@@ -16,10 +16,11 @@ from PySide6.QtCore import QProcess, QThread
 def shutdown_main_window(host) -> None:
     """执行主窗口关闭前的资源清理（不调用 super().closeEvent）。"""
     # -1. 先停掉迁入侧边导航的业务子页后台线程
-    # 运维/售后/跑视频各 Hub 子页的 worker 挂页面属性上，原先由各
+    # 运维/售后/跑视频/工作留痕各 Hub 子页的 worker 挂页面属性上，原先由各
     # FluentWindow 面板的 closeEvent 统一 detach；迁入主窗口后必须在此
     # 补上，否则关闭时线程仍在跑会报 QThread: Destroyed while running
-    for hub_name in ("management_hub", "aftersale_hub", "ledger_hub"):
+    for hub_name in ("management_hub", "aftersale_hub", "ledger_hub",
+                     "worklog_hub"):
         hub = getattr(host, hub_name, None)
         if hub is not None:
             try:
