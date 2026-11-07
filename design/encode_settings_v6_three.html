@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>编码设置 设计稿 v6（三区块布局）</title>
+<style>
+  :root{--bg:#1a1f2b;--card:#232838;--card2:#1f2534;--line:#3a4056;--txt:#e6e9f2;
+        --sub:#9aa1b5;--accent:#4f8cff;--ok:#70d49c;--warn:#e0a855;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--txt);font:13px/1.55 "Segoe UI","Microsoft YaHei",sans-serif;padding:20px;}
+  h1{font-size:16px;margin-bottom:4px;}
+  .note{color:var(--sub);font-size:12px;margin-bottom:12px;}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:12px;}
+  .tabs .t{padding:8px 18px;color:var(--sub);border-radius:6px 6px 0 0;}
+  .tabs .t.on{color:var(--accent);background:var(--card);border-bottom:2px solid var(--accent);}
+  .topbar{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+  .topbar label{color:var(--sub);}
+  select,input[type=text]{background:#2c3347;color:var(--txt);border:1px solid var(--line);
+    border-radius:6px;padding:5px 9px;min-width:100px;}
+  .btn{border:none;border-radius:6px;padding:6px 15px;font-size:12.5px;cursor:pointer;}
+  .btn.primary{background:var(--accent);color:#fff;}
+  .btn.ghost{background:transparent;color:var(--txt);border:1px solid var(--line);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin-bottom:10px;}
+  .card h3{font-size:13px;margin-bottom:9px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .badge{font-size:11px;color:var(--accent);border:1px solid var(--accent);border-radius:9px;padding:0 9px;font-weight:400;}
+  .badge.p2{color:var(--warn);border-color:var(--warn);}
+  .badge.p3{color:var(--sub);border-color:var(--line);}
+  .grid2{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:7px 12px;align-items:center;}
+  .lab{color:var(--sub);text-align:right;white-space:nowrap;}
+  .slider{display:flex;align-items:center;gap:8px;}
+  .track{width:120px;height:4px;background:var(--line);border-radius:2px;position:relative;}
+  .fill{position:absolute;left:0;top:0;height:4px;background:var(--accent);border-radius:2px;}
+  .knob{position:absolute;top:-5px;width:14px;height:14px;background:var(--accent);border-radius:50%;
+    box-shadow:0 0 0 3px rgba(79,140,255,.22);}
+  .val{min-width:40px;}
+  .cb{display:inline-flex;align-items:center;gap:6px;}
+  .cb i{width:14px;height:14px;border-radius:4px;border:1px solid var(--line);display:inline-block;}
+  .cb i.on{background:var(--accent);border-color:var(--accent);}
+  .subhead{color:var(--sub);font-size:11.5px;margin:9px 0 6px;border-top:1px dashed var(--line);padding-top:7px;}
+  .subhead:first-of-type{border-top:none;margin-top:0;padding-top:0;}
+  .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:8px;}
+  .dim{opacity:.55;}
+
+  .blocks{display:grid;grid-template-columns:1.12fr 1fr;gap:12px;align-items:stretch;}
+  .leftcol,.rightcol{display:flex;flex-direction:column;min-width:0;}
+  .sep{display:flex;align-items:center;gap:8px;color:var(--sub);font-size:11px;margin:2px 0 8px;}
+  .sep::before,.sep::after{content:"";height:1px;background:var(--line);flex:1;}
+  .scrollbox{overflow-y:auto;flex:1;padding-right:2px;}
+  .scrollbox::-webkit-scrollbar{width:8px;}
+  .scrollbox::-webkit-scrollbar-thumb{background:#3a4056;border-radius:4px;}
+
+  .pvwrap{display:flex;gap:10px;}
+  .pv{flex:1.5;background:#10141c;border:1px solid var(--line);border-radius:8px;
+      height:236px;display:flex;align-items:center;justify-content:center;
+      color:var(--sub);font-size:12px;text-align:center;line-height:1.8;}
+  .pvside{flex:1;display:flex;flex-direction:column;gap:6px;}
+  .pvside .grid2{grid-template-columns:auto 1fr;}
+  .pvside .lab{font-size:11.5px;}
+  .pvbar{display:flex;gap:7px;flex-wrap:wrap;margin-top:auto;}
+
+  .anno{margin-top:16px;background:var(--card2);border:1px solid var(--line);border-radius:10px;
+    padding:12px 16px;font-size:12px;color:var(--sub);}
+  .anno b{color:var(--txt);}
+  code{background:#151a26;border:1px solid var(--line);border-radius:4px;padding:0 5px;color:#8fd0ff;font-size:11.5px;}
+  table{border-collapse:collapse;width:100%;margin-top:8px;font-size:12px;}
+  th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;}
+  th{color:var(--txt);background:#1c2230;}
+</style>
+</head>
+<body>
+<h1>相机面板 ·「编码设置」页 设计稿 v6（三区块）</h1>
+<div class="note">左上预览 / 左下主辅码流固定 / 右侧其余卡片 · 合并 ImageTest + ConfigTool · P1 本期 / P2 规划 / P3 只读</div>
+
+<div class="tabs">
+  <div class="t">相机工具</div>
+  <div class="t on">编码设置</div>
+</div>
+
+<div class="topbar">
+  <label>通道</label><select><option>1</option></select>
+  <span style="color:var(--sub);font-size:12px;">全部参数按通道生效；能力位不支持的控件置灰</span>
+  <span style="flex:1"></span>
+  <button class="btn ghost">读取全部</button>
+</div>
+
+<div class="blocks">
+  <!-- ================= 左列：上=预览，下=主辅码流 ================= -->
+  <div class="leftcol">
+    <div class="card" style="margin-bottom:6px;">
+      <h3>预览画面 <span class="badge">辅码流 · RealPlayEx</span><span class="badge">共享登录会话</span></h3>
+      <div class="pvwrap">
+        <div class="pv">预览画布（原生 HWND 直渲）<br>切页停流 · 切回延迟 1s 恢复</div>
+        <div class="pvside">
+          <div class="grid2">
+            <div class="lab">码流</div><span>辅码流1 · 640×360</span>
+            <div class="lab">帧率</div><span>25 fps</span>
+            <div class="lab">编码</div><span>H.264 / VBR</span>
+            <div class="lab">状态</div><span style="color:var(--ok);">● 渲染中</span>
+          </div>
+          <div class="pvbar">
+            <button class="btn primary">开始预览</button>
+            <button class="btn ghost">停止</button>
+            <button class="btn ghost">抓图存档</button>
+            <button class="btn ghost">全屏</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sep">左下 · 常用码流参数（固定）</div>
+
+    <div class="scrollbox">
+      <div class="card">
+        <h3>主码流 <span class="badge">ENCODE_VIDEO 1100 · emFormatType=1</span><span class="badge">P1</span></h3>
+        <div class="grid2">
+          <div class="lab">码流类型</div><select class="dim"><option>普通</option></select>
+          <div class="lab">编码模式</div><select><option>H.264</option><option>H.265</option><option>MJPG</option></select>
+          <div class="lab">编码策略</div><select><option>普通</option></select>
+          <div class="lab">音频使能</div><span class="cb"><i class="on"></i>启用</span>
+          <div class="lab">码流控制</div><select><option>VBR 可变码流</option><option>CBR 固定码流</option></select>
+          <div class="lab">音频编码</div><select class="dim"><option>AAC</option><option>G.711A</option></select>
+          <div class="lab">帧率</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:60%"></div><div class="knob" style="left:58%"></div></div><span class="val">25</span></div>
+          <div class="lab">采样率</div><select class="dim"><option>8000</option><option>16000</option></select>
+          <div class="lab">分辨率</div><select><option>1080P（1920×1080）</option><option>720P（1280×720）</option><option>D1（704×576）</option><option>自定义…</option></select>
+          <div class="lab">I 帧间隔</div><select><option>50</option><option>25</option><option>100</option></select>
+          <div class="lab">图像质量</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:80%"></div><div class="knob" style="left:78%"></div></div><span class="val">80%</span></div>
+          <div class="lab">码率上限</div><select><option>4096 KB/s</option><option>6144 KB/s</option><option>8192 KB/s</option></select>
+        </div>
+        <div class="foot"><button class="btn ghost">读取</button><button class="btn primary">应用主码流</button></div>
+      </div>
+
+      <div class="card">
+        <h3>辅码流1 <span class="badge">emFormatType=4</span><span class="badge">P1</span></h3>
+        <div class="grid2">
+          <div class="lab">码流控制</div><select><option>VBR 可变码流</option><option>CBR 固定码流</option></select>
+          <div class="lab">编码模式</div><select><option>H.264</option><option>H.265</option></select>
+          <div class="lab">帧率</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:60%"></div><div class="knob" style="left:58%"></div></div><span class="val">25</span></div>
+          <div class="lab">I 帧间隔</div><select><option>50</option></select>
+          <div class="lab">分辨率</div><select><option>360P（640×360）</option><option>720P（1280×720）</option><option>D1（704×576）</option></select>
+          <div class="lab">码率上限</div><select><option>512 KB/s</option><option>1024 KB/s</option></select>
+          <div class="lab">图像质量</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:80%"></div><div class="knob" style="left:78%"></div></div><span class="val">80%</span></div>
+        </div>
+        <div class="foot"><button class="btn ghost">读取</button><button class="btn primary">应用辅码流</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 右列：其他卡片（独立滚动） ================= -->
+  <div class="rightcol">
+    <div class="sep">右侧 · 其他卡片（独立滚动）</div>
+    <div class="scrollbox">
+      <div class="card">
+        <h3>图像属性 <span class="badge">CFG_VIDEO_IMAGE_CTRL 9601</span><span class="badge">P1</span></h3>
+        <div class="subhead">镜像 / 旋转 / 翻转 / 防抖</div>
+        <div class="grid2">
+          <div class="lab">镜像</div><span class="cb"><i class="on"></i>开启（左右）</span>
+          <div class="lab">翻转</div><span class="cb"><i></i>开启（上下 180°）</span>
+          <div class="lab">旋转</div><select><option>不旋转</option><option>顺时针 90°</option><option>逆时针 90°</option></select>
+          <div class="lab">防抖</div><select><option>关闭</option><option>电子防抖</option><option>光学防抖</option></select>
+          <div class="lab">防抖灵敏度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+        </div>
+        <div class="subhead">色彩</div>
+        <div class="grid2">
+          <div class="lab">亮度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+          <div class="lab">对比度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:52%"></div><div class="knob" style="left:50%"></div></div><span class="val">52</span></div>
+          <div class="lab">饱和度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+          <div class="lab">Gamma</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+        </div>
+        <div class="subhead">清晰度 / 降噪</div>
+        <div class="grid2">
+          <div class="lab">锐度模式</div><select><option>自动</option><option>手动</option></select>
+          <div class="lab">锐度值</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:55%"></div><div class="knob" style="left:53%"></div></div><span class="val">55</span></div>
+          <div class="lab">3D 降噪</div><span class="cb"><i class="on"></i>开启</span>
+          <div class="lab">3D 等级</div><select><option>低</option><option>中</option><option>高</option></select>
+          <div class="lab">2D 降噪</div><span class="cb"><i class="on"></i>开启</span>
+          <div class="lab">2D 等级</div><select><option>低</option><option>中</option><option>高</option></select>
+        </div>
+        <div class="foot"><button class="btn ghost">读取图像属性</button><button class="btn primary">应用图像属性</button></div>
+      </div>
+
+      <div class="card dim">
+        <h3>曝光 <span class="badge p2">P2 · 1306/1308</span></h3>
+        <div class="grid2">
+          <div class="lab">曝光模式</div><select><option>自动</option><option>手动</option></select>
+          <div class="lab">抗闪</div><select><option>50Hz</option><option>60Hz</option><option>关闭</option></select>
+          <div class="lab">曝光补偿</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">0</span></div>
+          <div class="lab">快门</div><select><option>1/25</option><option>1/100</option><option>1/10000</option></select>
+          <div class="lab">增益</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:30%"></div><div class="knob" style="left:28%"></div></div><span class="val">30</span></div>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>背光 <span class="badge p2">P2 · 1309</span></h3>
+        <div class="grid2">
+          <div class="lab">背光模式</div><select><option>关闭</option><option>背光补偿</option><option>宽动态</option><option>强光抑制</option></select>
+          <div class="lab">宽动态等级</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:45%"></div><div class="knob" style="left:43%"></div></div><span class="val">45</span></div>
+          <div class="lab">BLC 区域</div><select><option>全屏</option><option>上</option><option>中</option><option>下</option></select>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>白平衡 <span class="badge p2">P2 · 枚举待导出</span></h3>
+        <div class="grid2">
+          <div class="lab">模式</div><select><option>自动</option><option>手动</option><option>室内</option><option>室外</option></select>
+          <div class="lab">红色增益</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+          <div class="lab">蓝色增益</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>日夜模式 <span class="badge p2">P2 · DAYNIGHT_INFO</span></h3>
+        <div class="grid2">
+          <div class="lab">类型</div><span class="cb"><i class="on"></i>电子</span><span class="cb" style="margin-left:8px;"><i></i>机械</span>
+          <div class="lab">切换模式</div><select><option>自动</option><option>彩色</option><option>黑白</option></select>
+          <div class="lab">灵敏度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">0-100</span></div>
+          <div class="lab">延时</div><select><option>0 s</option><option>2 s</option><option>5 s</option></select>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>补光 <span class="badge p2">P2 · LIGHTING_SCHEME</span></h3>
+        <div class="grid2">
+          <div class="lab">灯光模式</div><select><option>关闭</option><option>白光</option><option>红外</option><option>智能</option></select>
+          <div class="lab">补光强度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">0-100</span></div>
+          <div class="lab">灵敏度</div><select><option>0</option><option>1</option><option>3</option><option>5</option></select>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>除雾 <span class="badge p2">P2 · 1312</span></h3>
+        <div class="grid2">
+          <div class="lab">除雾模式</div><select><option>关闭</option><option>自动</option><option>手动</option></select>
+          <div class="lab">强度</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:48%"></div></div><span class="val">50</span></div>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>音频 <span class="badge p2">P2 · 1202 + 编码</span></h3>
+        <div class="grid2">
+          <div class="lab">音频使能</div><span class="cb"><i class="on"></i>开启</span>
+          <div class="lab">降噪</div><span class="cb"><i></i>开启</span>
+          <div class="lab">输入音量</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:70%"></div><div class="knob" style="left:68%"></div></div><span class="val">70</span></div>
+          <div class="lab">输出音量</div>
+          <div class="slider"><div class="track"><div class="fill" style="width:60%"></div><div class="knob" style="left:58%"></div></div><span class="val">60</span></div>
+          <div class="lab">音频编码</div><select><option>AAC</option><option>G.711A</option></select>
+          <div class="lab">采样率</div><select><option>8000</option><option>16000</option></select>
+        </div>
+      </div>
+
+      <div class="card dim">
+        <h3>聚焦信息 <span class="badge p3">P3 只读</span></h3>
+        <div style="color:var(--sub);font-size:12px;line-height:1.9;">
+          聚焦模式 / 当前焦距 / 变倍位置 / 对焦状态 —— 只读展示。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="anno">
+  <b>三区块布局说明</b>
+  <table>
+    <tr><th>区块</th><th>内容</th><th>滚动行为</th></tr>
+    <tr><td>左上</td><td>预览画面 + 实时信息 + 工具条</td><td>固定，不随左下滚动</td></tr>
+    <tr><td>左下</td><td>主码流 + 辅码流（固定位置）</td><td>区块内部滚动（窗口矮时）</td></tr>
+    <tr><td>右侧</td><td>图像属性(P1) + 曝光/背光/白平衡/日夜/补光/除雾/音频/聚焦(P2/P3)</td><td>独立滚动，与左侧互不影响</td></tr>
+  </table>
+  <br>
+  · <b>实现要点</b>：左右两列各一个 QScrollArea；左列上部预览卡固定、下部滚动区（主辅码流）；右列单滚动区；<br>
+  · <b>会话互斥</b>：预览与「相机工具」页共用登录会话——本页显示时工具页已停流，本页起辅码流；切走本页停流，工具页延迟 1s 恢复；<br>
+  · <b>分组应用</b>：主码流 / 辅码流 / 图像属性各自「读取 / 应用」；P2 组先真机探针通过才接线；<br>
+  · 三列主页面（登录/预览/云台）布局不变，仅重写本页。
+</div>
+</body>
+</html>

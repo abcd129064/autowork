@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""「相机工具」页 offscreen UI 冒烟（2026-10-07）
+"""「相机工具」页 offscreen UI 冒烟（2026-10-07，2026-11-06 增补编码设置页）
 
-两段验证：
+三段验证：
   A. ToolHub 集成：完整 ToolHub 离屏构造，第 5 页「相机工具」注册成功、优雅降级不炸容器；
-  B. 页面全流程（真机 49.235.34.253:4238）：UI 登录 → 固定镜头自动置灰 →
-     OSD 自动回填 → 预览开停（软断言：offscreen HWND 渲染不可视）→ 抓图落盘 → 断开复位。
+  B. 相机工具页全流程（真机 49.235.34.253:4238）：UI 登录 → 固定镜头自动置灰 →
+     OSD 自动回填 → 预览开停（软断言：offscreen HWND 渲染不可视）→ 抓图落盘 → 断开复位；
+  D. 编码设置页真机全流程：未读取压住「应用」→ 读取全部覆盖码流/图像/色彩/P2 各组
+     → 原值回写后设备状态不变 → 被拒档位回读纠偏 → 写后校验不谎报成功 →
+     连续读取无协议超时。D 段只把刚读到的现值原样写回，跑完设备状态与跑前一致。
 
 运行（唯一全依赖解释器）：
     QT_QPA_PLATFORM=offscreen python tools/smoke/smoke_dahua_camera_ui.py
@@ -16,6 +19,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# 控制台默认 GBK，冒烟结论带中文与设备型号，走管道时必须先切 UTF-8，
+# 否则重定向到文件是一片乱码，没法作为交付证据回看
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # ---- Qt DLL 引导（同 smoke_table_search.py） ----
 import importlib.util as _iu
@@ -180,6 +189,94 @@ def main() -> int:
         check("B22 编码配置 RMW 回环一致", False, str(e))
 
     # B6 断开复位
+    # D. 编码设置页真机全流程（读→放行→原值回写→校验）
+    #    只把刚读到的设备现值原样写回：不改设备状态，又能把写通道、写后
+    #    读回、以及"固件收了但不落库"的提示口径一起验掉。
+    from windows.camera.encode_page import EncodePage, _select_or_insert
+
+    ep = EncodePage(None, page)
+    ep.show()
+    app.processEvents()
+    check("D1 编码页挂在相机工具会话上", ep._cam is page and ep._cards)
+    check("D2 未读取时各「应用」被压住（防误写默认值）",
+          not ep._cards[1]["apply"].isEnabled()
+          and not ep._grp_exposure["apply"].isEnabled()
+          and not ep._btn_img_apply.isEnabled())
+
+    ep._on_read()                      # 顶栏「读取全部」
+    ok_read = wait_until(ep, lambda: len(ep._read_ok) >= 9, 60000)
+    check("D3 读取全部覆盖码流/图像/色彩/P2 各组", ok_read,
+          f"已读区块={sorted(ep._read_ok)}")
+    main_info = page._client.encode_video(1)
+    check("D4 读取全部回填主码流卡",
+          ep._cards[1]["cmb_comp"].currentData() == main_info["compression"]
+          and ep._cards[1]["sld_fps"].value() == int(round(main_info["framerate"])))
+    check("D5 读取后放行「应用」",
+          ep._cards[1]["apply"].isEnabled()
+          and ep._grp_exposure["apply"].isEnabled())
+
+    def drain(timeout_ms=60000):
+        """把串行队列排空：队列空了才谈得上"这一轮设备交互已经结束"，
+        比固定 sleep 可靠——core 层现在每次配置请求都要补间距"""
+        return wait_until(ep, lambda: page._serial._q.empty(), timeout_ms)
+
+    def apply_and_watch(fmt, label):
+        """原值回写：写前写后设备状态必须一致，且页面控件回到设备真值"""
+        before = page._client.encode_video(fmt)
+        ep._on_apply(fmt)
+        drain()
+        after = page._client.encode_video(fmt)
+        same_ui = (ep._cards[fmt]["cmb_comp"].currentData()
+                   == before["compression"] and ep._cards[fmt]["res_ref"]["w"]
+                   == int(before["width"]))
+        check(f"D6 {label}原值回写后设备状态不变",
+              after == before and same_ui,
+              f"{after['width']}x{after['height']}@{after['framerate']}")
+
+    apply_and_watch(1, "主码流")
+    apply_and_watch(4, "辅码流1")
+
+    # D7 辅码流改分辨率：4238 固件直接拒收（SDK err 21）。
+    #    要求是"卡片回到设备真值"，而不是停在被拒的档位上让人以为改成了。
+    extra_card = ep._cards[4]
+    dev_res = page._client.encode_video(4)
+    _select_or_insert(extra_card["cmb_res"], (1280, 720),
+                      names={(1280, 720): "720P（1280×720）"})
+    ep._on_apply(4)
+    # 等卡片回到设备真值那一项：res_ref 在读取阶段就已经是 640，
+    # 拿它当完成条件会立刻为真，测不到写失败后的那次回读
+    resync = wait_until(
+        ep, lambda: extra_card["cmb_res"].currentData()
+        == (int(dev_res["width"]), int(dev_res["height"])), 30000)
+    check("D7 辅码流被拒分辨率回读到设备真值", resync,
+          f"卡片={extra_card['res_ref']['w']}x{extra_card['res_ref']['h']} "
+          f"设备={dev_res['width']}x{dev_res['height']}")
+
+    # D8 图像属性原值回写：9601 在本机不落库，必须报"未生效"而不是假装成功
+    ep._on_apply_image()
+    img_ok = wait_until(ep, lambda: "image" in ep._read_ok, 40000)
+    check("D8 图像属性应用走写后校验（未落库不谎报成功）", img_ok)
+
+    # D9 P2 分组原值回写：曝光 1306 实测可写，读回应与设备一致
+    grp = ep._grp_exposure
+    dev = page._client.exposure()
+    grp["apply"].click()
+    exp_ok = wait_until(
+        ep, lambda: grp["widgets"]["compensation"]["slider"].value()
+        == int(dev["compensation"]), 40000)
+    check("D9 曝光分组应用后与设备回值一致", exp_ok,
+          f"compensation={page._client.exposure()['compensation']}")
+
+    # D10 串行节流：连续 12 次配置读取不应出现协议超时
+    errs = []
+    for _ in range(6):
+        for f in (1, 4):
+            try:
+                page._client.encode_video(f)
+            except Exception as e:  # noqa: BLE001
+                errs.append(str(e))
+    check("D10 连续 12 次编码读取无协议超时", not errs, "; ".join(errs[:2]))
+
     page._disconnect()
     app.processEvents()
     check("B18 断开后：状态复位", page._lb_state.text() == "未连接")
