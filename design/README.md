@@ -29,6 +29,8 @@ design/
 | [remote_page_v3_065.html](remote_page_v3_065.html) | 远程页 v3 变体 · 锁定 frps 0.65 口径 | `windows/remote_session/remote_hub.py`（**当前生效版本**） |
 | [remote_session_v2.html](remote_session_v2.html) | 远程会话页 · 二期设计稿（Remote Session v2） | `windows/remote_session/` |
 | [dahua_camera_tool.html](dahua_camera_tool.html) | 工具页第 5 子页「相机工具」设计稿 v1（云台预览 + OSD 叠加 + 批量下发，控件↔SDK API 标注齐全） | 已升级为面板级「相机」导航（`windows/camera/`） |
+| [video_repair_tool.html](video_repair_tool.html) | 工具页「视频修复」工作区设计稿 v1（掉电截断无 moov 的 mp4 无损修复：借参考文件 VOL 头 + 按 GOP 边界裁剪 + ffmpeg 流拷贝重封装；含内嵌 Pivot 与弹出窗口左侧子导航双形态、四态、后端契约与 7 处落点清单） | `main_window/tool_hub.py`（工作区）+ `windows/tools/video_repair.py`（后端）+ `workers/video_repair_worker.py`（线程） |
+| [video_enhance_tool.html](video_enhance_tool.html) | 工具页「画质提升」工作区设计稿 v1（**纯 ffmpeg 滤镜链**，不接 Real-ESRGAN：去噪→放大→锐化→色彩→补帧→编码；内嵌页签 + 弹出工作台双形态、5 子页〔增强任务/滤镜调参/编码输出/环境检测/质量对比〕、ffmpeg 路径设置项+PATH 兜底、VMAF/PSNR/SSIM 客观评分、**8 处注册点清单**与滤镜预设表。**已落地并按实现回填**：五张画布保留原样，画布与实现的差异写在紧邻的黄色 note 与文末「已识别的风险 / 本次明确不做」里） | `windows/tools/video_enhance.py`（引擎）+ `windows/tools/video_enhance_hub.py`（5 子页 UI）+ `workers/video_enhance_worker.py`（6 stage 线程）+ `main_window/tool_hub.py` 注册（工具页第 6 项）；单测 `tests/test_video_enhance.py`、冒烟 `tools/smoke/smoke_video_enhance_hub.py` |
 
 同一页面的多个版本**全部保留**，用于回溯设计演进；判断当前生效版本看上表最后一列。
 

@@ -665,7 +665,7 @@ class SettingsHubPage(QWidget):
         row(FluentIcon.DEVELOPER_TOOLS, "连接诊断", "查看连接日志与失败记录",
             "打开", win._on_open_conn_diag)
         row(FluentIcon.CODE, "打开工具页",
-            "单杆视频 / 端口占用 / 上传清单 / 批量整理",
+            "单杆视频 / 端口占用 / 上传清单 / 批量整理 / 视频修复",
             "前往", win._on_open_tool_hub)
 
         # 工具页行为开关（单杆视频工作区读取，2026-09-07 二期需求）
@@ -845,6 +845,10 @@ class SettingsHubPage(QWidget):
             ("backend_exe", "后端程序", "file"),
             ("newlog_excel_dir", "整理Excel目录", "dir"),
             ("newlog_out_dir", "整理输出目录", "dir"),
+            # 画质提升（2026-11-06）：留空即用 PATH 里的 ffmpeg，
+            # 工具页「环境检测」也有同样两个输入框，这里只是给全局设置一个入口
+            ("ffmpeg_path", "ffmpeg", "file"),
+            ("ffprobe_path", "ffprobe", "file"),
         ]
         for key, title, mode in items:
             value = str(settings.get(key, "") or defaults.get(key, "") or "")

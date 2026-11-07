@@ -386,7 +386,8 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                 from qfluentwidgets import FluentIcon
                 title = {"toolHub": "工具面板",
                          "remoteHub": "远程面板",
-                         "cameraHub": "相机面板"}.get(key, "面板")
+                         "cameraHub": "相机面板",
+                         "videoEnhanceHub": "画质提升工作台"}.get(key, "面板")
                 # 远程/工具面板（远程 2026-09-21、工具 2026-09-22 需求）：
                 # 弹出后各视图改管理面板式左侧子导航；其余 Hub 维持内嵌 Pivot
                 # ⚠️ nav_icons 的键必须覆盖该 Hub 全部注册页（hub_popout 以
@@ -401,7 +402,16 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                     "toolHub": {"单杆视频": FluentIcon.VIDEO,
                                 "端口占用": FluentIcon.CONNECT,
                                 "上传清单": FluentIcon.LIBRARY,
-                                "视频与日志批量整理": FluentIcon.FOLDER},
+                                "视频与日志批量整理": FluentIcon.FOLDER,
+                                "视频修复": FluentIcon.MOVIE,
+                                "画质提升": FluentIcon.BRUSH},
+                    # 画质提升（2026-11-06）：五键必须与 VideoEnhanceHub 的五个
+                    # addPage 文本逐字一致，少一个就退回内嵌 Pivot 形态
+                    "videoEnhanceHub": {"增强任务": FluentIcon.VIDEO,
+                                        "滤镜调参": FluentIcon.FILTER,
+                                        "编码输出": FluentIcon.SAVE_AS,
+                                        "环境检测": FluentIcon.COMMAND_PROMPT,
+                                        "质量对比": FluentIcon.PIE_SINGLE},
                 }.get(key)
                 win = HubPopoutWindow(type(hub), self, title,
                                       nav_icons=nav_icons)

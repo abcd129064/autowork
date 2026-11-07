@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """工具页 ToolHub（二期，2026-09-07）——「设置-工具」4 条动作行升级为独立工作区
 
-设计稿：design/tools_page_v2.html
+设计稿：design/tools_page_v2.html、design/video_repair_tool.html
 形态（2026-09-07 反馈修订）：与运维/售后/跑视频同风格——横排 Pivot 二级切换
-（无图标），四工作区堆叠在下方：
-    单杆视频 │ 端口占用 │ 上传清单 │ 视频与日志批量整理
+（无图标），六个工作区堆叠在下方：
+    单杆视频 │ 端口占用 │ 上传清单 │ 视频与日志批量整理 │ 视频修复 │ 画质提升
 
 复用原则（后端零改动）：
   - 单杆视频 → workers.single_video_worker.SingleVideoWorker（参数校验复刻
@@ -12,9 +12,13 @@
   - 端口占用 → 真实 socket 监听（TCP listen / UDP bind），表格化管理
   - 上传清单 → 扫描 {videos_dir}/upload，勾选打包走 ZipUploadWorker(files=白名单)
   - 批量整理 → NewLogWorker + 整理产物 ZipUploadWorker（zip_prefix=newlog）
+  - 视频修复 → windows.tools.video_repair（掉电截断无 moov 的 mp4 借参考文件
+    VOL 头无损重封装），线程 workers.video_repair_worker
+  - 画质提升 → windows.tools.video_enhance（纯 ffmpeg 滤镜链）
 
 busy 守卫：Worker 引用统一挂主窗口属性（_single_video_worker/_newlog_worker/
-_newlog_upload_worker），与菜单栏弹窗入口互斥，防止双开。
+_newlog_upload_worker/_video_probe_worker/_video_repair_worker 等），与弹出窗口
+入口互斥，防止双开；属性名要同时登记 hub_popout._BUSY_ATTRS 与 shutdown 7b。
 """
 import os
 import re
@@ -44,6 +48,8 @@ from windows.single_video_dialog import (
 from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
 from workers.collect_worker import ZipUploadWorker
+from workers.video_repair_worker import VideoRepairWorker
+from windows.tools import video_repair
 
 
 # 语义色（对齐 core/design_tokens.py：success/warning/danger/info）
@@ -1872,13 +1878,679 @@ class NewLogWork(QWidget):
         self.log_view.append(text)
 
 
+# ==================== 工作区 5：视频修复 ====================
+
+class VideoRepairWork(QWidget):
+    """视频修复工作区：掉电截断（无 moov）的 mp4 借参考文件 VOL 头无损重封装
+
+    流程三段：体检损坏文件（盒结构 + 码流起始码）→ 确认参考文件（提供 VOL 配置头
+    与帧率）→ ffmpeg 流拷贝重封装并校验。设计稿 design/video_repair_tool.html，
+    后端 windows.tools.video_repair，线程 workers.video_repair_worker。
+
+    原文件全程只读，输出永远是另一个路径；修复只做流拷贝，不转码。
+    """
+
+    # 下拉项顺序即本元组顺序，值对应 video_repair.pick_cut 的 mode
+    _CUT_MODES = (("auto", "自动裁到最近完整 GOP（推荐）"),
+                  ("vop", "裁到最后一个 VOP 起点（会留悬空 GOP 头）"))
+    _FILE_FILTER = "视频文件 (*.mp4);;所有文件 (*.*)"
+
+    def __init__(self, win, parent=None):
+        """建三张参数卡 + 运行输出，并读回上次的目录与参数配置
+
+        ffmpeg 可用性在建页时就查清：等到点「开始修复」才报缺失，用户已经白填
+        一轮参数了。
+        """
+        super().__init__(parent)
+        # objectName 是 PivotPage.addPage 的 routeKey 来源，缺失会在注册时直接抛错
+        self.setObjectName("videoRepairWork")
+        _transparent(self)
+        self._win = win
+        self._probe = None          # 最近一次体检结果 dict
+        self._out_path = ""         # 修复产物路径，成功后才有值
+        self._out_auto = True       # 输出路径仍是自动推导值时才允许被覆盖
+        self._file_dlg = None       # 非模态选择器引用，出作用域会被 GC 掉窗口
+        settings = win._load_settings()
+        self._start_dir = str(settings.get("repair_last_dir") or "")
+        self._ffmpeg, self._ffprobe = video_repair.find_ffmpeg()
+
+        body = QWidget(self)
+        body.setAutoFillBackground(False)
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 8, 20, 12)
+        lay.setSpacing(12)
+
+        # 三张卡叠起来比窗口高，套滚动；小窗口下终端区仍由 splitter 兜住高度
+        top = QWidget(body)
+        top.setAutoFillBackground(False)
+        top.setStyleSheet("background: transparent;")
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(10)
+        tl.addWidget(self._build_broken_card(top))
+        tl.addWidget(self._build_ref_card(top))
+        tl.addWidget(self._build_opt_card(top, settings))
+        tl.addStretch(1)
+        scroll = _make_scroll(top, body)
+        scroll.setMinimumHeight(220)
+
+        out_card = CardWidget(body)
+        ol = QVBoxLayout(out_card)
+        ol.setContentsMargins(16, 14, 16, 14)
+        ol.setSpacing(8)
+        ol.addWidget(CaptionLabel("运行输出:", out_card))
+        # height=None：终端吃满卡片剩余高度，与单杆视频/批量整理同一套手感
+        self.log_view = _make_terminal(out_card, None)
+        ol.addWidget(self.log_view, 1)
+        self.progress_bar = ProgressBar(out_card)
+        # range(0,0) 是不定进度：ffmpeg 只报已写入时长，没有总时长可换算百分比
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.hide()
+        ol.addWidget(self.progress_bar)
+
+        self.splitter = _make_vsplitter(body, scroll, out_card)
+        lay.addWidget(self.splitter, 1)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(body)
+
+        if not self._ffmpeg:
+            self.append_line(
+                "✘ 未找到 ffmpeg / ffprobe：本工作区依赖系统 ffmpeg，"
+                "请安装后加入 PATH")
+        self._sync_buttons()
+
+    # ---------- 卡片构建 ----------
+
+    def _build_broken_card(self, parent):
+        """卡片 1：损坏文件选择 + 体检结论（盒结构 / 码流统计分行展示）"""
+        card = CardWidget(parent)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(CaptionLabel("待修复文件:", card))
+        self.lbl_verdict = CaptionLabel("未选择文件", card)
+        head.addWidget(self.lbl_verdict)
+        head.addStretch(1)
+        v.addLayout(head)
+        self._paint(self.lbl_verdict, "未选择文件", _C_MUTED)
+
+        desc = BodyLabel(
+            "录制中断电或强制关机，mp4 的 moov 索引就永远没写出来：文件有大小却完全"
+            "打不开。媒体数据本身完好，补回配置头重新封装即可无损救回。", card)
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+
+        row = QHBoxLayout()
+        row.addWidget(BodyLabel("损坏文件:", card))
+        self.broken_edit = LineEdit(card)
+        # 只读：路径只由选择器写入，手输的相对路径在体检阶段还要再解析一遍
+        self.broken_edit.setReadOnly(True)
+        self.broken_edit.setPlaceholderText("选择打不开的 .mp4 文件")
+        self.broken_edit.setFixedWidth(460)
+        row.addWidget(self.broken_edit)
+        self.btn_browse = PushButton(FluentIcon.FOLDER, "浏览", card)
+        self.btn_browse.clicked.connect(
+            lambda: self._open_picker(self.broken_edit, "选择损坏的视频文件"))
+        row.addWidget(self.btn_browse)
+        self.btn_reprobe = ToolButton(FluentIcon.SYNC, card)
+        self.btn_reprobe.setToolTip("重新体检")
+        self.btn_reprobe.clicked.connect(self._start_probe)
+        row.addWidget(self.btn_reprobe)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.lbl_boxes = CaptionLabel("盒结构：—", card)
+        self.lbl_boxes.setWordWrap(True)
+        v.addWidget(self.lbl_boxes)
+        self.lbl_frames = CaptionLabel("码流：—", card)
+        self.lbl_frames.setWordWrap(True)
+        v.addWidget(self.lbl_frames)
+        return card
+
+    def _build_ref_card(self, parent):
+        """卡片 2：参考文件（VOL 配置头与帧率的来源）"""
+        card = CardWidget(parent)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(CaptionLabel("参考文件:", card))
+        self.lbl_ref_state = CaptionLabel("未选择", card)
+        head.addWidget(self.lbl_ref_state)
+        head.addStretch(1)
+        v.addLayout(head)
+        self._paint(self.lbl_ref_state, "未选择", _C_MUTED)
+
+        desc = BodyLabel(
+            "MPEG-4 短头码流内部不带 VOL 配置头，分辨率与量化参数只存在于正常文件的 "
+            "moov→stsd→esds 里，必须借同机同参数录制的文件补上。分辨率不一致会花屏。",
+            card)
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+
+        row = QHBoxLayout()
+        row.addWidget(BodyLabel("正常视频:", card))
+        self.ref_edit = LineEdit(card)
+        self.ref_edit.setPlaceholderText("同一台设备录制的、能正常播放的 .mp4")
+        self.ref_edit.setFixedWidth(460)
+        row.addWidget(self.ref_edit)
+        self.btn_ref_browse = PushButton(FluentIcon.FOLDER, "浏览", card)
+        self.btn_ref_browse.clicked.connect(
+            lambda: self._open_picker(self.ref_edit, "选择参考视频文件"))
+        row.addWidget(self.btn_ref_browse)
+        self.btn_ref_find = PushButton(FluentIcon.SEARCH, "自动发现", card)
+        self.btn_ref_find.setToolTip("在同目录内按修改时间找最近的同编码正常视频")
+        self.btn_ref_find.clicked.connect(self._on_discover)
+        row.addWidget(self.btn_ref_find)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.lbl_ref = CaptionLabel("参数：—", card)
+        self.lbl_ref.setWordWrap(True)
+        v.addWidget(self.lbl_ref)
+        return card
+
+    def _build_opt_card(self, parent, settings):
+        """卡片 3：修复参数 + 操作行（默认值即已验证的正确口径）"""
+        card = CardWidget(parent)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(CaptionLabel("修复参数:", card))
+        head.addStretch(1)
+        self.lbl_env = CaptionLabel("", card)
+        head.addWidget(self.lbl_env)
+        v.addLayout(head)
+        if self._ffmpeg:
+            self._paint(self.lbl_env, "ffmpeg 就绪", _C_SUCCESS)
+        else:
+            self._paint(self.lbl_env, "未找到 ffmpeg / ffprobe", _C_DANGER)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        self.combo_cut = ComboBox(card)
+        for _mode, text in self._CUT_MODES:
+            self.combo_cut.addItem(text)
+        self.combo_cut.setFixedWidth(300)
+        mode = str(settings.get("repair_cut_mode") or "auto")
+        modes = [m for m, _t in self._CUT_MODES]
+        self.combo_cut.setCurrentIndex(modes.index(mode) if mode in modes else 0)
+
+        self.spin_fps = CompactSpinBox(card)
+        self.spin_fps.setRange(1, 240)
+        try:
+            self.spin_fps.setValue(int(settings.get("repair_fps") or 25))
+        except (TypeError, ValueError):
+            self.spin_fps.setValue(25)
+        self.spin_fps.setFixedWidth(110)
+        self.spin_fps.setToolTip("参考文件读不到帧率时的兜底值")
+        _pair(grid, 0, "尾部裁剪:", self.combo_cut, "封装帧率:", self.spin_fps, card)
+
+        self.out_edit = LineEdit(card)
+        self.out_edit.setPlaceholderText("默认同目录同名加 _repaired 后缀")
+        self.out_edit.setFixedWidth(460)
+        self.btn_out = ToolButton(FluentIcon.SAVE_AS, card)
+        self.btn_out.setToolTip("另存为…")
+        self.btn_out.clicked.connect(
+            lambda: self._open_picker(self.out_edit, "选择输出文件", True))
+        self.chk_open_dir = CheckBox("修复后自动打开输出目录", card)
+        self.chk_open_dir.setChecked(bool(settings.get("repair_auto_open_dir", False)))
+        _pair(grid, 1, "输出文件:", self._cell(self.out_edit, self.btn_out, card),
+              "完成后:", self.chk_open_dir, card)
+
+        self.chk_verify = CheckBox("完整解码校验（多花十几秒，确认不花屏）", card)
+        self.chk_verify.setChecked(bool(settings.get("repair_verify_decode", True)))
+        grid.addWidget(self.chk_verify, 2, 1, 1, 3)
+        # 控件定宽、尾部空列吃剩余：与单杆视频表单同一套对齐规范
+        grid.setColumnStretch(4, 1)
+        v.addLayout(grid)
+
+        btns = QHBoxLayout()
+        self.btn_start = PrimaryPushButton(FluentIcon.PLAY, "开始修复", card)
+        self.btn_start.clicked.connect(self._on_start)
+        btns.addWidget(self.btn_start)
+        self.btn_open_out = PushButton(FluentIcon.FOLDER, "打开输出目录", card)
+        self.btn_open_out.clicked.connect(self._on_open_out)
+        # 产物要修复成功才存在，先藏起来，_on_repaired 里再显示
+        self.btn_open_out.hide()
+        btns.addWidget(self.btn_open_out)
+        self.btn_cancel = PushButton(FluentIcon.CLOSE, "取消", card)
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        btns.addWidget(self.btn_cancel)
+        btns.addStretch(1)
+        btns.addWidget(CaptionLabel("原文件全程只读 · 流拷贝不转码", card))
+        v.addLayout(btns)
+        return card
+
+    @staticmethod
+    def _cell(edit, btn, parent):
+        """LineEdit + 按钮组合成一个网格单元格（拉伸只给输入框）"""
+        w = QWidget(parent)
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(edit, 1)
+        h.addWidget(btn, 0)
+        return w
+
+    @staticmethod
+    def _paint(label, text, color):
+        """给状态文字上色：qfw 标签走 setTextColor（内部是 CustomStyleSheet），
+        直接 setStyleSheet 会被主题切换轮询冲掉。"""
+        label.setText(text)
+        try:
+            label.setTextColor(color, color.lighter(135))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _derive_out(broken):
+        """默认输出名：同目录同名加 _repaired 后缀，绝不覆盖原件"""
+        stem, _ext = os.path.splitext(broken)
+        return stem + "_repaired.mp4"
+
+    # ---------- 文件选择（非模态：exec() 会开自己的事件循环冻住整个窗口） ----------
+
+    def _open_picker(self, edit, title, accept_save=False):
+        """弹出非模态文件选择器，结果按目标输入框分派到 _on_picked"""
+        if self._file_dlg is not None:
+            return      # 非模态对话框允许重复点按钮，这里挡掉第二次打开
+        current = edit.text().strip()
+        start = os.path.dirname(current) if current else self._start_dir
+        if not start or not os.path.isdir(start):
+            start = self._start_dir if os.path.isdir(self._start_dir) else ""
+        dlg = QFileDialog(self, title, start, self._FILE_FILTER)
+        if accept_save:
+            # 另存为不能设 ExistingFile，否则文件名框不允许输入新名字
+            dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+            dlg.setDefaultSuffix("mp4")
+        else:
+            dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+            dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+        dlg.fileSelected.connect(lambda p, e=edit: self._on_picked(e, p))
+        dlg.finished.connect(self._on_picker_finished)
+        # 关闭即销毁：否则每次浏览都漏一个挂在本页下的隐藏 QFileDialog
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        self._file_dlg = dlg
+        self._sync_buttons()
+        dlg.open()
+
+    def _on_picker_finished(self, _result=0):
+        """选择器关闭（取消也会走到这里）：释放引用并恢复按钮"""
+        self._file_dlg = None
+        self._sync_buttons()
+
+    def _on_picked(self, edit, path):
+        """选中文件：按目标框决定后续动作（体检 / 重新校验参考 / 锁定输出路径）"""
+        if not path:
+            return
+        if edit is self.broken_edit:
+            self.broken_edit.setText(path)
+            self._out_path = ""
+            self.btn_open_out.hide()
+            # 用户手挑过输出路径就不再覆盖，否则每次换文件都把选择冲掉
+            if self._out_auto:
+                self.out_edit.setText(self._derive_out(path))
+            self._start_dir = os.path.dirname(path)
+            self._start_probe()
+        elif edit is self.ref_edit:
+            self.ref_edit.setText(path)
+            self._start_dir = os.path.dirname(path)
+            if self.broken_edit.text().strip():
+                self._start_probe()     # 换了参考文件要重新校验它能不能用
+        else:
+            self.out_edit.setText(path)
+            self._out_auto = False
+
+    def _on_discover(self):
+        """清空参考文件后重新体检：体检线程在参考为空时会自动发现同目录候选"""
+        if not self.broken_edit.text().strip():
+            self._win._show_info_bar("请先选择损坏的视频文件", "warning")
+            return
+        self.ref_edit.setText("")
+        self._start_probe()
+
+    # ---------- 体检 ----------
+
+    def _start_probe(self):
+        """起体检线程：盒结构、码流起始码、参考文件可用性一次做完
+
+        必须离开 UI 线程：mmap 扫起始码在几百 MB 录像上是秒级操作，放主线程会把
+        整个 FluentWindow 冻住。
+        """
+        win = self._win
+        path = self.broken_edit.text().strip()
+        if not path:
+            win._show_info_bar("请先选择损坏的视频文件", "warning")
+            return
+        if not os.path.isfile(path):
+            win._show_info_bar(f"文件不存在: {path}", "warning")
+            return
+        if self._worker_running("_video_probe_worker"):
+            return      # 已在体检：重复点刷新不该再起一个线程扫同一个文件
+        self._probe = None
+        self._paint(self.lbl_verdict, "体检中…", _C_MUTED)
+        self._sync_buttons()
+        self.append_line("")
+        self.append_line(f"▶ 体检: {path}")
+        w = VideoRepairWorker("probe", {"path": path,
+                                        "reference": self.ref_edit.text().strip()})
+        win._video_probe_worker = w
+        w.line.connect(self.append_line)
+        w.probed.connect(self._on_probed)
+        w.error.connect(self._on_probe_failed)
+        # lambda 绑 w 防闭包晚绑定；运行中的 QThread 交给 _release_worker_safe 延迟销毁
+        w.finished.connect(lambda w=w: win._release_worker_safe(w))
+        w.start()
+
+    def _on_probed(self, result):
+        """体检结果落界面：结论上色，盒结构与码流统计分行展示"""
+        win = self._win
+        w = getattr(win, "_video_probe_worker", None)
+        # 先摘共享引用再回收：_worker_running 读的正是这个属性
+        win._video_probe_worker = None
+        if w is not None:
+            win._release_worker_safe(w)
+        self._probe = result or {}
+
+        boxes = self._probe.get("box_list") or []
+        moov = "moov 存在" if self._probe.get("has_moov") else "moov 缺失"
+        self.lbl_boxes.setText(
+            f"盒结构：{' · '.join(boxes) if boxes else '—'}｜{moov}｜负载起点 "
+            f"0x{self._probe.get('payload_off', 0):X}"
+            f"（{_fmt_size(self._probe.get('payload_size', 0))}）")
+
+        frames = self._probe.get("frames") or {}
+        if frames:
+            # 偏短只是启发式：末帧后面不再有起始码，本质上无法自证写完。auto 档
+            # 无论哪种情况都裁到最后一个 GOP 头，所以文案不能出现「完整」这种结论
+            state = "明显偏短" if frames.get("last_frame_incomplete") else "长度正常"
+            self.lbl_frames.setText(
+                f"码流：帧起始码 B6 {frames.get('frame_count', 0)} 个｜GOP B3 "
+                f"{frames.get('gop_count', 0)} 个｜中位帧长 "
+                f"{_fmt_size(frames.get('median_frame', 0))}｜末帧残留 "
+                f"{_fmt_size(frames.get('last_vop_tail', 0))}（{state}，随所属 GOP 丢弃）")
+        else:
+            self.lbl_frames.setText("码流：—")
+
+        ref = self._probe.get("reference") or ""
+        if ref and self.ref_edit.text().strip() != ref:
+            self.ref_edit.setText(ref)
+        info = self._probe.get("ref_info") or {}
+        if info:
+            audio = "含音轨" if info.get("has_audio") else "无音轨"
+            self.lbl_ref.setText(
+                f"参数：{info.get('codec')} · {info.get('profile')} · "
+                f"{info.get('width')}×{info.get('height')} · {info.get('fps')} fps"
+                f"｜{audio}｜VOL {self._probe.get('vol_bytes', 0)} B")
+            if self._probe.get("discovered"):
+                self.append_line(f"[参考] 已自动发现同目录参考文件: {ref}")
+        else:
+            self.lbl_ref.setText("参数：—")
+
+        self._render_verdict(bool(info), bool(self._ffmpeg))
+        self._sync_buttons()
+        # 记住目录与参考文件：同一台录制机的录像固定在一处，下次不必重选
+        win._save_settings({
+            "repair_last_dir": os.path.dirname(self._probe.get("path") or ""),
+            "repair_last_ref": ref})
+
+    def _render_verdict(self, has_ref, has_ffmpeg):
+        """把体检结论翻成一句人话并上色（原因同时挂到悬停提示）"""
+        reason = self._probe.get("reason") or ""
+        if self._probe.get("ok") and has_ref and has_ffmpeg:
+            self._paint(self.lbl_verdict, "✔ 可修复", _C_SUCCESS)
+            self._paint(self.lbl_ref_state, "✔ 参考文件可用", _C_SUCCESS)
+            self.lbl_verdict.setToolTip("结构符合掉电截断特征，参考文件可提供 VOL 头")
+            return
+        if not self._probe.get("ok"):
+            self._paint(self.lbl_ref_state, "参考文件待确认", _C_MUTED)
+        elif not has_ref:
+            reason = reason or "未找到可用的参考文件，请手动指定同机录制的正常视频"
+            self._paint(self.lbl_ref_state, "✘ 参考文件不可用", _C_DANGER)
+        elif not has_ffmpeg:
+            reason = reason or "未找到 ffmpeg / ffprobe，请安装后加入 PATH"
+        self._paint(self.lbl_verdict, f"✘ {reason or '不可修复'}", _C_DANGER)
+        self.lbl_verdict.setToolTip(reason)
+
+    def _on_probe_failed(self, msg):
+        """体检异常：清引用、退回未就绪态，用户改完选择可以直接重试"""
+        win = self._win
+        w = getattr(win, "_video_probe_worker", None)
+        win._video_probe_worker = None
+        if w is not None:
+            win._release_worker_safe(w)
+        self._probe = None
+        self.append_line(f"✘ {msg}")
+        self._paint(self.lbl_verdict, f"✘ {msg}", _C_DANGER)
+        self._sync_buttons()
+        win._show_info_bar(str(msg).split(chr(10))[0], "error", duration=5000)
+
+    # ---------- 修复 ----------
+
+    def _on_start(self):
+        """开始修复：busy 守卫 → 参数校验 → 存配置 → 置运行态 → 拉起线程"""
+        win = self._win
+        if self._worker_running("_video_repair_worker"):
+            win._show_info_bar("修复任务正在运行中，请等待完成或先取消", "warning")
+            return
+        broken = self.broken_edit.text().strip()
+        ref = self.ref_edit.text().strip()
+        out = self.out_edit.text().strip() or self._derive_out(broken)
+        if not broken or not os.path.isfile(broken):
+            win._show_info_bar("损坏文件不存在，请重新选择", "warning")
+            return
+        if not ref or not os.path.isfile(ref):
+            win._show_info_bar("请先指定可用的参考文件", "warning")
+            return
+        if os.path.abspath(out) == os.path.abspath(broken):
+            # 输出撞原件会把唯一的数据源覆盖掉，这条必须硬拦
+            win._show_info_bar("输出路径不能与损坏文件相同（本工具不改写原件）",
+                               "error", duration=5000)
+            return
+        idx = self.combo_cut.currentIndex()
+        mode = self._CUT_MODES[idx][0] if 0 <= idx < len(self._CUT_MODES) else "auto"
+        params = {"broken": broken, "reference": ref, "out": out,
+                  "fps": self.spin_fps.value(), "cut_mode": mode,
+                  "verify_decode": self.chk_verify.isChecked()}
+        # 先落配置再起线程：修复失败也能保住用户刚调好的参数
+        win._save_settings({
+            "repair_last_dir": os.path.dirname(broken),
+            "repair_last_ref": ref,
+            "repair_cut_mode": mode,
+            "repair_fps": self.spin_fps.value(),
+            "repair_auto_open_dir": bool(self.chk_open_dir.isChecked()),
+            "repair_verify_decode": bool(self.chk_verify.isChecked()),
+        })
+        self.out_edit.setText(out)
+        self._enter_running(out)
+        w = VideoRepairWorker("repair", params)
+        # 不传 parent：QThread 挂到控件下会随控件销毁而中断，统一用宿主属性持有
+        win._video_repair_worker = w      # 与弹出窗口共享 busy 守卫
+        w.line.connect(self.append_line)
+        w.finished_ok.connect(self._on_repaired)
+        w.cancelled.connect(self._on_cancelled)
+        w.error.connect(self._on_repair_failed)
+        w.finished.connect(lambda w=w: win._release_worker_safe(w))
+        w.start()
+        win._append_log(f"[修复] 开始修复截断视频: {os.path.basename(broken)}")
+
+    def _enter_running(self, out):
+        """切运行态：锁输入、主按钮转文案、取消亮起、进度条走不定态"""
+        for w in self._input_widgets():
+            w.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("修复中...")
+        self.btn_cancel.setEnabled(True)
+        # 先亮进度条再 start：worker 可能立刻发第一行输出，晚显示会看到突然蹦出来
+        self.progress_bar.show()
+        self.append_line("")
+        self.append_line(f"▶ 开始修复 → {out}")
+
+    def _leave_running(self):
+        """运行态收尾：恢复输入与按钮，进度条收起"""
+        for w in self._input_widgets():
+            w.setEnabled(True)
+        self.btn_start.setText("开始修复")
+        self.progress_bar.hide()
+        self._sync_buttons()
+
+    def _input_widgets(self):
+        """运行期间要一起锁住的输入控件（锁不全就会让用户以为改动本次生效）"""
+        return (self.broken_edit, self.ref_edit, self.out_edit, self.combo_cut,
+                self.spin_fps, self.chk_verify, self.chk_open_dir,
+                self.btn_browse, self.btn_ref_browse, self.btn_ref_find,
+                self.btn_out, self.btn_reprobe)
+
+    def _worker_running(self, attr):
+        w = getattr(self._win, attr, None)
+        return w is not None and w.isRunning()
+
+    def _sync_buttons(self):
+        """按体检结果与线程状态刷新开始/取消/重新体检三个按钮"""
+        probing = self._worker_running("_video_probe_worker")
+        repairing = self._worker_running("_video_repair_worker")
+        ready = bool(self._probe and self._probe.get("ok")
+                     and self._probe.get("ref_info") and self._ffmpeg)
+        # 修复中不放开开始按钮：同一个输出文件被两个 ffmpeg 同时写会互相截断
+        self.btn_start.setEnabled(ready and not probing and not repairing
+                                  and self._file_dlg is None)
+        self.btn_cancel.setEnabled(repairing)
+        self.btn_reprobe.setEnabled(bool(self.broken_edit.text().strip())
+                                    and not probing and not repairing)
+
+    def _release_repair_worker(self):
+        """摘掉宿主上的修复 worker 引用并回收线程，否则下一次会被旧引用挡住"""
+        win = self._win
+        w = getattr(win, "_video_repair_worker", None)
+        win._video_repair_worker = None
+        if w is not None:
+            win._release_worker_safe(w)
+
+    def _on_repaired(self, report):
+        """修复完成：回收线程 → 打校验报告 → 按需打开输出目录"""
+        win = self._win
+        self._release_repair_worker()
+        self._leave_running()
+        report = report or {}
+        out = report.get("out") or ""
+        self._out_path = out
+        self.btn_open_out.show()
+        sha_ok = bool(report.get("sha_ok"))
+        errs = int(report.get("decode_errors") or 0)
+        self.append_line("")
+        self.append_line(f"✔ 修复完成: {out}（{_fmt_size(report.get('size', 0))}）")
+        self.append_line(
+            f"  {report.get('codec')} · {report.get('profile')} · "
+            f"{report.get('width')}×{report.get('height')} · {report.get('fps')} fps")
+        self.append_line(
+            f"  帧数 {report.get('frames', 0)}/{report.get('total_vops', 0)} · "
+            f"时长 {report.get('duration', 0)} s · 丢弃 "
+            f"{_fmt_size(report.get('dropped_bytes', 0))}"
+            f"（裁剪档 {report.get('cut_mode', 'auto')}）")
+        self.append_line(
+            f"  无损校验{'通过' if sha_ok else '未通过'}：媒体字节 SHA-256 "
+            f"{str(report.get('sha256', ''))[:16]}… "
+            f"{'与原文件负载前缀逐字节一致' if sha_ok else '与原文件不一致，请人工核对'}")
+        if report.get("verify_decode"):
+            self.append_line(f"  完整解码错误 {errs} 处")
+        win._append_log(
+            f"[修复] 视频修复完成: {out}（{report.get('frames', 0)} 帧，"
+            f"无损校验{'通过' if sha_ok else '未通过'}，解码错误 {errs} 处）")
+        if sha_ok and not errs:
+            win._show_info_bar(
+                f"修复完成，无损救回 {report.get('frames', 0)} 帧",
+                "success", duration=5000)
+        else:
+            win._show_info_bar("修复完成，但校验有告警，请查看运行输出",
+                               "warning", duration=6000)
+        if self.chk_open_dir.isChecked() and out:
+            self._on_open_out()
+
+    def _on_repair_failed(self, msg):
+        """修复失败：保留已填参数，用户换参考文件后可直接重试"""
+        self._release_repair_worker()
+        self._leave_running()
+        self.append_line("")
+        self.append_line(f"✘ {msg}")
+        self._win._append_log(f"[修复] 视频修复失败: {msg}")
+        self._win._show_info_bar(str(msg).split(chr(10))[0], "error", duration=5000)
+
+    def _on_cancelled(self):
+        """用户取消：worker 已删掉半成品输出，这里只收尾界面"""
+        self._release_repair_worker()
+        self._leave_running()
+        self.append_line("✘ 已取消，半成品输出已删除")
+        self._win._append_log("[修复] 视频修复已取消")
+        self._win._show_info_bar("修复已取消", "info", duration=3000)
+
+    def _on_cancel(self):
+        """二次确认后中断修复；ffmpeg 在子进程边界响应，先禁用按钮防重入"""
+        w = getattr(self._win, "_video_repair_worker", None)
+        if w is None or not w.isRunning():
+            return
+        box = MessageBox("取消修复", "修复进行中，确定取消？", self)
+        box.yesButton.setText("确定取消")
+        box.cancelButton.setText("继续修复")
+        if not box.exec():
+            return
+        if not w.isRunning():
+            return
+        self.append_line("… 正在取消修复...")
+        # 先禁用再请求中断：终止 ffmpeg 要等子进程退出，这段时间再点只会重复弹框
+        self.btn_cancel.setEnabled(False)
+        w.requestInterruption()
+
+    def _on_open_out(self):
+        """打开产物所在目录；文件被移走时静默失败"""
+        folder = os.path.dirname(self._out_path) if self._out_path else ""
+        if folder and os.path.isdir(folder):
+            try:
+                os.startfile(folder)
+            except Exception:
+                pass
+
+    # ---------- 收尾 ----------
+
+    def detach_workers(self):
+        """容器关闭时中断体检/修复线程（PivotPage.detach_workers 会调这个钩子）
+
+        worker 引用挂在宿主上，页面的 *_worker 属性扫描扫不到；不主动中断的话，
+        弹出窗口关闭后线程还在往已销毁的控件发信号。
+        """
+        for attr in ("_video_probe_worker", "_video_repair_worker"):
+            w = getattr(self._win, attr, None)
+            if w is not None:
+                try:
+                    w.requestInterruption()
+                except RuntimeError:
+                    pass
+
+    def append_line(self, text):
+        """往运行输出追加一行；worker 的 line 信号直连这里"""
+        self.log_view.append(text)
+
+
 # ==================== ToolHub 容器 ====================
 
 class ToolHub(PivotPage):
-    """工具页：横排 Pivot 二级切换 + 五工作区堆叠（与运维/售后/跑视频同风格）"""
+    """工具页：横排 Pivot 二级切换 + 六工作区堆叠（与运维/售后/跑视频同风格）"""
 
     def __init__(self, parent=None):
-        """建四个工作区并按导航顺序注册到 Pivot，默认停在单杆视频页
+        """建六个工作区并按导航顺序注册到 Pivot，默认停在单杆视频页
 
         工作区常驻不销毁，切页只做显隐，所以占用端口的页面能靠 hideEvent 收尾。
         """
@@ -1886,11 +2558,16 @@ class ToolHub(PivotPage):
         self.setObjectName("toolHub")
         self._win = parent
 
-        # 四个工作区一次建好：Pivot 切页只做显隐，不重建控件，切回来状态还在。
+        # 六个工作区一次建好：Pivot 切页只做显隐，不重建控件，切回来状态还在。
         self.single_video_work = SingleVideoWork(self._win, self)
         self.port_fake_work = PortFakeWork(self._win, self)
         self.upload_list_work = UploadListWork(self._win, self)
         self.newlog_work = NewLogWork(self._win, self)
+        self.video_repair_work = VideoRepairWork(self._win, self)
+        # 画质提升必须延迟 import：它顶层要借本文件的 _card/_make_terminal 等
+        # 私有助手，放模块头就是 import 环（本文件 ↔ video_enhance_hub）。
+        from windows.tools.video_enhance_hub import VideoEnhanceHub
+        self.video_enhance_work = VideoEnhanceHub(self._win, self)
         # 相机工具 2026-10-07 升级为面板级「相机」（windows/camera/，见 main_window）
 
         # 文案即 Pivot 标签，顺序与设计稿一致：单杆视频 → 端口 → 上传 → 整理，按链路走。
@@ -1898,6 +2575,11 @@ class ToolHub(PivotPage):
         self.addPage(self.port_fake_work, "端口占用")
         self.addPage(self.upload_list_work, "上传清单")
         self.addPage(self.newlog_work, "视频与日志批量整理")
+        self.addPage(self.video_repair_work, "视频修复")
+        # 「画质提升」这四个字同时是 main_window.open_hub_popout 里
+        # nav_icons["toolHub"] 的键，改一处必须改另一处，否则弹出面板会
+        # 静默退回「内嵌 Pivot」形态（判定条件是 len(entries) == len(meta)）。
+        self.addPage(self.video_enhance_work, "画质提升")
         # 锁宽：否则切页时 Pivot 条会随当前页文字长度抖动。
         self.lock_pivot_width()
         # 默认落在工作区 1，避免首次进入是一片空白。

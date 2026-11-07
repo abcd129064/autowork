@@ -143,6 +143,11 @@ KEY_DOMAIN = {
     "single_pending_root": "paths",
     "single_videos_root": "paths",
     "newlog_target_name": "paths",
+    # 工具页·画质提升（2026-11-06）：ffmpeg / ffprobe 可执行文件路径。
+    # 留空则退回 shutil.which 找 PATH；填了但文件不存在时**不**静默兜底，
+    # 否则用户改错了路径却以为生效了（video_enhance.locate_ffmpeg）
+    "ffmpeg_path": "paths",
+    "ffprobe_path": "paths",
     # ---- remote ----
     "remote_sessions": "remote",
     "restore_remote_sessions": "remote",
@@ -170,6 +175,12 @@ KEY_DOMAIN = {
     # 开机静默预连（2026-09-23）：bool，启动后自动拉起 frpc 并预热打洞，
     # 让点 SSH/SFTP 秒连；未登记键也归 misc，登记于此使语义显式
     "frp_autostart": "misc",
+    # 工具页·画质提升（2026-11-06）：参数集 / 历史 / 上次目录都归 misc，
+    # 不新开域文件——它们都是单机偏好，既不同步 MySQL 也无凭据，
+    # 多开一个 config/*.json 只会让「哪个文件存了什么」更难查
+    "enhance_params": "misc",
+    "enhance_history": "misc",
+    "enhance_last_dir": "misc",
 }
 
 # ==================== 运行时状态 ====================

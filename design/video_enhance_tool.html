@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工具页 · 画质提升设计稿（VideoEnhanceHub · 纯 ffmpeg 滤镜链）</title>
+<style>
+  /* ===== 取自 core/design_tokens.py + styles/light.qss 真实 token ===== */
+  :root{
+    --accent:#00BCD4; --accent-hover:#00ACC1; --accent-press:#00838F;
+    --accent-soft:rgba(0,188,212,.15);
+    --bg:#F5F6F8; --surface:#FFFFFF; --border:#E0E0E0;
+    --text:#20242B; --text2:#6B7280; --text3:#9CA3AF;
+    --success:#1a9e6c; --warning:#c98a2d; --danger:#cf4452; --info:#0078d4;
+    --neutral:#5c6675;
+    --radius:6px; --radius-lg:8px;
+    --term-bg:#1b1e23; --term-fg:#d4d8de;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#dfe3e8;color:var(--text);
+       padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1240px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header h1 span{font-weight:400;color:#8f959e;font-size:16px;}
+  .doc-header .meta{color:#5b6470;font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;
+         font-weight:600;background:var(--accent-soft);color:var(--accent-press);margin-right:6px;}
+  .badge.g{background:rgba(26,158,108,.12);color:var(--success);}
+  .badge.w{background:rgba(201,138,45,.14);color:var(--warning);}
+  .badge.d{background:rgba(207,68,82,.12);color:var(--danger);}
+  .note{max-width:1240px;margin:0 auto 22px;background:#fff;border:1px solid var(--border);
+        border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;
+        font-size:13px;color:var(--text2);line-height:1.75;}
+  .note b{color:var(--text);}
+  .note code,td code,li code,p code{font-family:var(--mono);background:var(--bg);padding:1px 6px;
+        border-radius:4px;font-size:12px;color:var(--accent-press);}
+  .section-label{max-width:1240px;margin:34px auto 12px;font-size:15px;font-weight:700;color:#333;}
+  .section-label span{font-weight:400;color:#6b7280;font-size:13px;margin-left:8px;}
+
+  /* ===== 应用窗口外框（FluentWindow + Mica） ===== */
+  .win{max-width:1240px;margin:0 auto;background:var(--bg);border-radius:10px;
+       overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.18);border:1px solid #c9ced5;}
+  .titlebar{height:40px;background:linear-gradient(180deg,#fbfcfd,#f4f6f8);
+            border-bottom:1px solid var(--border);display:flex;align-items:center;
+            padding:0 0 0 16px;gap:8px;}
+  .titlebar .app-ico{width:16px;height:16px;border-radius:3px;
+            background:linear-gradient(135deg,var(--accent),#4dd0e1);}
+  .titlebar .app-name{font-size:12px;color:var(--text2);}
+  .titlebar .tb-btns{margin-left:auto;display:flex;height:100%;}
+  .titlebar .tb-btns i{width:46px;height:100%;display:flex;align-items:center;
+            justify-content:center;color:var(--text2);font-style:normal;font-size:14px;}
+  .titlebar .tb-btns i:hover{background:rgba(0,0,0,.05);}
+  .titlebar .tb-btns i.close:hover{background:var(--danger);color:#fff;}
+
+  .app{display:flex;height:700px;}
+  /* 左侧一级导航（qfw NavigationInterface 展开态） */
+  .nav{width:190px;background:rgba(255,255,255,.7);border-right:1px solid var(--border);
+       padding:8px;flex-shrink:0;display:flex;flex-direction:column;}
+  .nav-item{display:flex;align-items:center;gap:12px;height:38px;padding:0 12px;
+       border-radius:var(--radius);color:var(--text);font-size:13.5px;position:relative;
+       margin-bottom:2px;}
+  .nav-item .ni{width:17px;height:17px;display:flex;align-items:center;justify-content:center;
+       color:var(--neutral);font-size:15px;}
+  .nav-item:hover{background:rgba(0,0,0,.045);}
+  .nav-item.active{background:rgba(0,0,0,.05);font-weight:600;}
+  .nav-item.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+       width:3px;height:16px;border-radius:2px;background:var(--text);}
+  .nav-item.new{color:var(--accent-press);}
+  .nav-item.new .ni{color:var(--accent);}
+  .nav-sep{height:1px;background:var(--border);margin:8px 6px;}
+  .nav-bottom{margin-top:auto;}
+  .nav-tag{font-size:10px;background:var(--accent);color:#fff;border-radius:4px;
+       padding:0 5px;margin-left:auto;font-weight:600;}
+
+  .content{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+  .page-head{padding:20px 28px 4px;}
+  .page-title{font-size:24px;font-weight:700;}
+  .page-sub{color:var(--text3);font-size:13px;margin-top:3px;}
+
+  /* ===== qfw Pivot 二级切换条（横排 · 无图标 · 13px/24px 行高） ===== */
+  .pivot-row{display:flex;align-items:center;gap:0;padding:8px 24px 0;}
+  .pivot{display:inline-flex;align-items:center;gap:2px;}
+  .pv{padding:1px 12px;height:24px;display:inline-flex;align-items:center;font-size:13px;
+      color:var(--text2);border-radius:4px;position:relative;white-space:nowrap;}
+  .pv:hover{background:rgba(0,0,0,.045);color:var(--text);}
+  .pv.on{color:var(--accent-press);font-weight:600;}
+  .pv.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:3px;
+      border-radius:2px 2px 0 0;background:var(--accent);}
+  /* 内层 Pivot（子页面）：与外层视觉一致但更靠左缩进，形成层级感 */
+  .pivot-row.inner{padding-left:34px;}
+  .pivot-row.inner .pv{font-size:12.5px;}
+  .popout-hint{margin-left:auto;display:flex;align-items:center;gap:8px;padding-right:16px;}
+  .popout-hint span{font-size:13px;color:var(--text2);}
+
+  .body{flex:1;overflow:auto;padding:14px 26px 26px;}
+
+  /* qfw 卡片 */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+        padding:16px 20px;margin-bottom:14px;}
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .card-h .ch-ico{width:22px;height:22px;border-radius:6px;background:var(--accent-soft);
+        color:var(--accent-press);display:flex;align-items:center;justify-content:center;font-size:13px;}
+  .card-h h3{font-size:15px;font-weight:600;}
+  .card-h .ch-sub{font-size:12px;color:var(--text3);margin-left:2px;}
+  .card-h .ch-right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+
+  /* 表单 */
+  .fld{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+  .fld>label{width:96px;flex-shrink:0;font-size:13px;color:var(--text);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px 22px;}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 18px;}
+  .mini-lbl{font-size:12px;color:var(--text2);margin-bottom:5px;}
+  .grp-ttl{font-size:13px;font-weight:600;color:var(--text);margin:2px 0 10px;
+        display:flex;align-items:center;gap:8px;}
+  .grp-ttl::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--accent);}
+
+  /* qfw 输入控件 */
+  .inp{height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+       border-radius:var(--radius);background:var(--surface);padding:0 11px;font-size:13px;
+       color:var(--text);width:100%;font-family:var(--font);}
+  .inp::placeholder{color:var(--text3);}
+  .inp.mono{font-family:var(--mono);font-size:12px;}
+  .inp:focus,.inp.f{outline:none;border-color:var(--accent);border-bottom-color:var(--accent);}
+  .inp:disabled,.inp.dis{background:var(--bg);color:var(--text3);}
+  .spin{display:inline-flex;align-items:center;height:33px;border:1px solid var(--border);
+        border-bottom:2px solid #cfd4da;border-radius:var(--radius);background:var(--surface);
+        font-size:13px;color:var(--text);overflow:hidden;}
+  .spin .sv{padding:0 12px;min-width:52px;text-align:center;font-family:var(--mono);}
+  .spin .ss{display:flex;flex-direction:column;border-left:1px solid var(--border);height:100%;}
+  .spin .ss b{flex:1;width:22px;display:flex;align-items:center;justify-content:center;
+        font-size:8px;color:var(--text2);font-weight:400;border-bottom:1px solid var(--border);}
+  .spin .ss b:last-child{border-bottom:none;}
+  .combo{position:relative;height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+        border-radius:var(--radius);background:var(--surface);display:flex;align-items:center;
+        padding:0 34px 0 11px;font-size:13px;color:var(--text);}
+  .combo::after{content:"\2304";position:absolute;right:11px;top:50%;transform:translateY(-52%);
+        color:var(--text2);font-size:14px;}
+  .combo.sm{height:30px;font-size:12.5px;}
+  /* qfw Slider */
+  .sld{display:flex;align-items:center;gap:10px;}
+  .sld .track{flex:1;height:4px;border-radius:999px;background:#dfe3e8;position:relative;}
+  .sld .track::after{content:"";position:absolute;left:0;top:0;bottom:0;border-radius:999px;
+        background:var(--accent);width:var(--p,50%);}
+  .sld .knob{position:absolute;left:var(--p,50%);top:50%;transform:translate(-50%,-50%);
+        width:14px;height:14px;border-radius:50%;background:var(--accent);
+        border:3px solid #fff;box-shadow:0 0 0 1px var(--accent-press);}
+  .sld .val{width:46px;text-align:right;font-family:var(--mono);font-size:12.5px;color:var(--text);}
+
+  /* qfw 按钮 */
+  .btn{height:33px;padding:0 15px;border:1px solid var(--border);border-radius:var(--radius);
+       background:var(--surface);color:var(--text);font-size:13px;display:inline-flex;
+       align-items:center;gap:7px;font-family:var(--font);white-space:nowrap;}
+  .btn:hover{background:#f6f7f9;}
+  .btn .bi{font-size:14px;}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  .btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+  .btn.danger{color:var(--danger);border-color:#f0c8cc;}
+  .btn.danger:hover{background:#fef2f3;}
+  .btn.sm{height:28px;padding:0 11px;font-size:12px;}
+  .btn.ghost{border-color:transparent;background:transparent;}
+  .btn.ghost:hover{background:rgba(0,0,0,.05);}
+  .btn:disabled,.btn.dis{opacity:.45;}
+  .tbtn{width:30px;height:30px;border:1px solid transparent;border-radius:var(--radius);
+        display:inline-flex;align-items:center;justify-content:center;color:var(--text2);
+        font-size:14px;background:transparent;}
+  .tbtn:hover{background:rgba(0,0,0,.05);border-color:var(--border);}
+
+  /* SwitchButton */
+  .sw{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text);}
+  .sw .track{width:40px;height:20px;border-radius:999px;background:var(--accent);position:relative;
+        border:1px solid var(--accent-press);flex-shrink:0;}
+  .sw .track::after{content:"";position:absolute;right:3px;top:2.5px;width:13px;height:13px;
+        border-radius:50%;background:#fff;}
+  .sw.off .track{background:#f0f1f3;border-color:#c9ced5;}
+  .sw.off .track::after{left:3px;right:auto;background:var(--neutral);}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;}
+  thead th{text-align:left;font-size:12px;color:var(--text2);font-weight:600;padding:9px 12px;
+        border-bottom:1px solid var(--border);white-space:nowrap;background:var(--surface);}
+  tbody td{padding:10px 12px;border-bottom:1px solid #f0f1f3;font-size:13px;color:var(--text);
+        vertical-align:middle;}
+  tbody tr:hover{background:#fafbfc;}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody tr.sel{background:var(--accent-soft);}
+  td.mono,.mono{font-family:var(--mono);font-size:12.5px;}
+  td.num{text-align:right;font-family:var(--mono);font-size:12.5px;}
+  .row-acts{display:flex;gap:6px;justify-content:flex-end;}
+
+  /* 语义标签 */
+  .tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 9px;
+       border-radius:999px;font-weight:600;white-space:nowrap;}
+  .tag::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+  .tag.on{background:rgba(26,158,108,.12);color:var(--success);}
+  .tag.warn{background:rgba(201,138,45,.14);color:var(--warning);}
+  .tag.off{background:rgba(92,102,117,.12);color:var(--neutral);}
+  .tag.err{background:rgba(207,68,82,.12);color:var(--danger);}
+  .tag.info{background:rgba(0,120,212,.12);color:var(--info);}
+  .tag.acc{background:var(--accent-soft);color:var(--accent-press);}
+  .tag.plain::before{display:none;}
+
+  /* 统计条 */
+  .stat-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;}
+  .stat-strip.c5{grid-template-columns:repeat(5,1fr);}
+  .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+        padding:13px 16px;}
+  .stat .num{font-size:22px;font-weight:700;line-height:1.15;font-family:var(--mono);}
+  .stat .num.g{color:var(--success);} .stat .num.a{color:var(--warning);}
+  .stat .num.d{color:var(--danger);} .stat .num.c{color:var(--accent-press);}
+  .stat .lbl{color:var(--text3);font-size:12px;margin-top:4px;}
+
+  /* 终端输出区 */
+  .term{background:var(--term-bg);border-radius:0 0 var(--radius) var(--radius);padding:12px 14px;
+        font-family:var(--mono);font-size:12.5px;color:var(--term-fg);line-height:1.7;
+        height:170px;overflow:auto;}
+  .term .ln{white-space:pre-wrap;}
+  .term .ok{color:#5fd08a;} .term .er{color:#ff7b72;} .term .wn{color:#e3b341;}
+  .term .dim{color:#7d8590;} .term .ac{color:#4dd0e1;}
+  .term-h{display:flex;align-items:center;gap:8px;background:#22262c;
+        border-radius:var(--radius) var(--radius) 0 0;padding:7px 12px;font-size:12px;
+        color:#aeb6c2;font-family:var(--mono);}
+  .term-h .dots{display:flex;gap:5px;}
+  .term-h .dots i{width:9px;height:9px;border-radius:50%;display:block;}
+  .term-wrap{border-radius:var(--radius);overflow:hidden;border:1px solid #000;}
+  .splitbar{height:5px;background:var(--bg);border-top:1px solid var(--border);
+        cursor:ns-resize;display:flex;align-items:center;justify-content:center;}
+  .splitbar::after{content:"";width:26px;height:2px;border-radius:2px;background:#cfd4da;}
+
+  /* 进度条 */
+  .prog{height:6px;border-radius:999px;background:#e9ecef;overflow:hidden;}
+  .prog>span{display:block;height:100%;border-radius:999px;background:var(--accent);}
+  .prog.g>span{background:var(--success);} .prog.w>span{background:var(--warning);}
+  .prog.d>span{background:var(--danger);}
+
+  /* InfoBar */
+  .infobar{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:var(--radius);
+        border:1px solid var(--border);background:var(--surface);margin-bottom:12px;font-size:13px;
+        line-height:1.6;}
+  .infobar .ib-ico{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;
+        justify-content:center;color:#fff;font-size:12px;flex-shrink:0;margin-top:1px;}
+  .infobar.info{border-left:3px solid var(--info);} .infobar.info .ib-ico{background:var(--info);}
+  .infobar.warn{border-left:3px solid var(--warning);} .infobar.warn .ib-ico{background:var(--warning);}
+  .infobar.succ{border-left:3px solid var(--success);} .infobar.succ .ib-ico{background:var(--success);}
+  .infobar.err{border-left:3px solid var(--danger);} .infobar.err .ib-ico{background:var(--danger);}
+  .infobar .ib-x{margin-left:auto;color:var(--text3);}
+
+  /* 空状态 */
+  .empty{text-align:center;padding:40px 20px;color:var(--text3);}
+  .empty .e-ico{width:56px;height:56px;border-radius:14px;background:var(--bg);border:1px solid var(--border);
+        display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 12px;color:#c2c8d0;}
+  .empty h4{font-size:14px;color:var(--text2);font-weight:600;margin-bottom:4px;}
+  .empty p{font-size:12.5px;margin-bottom:14px;}
+
+  /* 可用性勾选清单（环境检测） */
+  .chk-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px 14px;}
+  .chk{display:flex;align-items:center;gap:7px;font-size:12.5px;font-family:var(--mono);
+       color:var(--text);padding:4px 8px;border-radius:4px;background:var(--bg);}
+  .chk i{font-style:normal;width:14px;height:14px;border-radius:50%;display:flex;align-items:center;
+       justify-content:center;font-size:9px;color:#fff;flex-shrink:0;font-family:var(--font);}
+  .chk.y i{background:var(--success);} .chk.n i{color:var(--text3);background:#d5d9df;}
+  .chk.n{color:var(--text3);text-decoration:line-through;}
+
+  /* 帧对比 */
+  .cmp{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .cmp .pane{border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;background:var(--surface);}
+  .cmp .pane-h{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);
+       font-size:12.5px;color:var(--text2);}
+  .cmp .pane-h b{color:var(--text);font-size:13px;}
+  .cmp .img{height:210px;position:relative;overflow:hidden;}
+  .cmp .img.a{background:
+      repeating-linear-gradient(45deg,#3a4048 0 12px,#333940 12px 24px),
+      radial-gradient(circle at 30% 40%,#6b7480,#2c3138 70%);}
+  .cmp .img.b{background:
+      repeating-linear-gradient(45deg,#4a5560 0 12px,#3d4750 12px 24px),
+      radial-gradient(circle at 30% 40%,#93a0ad,#39424b 70%);}
+  .cmp .img .lbl{position:absolute;left:10px;bottom:10px;background:rgba(0,0,0,.62);color:#fff;
+      font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:4px;}
+  /* 中间拖拽对比条（可选增强，非 MVP） */
+  .cmp .img .divider-line{position:absolute;top:0;bottom:0;left:50%;width:2px;background:var(--accent);}
+
+  .kbd{font-family:var(--mono);font-size:11px;background:var(--bg);border:1px solid var(--border);
+        border-bottom-width:2px;border-radius:4px;padding:1px 6px;color:var(--text2);}
+  .hint{font-size:12px;color:var(--text3);margin-top:3px;line-height:1.6;}
+  .flex{display:flex;align-items:center;gap:10px;} .wrap{flex-wrap:wrap;}
+  .between{justify-content:space-between;} .grow{flex:1;} .mt{margin-top:14px;} .mb{margin-bottom:14px;}
+  .divider{height:1px;background:var(--border);margin:14px 0;}
+  .seg{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:2px;}
+  .seg i{font-style:normal;padding:5px 14px;font-size:12.5px;border-radius:4px;color:var(--text2);}
+  .seg i.on{background:var(--surface);color:var(--text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06);}
+
+  /* 文档正文表格（说明用，非 UI 还原） */
+  .doc-tbl{max-width:1240px;margin:0 auto 16px;background:#fff;border:1px solid var(--border);
+        border-radius:var(--radius-lg);overflow:hidden;}
+  .doc-tbl table{font-size:13px;}
+  .doc-tbl thead th{background:var(--bg);}
+  .doc-tbl td{padding:9px 12px;font-size:12.5px;line-height:1.6;}
+  .doc-tbl td.mono{font-size:12px;}
+  .foot{max-width:1240px;margin:26px auto 40px;color:#6b7280;font-size:12.5px;line-height:1.8;
+        background:#fff;border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 20px;}
+  .foot h4{font-size:13px;color:var(--text);margin-bottom:6px;}
+  .foot ul{margin-left:18px;} .foot li{margin-bottom:4px;}
+</style>
+</head>
+<body>
+
+<div class="doc-header">
+  <h1>工具页 · 画质提升设计稿 <span>VideoEnhanceHub · 纯 ffmpeg 滤镜链</span></h1>
+  <div class="meta">
+    <span class="badge">qfw 控件还原</span>
+    <span class="badge g">主色 #00BCD4</span>
+    <span class="badge">内嵌页签 + 弹出工作台双形态</span>
+    <span class="badge w">5 子页 Pivot</span>
+    <br>2026-11-06 · 挂载于主窗口「工具」页横排 Pivot 第 5 项 ·
+    对应实现 <code>main_window/tool_hub.py</code> + <code>windows/tools/video_enhance*.py</code> + <code>workers/video_enhance_worker.py</code>
+  </div>
+</div>
+
+<div class="note" style="border-left-color:var(--success)">
+  <b>&#10003; 本稿已于 2026-11-06 落地并按实现回填。</b>
+  代码是权威，本稿是设计过程记录：<b>五张画布（HTML mock）保留原样不改</b>，
+  凡画布与实现不一致处，都在紧邻画布的<b>黄色 note</b> 或文末「已识别的风险 / 本次明确不做」里写明差异与理由。
+  已回填为实际值的部分：滤镜预设 &#8594; <code>-vf</code> 串对照表、注册点清单（A~<b>H</b>，第八处是设计阶段漏掉的
+  <code>shutdown.py</code>）、文件与类结构、worker 信号签名、验证结果与实测数据。
+  <br>落地产物：<code>windows/tools/video_enhance.py</code>（引擎）·
+  <code>workers/video_enhance_worker.py</code>（6 stage 单 worker 类）·
+  <code>windows/tools/video_enhance_hub.py</code>（5 子页 UI）·
+  <code>tests/test_video_enhance.py</code>（202 passed）·
+  <code>tools/smoke/smoke_video_enhance_hub.py</code>（65 项全 PASS，rc=0）。
+</div>
+
+<div class="note" style="border-left-color:var(--danger)">
+  <b>&#9888; 并发会话冲突预警（2026-11-06 03:18 实测）：</b>本仓库当前有<b>另一个会话正在同时给工具页加页签</b> ——
+  <code>windows/tools/video_repair.py</code>（26KB，03:15 生成）、<code>workers/video_repair_worker.py</code>（03:16 生成）、
+  <code>design/video_repair_tool.html</code>（03:12 生成）均已落盘但<b>尚未 git add、也尚未接进 <code>tool_hub.py</code></b>。
+  两边要改的是<b>同一段代码</b>（<code>ToolHub.__init__</code> 的 addPage 区 + <code>open_hub_popout</code> 的 nav_icons 字典）。
+  <br>后果不只是文本冲突：<code>hub_popout.py:56</code> 用 <code>len(entries) == len(meta)</code> 判定是否走左侧子导航，
+  <b>任何一方漏登记对方的页签，工具面板弹出后就会静默退回内嵌 Pivot 形态</b>（不报错、不崩溃，只是形态降级）。
+  <br>因此本稿中所有「第 N 项」「4 &#8594; 5」都写成<b>相对表述（末位追加 / 以实际 addPage 数为准）</b>；
+  落手前必须重新数一遍 <code>addPage</code>，并与另一会话约定先后顺序。
+  <br><b>结局（回填）</b>：按用户选定的「先做零冲突部分、最后接线」推进——三个新模块与单测先写完，
+  注册点留到最后并<b>重新 grep 一遍</b>才动手。届时「视频修复」已先接进去，工具页页签数是 5 不是 4，
+  画质提升追加为<b>第 6 项</b>；两边的 <code>nav_icons["toolHub"]</code> 也各自补齐了对方的键，
+  <code>len(entries) == len(meta)</code> 判定通过（冒烟第 5 节锁住这条）。
+  顺带发现 <code>windows/tools/smoke_fluent_mainwindow.py</code> 的工作区数断言<b>在两边动手前就已经是错的</b>
+  （写着 4，实际 5），本次一并改成 6。
+</div>
+
+<div class="note">
+  <b>设计目标：</b>把仓库根目录已有的 CLI 脚本 <code>video_ai_enhance.py</code> 的「压制/两遍编码/体积控制」经验，
+  收敛成一个<b>不依赖外部 AI 可执行文件、只靠 ffmpeg 原生滤镜</b>的画质提升工作区，并接入工具页既有形态。
+  <br><b>已锁定的三项口径（2026-11-06 确认）：</b>
+  ① 引擎 = <b>纯 ffmpeg 滤镜链</b>（去噪 → 放大 → 锐化 → 色彩 → 补帧 → 编码），<b>不接 Real-ESRGAN</b>，不挑显卡；
+  ② 弹出窗口 = <b>5 子页</b>（增强任务 / 滤镜调参 / 编码输出 / 环境检测 / 质量对比）；
+  ③ ffmpeg 定位 = <b>设置项 + PATH 兜底</b>（新增 <code>ffmpeg_path</code> / <code>ffprobe_path</code>，留空走 <code>shutil.which</code>）。
+  <br><b>本机实测：</b><code>ffmpeg N-123918-gf7ca6f7481</code> 已在 PATH（<code>E:\ffmpeg-master-latest-win64-gpl-shared\bin</code>），
+  已确认可用：<code>libx264 / libx265 / h264_nvenc / hevc_nvenc / av1_nvenc / libsvtav1</code>，
+  滤镜 <code>hqdn3d / nlmeans / atadenoise / vaguedenoiser / bm3d / cas / unsharp / eq / scale / minterpolate</code>，
+  且带 <code>--enable-libvmaf</code>（质量对比子页的客观评分有依据）。
+</div>
+
+<!-- ============ 画布 1：内嵌页签（默认落地子页 = 增强任务） ============ -->
+<div class="section-label">画布 1 <span>工具页 · 内嵌「画质提升」页签 —— 外层 Pivot <b>末位追加</b>一项 + 内层 Pivot 5 子页</span></div>
+<div class="win">
+  <div class="titlebar">
+    <span class="app-ico"></span><span class="app-name">AutoWork · 台球追踪控制</span>
+    <span class="tb-btns"><i>&#9472;</i><i>&#9633;</i><i class="close">&#10005;</i></span>
+  </div>
+  <div class="app">
+    <div class="nav">
+      <div class="nav-item"><span class="ni">&#8962;</span>工作台</div>
+      <div class="nav-item"><span class="ni">&#9776;</span>运维管理</div>
+      <div class="nav-item"><span class="ni">&#973;</span>售后</div>
+      <div class="nav-item"><span class="ni">&#9654;</span>跑视频</div>
+      <div class="nav-item"><span class="ni">&#8644;</span>远程</div>
+      <div class="nav-item active"><span class="ni">&#9881;</span>工具</div>
+      <div class="nav-bottom">
+        <div class="nav-sep"></div>
+        <div class="nav-item"><span class="ni">&#9881;</span>设置</div>
+        <div class="nav-item"><span class="ni">&#9432;</span>关于</div>
+      </div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div class="page-title">工具</div>
+        <div class="page-sub">单杆视频、端口占用、上传清单、批量整理与画质提升的工作台</div>
+      </div>
+      <!-- 外层 Pivot（ToolHub 自身，既有 4 项 + 新增第 5 项） -->
+      <div class="pivot-row">
+        <div class="pivot">
+          <span class="pv">单杆视频</span>
+          <span class="pv">端口占用</span>
+          <span class="pv">上传清单</span>
+          <span class="pv">视频与日志批量整理</span>
+          <span class="pv" style="opacity:.45;border:1px dashed var(--border)">视频修复?</span>
+          <span class="pv on">画质提升</span>
+        </div>
+        <div class="popout-hint">
+          <span>点击此按钮弹出面板</span>
+          <span class="tbtn" style="border:1px solid var(--border);background:var(--surface)">&#10530;</span>
+        </div>
+      </div>
+      <div style="padding:4px 26px 0"><span class="hint">虚线项「视频修复?」= 并发会话正在加的页签，本稿不假设它是否存在；
+        「画质提升」只保证<b>追加在末尾</b>，不依赖具体序号。</span></div>
+      <!-- 内层 Pivot（VideoEnhanceHub 自身 5 子页）；右侧「弹出工作台」不浮动到最右，避免与外层按钮重叠 -->
+      <div class="pivot-row inner">
+        <div class="pivot">
+          <span class="pv on">增强任务</span>
+          <span class="pv">滤镜调参</span>
+          <span class="pv">编码输出</span>
+          <span class="pv">环境检测</span>
+          <span class="pv">质量对比</span>
+        </div>
+        <div class="popout-hint">
+          <span class="btn sm"><span class="bi">&#10530;</span>弹出工作台</span>
+        </div>
+      </div>
+      <div class="body">
+
+        <div class="stat-strip c5">
+          <div class="stat"><div class="num c">3</div><div class="lbl">队列中</div></div>
+          <div class="stat"><div class="num">1</div><div class="lbl">进行中</div></div>
+          <div class="stat"><div class="num g">7</div><div class="lbl">已完成</div></div>
+          <div class="stat"><div class="num d">1</div><div class="lbl">失败</div></div>
+          <div class="stat"><div class="num a">42%</div><div class="lbl">总进度</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">
+            <span class="ch-ico">&#9654;</span>
+            <h3>增强任务</h3><span class="ch-sub">批量添加视频，按当前滤镜与编码参数逐个跑 ffmpeg</span>
+            <div class="ch-right">
+              <span class="tag info">子进程 · 后台线程</span>
+              <span class="btn sm"><span class="bi">&#128193;</span>添加文件</span>
+              <span class="btn sm"><span class="bi">&#128194;</span>添加目录</span>
+              <span class="btn sm ghost">清空</span>
+            </div>
+          </div>
+
+          <table>
+            <thead><tr>
+              <th style="width:26px"><span class="chk y" style="background:none;padding:0"><i>&#10003;</i></span></th>
+              <th>文件</th><th style="width:96px">分辨率</th><th style="width:74px">帧率</th>
+              <th style="width:74px">时长</th><th style="width:80px">大小</th>
+              <th style="width:150px">状态</th><th style="width:130px">进度</th><th style="width:60px"></th>
+            </tr></thead>
+            <tbody>
+              <tr class="sel">
+                <td><span class="chk y" style="background:none;padding:0"><i>&#10003;</i></span></td>
+                <td class="mono">table_3226-01_20261105.mp4</td>
+                <td class="mono">1920x1080</td><td class="num">30.00</td><td class="num">02:14</td><td class="num">186 MB</td>
+                <td><span class="tag acc">增强中 · 滤镜</span></td>
+                <td><div class="prog"><span style="width:63%"></span></div>
+                    <div class="hint" style="margin-top:3px">63% · 1.2x · 剩 48s</div></td>
+                <td><span class="tbtn">&#10005;</span></td>
+              </tr>
+              <tr>
+                <td><span class="chk y" style="background:none;padding:0"><i>&#10003;</i></span></td>
+                <td class="mono">table_3226-02_20261105.mp4</td>
+                <td class="mono">1280x720</td><td class="num">25.00</td><td class="num">05:41</td><td class="num">312 MB</td>
+                <td><span class="tag off">排队中</span></td>
+                <td><div class="prog"><span style="width:0"></span></div><div class="hint" style="margin-top:3px">—</div></td>
+                <td><span class="tbtn">&#10005;</span></td>
+              </tr>
+              <tr>
+                <td><span class="chk y" style="background:none;padding:0"><i>&#10003;</i></span></td>
+                <td class="mono">old_match_2019.mkv</td>
+                <td class="mono">720x576</td><td class="num">25.00</td><td class="num">18:02</td><td class="num">1.2 GB</td>
+                <td><span class="tag warn">排队 · 放大2x 预计很慢</span></td>
+                <td><div class="prog"><span style="width:0"></span></div><div class="hint" style="margin-top:3px">—</div></td>
+                <td><span class="tbtn">&#10005;</span></td>
+              </tr>
+              <tr>
+                <td><span class="chk n" style="background:none;padding:0"><i>&#10003;</i></span></td>
+                <td class="mono">clip_broken.mp4</td>
+                <td class="mono">—</td><td class="num">—</td><td class="num">—</td><td class="num">0 B</td>
+                <td><span class="tag err">探测失败</span></td>
+                <td><div class="prog d"><span style="width:100%"></span></div>
+                    <div class="hint" style="margin-top:3px;color:var(--danger)">ffprobe 无法解析流</div></td>
+                <td><span class="tbtn">&#10005;</span></td>
+              </tr>
+              <tr>
+                <td><span class="chk n" style="background:none;padding:0"><i>&#10003;</i></span></td>
+                <td class="mono">table_3101-04_20261104.mp4</td>
+                <td class="mono">1920x1080</td><td class="num">30.00</td><td class="num">03:22</td><td class="num">98 MB</td>
+                <td><span class="tag on">已完成</span></td>
+                <td><div class="prog g"><span style="width:100%"></span></div>
+                    <div class="hint" style="margin-top:1px">100% · 用时 2m11s</div></td>
+                <td><span class="tbtn">&#128194;</span></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="divider"></div>
+          <div class="flex between wrap">
+            <div class="flex wrap">
+              <span class="btn primary"><span class="bi">&#9654;</span>开始增强</span>
+              <span class="btn dis"><span class="bi">&#9646;&#9646;</span>暂停</span>
+              <span class="btn danger"><span class="bi">&#9632;</span>停止</span>
+              <span style="width:1px;height:22px;background:var(--border)"></span>
+              <label style="font-size:13px;color:var(--text2)">并发</label>
+              <span class="spin"><span class="sv">1</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
+              <span class="hint" style="margin:0">同时跑几个 ffmpeg；>1 时 CPU 抢占会拉长单个任务</span>
+            </div>
+            <div class="flex">
+              <span class="btn sm ghost"><span class="bi">&#128194;</span>打开输出目录</span>
+              <span class="btn sm ghost">导出命令行</span>
+            </div>
+          </div>
+
+          <div class="note" style="border-left-color:var(--warning);margin-top:10px">
+            <b>本画布与落地实现的四处差异</b>（画布保留原样作为设计过程记录，实现以此条为准）：
+            <ul style="margin:6px 0 0 18px">
+              <li><b>每行一条进度条 &#8594; 「进度」文字列 + 页底一条全局进度条。</b>
+                  <code>TableWidget</code> 里塞 <code>setCellWidget</code> 进度条，滚动时要为每行维护一个控件；
+                  20 行清单就是 20 个 <code>ProgressBar</code>，刷新一次要重排 20 次。
+                  批量是<b>顺序</b>跑的，同一时刻只有一条在动，全局那一条足够表达；行内改为
+                  <code>63% · 1.2x</code> 文字，由 <code>refresh_row()</code> 统一刷。</li>
+              <li><b>每行挂「放大2x 预计很慢」黄标 &#8594; 任务页顶部一条全局 <code>lbl_warn</code>。</b>
+                  预警只由<b>参数</b>决定，与是哪一行无关；逐行挂会在 20 行上重复 20 遍同一句话。</li>
+              <li><b>「暂停」与「并发」未实现。</b>ffmpeg 子进程没有可靠的暂停语义；并发多路会同时抢
+                  CPU/GPU 与磁盘带宽，总时长不降反升，进度语义也变复杂。详见文末「本次明确不做」。</li>
+              <li><b>「导出命令行」&#8594;「复制命令行」。</b>用户拿到命令是为了粘贴去手跑，落文件反而多一步。</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="term-wrap">
+          <div class="term-h">
+            <span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span>
+            ffmpeg 输出 · table_3226-01_20261105.mp4
+            <span style="margin-left:auto">1,204 行 &#8595;</span>
+          </div>
+          <div class="term">
+<div class="ln dim">[14:22:07] $ ffprobe -v error -select_streams v:0 -show_entries stream=width,height ...</div>
+<div class="ln ac">[14:22:07] 源: 1920x1080 @ 30.000fps, 134.2s, 4026 帧, 音频: aac</div>
+<div class="ln">[14:22:07] 滤镜链: hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06</div>
+<div class="ln">[14:22:07] 编码: libx264 crf=18 preset=slow | 音频 copy | 容器 mp4 +faststart</div>
+<div class="ln dim">[14:22:07] $ ffmpeg -hide_banner -nostats -progress pipe:1 -y -i "..." -vf "..." -c:v libx264 ...</div>
+<div class="ln dim">frame= 1024 fps= 41 q=28.0 size=   18432kB time=00:00:34.13 bitrate=4425.6kbits/s speed=1.36x</div>
+<div class="ln dim">frame= 2536 fps= 42 q=28.0 size=   45056kB time=00:01:24.53 bitrate=4368.1kbits/s speed=1.4x</div>
+<div class="ln ok">[14:24:18] 完成: table_3226-01_20261105_enhanced.mp4 (121.4 MB) 用时 2m11s</div>
+<div class="ln wn">[14:24:18] 提示: 输出体积比源大 —— CRF 模式下锐化会增加高频细节，需要控体积请切「目标体积」</div>
+          </div>
+        </div>
+        <div class="splitbar"></div>
+        <div class="hint">上方表格与下方终端之间为 <code>QSplitter</code>（handleWidth=2），可拖动改高度 —— 复用 <code>tool_hub._make_vsplitter</code>。</div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 2：弹出工作台 · 滤镜调参 ============ -->
+<div class="section-label">画布 2 <span>弹出「画质提升工作台」独立窗口 —— 左侧子导航形态（HubPopoutWindow + nav_icons 覆盖 5 子页）· 当前子页：滤镜调参</span></div>
+<div class="win">
+  <div class="titlebar">
+    <span class="app-ico"></span><span class="app-name">AutoWork · 画质提升工作台</span>
+    <span class="tb-btns"><i>&#9472;</i><i>&#9633;</i><i class="close">&#10005;</i></span>
+  </div>
+  <div class="app" style="height:720px">
+    <!-- HubPopoutWindow 的左侧子导航：由 nav_icons["videoEnhanceHub"] 提供图标 -->
+    <div class="nav" style="width:200px">
+      <div class="nav-item"><span class="ni">&#9654;</span>增强任务</div>
+      <div class="nav-item active new"><span class="ni">&#10023;</span>滤镜调参</div>
+      <div class="nav-item"><span class="ni">&#9889;</span>编码输出</div>
+      <div class="nav-item"><span class="ni">&#9000;</span>环境检测</div>
+      <div class="nav-item"><span class="ni">&#9684;</span>质量对比</div>
+      <div class="nav-bottom">
+        <div class="nav-sep"></div>
+        <div class="hint" style="padding:0 10px 6px">子导航形态成立的前提：<br>nav_icons 的键必须覆盖全部 5 个注册页文本，少一个就退回内嵌 Pivot。</div>
+      </div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div class="page-title" style="font-size:20px">滤镜调参</div>
+        <div class="page-sub">滤镜固定顺序：去噪 &#8594; 放大 &#8594; 锐化 &#8594; 色彩 &#8594; 补帧（先去噪再放大，避免放大噪声；锐化放在放大之后，锐的是插值边缘）</div>
+      </div>
+      <div class="body">
+
+        <div class="card">
+          <div class="card-h">
+            <span class="ch-ico">&#9733;</span>
+            <h3>预设</h3><span class="ch-sub">选预设会覆盖下方全部滑块；再手动改则预设自动切到「自定义」</span>
+            <div class="ch-right">
+              <span class="combo" style="width:210px">标准增强（推荐）</span>
+              <span class="btn sm ghost">存为我的预设</span>
+            </div>
+          </div>
+          <div class="flex wrap" style="gap:8px">
+            <span class="tag plain off">关闭（仅转码）</span>
+            <span class="tag plain info">轻度修复</span>
+            <span class="tag plain acc">标准增强（推荐）</span>
+            <span class="tag plain warn">强锐化</span>
+            <span class="tag plain err">老片修复</span>
+            <span class="tag plain on">动漫 / 线条</span>
+          </div>
+        </div>
+
+        <div class="note" style="border-left-color:var(--warning)">
+          <b>画布控件 &#8594; 落地控件的对应关系</b>（下面几张画布通用，以此条为准）：
+          <ul style="margin:6px 0 0 18px">
+            <li><b>分段按钮（画布里 <code>.seg</code> 那三处：倍率/指定高度、CRF/目标体积、跳过/覆盖/加序号）
+                &#8594; qfluentwidgets <code>ComboBox</code>。</b>
+                <code>SegmentedWidget</code> 在本项目的 qfw 1.11.2 里<b>是存在的</b>，换掉它是取舍不是被迫：
+                这三处都是「选一个模式、联动置灰另一组控件」，<code>ComboBox</code> 的 <code>userData</code>
+                正好承载模式键，且与本页其它十几处下拉（算法/编码器/容器/输出模式）形态统一；
+                分段按钮在文字变长（如「目标体积（两遍编码）」）时会把整行顶宽。
+                <b>注意</b> qfw 的 <code>ComboBox</code> 是 <code>QPushButton</code> 不是 <code>QComboBox</code>，
+                <code>addItem</code> 的 userData 必须<b>用关键字传</b>（第二个位置参数是图标），
+                且没有 <code>view()/model()</code>。</li>
+            <li><b>「存为我的预设」未实现。</b>只保留内置 6 档 + 参数集整体持久化，理由见文末「本次明确不做」。</li>
+            <li><b>开关 &#8594; <code>SwitchButton</code>，滑块 &#8594; <code>Slider</code> + <code>CompactSpinBox</code> 配对。</b>
+                滑块只给整数刻度，小数精度靠旁边的 spin 输入。</li>
+            <li><b>锐化卡多一行 <code>lbl_sharpen_hint</code>「当前生效：…」。</b>
+                三种算法各有不同的生效字段（<code>cas</code> 只看 <code>sharpen_amount</code>，
+                <code>unsharp</code> 只看 <code>usm_*</code>，<code>unsharp+cas</code> 两组都看），
+                没有这行提示，用户拖一个当前算法根本不读的滑块时界面上没有任何东西解释它为什么没效果。
+                判定必须由 <code>"unsharp" in algo</code> 与 <code>"cas" in algo</code> 两个标志位组合出来——
+                只按「字符串里有没有 cas」判，两级算法会被说成只有 cas 生效。</li>
+          </ul>
+        </div>
+
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#8776;</span><h3>去噪</h3>
+              <div class="ch-right"><span class="sw"><span class="track"></span></span></div></div>
+            <div class="fld"><label>算法</label>
+              <span class="combo grow">hqdn3d（快 · 通用）</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">
+              备选：<code>nlmeans</code>（质量高、极慢）· <code>atadenoise</code>（时序自适应）·
+              <code>vaguedenoiser</code>（小波）· <code>bm3d</code>（最慢最强）</div>
+            <div class="fld"><label>亮度强度</label>
+              <span class="sld grow"><span class="track" style="--p:37%"><span class="knob"></span></span><span class="val">1.5</span></span></div>
+            <div class="fld"><label>色度强度</label>
+              <span class="sld grow"><span class="track" style="--p:37%"><span class="knob"></span></span><span class="val">1.5</span></span></div>
+            <div class="fld" style="margin-bottom:0"><label>时序强度</label>
+              <span class="sld grow"><span class="track" style="--p:30%"><span class="knob"></span></span><span class="val">6.0</span></span></div>
+            <div class="hint">时序强度过高会拖影（快速移动的球会糊尾）</div>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#10023;</span><h3>锐化</h3>
+              <div class="ch-right"><span class="sw"><span class="track"></span></span></div></div>
+            <div class="fld"><label>算法</label>
+              <span class="combo grow">cas（对比度自适应 · 推荐）</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">
+              备选：<code>unsharp</code>（传统 USM，参数多、易白边）</div>
+            <div class="fld"><label>强度</label>
+              <span class="sld grow"><span class="track" style="--p:80%"><span class="knob"></span></span><span class="val">0.80</span></span></div>
+            <div class="fld" style="margin-bottom:0"><label>USM 亮度矩阵</label>
+              <span class="spin"><span class="sv">5</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
+              <span class="spin"><span class="sv">5</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
+              <span class="hint" style="margin:0">仅 unsharp 生效（luma_msize_x/y）</span></div>
+            <div class="infobar warn" style="margin:12px 0 0">
+              <span class="ib-ico">!</span>
+              <div>cas 强度 &gt; 1.2 时暗部会出现振铃与颗粒放大，建议配合去噪一起用。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#10522;</span><h3>放大 / 分辨率</h3>
+              <div class="ch-right"><span class="sw off"><span class="track"></span></span></div></div>
+            <div class="fld"><label>目标</label>
+              <span class="seg"><i>倍率</i><i class="on">指定高度</i></span></div>
+            <div class="fld"><label>倍率</label>
+              <span class="combo" style="width:110px">1.5x</span>
+              <span class="hint" style="margin:0">2x 时 1080p&#8594;2160p，编码耗时约 &#215;4</span></div>
+            <div class="fld"><label>输出高度</label>
+              <span class="spin"><span class="sv">1080</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
+              <span class="hint" style="margin:0">宽度按 <code>scale=-2:H</code> 自动取偶</span></div>
+            <div class="fld" style="margin-bottom:0"><label>插值算法</label>
+              <span class="combo grow">lanczos（推荐）</span></div>
+            <div class="hint">备选：<code>spline</code>（更锐但易振铃）· <code>bicubic</code>（快）· <code>area</code>（缩小用）</div>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#9681;</span><h3>色彩（eq）</h3>
+              <div class="ch-right"><span class="sw"><span class="track"></span></span></div></div>
+            <div class="fld"><label>对比度</label>
+              <span class="sld grow"><span class="track" style="--p:52%"><span class="knob"></span></span><span class="val">1.04</span></span></div>
+            <div class="fld"><label>饱和度</label>
+              <span class="sld grow"><span class="track" style="--p:53%"><span class="knob"></span></span><span class="val">1.06</span></span></div>
+            <div class="fld"><label>亮度</label>
+              <span class="sld grow"><span class="track" style="--p:50%"><span class="knob"></span></span><span class="val">0.00</span></span></div>
+            <div class="fld" style="margin-bottom:0"><label>伽马</label>
+              <span class="sld grow"><span class="track" style="--p:50%"><span class="knob"></span></span><span class="val">1.00</span></span></div>
+            <div class="hint">台球录像常见偏灰，对比度 +0.03~0.06、饱和度 +0.05~0.10 通常就够；再高会失真</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#8634;</span><h3>补帧（minterpolate）</h3>
+            <div class="ch-right"><span class="sw off"><span class="track"></span></span><span class="tag err">极慢 · 默认关</span></div></div>
+          <div class="flex wrap">
+            <label style="font-size:13px;color:var(--text2)">目标帧率</label>
+            <span class="combo" style="width:110px">60</span>
+            <label style="font-size:13px;color:var(--text2)">模式</label>
+            <span class="combo" style="width:150px">mci（运动补偿）</span>
+            <span class="hint" style="margin:0">mi_mode=blend 快 10 倍但会有重影</span>
+          </div>
+          <div class="infobar err" style="margin:12px 0 0">
+            <span class="ib-ico">!</span>
+            <div>运动补偿插帧在 1080p 上大约 <b>0.1x 实时速度</b>（10 分钟视频要跑 100 分钟），
+            且台球这种高速小球容易出现插帧撕裂。默认关闭，勾选前请确认时长可接受。</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#9000;</span><h3>滤镜链实时预览</h3>
+            <span class="ch-sub">参数一动即重算，这就是最终传给 ffmpeg 的 <code>-vf</code> 值</span>
+            <div class="ch-right">
+              <span class="btn sm"><span class="bi">&#128203;</span>复制</span>
+              <span class="btn sm"><span class="bi">&#128247;</span>抽一帧预览</span>
+            </div></div>
+          <input class="inp mono" style="height:38px" readonly
+                 value="-vf &quot;hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06,format=yuv420p&quot;">
+          <div class="flex between mt">
+            <div class="hint">「抽一帧预览」= 在指定时间点各跑一次单帧 ffmpeg，输出 <code>prev_src.png</code> / <code>prev_dst.png</code>
+              到 <code>tempfile.mkdtemp(prefix="autowork_ve_prev_")</code>（系统临时目录），再并排显示在「质量对比」子页
+              （秒级，不进队列）。<br>串里<b>没有</b> <code>gamma=1.0:brightness=0.0</code>：<code>_color_filter()</code>
+              只输出与默认值有差别的项，等于默认就不写，省得 ffmpeg 多解析两个参数。
+              <br>PNG 落系统临时目录而不是 <code>tools/_scratch/</code>：AGENTS.md §2.3 管的是<b>仓库内</b>的自动生成物，
+              运行时产物写进仓库目录反而会污染工作树（用户机器上 <code>tools/_scratch</code> 也可能只读）。
+              同理，VMAF/PSNR 的中间日志走 <code>autowork_ve_metric_</code>、对比抽帧走 <code>autowork_ve_cmp_</code>。</div>
+            <span class="tag acc">预估耗时 &#8776; 1.4x 实时</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 3：编码输出 ============ -->
+<div class="section-label">画布 3 <span>弹出工作台 · 子页「编码输出」</span></div>
+<div class="win">
+  <div class="titlebar">
+    <span class="app-ico"></span><span class="app-name">AutoWork · 画质提升工作台</span>
+    <span class="tb-btns"><i>&#9472;</i><i>&#9633;</i><i class="close">&#10005;</i></span>
+  </div>
+  <div class="app" style="height:660px">
+    <div class="nav" style="width:200px">
+      <div class="nav-item"><span class="ni">&#9654;</span>增强任务</div>
+      <div class="nav-item"><span class="ni">&#10023;</span>滤镜调参</div>
+      <div class="nav-item active new"><span class="ni">&#9889;</span>编码输出</div>
+      <div class="nav-item"><span class="ni">&#9000;</span>环境检测</div>
+      <div class="nav-item"><span class="ni">&#9684;</span>质量对比</div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div class="page-title" style="font-size:20px">编码输出</div>
+        <div class="page-sub">编码器、码率模式、音频与输出命名</div>
+      </div>
+      <div class="body">
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#9889;</span><h3>视频编码器</h3>
+              <div class="ch-right"><span class="tag on">libx264 可用</span></div></div>
+            <div class="fld"><label>编码器</label>
+              <span class="combo grow">libx264（CPU · 兼容性最好）</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">
+              下拉项按「环境检测」的探测结果动态启用：<code>libx264</code> / <code>libx265</code> /
+              <code>h264_nvenc</code> / <code>hevc_nvenc</code> / <code>av1_nvenc</code> / <code>libsvtav1</code>；
+              探测不到的置灰并注明原因。</div>
+            <div class="fld"><label>preset</label>
+              <span class="combo grow">slow（质量优先）</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">
+              <code>ultrafast&#8230;veryslow</code>；x264 每上一档约慢 2 倍、同 CRF 体积小 5~10%。nvenc 用 <code>p1&#8230;p7</code>。</div>
+            <div class="fld" style="margin-bottom:0"><label>码率模式</label>
+              <span class="seg"><i class="on">CRF（恒定质量）</i><i>目标体积（两遍）</i></span></div>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#9878;</span><h3>CRF 模式</h3>
+              <div class="ch-right"><span class="tag acc">当前生效</span></div></div>
+            <div class="fld"><label>CRF</label>
+              <span class="sld grow"><span class="track" style="--p:35%"><span class="knob"></span></span><span class="val">18</span></span></div>
+            <div class="hint" style="margin:-4px 0 12px 108px">
+              x264 视觉无损 16~18 · 推荐 18~20 · 网络分发 23 · 范围 0~51（x265 建议 +2~4）</div>
+            <div class="divider"></div>
+            <div class="grp-ttl" style="opacity:.45">目标体积模式（未启用）</div>
+            <div class="fld" style="opacity:.45"><label>目标体积</label>
+              <span class="spin"><span class="sv">100</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
+              <span class="hint" style="margin:0">MB · 走两遍编码</span></div>
+            <div class="hint">
+              码率算法沿用 <code>video_ai_enhance.py:246</code>：<code>kbps = MB &#215; 8192 &#215; 0.98 / 时长</code>；
+              第一遍 <code>-an -f null &lt;os.devnull&gt;</code>，第二遍带音频。两种模式互斥，切到目标体积时 CRF 组置灰。
+              <br>第一遍<b>不能</b>写成 <code>-f mp4 null.mp4</code>：mp4 收尾要把 moov 回写文件头，
+              而 <code>os.devnull</code>（Windows 上是 <code>NUL</code>）不可 seek，muxer 会直接报错。
+              <code>-f null</code> 不写任何容器，才是丢弃第一遍输出的正确写法。</div>
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#9835;</span><h3>音频与容器</h3></div>
+            <div class="fld"><label>音频</label>
+              <span class="combo grow">直接复制（-c:a copy）</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">备选：<code>aac 192k</code> 重编码 · <code>去除音轨（-an）</code></div>
+            <div class="fld"><label>容器</label>
+              <span class="combo" style="width:120px">mp4</span>
+              <span class="sw"><span class="track"></span></span>
+              <span class="hint" style="margin:0">+faststart（元数据前置，便于网络播放）</span></div>
+            <div class="fld" style="margin-bottom:0"><label>像素格式</label>
+              <span class="combo grow">yuv420p（播放器兼容）</span></div>
+            <div class="hint">源为 10bit/422 时强制转 8bit 420，否则很多播放器黑屏</div>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#128194;</span><h3>输出位置与命名</h3></div>
+            <div class="fld"><label>输出目录</label>
+              <span class="combo" style="width:170px">源文件同目录</span>
+              <span class="btn sm">浏览&#8230;</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">
+              备选：<code>源文件同目录</code> / <code>设置里的 videos_dir</code> / <code>自定义</code>；
+              自定义时目录选择走 <code>tool_hub._pick_dir</code>（异步 QFileDialog，不冻结主线程）。</div>
+            <div class="fld"><label>命名模板</label>
+              <input class="inp mono grow" value="{name}_enhanced{suffix}"></div>
+            <div class="hint" style="margin:-4px 0 12px 108px">
+              可用占位符：<code>{name}</code> <code>{ext}</code> <code>{w}x{h}</code>（输出分辨率）
+              <code>{preset}</code> <code>{date}</code> <code>{suffix}</code>（放大时自动为 <code>_1080p</code>）</div>
+            <div class="fld" style="margin-bottom:0"><label>同名已存在</label>
+              <span class="seg"><i class="on">跳过</i><i>覆盖</i><i>加序号</i></span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#9000;</span><h3>最终命令预览</h3>
+            <div class="ch-right"><span class="btn sm"><span class="bi">&#128203;</span>复制完整命令</span></div></div>
+          <div class="term" style="height:auto;border-radius:var(--radius);padding:12px 14px">
+<div class="ln ac">ffmpeg -hide_banner -nostats -progress pipe:1 -y \</div>
+<div class="ln">  -i "C:\Users\shen_zhe\Desktop\videos\table_3226-01_20261105.mp4" \</div>
+<div class="ln">  -vf "hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06:gamma=1.0:brightness=0.0,format=yuv420p" \</div>
+<div class="ln">  -c:v libx264 -crf 18 -preset slow -pix_fmt yuv420p \</div>
+<div class="ln">  -c:a copy -movflags +faststart \</div>
+<div class="ln ok">  "C:\Users\shen_zhe\Desktop\videos\table_3226-01_20261105_enhanced.mp4"</div>
+          </div>
+          <div class="hint mt">
+            <code>-progress pipe:1 -nostats</code> 是进度解析的关键：ffmpeg 会输出机器可读的
+            <code>out_time_ms=</code> / <code>frame=</code> / <code>speed=</code> 键值行，
+            用 <code>out_time_ms/1e6/总时长</code> 算百分比，比正则刮 <code>time=</code> 稳。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 4：环境检测 ============ -->
+<div class="section-label">画布 4 <span>弹出工作台 · 子页「环境检测」—— ffmpeg/ffprobe 定位（设置项 + PATH 兜底）与能力探测</span></div>
+<div class="win">
+  <div class="titlebar">
+    <span class="app-ico"></span><span class="app-name">AutoWork · 画质提升工作台</span>
+    <span class="tb-btns"><i>&#9472;</i><i>&#9633;</i><i class="close">&#10005;</i></span>
+  </div>
+  <div class="app" style="height:680px">
+    <div class="nav" style="width:200px">
+      <div class="nav-item"><span class="ni">&#9654;</span>增强任务</div>
+      <div class="nav-item"><span class="ni">&#10023;</span>滤镜调参</div>
+      <div class="nav-item"><span class="ni">&#9889;</span>编码输出</div>
+      <div class="nav-item active new"><span class="ni">&#9000;</span>环境检测</div>
+      <div class="nav-item"><span class="ni">&#9684;</span>质量对比</div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div class="page-title" style="font-size:20px">环境检测</div>
+        <div class="page-sub">ffmpeg / ffprobe 可执行文件定位与能力探测 —— 本页任何一项失败，「增强任务」的开始按钮就置灰</div>
+      </div>
+      <div class="body">
+
+        <div class="infobar succ">
+          <span class="ib-ico">&#10003;</span>
+          <div><b>环境就绪。</b>ffmpeg 与 ffprobe 均已定位，libx264 / libvmaf 可用。上次探测：2026-11-06 14:20:11</div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#128194;</span><h3>可执行文件路径</h3>
+            <span class="ch-sub">留空 = 用 <code>shutil.which</code> 从 PATH 探测；填了 = 以填写值为准（写入 <code>config/paths.json</code>）</span>
+            <div class="ch-right"><span class="btn sm primary"><span class="bi">&#8635;</span>重新探测</span></div></div>
+          <div class="fld"><label>ffmpeg</label>
+            <input class="inp mono grow" value="E:\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe">
+            <span class="btn sm">浏览&#8230;</span>
+            <span class="tag on">N-123918-gf7ca6f7481</span></div>
+          <div class="fld"><label>ffprobe</label>
+            <input class="inp mono grow" value="E:\ffmpeg-master-latest-win64-gpl-shared\bin\ffprobe.exe">
+            <span class="btn sm">浏览&#8230;</span>
+            <span class="tag on">同版本</span></div>
+          <div class="fld" style="margin-bottom:0"><label>来源</label>
+            <span class="tag acc">PATH 探测</span>
+            <span class="hint" style="margin:0">当前值由 PATH 探测得到，尚未写入设置。点「写入设置」可固化，避免换 PATH 后失效。</span>
+            <span class="btn sm">写入设置</span></div>
+          <div class="divider"></div>
+          <div class="hint">
+            同一份路径也在 <b>设置 &#8594; 路径配置</b> 分组里出现两行（<code>ffmpeg</code> / <code>ffprobe</code>，mode="file"），
+            两处编辑的是同一个 <code>paths.json</code> 键，改哪边都生效。本页的「浏览」是快捷入口，不是第二份配置。
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#9881;</span><h3>版本与构建</h3></div>
+            <table>
+              <tbody>
+                <tr><td style="width:110px;color:var(--text2)">ffmpeg 版本</td><td class="mono">N-123918-gf7ca6f7481-20260411</td></tr>
+                <tr><td style="color:var(--text2)">构建</td><td class="mono">gcc 15.2.0 · win64 · --enable-gpl --enable-version3</td></tr>
+                <tr><td style="color:var(--text2)">硬件接口</td><td class="mono">--enable-ffnvcodec --enable-amf --enable-vulkan --enable-opencl --enable-vpl</td></tr>
+                <tr><td style="color:var(--text2)">质量评估</td><td><span class="tag on">libvmaf 已启用</span> <span class="hint" style="display:inline">「质量对比」子页可用</span></td></tr>
+                <tr><td style="color:var(--text2)">线程模型</td><td class="mono">--enable-pthreads（非 w32threads）</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="ch-ico">&#9889;</span><h3>可用编码器</h3>
+              <span class="ch-sub">解析 <code>ffmpeg -encoders</code></span></div>
+            <div class="chk-grid" style="grid-template-columns:repeat(2,1fr)">
+              <span class="chk y"><i>&#10003;</i>libx264</span>
+              <span class="chk y"><i>&#10003;</i>libx265</span>
+              <span class="chk y"><i>&#10003;</i>h264_nvenc</span>
+              <span class="chk y"><i>&#10003;</i>hevc_nvenc</span>
+              <span class="chk y"><i>&#10003;</i>av1_nvenc</span>
+              <span class="chk y"><i>&#10003;</i>libsvtav1</span>
+              <span class="chk y"><i>&#10003;</i>libvpx-vp9</span>
+              <span class="chk n"><i>&#10005;</i>h264_qsv</span>
+            </div>
+            <div class="hint mt">
+              <b>注意：编码器编译进来 &#8800; 能跑。</b><code>*_nvenc</code> 还要有 NVIDIA 驱动，
+              所以「编码输出」子页选中 nvenc 时，本页会补跑一次<b>单帧真实编码测试</b>
+              （<code>-f lavfi -i color=black:s=256x256:d=0.04 -frames:v 1 -c:v h264_nvenc -f null -</code>），
+              失败则把该编码器降级为置灰并给出 stderr 首行（截 200 字）。
+              <br>分辨率<b>必须是 256&#215;256</b> 而不是更小：NVENC 有最小尺寸限制，64&#215;64 会让它报
+              <code>Frame Dimension less than the minimum supported value</code>，
+              在明明有独显的机器上被误判成「硬件编码器不可用」。
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#10023;</span><h3>可用滤镜</h3>
+            <span class="ch-sub">解析 <code>ffmpeg -filters</code>；本页结果决定「滤镜调参」里哪些下拉项可选</span></div>
+          <div class="chk-grid">
+            <span class="chk y"><i>&#10003;</i>hqdn3d</span>
+            <span class="chk y"><i>&#10003;</i>nlmeans</span>
+            <span class="chk y"><i>&#10003;</i>atadenoise</span>
+            <span class="chk y"><i>&#10003;</i>vaguedenoiser</span>
+            <span class="chk y"><i>&#10003;</i>bm3d</span>
+            <span class="chk y"><i>&#10003;</i>cas</span>
+            <span class="chk y"><i>&#10003;</i>unsharp</span>
+            <span class="chk y"><i>&#10003;</i>eq</span>
+            <span class="chk y"><i>&#10003;</i>scale</span>
+            <span class="chk y"><i>&#10003;</i>minterpolate</span>
+            <span class="chk y"><i>&#10003;</i>libvmaf</span>
+            <span class="chk y"><i>&#10003;</i>psnr / ssim</span>
+          </div>
+          <div class="divider"></div>
+          <div class="flex between wrap">
+            <div class="hint" style="max-width:760px">
+              探测结果<b>缓存在内存</b>（不写 settings，避免与真实环境脱节）；只在三种时机重跑：
+              打开本页、点「重新探测」、ffmpeg 路径被修改。探测全程 &lt; 1.5s，但仍在后台线程跑，不阻塞 UI。
+            </div>
+            <span class="btn sm ghost">查看原始输出</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#9888;</span><h3>缺失时的降级表现</h3></div>
+          <div class="infobar err">
+            <span class="ib-ico">&#10005;</span>
+            <div><b>ffmpeg 未找到。</b>「增强任务」的开始按钮置灰，页顶常驻红色 InfoBar，
+            并给出两条出路：① 到本页填可执行文件路径；② 到 <b>设置 &#8594; 路径配置</b> 填 <code>ffmpeg</code> 行。
+            同时提供下载指引链接文本（不自动下载、不自动装包 —— AGENTS.md §3.2 禁止 agent/程序自行安装依赖）。</div>
+          </div>
+          <div class="infobar warn">
+            <span class="ib-ico">!</span>
+            <div><b>ffmpeg 找到但缺 libvmaf。</b>不影响增强主流程，只把「质量对比」子页的 VMAF 卡片置灰，
+            PSNR / SSIM 仍可用（这两个是 ffmpeg 内建，不依赖外部库）。</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 画布 5：质量对比 ============ -->
+<div class="section-label">画布 5 <span>弹出工作台 · 子页「质量对比」—— VMAF/PSNR/SSIM 客观评分 + 抽帧左右对比 + 历史</span></div>
+<div class="win">
+  <div class="titlebar">
+    <span class="app-ico"></span><span class="app-name">AutoWork · 画质提升工作台</span>
+    <span class="tb-btns"><i>&#9472;</i><i>&#9633;</i><i class="close">&#10005;</i></span>
+  </div>
+  <div class="app" style="height:720px">
+    <div class="nav" style="width:200px">
+      <div class="nav-item"><span class="ni">&#9654;</span>增强任务</div>
+      <div class="nav-item"><span class="ni">&#10023;</span>滤镜调参</div>
+      <div class="nav-item"><span class="ni">&#9889;</span>编码输出</div>
+      <div class="nav-item"><span class="ni">&#9000;</span>环境检测</div>
+      <div class="nav-item active new"><span class="ni">&#9684;</span>质量对比</div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div class="page-title" style="font-size:20px">质量对比</div>
+        <div class="page-sub">对一对「源 / 输出」文件跑客观指标与抽帧对比；也可直接从历史记录里挑一行</div>
+      </div>
+      <div class="body">
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#128260;</span><h3>对比对象</h3>
+            <div class="ch-right"><span class="btn sm primary"><span class="bi">&#9654;</span>开始评测</span><span class="btn sm dis">停止</span></div></div>
+          <div class="fld"><label>源文件</label>
+            <input class="inp mono grow" value="C:\Users\shen_zhe\Desktop\videos\table_3226-01_20261105.mp4">
+            <span class="btn sm">浏览&#8230;</span></div>
+          <div class="fld"><label>输出文件</label>
+            <input class="inp mono grow" value="C:\Users\shen_zhe\Desktop\videos\table_3226-01_20261105_enhanced.mp4">
+            <span class="btn sm">浏览&#8230;</span></div>
+          <div class="fld" style="margin-bottom:0"><label>抽帧时间点</label>
+            <span class="spin"><span class="sv">00:00:42</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
+            <span class="sw"><span class="track"></span></span>
+            <span class="hint" style="margin:0">评测完成后自动在「增强任务」里补一行结果</span></div>
+        </div>
+
+        <div class="stat-strip c5">
+          <div class="stat"><div class="num g">94.31</div><div class="lbl">VMAF（越高越好，&gt;93 优秀）</div></div>
+          <div class="stat"><div class="num c">41.82</div><div class="lbl">PSNR dB</div></div>
+          <div class="stat"><div class="num c">0.9871</div><div class="lbl">SSIM</div></div>
+          <div class="stat"><div class="num a">186 &#8594; 121</div><div class="lbl">体积 MB（-35%）</div></div>
+          <div class="stat"><div class="num">2m11s</div><div class="lbl">增强耗时</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#128247;</span><h3>抽帧对比</h3>
+            <span class="ch-sub">t=00:00:42 · 各跑一次单帧 ffmpeg 输出 PNG</span>
+            <div class="ch-right"><span class="btn sm ghost">1:1 查看</span><span class="btn sm ghost">导出并排图</span></div></div>
+          <div class="cmp">
+            <div class="pane">
+              <div class="pane-h"><b>源（前）</b><span class="mono" style="margin-left:auto">1920x1080 · 8.1 Mbps</span></div>
+              <div class="img a"><span class="lbl">before.png</span></div>
+            </div>
+            <div class="pane">
+              <div class="pane-h"><b>输出（后）</b><span class="mono" style="margin-left:auto">1920x1080 · 6.2 Mbps</span></div>
+              <div class="img b"><span class="lbl">after.png</span></div>
+            </div>
+          </div>
+          <div class="infobar info mt">
+            <span class="ib-ico">i</span>
+            <div>PNG 落 <code>tempfile.mkdtemp(prefix="autowork_ve_prev_")</code>（系统临时目录，每次抽帧新建一个）。
+            <b>不</b>落 <code>tools/_scratch/</code>：AGENTS.md §2.3 约束的是<b>仓库内</b>的自动生成物，
+            运行时产物写进仓库目录反而污染工作树，且打包分发后该目录可能只读。
+            用 <code>QLabel</code> + <code>QPixmap.scaled(KeepAspectRatio, SmoothTransformation)</code> 显示，不引入图片查看器依赖。</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#9684;</span><h3>指标明细</h3>
+            <span class="ch-sub">VMAF 需两侧同分辨率；输出被放大时会先把源 lanczos 放大到同尺寸再比，并标注口径</span></div>
+          <div class="term" style="height:auto;border-radius:var(--radius);padding:12px 14px">
+<div class="ln dim"># VMAF（源分辨率与输出一致，无需预缩放）</div>
+<div class="ln ac">ffmpeg -i out.mp4 -i src.mp4 -lavfi "[0:v][1:v]libvmaf=log_fmt=json:log_path=vmaf.json" -f null -</div>
+<div class="ln dim"># 输出被放大到 2160p 时，先把参考源放大到同尺寸，否则 libvmaf 直接报错</div>
+<div class="ln ac">ffmpeg -i out.mp4 -i src.mp4 -lavfi "[1:v]scale=3840:2160:flags=lanczos[ref];[0:v][ref]libvmaf=..." -f null -</div>
+<div class="ln dim"># PSNR / SSIM（ffmpeg 内建，不依赖 libvmaf）</div>
+<div class="ln ac">ffmpeg -i out.mp4 -i src.mp4 -lavfi "[0:v][1:v]psnr;[0:v][1:v]ssim" -f null -</div>
+          </div>
+          <div class="hint mt">
+            <b>口径提醒（会显示在页面上）：</b>锐化类滤镜会<b>降低</b> VMAF/PSNR —— 因为它们改变了像素、
+            偏离了参考源，而这类指标衡量的是「与源的接近程度」，不是「好不好看」。
+            所以本页把客观分与主观抽帧并排展示，不把 VMAF 当唯一结论。
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="ch-ico">&#128214;</span><h3>历史记录</h3>
+            <span class="ch-sub">仅本地留档，不参与任何同步</span>
+            <div class="ch-right"><span class="btn sm ghost">清空</span></div></div>
+          <table>
+            <thead><tr>
+              <th style="width:130px">时间</th><th>源 &#8594; 输出</th><th style="width:230px">参数摘要</th>
+              <th style="width:70px">VMAF</th><th style="width:96px">体积</th><th style="width:70px">耗时</th><th style="width:44px"></th>
+            </tr></thead>
+            <tbody>
+              <tr class="sel">
+                <td class="mono">11-06 14:24</td>
+                <td class="mono">table_3226-01_20261105.mp4 &#8594; &#8230;_enhanced.mp4</td>
+                <td class="mono" style="font-size:11.5px">标准增强 · x264 crf18 slow</td>
+                <td class="num" style="color:var(--success)">94.31</td>
+                <td class="num">186&#8594;121 MB</td><td class="num">2m11s</td><td><span class="tbtn">&#8635;</span></td>
+              </tr>
+              <tr>
+                <td class="mono">11-06 11:02</td>
+                <td class="mono">old_match_2019.mkv &#8594; old_match_2019_1080p.mp4</td>
+                <td class="mono" style="font-size:11.5px">老片修复 · 放大2x · x264 crf20</td>
+                <td class="num" style="color:var(--warning)">78.04</td>
+                <td class="num">1.2&#8594;2.8 GB</td><td class="num">41m07s</td><td><span class="tbtn">&#8635;</span></td>
+              </tr>
+              <tr>
+                <td class="mono">11-05 19:47</td>
+                <td class="mono">clip_test.mp4 &#8594; clip_test_100MB.mp4</td>
+                <td class="mono" style="font-size:11.5px">强锐化 · 目标体积100MB 两遍</td>
+                <td class="num" style="color:var(--text3)">未评测</td>
+                <td class="num">312&#8594;99 MB</td><td class="num">6m33s</td><td><span class="tbtn">&#8635;</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="hint mt">
+            历史落 <code>config/misc.json</code>（经 <code>core.app_settings</code> 门面，
+            <code>enhance_history</code> 路由到 <code>misc</code> 域），上限 50 条环形裁剪；不含任何凭据字段，无需 DPAPI。
+            落地时<b>没有</b>新开 <code>video_enhance</code> 域：<code>enhance_params</code> /
+            <code>enhance_history</code> / <code>enhance_last_dir</code> 都是单机偏好，既不同步 MySQL 也无凭据，
+            多开一个 <code>config/*.json</code> 只会让「哪个文件存了什么」更难查。
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 注册点清单 ============ -->
+<div class="section-label">注册点清单 <span>本功能的「双注册 + 六处补充」（A~H）—— 少一处就出现静默降级</span></div>
+<div class="doc-tbl">
+  <table>
+    <thead><tr><th style="width:34px">#</th><th style="width:250px">文件 · 位置</th><th>要加什么</th><th style="width:290px">漏了会怎样</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="mono">A</td>
+        <td class="mono">main_window/tool_hub.py<br>ToolHub.__init__ ~1890-1904</td>
+        <td><b>注册点 1（内嵌）</b>：<code>self.video_enhance_work = VideoEnhanceHub(self._win, self)</code>，
+            然后 <code>self.addPage(self.video_enhance_work, "画质提升")</code>，<b>追加在既有 addPage 序列末尾</b>
+            且必须在 <code>lock_pivot_width()</code> 之前（该调用会按内容冻结切换条宽度，后加的页签不会被计入）。</td>
+        <td>页签根本不出现。</td>
+      </tr>
+      <tr>
+        <td class="mono">B</td>
+        <td class="mono">main_window/main_window.py<br>open_hub_popout · nav_icons["toolHub"] ~401-404</td>
+        <td><b>注册点 2（弹出）</b>：<code>"画质提升": FluentIcon.BRUSH</code>，键名必须与 A 的 <code>addPage</code> 文本<b>逐字一致</b>。
+            图标<b>不能</b>用 <code>MOVIE</code>：并发落地的「视频修复」页签已经占用了它，
+            两个页签同图标在左侧子导航里分不清（落地时改为 <code>BRUSH</code>）。</td>
+        <td><code>hub_popout.py:56</code> 的 <code>len(entries) == len(meta)</code> 判定失败 &#8594;
+            工具面板弹出后<b>静默退回</b>「内嵌整个 Hub + 顶部 Pivot」形态，左侧子导航消失。不报错，最难发现。</td>
+      </tr>
+      <tr>
+        <td class="mono">C</td>
+        <td class="mono">main_window/main_window.py<br>open_hub_popout · title / nav_icons ~387-405</td>
+        <td><b>注册点 3（工作台自身弹出）</b>：给 <code>"videoEnhanceHub"</code> 补 title
+            <code>"画质提升工作台"</code>，并补一组覆盖 5 子页文本的 nav_icons
+            （<code>增强任务/滤镜调参/编码输出/环境检测/质量对比</code>）。</td>
+        <td>点「弹出工作台」开出来的窗口标题是「面板」，且退回内嵌 Pivot 形态（子页面变横排而不是左侧导航）。</td>
+      </tr>
+      <tr>
+        <td class="mono">D</td>
+        <td class="mono">main_window/hub_popout.py<br>_BUSY_ATTRS ~27-28</td>
+        <td>追加 <b>四个</b> worker 属性名 <code>_ve_enhance_worker</code> / <code>_ve_probe_worker</code> /
+            <code>_ve_env_worker</code> / <code>_ve_cmp_worker</code>（不是一个 <code>_video_enhance_worker</code>：
+            四路任务各自一条线程，共用一个守卫会让「探测中」误挡住「开始增强」）；并给 <code>HubPopoutWindow</code> 补一个
+            <code>open_hub_popout(self, hub)</code> 转发到 <code>self._main</code>。
+            这四个名字必须与 <code>video_enhance_hub.WORKER_ATTRS</code> 和 <code>shutdown.py</code> 第 7b 步<b>三处逐字一致</b>。</td>
+        <td>① 内嵌视图与弹出窗口可同时各起一个 ffmpeg，双开抢 CPU；
+            ② 在已弹出的工具面板里再点「弹出工作台」时，<code>PivotPage._on_popout</code> 的
+            <code>getattr(win, "open_hub_popout", None)</code> 取到 None，按钮<b>点了没反应</b>。</td>
+      </tr>
+      <tr>
+        <td class="mono">E</td>
+        <td class="mono">core/app_settings.py<br>键&#8594;域映射 ~134-145</td>
+        <td>追加 <code>"ffmpeg_path": "paths"</code>、<code>"ffprobe_path": "paths"</code>，以及并入既有域的
+            <code>"enhance_params" / "enhance_history" / "enhance_last_dir": "misc"</code>。
+            <code>ffmpeg_path</code> 填了但文件不存在时 <code>locate_ffmpeg</code> <b>不</b>静默兜底到 PATH——
+            否则用户改错了路径却以为生效了。</td>
+        <td>保存的路径落不进 <code>paths.json</code>、参数集落不进 <code>misc.json</code>，重启后丢失（表现为「设置存了但不生效」）。</td>
+      </tr>
+      <tr>
+        <td class="mono">F</td>
+        <td class="mono">main_window/settings_mixin.py<br>DEFAULT_PATHS ~28-37<br>main_window/hub_pages.py<br>_group_paths ~840-848</td>
+        <td>DEFAULT_PATHS 补 <code>ffmpeg_path</code> / <code>ffprobe_path</code>（默认<b>空串</b>，表示走 PATH）；
+            <code>_group_paths</code> 的 items 补两行 <code>("ffmpeg_path","ffmpeg","file")</code>、
+            <code>("ffprobe_path","ffprobe","file")</code>。</td>
+        <td>设置页看不到这两行，用户只能靠改系统 PATH。</td>
+      </tr>
+      <tr>
+        <td class="mono">G</td>
+        <td class="mono">windows/tools/<br>smoke_fluent_mainwindow.py ~158-162</td>
+        <td>把 <code>th.stack.count()</code> / <code>len(th.pivot.items)</code> 的断言改成<b>落手时的实际页签数</b>，
+            并补一条 8b.2b 锁住「画质提升已注册 + 五子页文本顺序」。
+            <b>不要写死数字，改前先 grep 一遍 addPage。</b>
+            <br><b>落地实况</b>：该断言在本次动手前<b>就已经是错的</b>——写的是 4，而并发会话的「视频修复」
+            已经把页签数推到 5，没人同步。本次直接改成 6（含画质提升），并在注释里写明「数量随页签增减同步改」。</td>
+        <td>冒烟脚本误报失败；更糟的是若按「5」写死而实际是 6，冒烟会<b>反过来掩盖</b>另一会话漏注册 nav_icons 的问题。</td>
+      </tr>
+      <tr>
+        <td class="mono">H</td>
+        <td class="mono">main_window/shutdown.py<br>第 7b 步 worker 清理清单</td>
+        <td><b>设计阶段漏掉的第八处</b>：把四个 <code>_ve_*</code> 属性名追加进关窗时的
+            <code>requestInterruption()</code> + <code>wait(1000)</code> 循环。
+            <code>PivotPage.detach_workers()</code> 只按 <code>*_worker</code> 后缀<b>扫属性</b>，
+            而本功能的 worker 挂在<b>宿主主窗口</b>上（<code>hub.worker()</code> 读 <code>self._win</code>），
+            扫页面属性扫不到。</td>
+        <td>关掉主窗口后 ffmpeg 子进程还在跑，一直占着 CPU 与输出文件句柄，
+            且输出文件被占用导致下次增强写不进去。worker 只有收到中断才会去 kill 子进程。</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="note" style="border-left-color:var(--warning)">
+  <b>为什么不直接手改 <code>config/paths.json</code>？</b>
+  AGENTS.md §3.1 把 <code>config/**</code> 列为禁改文件（含 DPAPI 密文与生产 IP）。
+  所以 F 项只改 <b>代码里的默认值与设置页行定义</b>，真实键值由应用运行时经
+  <code>_save_settings</code> &#8594; <code>app_settings.set</code> 写入 —— 与本仓库既有路径项完全同一条链路。
+</div>
+
+<!-- ============ 文件与类结构 ============ -->
+<div class="section-label">文件与类结构 <span>新增 5 个文件（3 模块 + 单测 + 冒烟）· 改动 8 个既有文件 · 1 处索引</span></div>
+<div class="doc-tbl">
+  <table>
+    <thead><tr><th style="width:290px">路径</th><th style="width:60px">类型</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">windows/tools/video_enhance.py</td><td><span class="tag acc plain">新增</span></td>
+        <td><b>引擎层（纯逻辑，无 Qt，可离线单测）</b>：<code>locate_ffmpeg(settings)</code>（设置值优先、<code>shutil.which</code> 兜底）、
+            <code>probe(path)</code> &#8594; <code>VideoInfo(w,h,fps,duration,n_frames,audio_codec,size)</code>、
+            <code>detect_capabilities(ffmpeg)</code> &#8594; 编码器/滤镜/libvmaf 集合、
+            <code>build_filter_chain(params)</code> &#8594; <code>-vf</code> 字符串、
+            <code>build_command(src,dst,params,info)</code> &#8594; argv 列表、
+            <code>parse_progress(line,duration)</code> &#8594; 百分比、
+            <code>build_metric_command(src,dst,kind)</code>（vmaf/psnr/ssim，含参考源预缩放）、
+            <code>PRESETS</code> 预设表、<code>resolve_output_path(tpl,info,params)</code>。</td></tr>
+      <tr><td class="mono">workers/video_enhance_worker.py</td><td><span class="tag acc plain">新增</span></td>
+        <td><b>QThread 后台执行</b>：队列逐个跑 ffmpeg 子进程，读 <code>-progress pipe:1</code> 键值行推进度。
+            <code>STAGES = ("probe","enhance","env","metric","frame","preview")</code> —— 一个 worker 类按
+            <code>stage</code> 跑六种活，避免六个几乎一样的 QThread 子类。
+            信号（落地签名）：<code>line(str)</code> /
+            <code>probed(int,object)</code> /
+            <code>progress(int,int,float)</code>（项序号, 百分比, 速度）/
+            <code>item_done(int,str,str)</code>（项序号, 源, 输出；<b>输出为空串</b>表示「已存在被跳过」，是第三态不是失败）/
+            <code>item_failed(int,str)</code> / <code>env_ready(object)</code> / <code>metric_ready(object)</code> /
+            <code>frames_ready(object)</code> / <code>finished_ok(object)</code> / <code>cancelled()</code> / <code>error(str)</code>。
+            <b>成功信号刻意不叫 <code>finished</code></b> —— 遮蔽 QThread 内建 <code>finished</code> 会导致销毁崩溃
+            （同 <code>workers/single_video_worker.py</code> 口径）。取消走 <code>requestInterruption()</code> +
+            终止子进程（Windows 上 <code>proc.terminate()</code> 后 <code>kill()</code> 兜底）。
+            <br><code>_stream_ffmpeg</code> 把 stderr 并到 stdout（避免 64KB 管道写满死锁），用后台线程 + 队列
+            以 0.25s 超时轮询转发行——这样 <code>minterpolate</code>/<code>atadenoise</code> 缓冲好几秒不吐字时
+            取消仍然生效；<b>进度键值行刻意不喂给 <code>on_line</code></b>（每秒好几条会把终端刷成噪声），
+            只走 <code>on_progress</code>。</td></tr>
+      <tr><td class="mono">windows/tools/video_enhance_hub.py</td><td><span class="tag acc plain">新增</span></td>
+        <td><b>UI 层</b>：<code>VideoEnhanceHub(PivotPage)</code> + 5 个子页类
+            （<code>EnhanceTaskPage</code> / <code>FilterPage</code> / <code>EncodePage</code> /
+            <code>EnvPage</code> / <code>ComparePage</code>）。
+            放独立模块而不是塞进 <code>tool_hub.py</code>：后者已 1900+ 行，且「相机工具」已有同样的外移先例
+            （<code>windows/camera/camera_hub.py</code>）。
+            构造签名沿用 <code>(win, parent=None)</code>，<code>objectName="videoEnhanceHub"</code>。
+            <b>不新建按钮、也不隐藏继承来的那颗</b>：复用 <code>WorkLogHub</code> 的做法，用 <code>_inline_popout()</code>
+            把基类的 <code>btn_popout</code>/<code>lbl_popout_hint</code> 从「浮动定位」搬进内层 Pivot 行布局
+            （<code>addStretch</code> 顶到行尾），只把提示文案改成「弹出工作台」。
+            这样 <code>_on_popout()</code>、显隐同步、<code>HubPopoutWindow</code> 按属性名隐藏它的逻辑全部照旧生效——
+            换成自建 <code>btn_workbench</code> 就要把这三处都再实现一遍，且弹出窗按 <code>btn_popout</code> 这个名字找不到它，
+            会出现「弹出的工作台里还留着一颗点了没反应的弹出按钮」。
+            <br>基类给 <code>pivot_row</code> 设了 <code>AlignLeft|AlignTop</code>，那会让整行只占 sizeHint 宽度、
+            <code>addStretch</code> 顶不出去；<code>_inline_popout()</code> 里必须先清掉这个对齐。</td></tr>
+      <tr><td class="mono">main_window/tool_hub.py</td><td><span class="tag warn plain">改</span></td>
+        <td>注册点 A：import + 实例化 + <code>addPage(&#8230;, "画质提升")</code>（3 行）。</td></tr>
+      <tr><td class="mono">main_window/main_window.py</td><td><span class="tag warn plain">改</span></td>
+        <td>注册点 B + C：<code>nav_icons["toolHub"]</code> 补一项；<code>title</code>/<code>nav_icons</code> 补
+            <code>videoEnhanceHub</code> 一组。</td></tr>
+      <tr><td class="mono">main_window/hub_popout.py</td><td><span class="tag warn plain">改</span></td>
+        <td>注册点 D：<code>_BUSY_ATTRS</code> 追加四个 <code>_ve_*</code> + <code>open_hub_popout</code> 转发方法。</td></tr>
+      <tr><td class="mono">core/app_settings.py<br>main_window/settings_mixin.py<br>main_window/hub_pages.py</td><td><span class="tag warn plain">改</span></td>
+        <td>注册点 E + F：键&#8594;域映射（2 个 <code>paths</code> + 3 个 <code>misc</code>）、DEFAULT_PATHS、设置页路径配置两行。</td></tr>
+      <tr><td class="mono">windows/tools/smoke_fluent_mainwindow.py</td><td><span class="tag warn plain">改</span></td>
+        <td>注册点 G：工具页工作区数断言改成 6（动手前它写的是 4，已经比实际的 5 落后一轮），并补 8b.2b 锁子页文本顺序。</td></tr>
+      <tr><td class="mono">main_window/shutdown.py</td><td><span class="tag warn plain">改</span></td>
+        <td>注册点 H（<b>设计阶段漏掉</b>）：第 7b 步的 worker 属性清单追加四个 <code>_ve_*</code>。</td></tr>
+      <tr><td class="mono">tools/smoke/smoke_video_enhance_hub.py</td><td><span class="tag acc plain">新增</span></td>
+        <td><b>永久离屏冒烟</b>（AGENTS.md §2.2：<code>smoke_</code> 前缀归 <code>tools/smoke/</code>，不进 <code>tests/</code>）。
+            八节：Hub 结构 / 内联弹出按钮 / 切页与参数广播 / 八处注册点 AST 核对 / nav_icons 双覆盖 /
+            弹出窗左侧子导航形态 / worker 属性名三处一致 / 真 ffmpeg 端到端（找不到 ffmpeg 则跳过不算失败）。
+            刻意<b>不构造 MainWindow</b>——那会写 <code>config/</code> 并连 frpc，与本仓「跑测试前后 config/ database/ 零改动」
+            的验收口径冲突；注册点改为对源码做 AST/文本核对。</td></tr>
+      <tr><td class="mono">tests/test_video_enhance.py</td><td><span class="tag acc plain">新增</span></td>
+        <td>离线单测（不碰真 ffmpeg）：<code>build_filter_chain</code> 的顺序与开关组合、预设展开、
+            <code>build_command</code> 的 CRF/两遍互斥、目标体积码率算式、
+            <code>parse_progress</code> 对 <code>out_time_ms</code> 的解析、
+            输出命名模板与「跳过/覆盖/加序号」三种冲突策略、
+            <code>locate_ffmpeg</code> 的设置优先与 PATH 兜底（monkeypatch <code>shutil.which</code>）。</td></tr>
+      <tr><td class="mono">design/README.md · docs/README.md</td><td><span class="tag warn plain">改</span></td>
+        <td>本设计稿登记进 <code>design/README.md</code> 的设计稿表（AGENTS.md §1.4 要求同一次提交内补索引）。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ 滤镜预设表 ============ -->
+<div class="section-label">滤镜预设 &#8594; -vf 串 <span>引擎层 <code>PRESETS</code> 的实际取值</span></div>
+<div class="doc-tbl">
+  <table>
+    <thead><tr><th style="width:150px">预设</th><th>-vf 值</th><th style="width:230px">适用 / 代价</th></tr></thead>
+    <tbody>
+      <tr><td>关闭（仅转码）</td><td class="mono">format=yuv420p</td><td>只换编码器或压体积，画质不动。最快。</td></tr>
+      <tr><td>轻度修复</td><td class="mono">hqdn3d=1:1:4:4,cas=0.4,eq=contrast=1.02:saturation=1.03,format=yuv420p</td><td>源本身干净，只想去压缩块效应。</td></tr>
+      <tr><td><b>标准增强（推荐）</b></td><td class="mono">hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06,format=yuv420p</td><td>默认值。台球录像通用。</td></tr>
+      <tr><td>强锐化</td><td class="mono">hqdn3d=1:1:4:4,unsharp=5:5:1:5:5:0.0,cas=1,eq=contrast=1.05,format=yuv420p</td><td>糊片、失焦。易出白边，慎用于已清晰的源。</td></tr>
+      <tr><td>老片修复</td><td class="mono">atadenoise=0a=0.02:0b=0.04:s=80,hqdn3d=2:2:8:8,cas=0.6,eq=contrast=1.08:brightness=0.02:saturation=1.08,format=yuv420p</td><td>强噪点、偏灰的老录像。两级去噪串联，慢。</td></tr>
+      <tr><td>动漫 / 线条</td><td class="mono">hqdn3d=2:2:6:6,cas=1.2,eq=contrast=1.06:saturation=1.15,format=yuv420p</td><td>色块分明、线条锐利的内容。</td></tr>
+      <tr><td colspan="3" style="background:var(--bg);color:var(--text2);font-size:12.5px">
+        上表是 <code>build_filter_chain(apply_preset(default_params(), k))</code> 的<b>逐字输出</b>（落地后回填）。
+        两处与直觉不同：<b>(1)</b> <code>_fnum()</code> 会削掉尾随 <code>.0</code>，所以滑块上的 <code>1.0</code>
+        落到串里是 <code>1</code>；<b>(2)</b> <code>eq</code> 的参数顺序由 <code>_eq_filter()</code> 固定为
+        contrast &#8594; brightness &#8594; saturation &#8594; gamma，<b>不</b>跟随界面控件的排列顺序。
+        <code>atadenoise</code> 用具名参数 <code>0a/0b/s</code>（阈值由 <code>denoise_luma</code> 换算而来），
+        不用位置参数——ffmpeg 版本间位置参数含义变过。
+        <br>以下为<b>叠加项</b>，按固定顺序插入到预设串中（不是独立预设）：
+        放大 &#8594; 在去噪之后插入 <code>scale=-2:H:flags=lanczos</code>；
+        补帧 &#8594; 在链尾（<code>format</code> 之前）追加 <code>minterpolate=fps=N:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1</code>。
+        <code>format=yuv420p</code> 永远置于链尾，保证播放器兼容。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="foot">
+  <h4>实现顺序与验证</h4>
+  <ul>
+    <li><b>第 1 步 引擎层 + 单测</b>：先写 <code>windows/tools/video_enhance.py</code> 与 <code>tests/test_video_enhance.py</code>，
+        纯字符串/列表变换，无 Qt、无子进程，<code>pytest tests/test_video_enhance.py -q</code> 必须全绿。
+        <b>落地结果：202 passed。</b></li>
+    <li><b>第 2 步 Worker</b>：<code>workers/video_enhance_worker.py</code>，信号名避开 <code>finished</code>。</li>
+    <li><b>第 3 步 UI</b>：<code>windows/tools/video_enhance_hub.py</code> 的 5 子页。</li>
+    <li><b>第 4 步 八处注册</b>（A~H），逐个核对。
+        按用户选定的推进方式：第 1~3 步与单测都是<b>零冲突新增文件</b>，先做完；
+        注册点全是<b>改既有文件</b>，留到最后统一接线，且动手前<b>重新 grep 一遍</b>——
+        本工作树有并行会话在改同一批文件（<code>tool_hub.py</code> 的「视频修复」就是期间落进来的）。</li>
+    <li><b>第 5 步 验证</b>：<code>QT_QPA_PLATFORM=offscreen</code> 跑
+        <code>tools/smoke/smoke_video_enhance_hub.py</code>（<b>落地结果：65 项全 PASS，rc=0</b>，
+        含真 ffmpeg 端到端一节）；再跑 <code>python tools/check_refs.py --all</code>、
+        <code>pytest tests/ -q</code>、<code>python -m compileall -q tools design tests</code>。
+        <br>解释器按 AGENTS.md §5.1 必须写全路径：<code>E:\ANACONDA</code> 缺 qfluentwidgets 跑不了 UI，
+        <code>miniconda3</code> 的 PySide6 需要内联引导；冒烟脚本用后者并自带引导。
+        <br><b>落地结果</b>：全量 <code>pytest</code> 1171 passed / 30 failed / 15 skipped / 20 errors，
+        非通过项全部落在 AGENTS.md §5.2 已登记的「缺依赖」类目里，无新增失败类别；
+        <code>compileall</code> rc=0；<code>config/</code> 与 <code>database/</code> 前后快照<b>零改动</b>。
+        <code>check_refs.py</code> 唯一一处断链在并行会话的未入库设计稿
+        <a href="video_repair_tool.html"><code>design/video_repair_tool.html</code></a> 里
+        （它引用了一个尚未创建的 <code>tests/test_video_*</code> 单测文件），与本功能无关。
+        <b>注意</b>：<code>check_refs.py</code> 会把文档里任何仓库根相对路径都当引用校验，
+        连写在 <code>&lt;code&gt;</code> 里的「反例路径」也算——所以此处刻意不写出那个不存在的完整文件名。</li>
+    <li><b>真机验收</b>：拿一个真实 mp4 走一遍「标准增强 + CRF18」，确认输出可播、进度条平滑、
+        停止能真正杀掉 ffmpeg 子进程（不留孤儿进程占 CPU）。
+        <br>已用合成源自证的部分（冒烟第 8 节，本机 ffmpeg <code>N-123918-gf7ca6f7481</code>）：
+        探测到 236 个编码器与 libvmaf；320&#215;240 &#8594; 480 lanczos 放大生效、音轨 <code>copy</code> 保留；
+        <code>on_progress</code> 收到收尾 100% 且终端不含 <code>out_time_ms=</code> 噪声；
+        对比帧 PNG 两张大小不同（26812 / 96128 B）；PSNR 出数 35.37。</li>
+  </ul>
+  <h4 style="margin-top:12px">已识别的风险</h4>
+  <ul>
+    <li><b>图标枚举版本约束</b>：本项目 qfluentwidgets 的 <code>FluentIcon</code> 无 <code>GAME_OPTIONS</code> 等成员。
+        本设计稿选用的是<b>已核对存在于当前安装版本</b>的成员：
+        <code>MOVIE / VIDEO / FILTER / SPEED_HIGH / COMMAND_PROMPT / PIE_SINGLE / FIT_PAGE</code>。
+        实施时若报 <code>AttributeError</code>，从上述清单里换，不要新造名字。
+        <br><b>落地补充</b>：另有一批成员同样不可用——<code>STOP / PICTURE / PICTURE_TILE / CLEAR / CROP / SHARING /
+        HIGHLIGHT / ALIGN_CENTER / COLOR / ERASE / VIEW_ALL / BULLETED_LIST / TILE / MOSAIC / EFFECT / MAGIC</code>，
+        以及 <code>ElevatedPushButton</code> 这个类本身。实际用到的是
+        <code>BRUSH</code>（工具页页签，<code>MOVIE</code> 被「视频修复」占了）、
+        <code>VIDEO / FILTER / SAVE_AS / COMMAND_PROMPT / PIE_SINGLE</code>（五子页导航）。
+        冒烟第 5 节会用主窗口的真实映射建弹出窗，图标名写错会在那一节就炸，不必等用户点。</li>
+    <li><b>嵌套 PivotPage 的按钮重叠</b>：外层 ToolHub 的 <code>btn_popout</code> 是<b>浮动</b>定位在页面右上角的
+        （<code>pivot_page._reposition_popout_btn</code>，y&#8776;10）。内层若也浮动，两颗在纵向上只差几像素，窗口一窄就叠住。
+        解决办法是 <code>_inline_popout()</code> 把内层那颗搬进 Pivot 行布局（落到 y&#8776;44）。
+        <br><b>落地已量化自证</b>：冒烟 2b 节真构造一层 ToolHub，把两颗按钮 <code>mapTo</code> 到同一坐标系，
+        在 1500/1100/900 三种宽度下均不重叠（外层 y=10~40，内层 y=44~76）。
+        <b>核对时必须先确认顶层 <code>isVisible()</code></b>：<code>ToolHub(win)</code> 的构造参数同时是宿主窗口
+        <b>和 Qt 父对象</b>，父不 show 则子树布局根本不跑，按钮停在 100&#215;30 初值上，
+        而 <code>isVisibleTo()</code> 仍然返回 True——量出来的「不重叠」是假通过。</li>
+    <li><b>子进程僵尸</b>：<code>PivotPage.detach_workers()</code> 只调 <code>requestInterruption()</code> 不 <code>wait()</code>。
+        Worker 必须在收到 interrupt 后主动终止 ffmpeg 子进程，否则关窗口后 ffmpeg 仍在后台跑满 CPU。
+        <br><b>落地发现的既有缺陷（不属本功能，未修，已上报）</b>：<code>PivotPage.detach_workers()</code> 会扫
+        <code>dir(page)</code> 里所有以 <code>_worker</code> <b>结尾</b>的属性，而 <code>NewLogWork._release_upload_worker</code>、
+        <code>VideoRepairWork._release_repair_worker</code> 是<b>方法</b>，名字正好撞后缀；
+        <code>_stop()</code> 只捕 <code>(RuntimeError, TypeError)</code>，于是抛
+        <code>AttributeError: 'function' object has no attribute 'requestInterruption'</code>。
+        两处生产调用点都用 <code>except Exception: pass</code> 吞掉了，所以不崩，
+        但扫描会在第 4 页中断——排在其后的工具页 worker 在弹出面板关闭时<b>不会被中断</b>。
+        本功能不受影响：四个 worker 已在 <code>shutdown.py</code> 第 7b 步显式登记（注册点 H）。</li>
+    <li><b>耗时预期管理</b>：放大 2x + slow preset 在 1080p 源上约 0.3x 实时，18 分钟视频要跑 1 小时。
+        设计稿原打算给「放大 &#8805; 2x」或「补帧开启」的<b>每一行</b>挂黄色预警标签。
+        <b>落地改为任务页顶部一条全局 <code>lbl_warn</code></b>：预警只由<b>参数</b>决定，与是哪一行无关，
+        逐行挂标签会在 20 行的清单上重复 20 遍同样的话，而且行是复用的（<code>refresh_row</code>）容易残留。</li>
+    <li><b>不自动装依赖</b>：ffmpeg 缺失时只提示、只给路径入口，<b>不</b>触发任何下载安装
+        （AGENTS.md §3.2 禁止擅自安装第三方包）。</li>
+    <li><b>历史与配置写入</b>：全部经 <code>core.app_settings</code> 门面，不直接读写 <code>config/</code> 下文件。</li>
+    <li><b>编码器探测失败的呈现</b>：qfluentwidgets 的 <code>ComboBox</code> 是 <code>QPushButton</code> 而不是
+        <code>QComboBox</code>，<b>没有</b> <code>view()/model()</code>，也没有单项 tooltip。
+        置灰只能走它自己的 <code>setItemEnabled(i, bool)</code>，失败原因统一报在下方 <code>lbl_enc_state</code>。
+        探测失败<b>只置灰不改选择</b>：用户挑的编码器在这台机器上跑不通时，params 里仍是它，
+        直接开跑会在第一个文件上失败——所以 <code>on_env_ready</code> 里额外弹一条 warning 让他自己去换。</li>
+  </ul>
+  <h4 style="margin-top:12px">本次明确不做（避免范围膨胀）</h4>
+  <ul>
+    <li>Real-ESRGAN / 任何外部 AI 超分可执行文件（已确认走纯 ffmpeg）。</li>
+    <li>根目录 <code>video_ai_enhance.py</code> 的删除或迁移 —— 它是独立 CLI，本次不动它，只借鉴其两遍编码码率算式。</li>
+    <li>拖拽中间线的滑块式前后对比（画布 5 只并排展示；需要时再迭代）。</li>
+    <li>随包分发 ffmpeg.exe（已确认走设置项 + PATH）。</li>
+    <li><b>暂停 / 继续</b>：ffmpeg 子进程没有可靠的暂停语义，做了只能靠挂起进程，Windows 上不稳。</li>
+    <li><b>并发多路增强</b>：顺序跑。多路会同时抢 CPU/GPU 与磁盘带宽，总时长不降反升，且进度条语义变复杂。</li>
+    <li><b>「存为我的预设」</b>：只保留内置 6 档 + 参数集整体持久化（<code>enhance_params</code>），
+        用户自定义预设需要一套命名/覆盖/删除的 UI，收益不抵复杂度。</li>
+    <li><b>导出命令行到文件</b>：改为「复制命令行」到剪贴板——用户拿到命令是为了粘贴去手跑，落文件反而多一步。</li>
+  </ul>
+</div>
+
+</body>
+</html>

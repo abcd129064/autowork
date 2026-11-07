@@ -60,7 +60,7 @@ def open_tool_hub(host, work=None):
     """工具入口统一跳转二期独立工具页（main_window.tool_hub）。
 
     work 可为工作区属性名（single_video_work/port_fake_work/
-    upload_list_work/newlog_work），缺省保持当前页。
+    upload_list_work/newlog_work/video_repair_work），缺省保持当前页。
     """
     hub = getattr(host, "tool_hub", None)
     if hub is None:

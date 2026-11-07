@@ -166,6 +166,10 @@ class UIMixin:
 
     # ==================== 端口占用（工具菜单） ====================
 
+    # staticmethod 不可省：调用点全是 win._release_worker_safe(w)，漏了装饰器
+    # 就会多绑一个 self 进去，抛 TypeError 且发生在信号槽里（只打 traceback，
+    # 界面后半段收尾代码被静默跳过）
+    @staticmethod
     def _release_worker_safe(worker):
         """安全释放 QThread：线程仍在运行时交由 finished → deleteLater 延迟销毁
 

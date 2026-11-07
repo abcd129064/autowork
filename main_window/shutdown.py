@@ -116,8 +116,15 @@ def shutdown_main_window(host) -> None:
         except RuntimeError:
             pass
 
-    # 7b. 清理批量整理 worker（NewLog 整理 / 打包上传，中断并短等待）
-    for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker'):
+    # 7b. 清理工具页 worker（批量整理 / 打包上传 / 单杆视频 / 视频修复体检与修复 /
+    # 画质提升四路，中断并短等待）
+    # 画质提升的四个属性名必须与 video_enhance_hub.WORKER_ATTRS、
+    # hub_popout._BUSY_ATTRS 三处一致：漏登记这里，关窗后 ffmpeg 子进程还在跑，
+    # 会一直占着 CPU 与输出文件句柄（worker 收到中断才会 _kill 子进程）
+    for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker',
+                 '_video_probe_worker', '_video_repair_worker',
+                 '_ve_enhance_worker', '_ve_probe_worker',
+                 '_ve_env_worker', '_ve_cmp_worker'):
         nw = getattr(host, attr, None)
         if nw is not None:
             setattr(host, attr, None)

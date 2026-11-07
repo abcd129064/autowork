@@ -17,15 +17,24 @@
   - _show_info_bar：InfoBar 落在弹出窗口自身（体验更好）
   - _append_log / _load_settings / _save_settings：转发主窗口（日志与
     配置单源，弹窗与内嵌视图改的是同一份 settings 域文件）
+  - _release_worker_safe：转发主窗口（工作区收尾要调它回收 QThread，本窗口
+    没有这个方法时 __getattr__ 会直接抛 AttributeError，槽内异常只打 traceback，
+    界面收尾被静默跳过）
   - videos_dir：实时读主窗口属性（设置保存后会更新）
   - busy 守卫属性（_single_video_worker 等）：经 __getattr__/__setattr__
     读写主窗口 —— 弹出窗口与内嵌视图共享互斥，防止双开 worker。
 """
 from qfluentwidgets import FluentWindow, FluentIcon
 
-# busy 守卫属性（tool_hub 工作区经 getattr/setattr(win, ...) 读写）
+# busy 守卫属性（tool_hub / video_enhance_hub 工作区经 getattr/setattr(win, ...) 读写）
 _BUSY_ATTRS = ("_single_video_worker", "_newlog_worker",
-               "_newlog_upload_worker")
+               "_newlog_upload_worker", "_video_probe_worker",
+               "_video_repair_worker",
+               # 画质提升（2026-11-06）：四个 worker 属性名与
+               # windows/tools/video_enhance_hub.py 的 WORKER_ATTRS 一一对应，
+               # 改名要两边同步，否则弹出窗口与内嵌视图各自一份守卫，会双开 ffmpeg
+               "_ve_enhance_worker", "_ve_probe_worker",
+               "_ve_env_worker", "_ve_cmp_worker")
 
 
 class HubPopoutWindow(FluentWindow):
@@ -103,6 +112,23 @@ class HubPopoutWindow(FluentWindow):
         fn = getattr(self._main, "_save_settings", None)
         if fn is not None:
             fn(data)
+
+    def _release_worker_safe(self, worker):
+        """QThread 安全回收转发主窗口（实现见 ui_mixin._release_worker_safe）"""
+        fn = getattr(self._main, "_release_worker_safe", None)
+        if fn is not None:
+            fn(worker)
+
+    def open_hub_popout(self, hub):
+        """内嵌子 Hub 的「弹出面板」按钮转发主窗口
+
+        PivotPage._on_popout 取 self.window().open_hub_popout，本窗口不提供时
+        它会静默什么都不做——按钮还在，点了没反应。转发后从弹出的工具面板里
+        也能把画质提升再单独弹一层（新实例挂主窗口，busy 守卫经 _BUSY_ATTRS
+        共享，不会双开 ffmpeg）。
+        """
+        fn = getattr(self._main, "open_hub_popout", None)
+        return fn(hub) if fn is not None else None
 
     @property
     def videos_dir(self):
