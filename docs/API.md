@@ -2602,9 +2602,9 @@ CLI 冒烟入口：`tools/smoke/smoke_wecom_clip_collect.py`（`--selftest` / `-
 
 ## windows/tools/ 工具页功能后端
 
-工具页（`main_window.tool_hub`）四工作区的运行时业务逻辑，由 `SingleVideoWorker` / `NewLogWorker` / `PortFakeWidget` 调用；
-单杆渲染相关部分从 single_json 项目收编。包内另有 `newlog.py`（批量整理，见上 Workers 节）
-与 `smoke_fluent_mainwindow.py`（GUI 冒烟脚本）。
+工具页（`main_window.tool_hub`）六工作区的运行时业务逻辑，由 `SingleVideoWorker` / `NewLogWorker` / `PortFakeWidget` 调用；
+单杆渲染相关部分从 single_json 项目收编。包内另有 `newlog.py`（批量整理，见上 Workers 节）、
+`video_repair.py`（视频修复）、`video_enhance.py` 与 `video_enhance_hub.py`（画质提升引擎与五子页工作台）。
 
 ### windows.tools.single_shot_video
 

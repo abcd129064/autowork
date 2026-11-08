@@ -63,7 +63,7 @@ cd web/vue-pure-admin && pnpm dev          # v2 前端 dev
 | 层 | 命令 | 说明 |
 | --- | --- | --- |
 | 离线单测 | `<解释器> -m pytest tests/ -q` | 基线见 AGENTS.md §5.2（passed 不低于基线、无新增失败） |
-| GUI 冒烟（offscreen） | `<解释器> windows/tools/smoke_fluent_mainwindow.py` | 主窗口 14+ 组断言：导航/Pivot 切换/设置分页/表格列宽等 |
+| GUI 冒烟（offscreen） | `<全依赖解释器> tools/run_with_qt.py run tools/smoke/smoke_<name>.py` | 界面骨架与集成点自证，如 `smoke_video_enhance_hub.py`、`smoke_worklog_hub.py`、`smoke_dahua_camera_ui.py`；`run_with_qt.py` 只做 Qt 内联引导，不改环境 |
 | 真机冒烟 / 等价性验证 | `python tools/smoke/<name>.py` | 需真机/真实网络/真实 frpc，人工执行 |
 | 真机端到端回归 | `python tools/smoke/regression_*.py` | 如 `regression_aftersale_ui.py` |
 | 性能测量 | `python tools/perf/<name>.py` | 如 `scroll_profile.py`、`column_merge_probe.py`、`shot_fluent_mainwindow.py`（真机截图） |

@@ -33,11 +33,13 @@ tools/stress_test/README.md   压测套件说明
 - **进程管理**：启动/终止/挂起/恢复 SnookerTracking 程序
 - **detect.json 解码**：自动调用 AES 解码工具生成 detect.json
 
-### 工具页（左侧导航「工具」，Pivot 四工作区）
+### 工具页（左侧导航「工具」，Pivot 六工作区）
 - **单杆视频**（收编 single_json 项目）：选择日志文件自动识别场次信息——`session_date` 从文件名自动解析（如 `20260810_230635.log` → `20260810`），`session_code` 自动生成（`日期_21位随机串`，与球桌接口 code 同格式）；参数卡右侧带**日志预览**面板（大小·行数/悬停完整路径/256KB 截断提示/随选择联动），参数区与「运行输出」终端间可上下拖动分隔；后台 Worker 生成带计分水印的单杆视频（PIL 在比分条模板上画文字/头像按 alpha 叠帧；选手0 用原图，选手1 用镜像图且品牌图形还原防翻反）
 - **上传清单**：复选框表格勾选待上传文件（表头浮全选框），打包 zip 后经 SFTP 上传到服务器，仅清理已传文件；「删除所选」带二次确认与路径越界防护
 - **视频/日志批量整理**：按 Excel 署名筛选，批量归类视频/日志/配置文件（NewLog），完成后可一键打包上传
 - **端口占用**：真实监听指定端口模拟服务占用（TCP `netstat -ano` 可见 LISTENING / UDP bind），用于测试端口冲突/验证服务检测逻辑
+- **视频修复**：录制掉电截断（mp4 的 moov 索引没写出来）的文件，借同机同参数的正常文件补 VOL 配置头，按 GOP 边界裁剪后 ffmpeg 流拷贝无损重封装；不转码，原文件全程只读
+- **画质提升**：纯 ffmpeg 滤镜链（去噪→放大→锐化→色彩→补帧→编码），五子页工作台可再单独弹出，带 ffmpeg 环境检测与 VMAF/PSNR/SSIM 客观评分
 
 > 菜单栏「工具」及各入口已统一改为跳转工具页对应工作区；工具页/远程页另可通过 `HubPopoutWindow` 弹出为独立窗口使用。
 
@@ -241,12 +243,14 @@ autowork/
 │       ├── single_video_tool.py #  单杆 json 生成（日志解析/开球局提取）
 │       ├── port_fake.py       #   端口占用模拟器（真实监听指定端口）
 │       ├── newlog.py          #   视频/日志批量整理主流程（Excel 驱动，可 CLI 独立运行）
-│       └── smoke_fluent_mainwindow.py  # 主窗口 GUI 冒烟脚本（offscreen）
+│       ├── video_repair.py    #   视频修复（无 moov 的 mp4 借参考文件 VOL 头无损重封装）
+│       ├── video_enhance.py   #   画质提升引擎（ffmpeg 滤镜链拼装/执行/客观评分）
+│       └── video_enhance_hub.py # 画质提升工作台（五子页 UI）
 │
 ├── main_window/               # 主窗口层（Mixin + Hub 页面）
 │   ├── main_window.py         #   MainWindow 主类（组合 Mixin，注册导航 Hub）
 │   ├── hub_pages.py           #   业务域容器页（ManagementHub/AftersaleHub/LedgerHub/SettingsHub/About）
-│   ├── tool_hub.py            #   工具页（四工作区：单杆视频/上传清单/批量整理/端口占用）
+│   ├── tool_hub.py            #   工具页（六工作区：单杆视频/端口占用/上传清单/批量整理/视频修复/画质提升）
 │   ├── pivot_page.py          #   Pivot 二级导航容器页基建
 │   ├── hub_popout.py          #   Hub 弹出为独立窗口（HubPopoutWindow）
 │   ├── setting_cards.py       #   统一设置页卡片组件（SettingGroup/SettingRow）
@@ -541,8 +545,9 @@ frp 服务器配置（设置 → 远程连接）：
   `tools/smoke/`，性能与视觉对比放 `tools/perf/`，接口探测放 `tools/probe/`，
   生产部署放 `tools/deploy/`；一切临时产物落 `tools/_scratch/`（已 gitignore）
 - **测试**：`pytest tests/ -q`（基线 **744 passed / 36 failed / 13 errors**，49 个
-  非通过项均为环境缺依赖的既有状态，见 AGENTS.md §5.2）；GUI 冒烟
-  `python windows/tools/smoke_fluent_mainwindow.py`（offscreen）；
+  非通过项均为环境缺依赖的既有状态，见 AGENTS.md §5.2）；GUI 冒烟用
+  `python tools/run_with_qt.py run tools/smoke/smoke_<name>.py`（offscreen，
+  需依赖齐全的解释器，Qt 内联引导见 docs/Qt内联引导说明.md）；
   真机截图 `python tools/perf/shot_fluent_mainwindow.py`
 - **解释器**：PATH 上的 `python` 是 3.8-32bit 不可用，必须显式写全路径
   （GUI/采集用 `E:\ANACONDA\python.exe`，业务依赖最全的是 miniconda，见 AGENTS.md §5.1）

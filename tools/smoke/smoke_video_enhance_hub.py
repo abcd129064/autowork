@@ -18,7 +18,7 @@
   2b. 真构造一层 ToolHub，把内外两颗弹出按钮换算到同一坐标系验不重叠
       （ToolHub 构造失败时跳过不判失败：它还挂着别的会话在改的工作区）
   3. 五子页 switchTo 往返、paramsChanged 广播、detach_workers 不抛
-  4. 八处注册点 A~H（tool_hub / main_window×2 / hub_popout / app_settings /
+  4. 八处注册点 A~H（tool_hub×2 / main_window×2 / hub_popout / app_settings /
      settings_mixin / hub_pages / shutdown）
   5. nav_icons 双覆盖：toolHub 六键、videoEnhanceHub 五键（少一个退回内嵌 Pivot）
   6. HubPopoutWindow 拿到该 nav_icons 后是左侧子导航形态
@@ -374,10 +374,16 @@ def main() -> int:
           '("ffmpeg_path", "ffmpeg", "file")' in hp_src
           and '("ffprobe_path", "ffprobe", "file")' in hp_src)
 
-    # G：主窗口冒烟脚本的工作区计数
-    g_src = _read("windows", "tools", "smoke_fluent_mainwindow.py")
-    check("4.G1 smoke_fluent_mainwindow 计数已从 4 更新到 6",
-          "th.stack.count() == 6" in g_src and "th.stack.count() == 4" not in g_src)
+    # G：工具页工作区总数。原先是读 windows/tools/smoke_fluent_mainwindow.py
+    # 里写死的 th.stack.count()（该脚本已下线），改成直接数 tool_hub 的
+    # addPage——写死数字的坑就在这：并发会话加了「视频修复」没人
+    # 同步，冒烟反而掩盖漏注册。
+    add_lines = [l.strip() for l in tool_src.splitlines()
+                 if l.strip().startswith("self.addPage(self.")]
+    check("4.G1 ToolHub 注册六个工作区且含画质提升",
+          len(add_lines) == 6
+          and f'self.addPage(self.video_enhance_work, "{TAB_TEXT}")' in add_lines,
+          add_lines)
 
     # H：关窗清理（漏了这里，关窗后 ffmpeg 子进程还在跑）
     miss_h = [a for a in WORKER_ATTRS if f"'{a}'" not in shut_src]
