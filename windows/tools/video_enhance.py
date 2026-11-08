@@ -41,27 +41,27 @@ class EnhanceCancelled(Exception):
 # 去噪算法。两级串联那一项是给老片用的：atadenoise 先按时序抹掉大面积噪点，
 # hqdn3d 再收拾残余，单开任何一个都不够。
 DENOISE_ALGOS = [
-    ("hqdn3d", "hqdn3d（快 · 通用）"),
-    ("atadenoise", "atadenoise（时序自适应）"),
-    ("vaguedenoiser", "vaguedenoiser（小波）"),
-    ("nlmeans", "nlmeans（质量高 · 极慢）"),
-    ("bm3d", "bm3d（最强 · 最慢）"),
-    ("atadenoise+hqdn3d", "两级：atadenoise + hqdn3d（老片）"),
+    ("hqdn3d", "hqdn3d"),
+    ("atadenoise", "atadenoise"),
+    ("vaguedenoiser", "vaguedenoiser"),
+    ("nlmeans", "nlmeans"),
+    ("bm3d", "bm3d"),
+    ("atadenoise+hqdn3d", "atadenoise + hqdn3d"),
 ]
 
 # 锐化算法。unsharp+cas 是「强锐化」预设用的组合：USM 提边缘，cas 再补对比度自适应
 # 那一层，比单独把 cas 拉到 1.5 更不容易出白边。
 SHARPEN_ALGOS = [
-    ("cas", "cas（对比度自适应 · 推荐）"),
-    ("unsharp", "unsharp（传统 USM）"),
-    ("unsharp+cas", "两级：USM + cas（强锐化）"),
+    ("cas", "cas"),
+    ("unsharp", "unsharp"),
+    ("unsharp+cas", "unsharp + cas"),
 ]
 
 SCALE_ALGOS = [
-    ("lanczos", "lanczos（推荐）"),
-    ("spline", "spline（更锐 · 易振铃）"),
-    ("bicubic", "bicubic（快）"),
-    ("area", "area（缩小用）"),
+    ("lanczos", "lanczos"),
+    ("spline", "spline"),
+    ("bicubic", "bicubic"),
+    ("area", "area"),
 ]
 
 # x264/x265 的速度档；每上一档约慢一倍、同 CRF 体积小 5~10%
@@ -78,49 +78,49 @@ SVT_PRESETS = [str(i) for i in range(14)]
 # hw:           需要额外做一次真实编码测试，编译进来 ≠ 机器上有对应驱动。
 ENCODERS = {
     "libx264": {
-        "label": "libx264（CPU · 兼容性最好）", "quality_flag": "-crf",
+        "label": "libx264", "quality_flag": "-crf",
         "presets": X264_PRESETS, "two_pass": True, "hw": False,
         "crf_hint": "视觉无损 16~18 · 推荐 18~20 · 网络分发 23",
     },
     "libx265": {
-        "label": "libx265（CPU · 同质量体积小 30%）", "quality_flag": "-crf",
+        "label": "libx265", "quality_flag": "-crf",
         "presets": X264_PRESETS, "two_pass": True, "hw": False,
         "crf_hint": "比 x264 大 2~4 才是同等观感",
     },
     "h264_nvenc": {
-        "label": "h264_nvenc（NVIDIA · 快）", "quality_flag": "-cq",
+        "label": "h264_nvenc", "quality_flag": "-cq",
         "presets": NVENC_PRESETS, "two_pass": False, "hw": True,
         "crf_hint": "CQ 18~22 常用",
     },
     "hevc_nvenc": {
-        "label": "hevc_nvenc（NVIDIA · H.265）", "quality_flag": "-cq",
+        "label": "hevc_nvenc", "quality_flag": "-cq",
         "presets": NVENC_PRESETS, "two_pass": False, "hw": True,
         "crf_hint": "CQ 20~26 常用",
     },
     "av1_nvenc": {
-        "label": "av1_nvenc（NVIDIA · AV1，需 40 系以上）", "quality_flag": "-cq",
+        "label": "av1_nvenc", "quality_flag": "-cq",
         "presets": NVENC_PRESETS, "two_pass": False, "hw": True,
         "crf_hint": "CQ 26~32 常用",
     },
     "libsvtav1": {
-        "label": "libsvtav1（CPU · AV1，很慢）", "quality_flag": "-crf",
+        "label": "libsvtav1", "quality_flag": "-crf",
         "presets": SVT_PRESETS, "two_pass": False, "hw": False,
         "crf_hint": "CRF 26~34 常用，preset 0~13 越小越慢",
     },
 }
 
-CONTAINERS = [("mp4", "mp4（+faststart，网络播放友好）"),
-              ("mkv", "mkv（封装宽松，不怕中断）")]
+CONTAINERS = [("mp4", "mp4"),
+              ("mkv", "mkv")]
 
-AUDIO_MODES = [("copy", "直接复制（-c:a copy）"),
+AUDIO_MODES = [("copy", "直接复制"),
                ("aac", "AAC 重编码"),
-               ("none", "去除音轨（-an）")]
+               ("none", "去除音轨")]
 
 # 画质预设：每一项都是对 default_params() 的覆盖，选预设 = 批量写参数。
 # 引擎本身只认参数不认预设名，所以 UI 手动改任何一个滑块都能自然落到「自定义」。
 PRESETS = {
     "off": {
-        "label": "关闭（仅转码）",
+        "label": "关闭",
         "desc": "只换编码器或压体积，画质不动，最快",
         "params": {"denoise_on": False, "sharpen_on": False, "color_on": False},
     },
@@ -136,7 +136,7 @@ PRESETS = {
                    "brightness": 0.0, "gamma": 1.0},
     },
     "standard": {
-        "label": "标准增强（推荐）",
+        "label": "标准增强",
         "desc": "默认值，台球录像通用",
         "params": {"denoise_on": True, "denoise_algo": "hqdn3d",
                    "denoise_luma": 1.5, "denoise_chroma": 1.5,
@@ -410,7 +410,7 @@ def probe(path, ffprobe):
         elif st.get("codec_type") == "audio" and not info["audio_codec"]:
             info["audio_codec"] = st.get("codec_name") or ""
     if vstream is None:
-        info["reason"] = "没有可用的视频流（可能是纯音频或封面图流）"
+        info["reason"] = "没有可用的视频流，可能是纯音频或封面图流"
         return info
     fmt = data.get("format") or {}
     info["width"] = int(vstream.get("width") or 0)
@@ -439,7 +439,7 @@ def probe(path, ffprobe):
         return info
     if info["duration"] <= 0:
         # 时长拿不到就没法算目标体积模式的码率，CRF 模式仍然能跑，所以只警告不失败
-        info["reason"] = "无法读取时长，「目标体积」模式不可用（CRF 模式仍可跑）"
+        info["reason"] = "无法读取时长，「目标体积」模式不可用，CRF 模式仍可跑"
     info["ok"] = True
     return info
 
@@ -994,7 +994,7 @@ def cleanup_passlog(passlogfile):
 
 # ==================== 质量评测与抽帧 ====================
 
-METRICS = [("vmaf", "VMAF（越高越好，>93 优秀）"),
+METRICS = [("vmaf", "VMAF"),
            ("psnr", "PSNR dB"),
            ("ssim", "SSIM")]
 

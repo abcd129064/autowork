@@ -69,7 +69,7 @@ _STATES = {
     "ready": ("就绪", _C_ACCENT),
     "running": ("增强中", _C_ACCENT),
     "done": ("已完成", _C_SUCCESS),
-    "skipped": ("已跳过（输出已存在）", _C_MUTED),
+    "skipped": ("已跳过：输出已存在", _C_MUTED),
     "failed": ("失败", _C_DANGER),
 }
 
@@ -444,7 +444,7 @@ class EnhanceTaskPage(VePage):
         self.btn_open_out.clicked.connect(self._on_open_out)
         bottom.addWidget(self.btn_open_out)
         self.btn_copy_cmd = PushButton(FluentIcon.COPY, "复制命令行", card)
-        self.btn_copy_cmd.setToolTip("把选中行（或第一行）的完整 ffmpeg 命令复制到剪贴板")
+        self.btn_copy_cmd.setToolTip("把选中行的完整 ffmpeg 命令复制到剪贴板；没有选中时用第一行")
         self.btn_copy_cmd.clicked.connect(self._on_copy_cmd)
         bottom.addWidget(self.btn_copy_cmd)
         cv.addLayout(bottom)
@@ -576,8 +576,8 @@ class EnhanceTaskPage(VePage):
         p = self._hub.params
         warn = []
         if p.get("interp_on"):
-            warn.append("已开启补帧：运动补偿插帧在 1080p 上约 0.1x 实时"
-                        "（10 分钟视频要跑 100 分钟），且高速小球容易插帧撕裂")
+            warn.append("已开启补帧：运动补偿插帧在 1080p 上约 0.1x 实时，"
+                        "10 分钟视频要跑 100 分钟；且高速小球容易插帧撕裂")
         if p.get("scale_on") and p.get("scale_mode") == "ratio" \
                 and float(p.get("scale_ratio") or 0) >= 2:
             warn.append(f"放大 {p.get('scale_ratio')}x：像素数按平方增长，"
@@ -617,7 +617,7 @@ class EnhanceTaskPage(VePage):
                              filt=VIDEO_FILTER)
 
     def _on_add_dir(self):
-        self._hub.pick_paths("选择视频所在目录（递归收集常见视频后缀）",
+        self._hub.pick_paths("选择视频所在目录，会递归收集常见视频后缀",
                              self._add_dir, mode="dir")
 
     def _add_dir(self, paths):
@@ -651,7 +651,7 @@ class EnhanceTaskPage(VePage):
                           "reason": "", "dst": "", "pct": 0, "speed": 0.0,
                           "elapsed": 0.0, "checked": True})
         if not added:
-            self._hub.info("没有新增文件（重复添加或文件已不存在）", "info")
+            self._hub.info("没有新增文件：都是重复添加，或文件已不存在", "info")
             return
         first = len(self._hub.rows)
         self._hub.rows.extend(added)
@@ -706,7 +706,7 @@ class EnhanceTaskPage(VePage):
     def _on_clear(self):
         if not self._hub.rows:
             return
-        box = MessageBox("清空任务列表", "确定移除全部行？（不会删除任何已生成的输出文件）", self)
+        box = MessageBox("清空任务列表", "确定移除全部行？不会删除任何已生成的输出文件。", self)
         box.yesButton.setText("清空")
         box.cancelButton.setText("取消")
         if box.exec():
@@ -753,7 +753,7 @@ class EnhanceTaskPage(VePage):
             ("item_failed", self._on_item_failed),
             ("finished_ok", self._on_batch_done)], row_map=run_rows)
         self._sync_buttons()
-        hub.log(f"[画质提升] 开始批量增强 {len(run_rows)} 个文件（{ve.summarize_params(p)}）")
+        hub.log(f"[画质提升] 开始批量增强 {len(run_rows)} 个文件：{ve.summarize_params(p)}")
 
     def _on_progress(self, i, pct, speed):
         row = self._hub.row_of(W_ENHANCE, i)
@@ -822,7 +822,7 @@ class EnhanceTaskPage(VePage):
             return
         if not w.isRunning():
             return
-        self.append_line("… 正在停止（终止 ffmpeg 子进程）...")
+        self.append_line("… 正在停止，终止 ffmpeg 子进程...")
         self.btn_stop.setEnabled(False)
         w.requestInterruption()
 
@@ -849,7 +849,7 @@ class EnhanceTaskPage(VePage):
             except Exception:
                 pass
         else:
-            self._hub.info(f"输出目录还不存在：{folder or '（未确定）'}", "info")
+            self._hub.info(f"输出目录还不存在：{folder or '未确定'}", "info")
 
     def _on_copy_cmd(self):
         i = self.selected_row()
@@ -868,15 +868,13 @@ class EnhanceTaskPage(VePage):
 class FilterPage(VePage):
     """滤镜调参：预设 + 去噪 / 锐化 / 放大 / 色彩 / 补帧 + -vf 实时预览"""
 
-    _RATIOS = [(1.5, "1.5x"), (2.0, "2x（1080p→2160p，耗时约 ×4）"),
-               (3.0, "3x"), (4.0, "4x")]
-    _INTERP_MODES = [("mci", "mci（运动补偿 · 质量高 · 极慢）"),
-                     ("blend", "blend（快 10 倍 · 会有重影）")]
+    _RATIOS = [(1.5, "1.5x"), (2.0, "2x"), (3.0, "3x"), (4.0, "4x")]
+    _INTERP_MODES = [("mci", "mci"), ("blend", "blend")]
 
     def __init__(self, hub, parent=None):
         super().__init__(hub, "滤镜调参",
-                        "滤镜固定顺序：去噪 → 放大 → 锐化 → 色彩 → 补帧"
-                        "（先降噪再放大，避免把噪声一起放大；锐化放在放大之后，锐的是插值边缘）",
+                        "滤镜固定顺序：去噪 → 放大 → 锐化 → 色彩 → 补帧。"
+                        "先降噪再放大，避免把噪声一起放大；锐化放在放大之后，锐的是插值边缘。",
                         parent)
         self.setObjectName("veFilterPage")
         body, lay = self.add_scrolled_body()
@@ -959,7 +957,7 @@ class FilterPage(VePage):
             r = _field(card, label)
             r.addWidget(w, 1)
             cv.addLayout(r)
-        cv.addWidget(_hint(card, "时序强度过高会拖影（快速移动的球会糊尾）"))
+        cv.addWidget(_hint(card, "时序强度过高会拖影，快速移动的球会糊尾"))
         self._denoise_widgets = (self.cmb_denoise, self.sld_luma, self.sld_chroma,
                                  self.sld_temporal)
         return card
@@ -998,7 +996,7 @@ class FilterPage(VePage):
         r.addWidget(self.spin_ly)
         r.addWidget(self.sld_usm, 1)
         cv.addLayout(r)
-        cv.addWidget(_hint(card, "两个整数是 unsharp 的 luma_msize_x/y（仅 unsharp 生效）；"
+        cv.addWidget(_hint(card, "两个整数是 unsharp 的 luma_msize_x/y，只有 unsharp 会读；"
                                  "滑块是强度，cas 用 sharpen_amount、unsharp 用 usm_amount"))
         cv.addWidget(_hint(card, "⚠ cas 强度 > 1.2 时暗部会出现振铃与颗粒放大，建议配合去噪一起用"))
         self._sharpen_widgets = (self.cmb_sharpen, self.sld_sharpen, self.spin_lx,
@@ -1053,7 +1051,7 @@ class FilterPage(VePage):
         return card
 
     def _build_color(self, parent):
-        card, cv, right = _card(parent, "色彩（eq）")
+        card, cv, right = _card(parent, "色彩 eq")
         self.sw_color = self._switch(card, "color_on")
         right.addWidget(self.sw_color)
         self.sld_contrast = _FSlider(0.5, 2.0, 0.01, 1.0, card)
@@ -1076,7 +1074,7 @@ class FilterPage(VePage):
         return card
 
     def _build_interp(self, parent):
-        card, cv, right = _card(parent, "补帧（minterpolate）")
+        card, cv, right = _card(parent, "补帧 minterpolate")
         self.sw_interp = self._switch(card, "interp_on")
         right.addWidget(self.sw_interp)
         r = QHBoxLayout()
@@ -1094,8 +1092,8 @@ class FilterPage(VePage):
         r.addWidget(self.cmb_interp)
         r.addStretch(1)
         cv.addLayout(r)
-        cv.addWidget(_hint(card, "⚠ 运动补偿插帧在 1080p 上大约 0.1x 实时速度"
-                                 "（10 分钟视频要跑 100 分钟），且台球这种高速小球容易出现"
+        cv.addWidget(_hint(card, "⚠ 运动补偿插帧在 1080p 上大约 0.1x 实时速度，"
+                                 "10 分钟视频要跑 100 分钟；且台球这种高速小球容易出现"
                                  "插帧撕裂。默认关闭，开启前请确认时长可接受。"))
         self._interp_widgets = (self.spin_fps, self.cmb_interp)
         return card
@@ -1107,8 +1105,8 @@ class FilterPage(VePage):
         self.btn_copy_vf.clicked.connect(self._on_copy_vf)
         right.addWidget(self.btn_copy_vf)
         self.btn_frame = PushButton(FluentIcon.PHOTO, "抽一帧预览", card)
-        self.btn_frame.setToolTip("在指定时间点上各跑一次单帧 ffmpeg（原帧 / 过完滤镜链），"
-                                  "秒级出图，结果并排显示在「质量对比」子页")
+        self.btn_frame.setToolTip("在指定时间点上各跑一次单帧 ffmpeg，一份取原帧、一份过完"
+                                  "滤镜链，秒级出图，结果并排显示在「质量对比」子页")
         self.btn_frame.clicked.connect(self._on_preview)
         right.addWidget(self.btn_frame)
 
@@ -1156,7 +1154,7 @@ class FilterPage(VePage):
         }, [("frames_ready", hub.compare_page.set_frames)])
         hub.task_page.append_line(f"▶ 抽帧预览 t={self.spin_t.value()}s: "
                                   f"{os.path.basename(src)}")
-        hub.info("预览生成中（秒级）…", "info")
+        hub.info("预览生成中，通常几秒…", "info")
         hub.switchTo(hub.compare_page)
 
     def refresh(self):
@@ -1220,7 +1218,7 @@ class FilterPage(VePage):
         try:
             chain = ve.build_filter_chain(dict(p), info)
         except ve.EnhanceError as e:
-            chain = f"（无法生成：{e}）"
+            chain = f"无法生成滤镜链：{e}"
         self.vf_edit.setText(f'-vf "{chain}"')
         # 耗时的量级只由「是否放大 / 是否补帧」决定，给个数比什么都不说强
         cost = []
@@ -1230,9 +1228,9 @@ class FilterPage(VePage):
             h = ve.target_height(dict(p), info or {})
             src_h = int((info or {}).get("height") or 0)
             if src_h and h:
-                cost.append(f"放大到 {h}p（像素 ×{(h / src_h) ** 2:.1f}）")
+                cost.append(f"放大到 {h}p，像素数 ×{(h / src_h) ** 2:.1f}")
         self.lbl_cost.setText("预估：" + "，".join(cost) if cost else
-                              "预估：≈ 1.4x 实时（不放大不补帧）")
+                              "预估：≈ 1.4x 实时，即不放大也不补帧")
         self.btn_frame.setEnabled(self._hub.ready() and bool(src))
 
 
@@ -1241,9 +1239,9 @@ class FilterPage(VePage):
 class EncodePage(VePage):
     """编码输出：编码器 / 码率模式 / 音频容器 / 输出命名 + 完整命令预览"""
 
-    _PIX_FMTS = [("yuv420p", "yuv420p（播放器兼容 · 推荐）"),
-                 ("yuv422p", "yuv422p（保留色度采样）"),
-                 ("yuv444p", "yuv444p（无色度损失 · 体积大）")]
+    _PIX_FMTS = [("yuv420p", "yuv420p"),
+                 ("yuv422p", "yuv422p"),
+                 ("yuv444p", "yuv444p")]
     _OUT_MODES = [("source", "源文件同目录"), ("videos", "设置里的 videos_dir"),
                   ("custom", "自定义目录")]
     _ON_EXIST = [("skip", "跳过"), ("overwrite", "覆盖"), ("rename", "加序号")]
@@ -1292,8 +1290,8 @@ class EncodePage(VePage):
         cv.addWidget(self.lbl_preset_hint)
 
         r = _field(card, "码率模式")
-        self.cmb_rate = _combo(card, [("crf", "CRF（恒定质量 · 推荐）"),
-                                      ("size", "目标体积（两遍编码）")], 240)
+        self.cmb_rate = _combo(card, [("crf", "CRF"),
+                                      ("size", "目标体积")], 240)
         self.cmb_rate.currentIndexChanged.connect(
             lambda _i: self._set("rate_mode", _combo_val(self.cmb_rate, "crf")))
         r.addWidget(self.cmb_rate)
@@ -1374,7 +1372,7 @@ class EncodePage(VePage):
         self.sw_faststart.checkedChanged.connect(
             lambda on: self._set("faststart", bool(on)))
         r.addWidget(self.sw_faststart)
-        r.addWidget(_hint(card, "+faststart（仅 mp4）"))
+        r.addWidget(_hint(card, "+faststart，仅对 mp4 生效"))
         r.addStretch(1)
         cv.addLayout(r)
 
@@ -1444,7 +1442,7 @@ class EncodePage(VePage):
 
     def _build_cmd(self, parent):
         card, cv, right = _card(parent, "最终命令预览",
-                               "取任务列表里选中行（没选中就用第一行）的真实路径拼出来")
+                               "取任务列表里选中行的真实路径拼出来，没选中就用第一行")
         self.btn_copy = PushButton(FluentIcon.COPY, "复制完整命令", card)
         self.btn_copy.clicked.connect(self._on_copy)
         right.addWidget(self.btn_copy)
@@ -1474,7 +1472,7 @@ class EncodePage(VePage):
             for name, spec in ve.ENCODERS.items():
                 # 探测过且明确失败 → 置灰但保留在列表里，让用户看得到「为什么不能用」
                 bad = name in tested and not tested[name][0]
-                text = spec["label"] + ("（不可用）" if bad else "")
+                text = spec["label"] + (" · 不可用" if bad else "")
                 self.cmb_encoder.addItem(text, userData=name)
                 # qfw 的 ComboBox 是 QPushButton 不是 QComboBox，没有 view()/model()，
                 # 置灰只能走它自己的 setItemEnabled；原因文案没有单项 tooltip 可挂，
@@ -1521,19 +1519,19 @@ class EncodePage(VePage):
 
         i = hub.task_page.selected_row()
         cmd = hub.preview_command(i if i is not None else 0, multiline=True)
-        self.cmd_view.setPlainText(cmd or "（任务列表为空，先在「增强任务」里添加文件）")
+        self.cmd_view.setPlainText(cmd or "任务列表为空，先在「增强任务」里添加文件")
 
         src = hub.first_ok_source()
         info = hub.info_of(src) if src else None
         try:
             dst = ve.resolve_output_path(src or "<源文件>", dict(p), info,
-                                         hub.videos_dir) or "（按当前策略会被跳过）"
+                                         hub.videos_dir) or "<按当前策略会被跳过>"
         except Exception:
             dst = "<输出文件>"
         self.lbl_tpl_out.setText(f"示例输出：{dst}")
         dur = float((info or {}).get("duration") or 0)
         kbps = ve.target_bitrate_kbps(p.get("target_mb"), dur) if dur else 0
-        self.lbl_kbps.setText(f"≈ {kbps} kbps（按 {_fmt_dur(dur)} 时长算）" if kbps
+        self.lbl_kbps.setText(f"≈ {kbps} kbps，按 {_fmt_dur(dur)} 时长算" if kbps
                               else "选中一条已探测成功的任务后才能算出码率")
 
     def _rebuild_presets(self, p):
@@ -1609,8 +1607,8 @@ class EnvPage(VePage):
 
         self.lbl_source = _hint(card, "")
         cv.addWidget(self.lbl_source)
-        cv.addWidget(_hint(card, "同一份路径也在「设置 → 应用配置 → 路径配置」里出现两行"
-                                 "（ffmpeg / ffprobe），两处编辑的是同一个 paths.json 键，"
+        cv.addWidget(_hint(card, "同一份路径也在「设置 → 应用配置 → 路径配置」里出现 "
+                                 "ffmpeg 和 ffprobe 两行，两处编辑的是同一个 paths.json 键，"
                                  "改哪边都生效。本页的「浏览」是快捷入口，不是第二份配置。"))
         return card
 
@@ -1628,7 +1626,7 @@ class EnvPage(VePage):
         ff = self.ffmpeg_edit.text().strip()
         fp = self.ffprobe_edit.text().strip()
         self._hub.save({"ffmpeg_path": ff, "ffprobe_path": fp})
-        self._hub.info("已写入 config/paths.json（留空表示走 PATH 探测）", "success")
+        self._hub.info("已写入 config/paths.json；留空表示走 PATH 探测", "success")
 
     def _on_redetect(self):
         """改路径 → 重新定位 → 后台跑一次能力探测
@@ -1689,7 +1687,7 @@ class EnvPage(VePage):
             self._enc_labels[name] = lab
         cv.addLayout(grid)
         cv.addWidget(_hint(card, "注意：编码器编译进来 ≠ 能跑。*_nvenc 还要有 NVIDIA 驱动，"
-                                 "所以每个都真编一帧黑场才算数（单次 < 200ms）；"
+                                 "所以每个都真编一帧黑场才算数，单次不到 200ms；"
                                  "失败的那一项会在「编码输出」里置灰并带上 stderr 摘要"))
         return card
 
@@ -1705,7 +1703,7 @@ class EnvPage(VePage):
             grid.addWidget(lab, i // 5, i % 5)
             self._filter_labels[name] = lab
         cv.addLayout(grid)
-        cv.addWidget(_hint(card, "探测结果缓存在内存（不写 settings，避免与真实环境脱节）；"
+        cv.addWidget(_hint(card, "探测结果只缓存在内存、不写 settings，避免与真实环境脱节；"
                                  "只在三种时机重跑：打开本页、点「重新探测」、ffmpeg 路径被修改"))
         return card
 
@@ -1714,10 +1712,10 @@ class EnvPage(VePage):
         cv.addWidget(_hint(card, "✘ ffmpeg 未找到：「增强任务」的开始按钮置灰，本页页顶常驻红色提示，"
                                  "并给出两条出路 —— ① 到本页填可执行文件路径；"
                                  "② 到「设置 → 路径配置」填 ffmpeg 行。"
-                                 "本工具不会自动下载、不会自动装包（AGENTS.md §3.2）。"))
+                                 "本工具不会自动下载、不会自动装包，这是 AGENTS.md §3.2 的硬约束。"))
         cv.addWidget(_hint(card, "⚠ ffmpeg 找到但缺 libvmaf：不影响增强主流程，"
-                                 "只把「质量对比」子页的 VMAF 选项置灰，PSNR / SSIM 仍可用"
-                                 "（这两个是 ffmpeg 内建，不依赖外部库）。"))
+                                 "只把「质量对比」子页的 VMAF 选项置灰，PSNR / SSIM 仍可用 —— "
+                                 "这两个是 ffmpeg 内建，不依赖外部库。"))
         return card
 
     def refresh(self):
@@ -1742,7 +1740,7 @@ class EnvPage(VePage):
 
         ff_set = bool(str(settings.get("ffmpeg_path") or "").strip())
         self.lbl_source.setText(
-            ("来源：设置项（config/paths.json）" if ff_set else
+            ("来源：设置项 config/paths.json" if ff_set else
              "来源：PATH 探测 —— 当前值尚未写入设置，点「写入设置」可固化，"
              "避免换 PATH 后失效"))
         _paint(self.ffmpeg_tag, os.path.basename(hub.ffmpeg) if hub.ffmpeg else "未定位",
@@ -1755,8 +1753,8 @@ class EnvPage(VePage):
         build = caps.get("build") or ""
         self._ver_labels["build"].setText(build[:600] or "—")
         self._ver_labels["vmaf"].setText(
-            "libvmaf 已启用（「质量对比」可用 VMAF）" if caps.get("has_vmaf")
-            else "libvmaf 未启用（VMAF 不可用，PSNR / SSIM 仍可用）")
+            "libvmaf 已启用，「质量对比」可用 VMAF" if caps.get("has_vmaf")
+            else "libvmaf 未启用，VMAF 不可用，PSNR / SSIM 仍可用")
 
         filters = set(caps.get("filters") or [])
         for name, lab in self._filter_labels.items():
@@ -1775,7 +1773,7 @@ class EnvPage(VePage):
                 _paint(lab, f"{'✓' if ok else '✗'} {name}", _C_SUCCESS if ok else _C_DANGER)
                 lab.setToolTip(why or "")
             elif name in compiled:
-                _paint(lab, f"○ {name}（未试编）", _C_MUTED)
+                _paint(lab, f"○ {name} · 未试编", _C_MUTED)
             else:
                 _paint(lab, f"✗ {name}", _C_DANGER)
                 lab.setToolTip("这个 ffmpeg 构建里没有编译该编码器")
@@ -1849,8 +1847,8 @@ class ComparePage(VePage):
         card2, c2, _r2 = _card(body, "抽帧对比", "同一时间点各跑一次单帧 ffmpeg 输出 PNG")
         panes = QHBoxLayout()
         panes.setSpacing(12)
-        self.pane_src = _ImagePane("源（前）", card2)
-        self.pane_dst = _ImagePane("输出（后）", card2)
+        self.pane_src = _ImagePane("源 · 处理前", card2)
+        self.pane_dst = _ImagePane("输出 · 处理后", card2)
         panes.addWidget(self.pane_src, 1)
         panes.addWidget(self.pane_dst, 1)
         c2.addLayout(panes)
@@ -1866,7 +1864,7 @@ class ComparePage(VePage):
         c3.addWidget(self.log_view)
         lay.addWidget(card3)
 
-        card4, c4, right4 = _card(body, "历史记录", "仅本地留档（config/misc.json），不参与任何同步")
+        card4, c4, right4 = _card(body, "历史记录", "仅本地留档在 config/misc.json，不参与任何同步")
         self.btn_hist_clear = PushButton(FluentIcon.DELETE, "清空", card4)
         self.btn_hist_clear.clicked.connect(self._on_clear_history)
         right4.addWidget(self.btn_hist_clear)
@@ -2010,11 +2008,11 @@ class ComparePage(VePage):
         bits = [f"t={_fmt_dur(r.get('t'))}"]
         if r.get("reason"):
             bits.append(f"⚠ {r['reason']}")
-        bits.append(f"PNG 落 {os.path.dirname(src_png or dst_png) or '（临时目录）'}")
+        bits.append(f"PNG 落 {os.path.dirname(src_png or dst_png) or '临时目录'}")
         self.lbl_png.setText(" · ".join(bits))
         hub.task_page.append_line(
             f"▶ 抽帧完成：{os.path.basename(src_png)} / {os.path.basename(dst_png)}"
-            + (f"（{r['reason']}）" if r.get("reason") else ""))
+            + (f" · {r['reason']}" if r.get("reason") else ""))
 
     def _on_stop(self):
         w = self._hub.worker(W_CMP)
@@ -2270,7 +2268,7 @@ class VideoEnhanceHub(PivotPage):
         if not (src and dst):
             return
         entry = {"time": datetime.now().strftime("%m-%d %H:%M"), "src": src,
-                 "dst": dst, "summary": "（仅评测，非本工具产出）",
+                 "dst": dst, "summary": "仅评测，非本工具产出",
                  "size_in": os.path.getsize(src) if os.path.isfile(src) else 0,
                  "size_out": os.path.getsize(dst) if os.path.isfile(dst) else 0,
                  "elapsed": 0, "vmaf": None, "psnr": None, "ssim": None}
@@ -2306,7 +2304,7 @@ class VideoEnhanceHub(PivotPage):
             v = (s.get(key) or "").strip()
             missing.append(f"{exe} 路径填了但文件不存在：{v}" if v
                            else f"{exe} 没填且 PATH 里也找不到")
-        return "；".join(missing) + "（到「环境检测」页填路径，或把它加进 PATH）"
+        return "；".join(missing) + "；到「环境检测」页填路径，或把它加进 PATH"
 
     def on_env_ready(self, result):
         self.release(W_ENV)
@@ -2321,7 +2319,7 @@ class VideoEnhanceHub(PivotPage):
         t = (self.caps.get("tests") or {}).get(self.params.get("encoder"))
         if t is not None and not t[0]:
             self.info(f"当前编码器 {self.params.get('encoder')} 在这台机器上跑不通，"
-                      f"请到「编码输出」换一个（原因：{t[1]}）", "warning", duration=6000)
+                      f"请到「编码输出」换一个；原因：{t[1]}", "warning", duration=6000)
 
     def refresh_env(self):
         self.caps = {}

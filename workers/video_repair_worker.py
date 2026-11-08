@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""视频修复 Worker（工具页「视频修复」工作区）
+"""视频修复 Worker，服务工具页「视频修复」工作区
 
 体检与修复都必须离开 UI 线程：mmap 扫起始码在几百 MB 的录像上是秒级操作，放在
 主线程会把整个 FluentWindow 冻住，连左侧导航都点不动。
 
-后端逻辑全在 windows.tools.video_repair（纯文件与子进程操作，不 import Qt），
+后端逻辑全在 windows.tools.video_repair，纯文件与子进程操作、不 import Qt；
 本文件只做「参数进 → 信号出」以及取消与异常的收口。
 """
 import os
@@ -12,7 +12,7 @@ import traceback
 
 from PySide6.QtCore import QThread, Signal
 
-# 体检结果里要带出去的帧统计字段（几千个偏移量本身不回传，界面用不上）
+# 体检结果只带帧统计字段：几千个偏移量本身不回传，界面用不上
 _FRAME_KEYS = ("frame_count", "gop_count", "median_frame", "last_vop_tail",
                "last_frame_incomplete", "is_h264")
 
@@ -26,13 +26,13 @@ class VideoRepairWorker(QThread):
 
     Signals:
         line(str): 终端逐行输出
-        probed(object): 体检结果 dict（仅 stage="probe"）
-        finished_ok(object): 修复报告 dict（仅 stage="repair"）
+        probed(object): 体检结果 dict，仅 stage="probe" 时发
+        finished_ok(object): 修复报告 dict，仅 stage="repair" 时发
         cancelled(): 用户取消，半成品输出已删除
         error(str): 失败原因，文案可直接展示
 
-    注意不要把业务信号命名成 finished——那是 QThread 原生信号，遮蔽过会崩
-    （本仓 NewLog/售后 worker 都踩过）。
+    注意不要把业务信号命名成 finished——那是 QThread 原生信号，遮蔽过会崩，
+    本仓 NewLog 与售后 worker 都踩过。
     """
 
     line = Signal(str)
@@ -81,7 +81,7 @@ class VideoRepairWorker(QThread):
             "has_moov": boxes.get("has_moov", False),
             "mdat_last": boxes.get("mdat_last", False),
             # 盒结构只回传可读摘要：完整列表在几百 MB 文件上可能有几十项
-            "box_list": [f"{t} @0x{p:X} ({s:,} B)"
+            "box_list": [f"{t} @0x{p:X} {s:,} B"
                          for t, p, s in (boxes.get("boxes") or [])[:12]],
             "payload_off": boxes.get("payload_off", 0),
             "payload_size": boxes.get("payload_size", 0),
@@ -105,11 +105,10 @@ class VideoRepairWorker(QThread):
                 result["vol_bytes"] = len(vol or b"")
                 if info["codec"] != "mpeg4":
                     result["ok"] = False
-                    result["reason"] = (f"参考文件编码是 {info['codec'] or '未知'}，"
-                                        f"需要 mpeg4（MPEG-4 Part 2）")
+                    result["reason"] = f"参考文件编码是 {info['codec'] or '未知'}，需要 mpeg4"
                 elif info["has_audio"]:
                     result["ok"] = False
-                    result["reason"] = "参考文件含音轨：流拷贝会丢音轨，本工具不处理"
+                    result["reason"] = "参考文件含音轨，流拷贝会丢音轨，本工具不处理"
                 elif not vol:
                     result["ok"] = False
                     result["reason"] = "参考文件里读不出 VOL 配置头，请换同机录制的正常文件"

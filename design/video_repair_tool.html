@@ -194,11 +194,18 @@
     <span class="badge g">无损 · 不转码</span>
     <span class="badge w">双注册：Pivot 页签 + 弹出窗口左侧子导航</span>
     <span class="badge d">依赖系统 ffmpeg / ffprobe</span>
-    <br>2026-11-06 · 对应实现 <span class="path">main_window/tool_hub.py</span>（工作区）+
-    <span class="path">windows/tools/video_repair.py</span>（后端）+
-    <span class="path">workers/video_repair_worker.py</span>（线程）
+    <br>2026-11-06 首版 · 2026-11-07 文案精简 · 对应实现 <span class="path">main_window/tool_hub.py</span> 工作区 +
+    <span class="path">windows/tools/video_repair.py</span> 后端 +
+    <span class="path">workers/video_repair_worker.py</span> 线程
     · 原理已在真实文件上验证：<span class="mono-i">20261105_195736.mp4</span> → 6574 帧 / 262.94 s / 0 解码错误 / 媒体字节 SHA-256 与原文件前缀完全一致
   </div>
+</div>
+
+<div class="note" style="border-left-color:var(--accent);">
+  <b>文案口径（2026-11-07 修订，下方画布已按此同步）：</b>界面上<b>不用括号式旁白</b>，一律改成
+  <span class="mono-i">·</span> 分隔的短句或逗号顺承；卡片说明压到两行以内，只留「为什么需要这个输入」与「填错会怎样」，
+  原理细节留给本文档与后端 docstring。耗时、兜底条件这类次要信息挪到<b>悬停提示</b>，不占正文。
+  终端输出同样去掉括号，字段之间用 <span class="mono-i">·</span> 或逗号分隔。
 </div>
 
 <div class="note">
@@ -254,6 +261,9 @@
             <h3>待修复文件</h3><span class="ch-sub">掉电截断、无 moov、mdat 吃到文件尾的 mp4</span>
             <div class="ch-right"><span class="tag on">可修复</span></div>
           </div>
+          <div class="hint" style="margin:0 0 8px;">
+            断电让 mp4 索引没写出来，文件有大小却打不开。媒体数据完好，补回配置头即可无损救回。
+          </div>
           <div class="fld">
             <label>损坏文件</label>
             <input class="inp mono ro" value="C:\Users\shen_zhe\Desktop\20261105_195736.mp4" readonly style="max-width:520px;">
@@ -261,15 +271,11 @@
             <button class="btn ico" title="重新体检">&#8635;</button>
           </div>
           <div class="probe">
-            <span class="kv">盒结构 <b>ftyp 28B</b> · <b>free 8B</b> · <b>mdat size=0（尾扩展）</b> · <b style="color:var(--danger)">moov 缺失</b></span>
-            <span class="kv">负载起点 <b>0x2C</b></span>
-            <span class="kv">负载 <b>14.0 MB</b></span>
-            <span class="kv">帧起始码 B6 <b>6575</b></span>
-            <span class="kv">GOP 起始码 B3 <b>549</b></span>
-            <span class="kv">末帧残留 <b>5695 B</b>（长度正常，随所属 GOP 丢弃）</span>
+            <span class="kv">盒结构：<b>ftyp @0x0 28 B</b> · <b>free @0x1C 8 B</b> · <b>mdat @0x24 14,680,064 B</b>｜<b style="color:var(--danger)">moov 缺失</b>｜负载 <b>0x2C</b> · <b>14.0 MB</b></span>
+            <span class="kv">码流：帧 <b>6575</b> 个｜GOP <b>549</b> 个｜中位帧长 <b>837 B</b>｜末帧残留 <b>5695 B</b> · 长度正常，随 GOP 丢弃</span>
           </div>
           <div class="hint" style="margin-top:8px;">
-            体检在选择文件后自动进行（后台线程 + mmap 扫描，不整文件读进内存）；结果决定「开始修复」是否可点。
+            体检在选择文件后自动进行，走后台线程 + mmap 扫描，不整文件读进内存；结果决定「开始修复」是否可点。
           </div>
         </div>
 
@@ -280,18 +286,17 @@
             <h3>参考文件</h3><span class="ch-sub">提供 VOL 配置头与帧率，必须与损坏文件同机同参数录制</span>
             <div class="ch-right"><span class="tag acc">VOL 48 B</span></div>
           </div>
+          <div class="hint" style="margin:0 0 8px;">
+            损坏文件缺配置头，分辨率与帧率要借同机录制的正常视频补上。分辨率不一致会花屏。
+          </div>
           <div class="fld">
-            <label>参考文件</label>
+            <label>正常视频</label>
             <input class="inp mono" value="C:\Users\shen_zhe\Desktop\20261031_235752.mp4" style="max-width:520px;">
             <button class="btn"><span class="bi">&#128193;</span>浏览</button>
-            <button class="btn sm"><span class="bi">&#128270;</span>自动发现</button>
+            <button class="btn sm" title="在同目录找最近的同编码正常视频"><span class="bi">&#128270;</span>自动发现</button>
           </div>
           <div class="probe">
-            <span class="kv">编码 <b>mpeg4 · Simple Profile · mp4v</b></span>
-            <span class="kv">分辨率 <b>960×542</b></span>
-            <span class="kv">帧率 <b>25 fps</b></span>
-            <span class="kv">muxer <b>Lavf58.76.100</b></span>
-            <span class="kv">音轨 <b>无</b></span>
+            <span class="kv">参数：<b>mpeg4</b> · <b>Simple Profile</b> · <b>960×542</b> · <b>25 fps</b>｜无音轨｜VOL <b>48 B</b></span>
           </div>
           <div class="hint" style="margin-top:8px;">
             <b>自动发现</b>：在损坏文件同目录内按修改时间倒序，挑第一个 <span class="mono-i">ffprobe codec_name=mpeg4</span> 且能正常读出 moov 的 mp4；
@@ -308,23 +313,29 @@
           <div class="grid2">
             <div>
               <div class="mini-lbl">尾部裁剪</div>
-              <div class="combo" style="max-width:300px;">自动裁到最近完整 GOP（推荐）</div>
-              <div class="hint" style="margin-top:4px;">另一档「裁到最后一个 VOP 起点」会留下悬空 GOP 头，解码改报 header damaged</div>
+              <div class="combo" style="max-width:300px;">自动裁到完整 GOP · 推荐</div>
+              <div class="hint" style="margin-top:4px;">另一档「裁到最后 VOP · 有损坏风险」会留下悬空 GOP 头，解码改报 header damaged</div>
             </div>
             <div>
-              <div class="mini-lbl">帧率（参考文件读不到时兜底）</div>
+              <div class="mini-lbl">封装帧率</div>
               <div style="display:flex;gap:10px;align-items:center;">
-                <div class="spin"><span class="sv">25</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></div>
-                <label class="ck"><span class="bx">&#10003;</span>修复后自动打开输出目录</label>
+                <div class="spin" title="参考文件无帧率时的兜底值"><span class="sv">25</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></div>
+                <span class="hint">参考文件无帧率时的兜底值</span>
               </div>
             </div>
             <div style="grid-column:1 / -1;">
               <div class="mini-lbl">输出文件</div>
               <div style="display:flex;gap:10px;align-items:center;">
                 <input class="inp mono" value="C:\Users\shen_zhe\Desktop\20261105_195736_repaired.mp4" style="max-width:520px;">
-                <button class="btn"><span class="bi">&#128193;</span>另存为</button>
+                <button class="btn ico" title="另存为…"><span class="bi">&#128193;</span></button>
+                <span class="mini-lbl" style="margin:0 0 0 12px;">完成后</span>
+                <label class="ck"><span class="bx">&#10003;</span>自动打开输出目录</label>
               </div>
               <div class="hint" style="margin-top:4px;">原文件永不改写；默认同目录同名加 <span class="mono-i">_repaired</span> 后缀</div>
+            </div>
+            <div style="grid-column:1 / -1;">
+              <label class="ck" title="逐帧解码确认不花屏，多花十几秒"><span class="bx">&#10003;</span>完整解码校验</label>
+              <span class="hint" style="margin-left:10px;">逐帧解码确认不花屏，多花十几秒</span>
             </div>
           </div>
           <div class="divider"></div>
@@ -332,7 +343,7 @@
             <button class="btn primary"><span class="bi">&#9654;</span>开始修复</button>
             <button class="btn"><span class="bi">&#128193;</span>打开输出目录</button>
             <button class="btn dis"><span class="bi">&#10005;</span>取消</button>
-            <span class="hint" style="margin-left:auto;">全程只读原文件 · 流拷贝不转码 · 14 MB 约 2 s</span>
+            <span class="hint" style="margin-left:auto;">原文件只读 · 流拷贝不转码</span>
           </div>
         </div>
 
@@ -347,14 +358,12 @@
             <div class="ch-right"><span class="tag off">空闲</span></div>
           </div>
           <div class="term" style="height:210px;">
-<span class="dim">[体检] 读取盒结构…</span>
-[体检] ftyp @0x0 (28 B) · free @0x1C (8 B) · mdat @0x24 (size=0 → 尾扩展)
-<span class="err">[体检] moov 缺失 —— 符合掉电截断特征</span>
-[体检] 负载 14,680,064 B，起点 0x2C；B6 帧起始码 6575 个，B3 GOP 起始码 549 个
-[体检] 最后一个 VOP @0xDFE9C1，其后 5,695 B 即到 EOF（中位帧长仅 837 B，末帧不偏短；但末帧之后再无起始码，无法自证写完，auto 档仍连同 GOP 一起丢）
-<span class="acc">[参考] C:\...\20261031_235752.mp4 → mpeg4 Simple Profile 960×542 25 fps，VOL 48 B</span>
-<span class="ok">[就绪] 可以开始修复：裁到最近 GOP @0xDFE9BA，将丢弃 5,702 B（悬空 GOP 头 + 半帧）</span>
-<span class="dim">等待操作…</span>
+<span class="dim">▶ 体检: C:\Users\shen_zhe\Desktop\20261105_195736.mp4</span>
+<span class="acc">[参考] 已自动发现同目录参考文件: C:\Users\shen_zhe\Desktop\20261031_235752.mp4</span>
+          </div>
+          <div class="hint" style="margin-top:6px;">
+            体检结论只落在卡片里那两行灰字，终端不重复刷一遍。末帧偏短与否只是启发式：末帧之后再无起始码，流本身无法自证写完，
+            所以 auto 档不论「明显偏短」还是「长度正常」都连同所属 GOP 一起丢，文案里不出现「完整」这种结论。
           </div>
         </div>
       </div>
@@ -395,13 +404,12 @@
             <input class="inp mono ro" value="C:\Users\shen_zhe\Desktop\20261105_195736.mp4" readonly style="max-width:480px;">
             <button class="btn"><span class="bi">&#128193;</span>浏览</button></div>
           <div class="probe">
-            <span class="kv">盒结构 <b>mdat 尾扩展 · moov 缺失</b></span>
-            <span class="kv">B6 <b>6575</b></span><span class="kv">GOP <b>549</b></span>
-            <span class="kv">负载 <b>14.0 MB</b></span>
+            <span class="kv">盒结构：<b>mdat 尾扩展</b>｜<b style="color:var(--danger)">moov 缺失</b>｜负载 <b>14.0 MB</b></span>
+            <span class="kv">码流：帧 <b>6575</b> 个｜GOP <b>549</b> 个｜末帧残留 <b>5695 B</b> · 长度正常，随 GOP 丢弃</span>
           </div>
         </div>
         <div class="card" style="opacity:.72;">
-          <div class="card-h"><span class="ch-ico">&#9881;</span><h3>修复参数</h3><span class="ch-sub">（以下卡片与画布 1 完全同构，此处省略）</span></div>
+          <div class="card-h"><span class="ch-ico">&#9881;</span><h3>修复参数</h3><span class="ch-sub">以下卡片与画布 1 完全同构，此处省略</span></div>
         </div>
       </div>
     </div>
@@ -409,55 +417,62 @@
 </div>
 
 <!-- ==================== 画布 3 ==================== -->
-<div class="section-label">画布 3 <span>四态 · 体检失败 / 修复中 / 修复成功（含无损校验报告）/ 环境缺失</span></div>
+<div class="section-label">画布 3 <span>四态 · 体检失败 / 修复中 / 修复成功 / 环境缺失。终端文案与实现逐字一致，字段间用 · 或逗号，不用括号</span></div>
 <div class="spec" style="padding:16px 18px;display:grid;grid-template-columns:1fr 1fr;gap:16px;">
   <div>
-    <div class="mini-lbl" style="font-weight:600;color:var(--danger);">① 体检失败（不可修复 / 不支持）</div>
+    <div class="mini-lbl" style="font-weight:600;color:var(--danger);">① 体检失败 · 不可修复或不支持</div>
     <div class="term" style="height:180px;">
-<span class="err">[体检] 已找到 moov @0x15507C9 —— 文件索引完整，不属于掉电截断</span>
-<span class="dim">[提示] 若仍打不开，多半是 mdat 内部损坏或播放器问题，本页不做猜测性修复</span>
-<span class="err">[体检] 编码为 h264，当前版本只支持 MPEG-4 Part 2(mp4v)</span>
-<span class="err">[体检] mdat 不是最后一个盒（后面还有 1,204 B），切点不可信</span>
-<span class="err">[体检] 含音轨（aac）：流拷贝方案会丢音轨，本页拒绝处理</span>
+<span class="err">✘ 已找到 moov 索引，不属于掉电截断。若仍打不开多半是 mdat 内部损坏，本工具不处理</span>
+<span class="err">✘ 码流是 H.264，当前只支持 MPEG-4 Part 2</span>
+<span class="err">✘ mdat 不是最后一个盒，媒体切点不可信</span>
+<span class="err">✘ 参考文件含音轨，流拷贝会丢音轨，本工具不处理</span>
+<span class="err">✘ 参考文件里读不出 VOL 配置头，请换同机录制的正常文件</span>
     </div>
-    <div class="hint" style="margin-top:6px;">「开始修复」置灰；卡片右上角标签转 <span class="tag err">不可修复</span>，并把原因写进标签的悬停提示。</div>
+    <div class="hint" style="margin-top:6px;">五种拒绝互斥，一次只出一条：写进卡片头的结论标签并上色，同一句话挂到悬停提示；「开始修复」置灰。体检正常返回时终端不刷这些字，只有抛异常才走 <span class="mono-i">✘</span> 行。</div>
   </div>
   <div>
-    <div class="mini-lbl" style="font-weight:600;color:var(--accent-press);">② 修复中（按钮转禁用 + 不定进度条）</div>
+    <div class="mini-lbl" style="font-weight:600;color:var(--accent-press);">② 修复中 · 按钮转禁用 + 不定进度条</div>
     <div class="term" style="height:180px;">
-<span class="acc">[1/4] 提取参考 VOL 头… 48 B（00 00 01 b0 01 …）</span>
-<span class="acc">[2/4] 拼接裸流 → 临时目录 payload.mpg（VOL 48 B + 14,674,362 B）</span>
-<span class="acc">[3/4] ffmpeg 流拷贝重封装（-c:v copy，不转码）</span>
-<span class="dim">frame= 6574 fps=0 q=-1.0 Lsize=   14359kB time=00:04:22.94 bitrate= 448.1kbits/s speed=  18x</span>
-<span class="warn">[4/4] 完整解码校验中（ffmpeg -f null -）…</span>
+<span class="dim">▶ 开始修复 → C:\...\20261105_195736_repaired.mp4</span>
+<span class="acc">[1/4] 体检损坏文件…</span>
+      末帧残留 5,695 B · 长度正常，随 GOP 丢弃
+      裁剪点 0xDFE9BA · auto 档，丢弃 5,702 B
+<span class="acc">[2/4] 提取参考文件 VOL 配置头…</span>
+      960×542 · 25.0 fps · Simple Profile · VOL 48 B · 00 00 01 b0 01
+<span class="acc">[3/4] ffmpeg 流拷贝重封装，不转码…</span>
+<span class="dim">[ffmpeg] 已写入 262.9 s</span>
+<span class="warn">[4/4] 校验…</span>
     </div>
     <div class="bar indet" style="margin-top:8px;"><i></i></div>
-    <div class="hint" style="margin-top:6px;">ffmpeg 进度行走 <span class="mono-i">line</span> 信号逐行追加；「取消」= <span class="mono-i">requestInterruption()</span> + 终止子进程 + 删半成品。</div>
+    <div class="hint" style="margin-top:6px;">ffmpeg 进度只取 <span class="mono-i">-progress pipe:1</span> 的已写入时长，换算不出百分比，所以进度条走不定态；「取消」= <span class="mono-i">requestInterruption()</span> + 终止子进程 + 删半成品。</div>
   </div>
   <div>
     <div class="mini-lbl" style="font-weight:600;color:var(--success);">③ 修复成功 · 无损校验报告</div>
     <div class="term" style="height:180px;">
-<span class="ok">[完成] C:\Users\shen_zhe\Desktop\20261105_195736_repaired.mp4（14,704,024 B）</span>
-[校验] 编码 mpeg4 · Simple Profile · 960×542 · 25 fps · 帧数 6574 · 时长 262.94 s
-<span class="ok">[校验] 完整解码 0 处错误</span>
-<span class="ok">[校验] 媒体字节 SHA-256 = cd7a56ee…dff8c9 与原文件负载前缀逐字节一致 → 无损</span>
-[校验] 丢弃 5,702 B（1 个悬空 GOP 头 + 1 个半帧），保留 6574/6575 帧
+      编码 mpeg4 · Simple Profile · 960×542 · 25.0 fps · 帧数 6574 · 时长 262.94 s
+      媒体字节 SHA-256 cd7a56eecd693450… · 与原件负载前缀一致，无损
+<span class="ok">      完整解码 0 处错误</span>
+
+<span class="ok">✔ 修复完成: C:\...\20261105_195736_repaired.mp4 · 14.0 MB</span>
+  帧数 6574/6575 · 时长 262.94 s · 丢弃 5.6 KB · 裁剪 auto 档
+<span class="ok">  无损校验通过 · 媒体字节 SHA-256 cd7a56eecd693450…</span>
+  完整解码错误 0 处
     </div>
     <div class="hint" style="margin-top:6px;">
       无损证明是本工作区的核心可信度来源：输出 mp4 的 mdat 负载去掉借来的 VOL 后，必须与原文件 <span class="mono-i">es[:cut]</span> 的 SHA-256 相同。
-      报告同时经 <span class="mono-i">_append_log</span> 落主窗口日志（弹出窗口形态下转发主窗口，日志单源）。
+      校验通过时不再追加解释，只有不一致才补一句「与原件不一致，请人工核对」。报告同时经 <span class="mono-i">_append_log</span> 落主窗口日志，弹出窗口形态下转发主窗口，日志单源。
     </div>
   </div>
   <div>
     <div class="mini-lbl" style="font-weight:600;color:var(--warning);">④ 环境缺失 / 取消 / 异常</div>
     <div class="term" style="height:180px;">
-<span class="err">[环境] 未找到 ffmpeg.exe（PATH 内无），无法完成重封装</span>
-<span class="dim">[环境] 参考 video_ai_enhance.py 的口径：本功能依赖系统 ffmpeg / ffprobe，请安装后加入 PATH</span>
-<span class="warn">[取消] 已终止 ffmpeg（pid 21884），删除半成品 …_repaired.mp4</span>
-<span class="err">[失败] ffmpeg 退出码 1：Invalid data found when processing input</span>
-<span class="dim">[提示] 参考文件分辨率与损坏文件不一致时会出现此错误，请换同机录制的参考文件</span>
+<span class="err">✘ 未找到 ffmpeg / ffprobe，请安装后加入 PATH</span>
+<span class="warn">✘ 已取消，半成品输出已删除</span>
+<span class="err">✘ ffmpeg 重封装失败，退出码 1: Invalid data found when processing input；常见原因是参考文件分辨率不一致，请换同机录制的参考文件</span>
+<span class="dim">… 正在取消修复...</span>
+<span class="warn">      已请求取消，跳过校验，输出文件保留</span>
     </div>
-    <div class="hint" style="margin-top:6px;">ffmpeg 缺失在<b>进入页签时</b>就检测并把结果写在卡片头（不等到点按钮才失败）；异常一律 <span class="mono-i">error</span> 信号 + InfoBar。</div>
+    <div class="hint" style="margin-top:6px;">ffmpeg 缺失在<b>进入页签时</b>就检测，结果写进卡片头与终端首行，不等到点按钮才失败；异常一律 <span class="mono-i">error</span> 信号 + InfoBar。重封装成功之后再取消只跳过校验，成品保留不删。</div>
   </div>
 </div>
 

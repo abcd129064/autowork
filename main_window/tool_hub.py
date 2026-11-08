@@ -1881,18 +1881,18 @@ class NewLogWork(QWidget):
 # ==================== 工作区 5：视频修复 ====================
 
 class VideoRepairWork(QWidget):
-    """视频修复工作区：掉电截断（无 moov）的 mp4 借参考文件 VOL 头无损重封装
+    """视频修复工作区：缺 moov 的掉电截断 mp4 借参考文件配置头无损重封装
 
-    流程三段：体检损坏文件（盒结构 + 码流起始码）→ 确认参考文件（提供 VOL 配置头
-    与帧率）→ ffmpeg 流拷贝重封装并校验。设计稿 design/video_repair_tool.html，
-    后端 windows.tools.video_repair，线程 workers.video_repair_worker。
+    流程三段：体检损坏文件的盒结构与码流起始码 → 确认参考文件，拿到 VOL 头与帧率
+    → ffmpeg 流拷贝重封装并校验。设计稿 design/video_repair_tool.html，后端
+    windows.tools.video_repair，线程 workers.video_repair_worker。
 
     原文件全程只读，输出永远是另一个路径；修复只做流拷贝，不转码。
     """
 
     # 下拉项顺序即本元组顺序，值对应 video_repair.pick_cut 的 mode
-    _CUT_MODES = (("auto", "自动裁到最近完整 GOP（推荐）"),
-                  ("vop", "裁到最后一个 VOP 起点（会留悬空 GOP 头）"))
+    _CUT_MODES = (("auto", "自动裁到完整 GOP · 推荐"),
+                  ("vop", "裁到最后 VOP · 有损坏风险"))
     _FILE_FILTER = "视频文件 (*.mp4);;所有文件 (*.*)"
 
     def __init__(self, win, parent=None):
@@ -1957,15 +1957,13 @@ class VideoRepairWork(QWidget):
         root.addWidget(body)
 
         if not self._ffmpeg:
-            self.append_line(
-                "✘ 未找到 ffmpeg / ffprobe：本工作区依赖系统 ffmpeg，"
-                "请安装后加入 PATH")
+            self.append_line("✘ 未找到 ffmpeg / ffprobe，请安装后加入 PATH")
         self._sync_buttons()
 
     # ---------- 卡片构建 ----------
 
     def _build_broken_card(self, parent):
-        """卡片 1：损坏文件选择 + 体检结论（盒结构 / 码流统计分行展示）"""
+        """卡片 1：损坏文件选择 + 体检结论，盒结构与码流统计分行展示"""
         card = CardWidget(parent)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
@@ -1981,8 +1979,8 @@ class VideoRepairWork(QWidget):
         self._paint(self.lbl_verdict, "未选择文件", _C_MUTED)
 
         desc = BodyLabel(
-            "录制中断电或强制关机，mp4 的 moov 索引就永远没写出来：文件有大小却完全"
-            "打不开。媒体数据本身完好，补回配置头重新封装即可无损救回。", card)
+            "断电让 mp4 索引没写出来，文件有大小却打不开。媒体数据完好，"
+            "补回配置头即可无损救回。", card)
         desc.setWordWrap(True)
         v.addWidget(desc)
 
@@ -2014,7 +2012,7 @@ class VideoRepairWork(QWidget):
         return card
 
     def _build_ref_card(self, parent):
-        """卡片 2：参考文件（VOL 配置头与帧率的来源）"""
+        """卡片 2：参考文件，VOL 配置头与帧率的来源"""
         card = CardWidget(parent)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
@@ -2030,16 +2028,15 @@ class VideoRepairWork(QWidget):
         self._paint(self.lbl_ref_state, "未选择", _C_MUTED)
 
         desc = BodyLabel(
-            "MPEG-4 短头码流内部不带 VOL 配置头，分辨率与量化参数只存在于正常文件的 "
-            "moov→stsd→esds 里，必须借同机同参数录制的文件补上。分辨率不一致会花屏。",
-            card)
+            "损坏文件缺配置头，分辨率与帧率要借同机录制的正常视频补上。"
+            "分辨率不一致会花屏。", card)
         desc.setWordWrap(True)
         v.addWidget(desc)
 
         row = QHBoxLayout()
         row.addWidget(BodyLabel("正常视频:", card))
         self.ref_edit = LineEdit(card)
-        self.ref_edit.setPlaceholderText("同一台设备录制的、能正常播放的 .mp4")
+        self.ref_edit.setPlaceholderText("同机录制、能正常播放的 mp4")
         self.ref_edit.setFixedWidth(460)
         row.addWidget(self.ref_edit)
         self.btn_ref_browse = PushButton(FluentIcon.FOLDER, "浏览", card)
@@ -2047,7 +2044,7 @@ class VideoRepairWork(QWidget):
             lambda: self._open_picker(self.ref_edit, "选择参考视频文件"))
         row.addWidget(self.btn_ref_browse)
         self.btn_ref_find = PushButton(FluentIcon.SEARCH, "自动发现", card)
-        self.btn_ref_find.setToolTip("在同目录内按修改时间找最近的同编码正常视频")
+        self.btn_ref_find.setToolTip("在同目录找最近的同编码正常视频")
         self.btn_ref_find.clicked.connect(self._on_discover)
         row.addWidget(self.btn_ref_find)
         row.addStretch(1)
@@ -2059,7 +2056,7 @@ class VideoRepairWork(QWidget):
         return card
 
     def _build_opt_card(self, parent, settings):
-        """卡片 3：修复参数 + 操作行（默认值即已验证的正确口径）"""
+        """卡片 3：修复参数 + 操作行，默认值即已验证的正确口径"""
         card = CardWidget(parent)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
@@ -2096,7 +2093,7 @@ class VideoRepairWork(QWidget):
         except (TypeError, ValueError):
             self.spin_fps.setValue(25)
         self.spin_fps.setFixedWidth(110)
-        self.spin_fps.setToolTip("参考文件读不到帧率时的兜底值")
+        self.spin_fps.setToolTip("参考文件无帧率时的兜底值")
         _pair(grid, 0, "尾部裁剪:", self.combo_cut, "封装帧率:", self.spin_fps, card)
 
         self.out_edit = LineEdit(card)
@@ -2106,12 +2103,13 @@ class VideoRepairWork(QWidget):
         self.btn_out.setToolTip("另存为…")
         self.btn_out.clicked.connect(
             lambda: self._open_picker(self.out_edit, "选择输出文件", True))
-        self.chk_open_dir = CheckBox("修复后自动打开输出目录", card)
+        self.chk_open_dir = CheckBox("自动打开输出目录", card)
         self.chk_open_dir.setChecked(bool(settings.get("repair_auto_open_dir", False)))
         _pair(grid, 1, "输出文件:", self._cell(self.out_edit, self.btn_out, card),
               "完成后:", self.chk_open_dir, card)
 
-        self.chk_verify = CheckBox("完整解码校验（多花十几秒，确认不花屏）", card)
+        self.chk_verify = CheckBox("完整解码校验", card)
+        self.chk_verify.setToolTip("逐帧解码确认不花屏，多花十几秒")
         self.chk_verify.setChecked(bool(settings.get("repair_verify_decode", True)))
         grid.addWidget(self.chk_verify, 2, 1, 1, 3)
         # 控件定宽、尾部空列吃剩余：与单杆视频表单同一套对齐规范
@@ -2131,13 +2129,13 @@ class VideoRepairWork(QWidget):
         self.btn_cancel.clicked.connect(self._on_cancel)
         btns.addWidget(self.btn_cancel)
         btns.addStretch(1)
-        btns.addWidget(CaptionLabel("原文件全程只读 · 流拷贝不转码", card))
+        btns.addWidget(CaptionLabel("原文件只读 · 流拷贝不转码", card))
         v.addLayout(btns)
         return card
 
     @staticmethod
     def _cell(edit, btn, parent):
-        """LineEdit + 按钮组合成一个网格单元格（拉伸只给输入框）"""
+        """LineEdit + 按钮组合成一个网格单元格，拉伸只给输入框"""
         w = QWidget(parent)
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
@@ -2148,8 +2146,8 @@ class VideoRepairWork(QWidget):
 
     @staticmethod
     def _paint(label, text, color):
-        """给状态文字上色：qfw 标签走 setTextColor（内部是 CustomStyleSheet），
-        直接 setStyleSheet 会被主题切换轮询冲掉。"""
+        """给状态文字上色：qfw 标签走 setTextColor，直接 setStyleSheet 会被
+        主题切换轮询冲掉。"""
         label.setText(text)
         try:
             label.setTextColor(color, color.lighter(135))
@@ -2162,7 +2160,7 @@ class VideoRepairWork(QWidget):
         stem, _ext = os.path.splitext(broken)
         return stem + "_repaired.mp4"
 
-    # ---------- 文件选择（非模态：exec() 会开自己的事件循环冻住整个窗口） ----------
+    # ---------- 文件选择：非模态，exec() 会开自己的事件循环冻住整个窗口 ----------
 
     def _open_picker(self, edit, title, accept_save=False):
         """弹出非模态文件选择器，结果按目标输入框分派到 _on_picked"""
@@ -2189,12 +2187,12 @@ class VideoRepairWork(QWidget):
         dlg.open()
 
     def _on_picker_finished(self, _result=0):
-        """选择器关闭（取消也会走到这里）：释放引用并恢复按钮"""
+        """选择器关闭即释放引用并恢复按钮，取消也会走到这里"""
         self._file_dlg = None
         self._sync_buttons()
 
     def _on_picked(self, edit, path):
-        """选中文件：按目标框决定后续动作（体检 / 重新校验参考 / 锁定输出路径）"""
+        """选中文件：按目标框分派到体检、重新校验参考或锁定输出路径"""
         if not path:
             return
         if edit is self.broken_edit:
@@ -2269,20 +2267,20 @@ class VideoRepairWork(QWidget):
         boxes = self._probe.get("box_list") or []
         moov = "moov 存在" if self._probe.get("has_moov") else "moov 缺失"
         self.lbl_boxes.setText(
-            f"盒结构：{' · '.join(boxes) if boxes else '—'}｜{moov}｜负载起点 "
-            f"0x{self._probe.get('payload_off', 0):X}"
-            f"（{_fmt_size(self._probe.get('payload_size', 0))}）")
+            f"盒结构：{' · '.join(boxes) if boxes else '—'}｜{moov}｜负载 "
+            f"0x{self._probe.get('payload_off', 0):X} · "
+            f"{_fmt_size(self._probe.get('payload_size', 0))}")
 
         frames = self._probe.get("frames") or {}
         if frames:
-            # 偏短只是启发式：末帧后面不再有起始码，本质上无法自证写完。auto 档
-            # 无论哪种情况都裁到最后一个 GOP 头，所以文案不能出现「完整」这种结论
+            # 偏短只是启发式：末帧后面不再有起始码，无法自证写完。auto 档两种情况
+            # 都裁到最后一个 GOP 头，文案不能出现「完整」这种结论
             state = "明显偏短" if frames.get("last_frame_incomplete") else "长度正常"
             self.lbl_frames.setText(
-                f"码流：帧起始码 B6 {frames.get('frame_count', 0)} 个｜GOP B3 "
+                f"码流：帧 {frames.get('frame_count', 0)} 个｜GOP "
                 f"{frames.get('gop_count', 0)} 个｜中位帧长 "
                 f"{_fmt_size(frames.get('median_frame', 0))}｜末帧残留 "
-                f"{_fmt_size(frames.get('last_vop_tail', 0))}（{state}，随所属 GOP 丢弃）")
+                f"{_fmt_size(frames.get('last_vop_tail', 0))} · {state}，随 GOP 丢弃")
         else:
             self.lbl_frames.setText("码流：—")
 
@@ -2309,17 +2307,17 @@ class VideoRepairWork(QWidget):
             "repair_last_ref": ref})
 
     def _render_verdict(self, has_ref, has_ffmpeg):
-        """把体检结论翻成一句人话并上色（原因同时挂到悬停提示）"""
+        """把体检结论翻成一句人话并上色，原因挂到悬停提示"""
         reason = self._probe.get("reason") or ""
         if self._probe.get("ok") and has_ref and has_ffmpeg:
             self._paint(self.lbl_verdict, "✔ 可修复", _C_SUCCESS)
             self._paint(self.lbl_ref_state, "✔ 参考文件可用", _C_SUCCESS)
-            self.lbl_verdict.setToolTip("结构符合掉电截断特征，参考文件可提供 VOL 头")
+            self.lbl_verdict.setToolTip("结构符合掉电截断，参考文件可提供配置头")
             return
         if not self._probe.get("ok"):
             self._paint(self.lbl_ref_state, "参考文件待确认", _C_MUTED)
         elif not has_ref:
-            reason = reason or "未找到可用的参考文件，请手动指定同机录制的正常视频"
+            reason = reason or "未找到可用参考文件，请手动指定同机录制的正常视频"
             self._paint(self.lbl_ref_state, "✘ 参考文件不可用", _C_DANGER)
         elif not has_ffmpeg:
             reason = reason or "未找到 ffmpeg / ffprobe，请安装后加入 PATH"
@@ -2345,7 +2343,7 @@ class VideoRepairWork(QWidget):
         """开始修复：busy 守卫 → 参数校验 → 存配置 → 置运行态 → 拉起线程"""
         win = self._win
         if self._worker_running("_video_repair_worker"):
-            win._show_info_bar("修复任务正在运行中，请等待完成或先取消", "warning")
+            win._show_info_bar("修复进行中，请等待完成或先取消", "warning")
             return
         broken = self.broken_edit.text().strip()
         ref = self.ref_edit.text().strip()
@@ -2358,7 +2356,7 @@ class VideoRepairWork(QWidget):
             return
         if os.path.abspath(out) == os.path.abspath(broken):
             # 输出撞原件会把唯一的数据源覆盖掉，这条必须硬拦
-            win._show_info_bar("输出路径不能与损坏文件相同（本工具不改写原件）",
+            win._show_info_bar("输出路径不能与损坏文件相同，本工具不改写原件",
                                "error", duration=5000)
             return
         idx = self.combo_cut.currentIndex()
@@ -2393,7 +2391,7 @@ class VideoRepairWork(QWidget):
         for w in self._input_widgets():
             w.setEnabled(False)
         self.btn_start.setEnabled(False)
-        self.btn_start.setText("修复中...")
+        self.btn_start.setText("修复中…")
         self.btn_cancel.setEnabled(True)
         # 先亮进度条再 start：worker 可能立刻发第一行输出，晚显示会看到突然蹦出来
         self.progress_bar.show()
@@ -2409,7 +2407,7 @@ class VideoRepairWork(QWidget):
         self._sync_buttons()
 
     def _input_widgets(self):
-        """运行期间要一起锁住的输入控件（锁不全就会让用户以为改动本次生效）"""
+        """运行期间要一起锁住的输入控件，锁不全用户会以为改动本次生效"""
         return (self.broken_edit, self.ref_edit, self.out_edit, self.combo_cut,
                 self.spin_fps, self.chk_verify, self.chk_open_dir,
                 self.btn_browse, self.btn_ref_browse, self.btn_ref_find,
@@ -2452,24 +2450,25 @@ class VideoRepairWork(QWidget):
         sha_ok = bool(report.get("sha_ok"))
         errs = int(report.get("decode_errors") or 0)
         self.append_line("")
-        self.append_line(f"✔ 修复完成: {out}（{_fmt_size(report.get('size', 0))}）")
+        self.append_line(f"✔ 修复完成: {out} · {_fmt_size(report.get('size', 0))}")
         self.append_line(
             f"  {report.get('codec')} · {report.get('profile')} · "
             f"{report.get('width')}×{report.get('height')} · {report.get('fps')} fps")
         self.append_line(
             f"  帧数 {report.get('frames', 0)}/{report.get('total_vops', 0)} · "
             f"时长 {report.get('duration', 0)} s · 丢弃 "
-            f"{_fmt_size(report.get('dropped_bytes', 0))}"
-            f"（裁剪档 {report.get('cut_mode', 'auto')}）")
+            f"{_fmt_size(report.get('dropped_bytes', 0))} · "
+            f"裁剪 {report.get('cut_mode', 'auto')} 档")
+        # 通过时校验结论已经说明一切，只有不一致才需要追加人工核对的提示
+        sha_note = "" if sha_ok else " · 与原件不一致，请人工核对"
         self.append_line(
-            f"  无损校验{'通过' if sha_ok else '未通过'}：媒体字节 SHA-256 "
-            f"{str(report.get('sha256', ''))[:16]}… "
-            f"{'与原文件负载前缀逐字节一致' if sha_ok else '与原文件不一致，请人工核对'}")
+            f"  无损校验{'通过' if sha_ok else '未通过'} · 媒体字节 SHA-256 "
+            f"{str(report.get('sha256', ''))[:16]}…{sha_note}")
         if report.get("verify_decode"):
             self.append_line(f"  完整解码错误 {errs} 处")
         win._append_log(
-            f"[修复] 视频修复完成: {out}（{report.get('frames', 0)} 帧，"
-            f"无损校验{'通过' if sha_ok else '未通过'}，解码错误 {errs} 处）")
+            f"[修复] 视频修复完成: {out} · {report.get('frames', 0)} 帧 · "
+            f"无损校验{'通过' if sha_ok else '未通过'} · 解码错误 {errs} 处")
         if sha_ok and not errs:
             win._show_info_bar(
                 f"修复完成，无损救回 {report.get('frames', 0)} 帧",
@@ -2526,7 +2525,7 @@ class VideoRepairWork(QWidget):
     # ---------- 收尾 ----------
 
     def detach_workers(self):
-        """容器关闭时中断体检/修复线程（PivotPage.detach_workers 会调这个钩子）
+        """容器关闭时中断体检/修复线程，由 PivotPage.detach_workers 调用
 
         worker 引用挂在宿主上，页面的 *_worker 属性扫描扫不到；不主动中断的话，
         弹出窗口关闭后线程还在往已销毁的控件发信号。

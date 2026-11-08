@@ -319,10 +319,13 @@
 
 <div class="note" style="border-left-color:var(--success)">
   <b>&#10003; 本稿已于 2026-11-06 落地并按实现回填。</b>
-  代码是权威，本稿是设计过程记录：<b>五张画布（HTML mock）保留原样不改</b>，
-  凡画布与实现不一致处，都在紧邻画布的<b>黄色 note</b> 或文末「已识别的风险 / 本次明确不做」里写明差异与理由。
+  代码是权威，本稿是设计过程记录。画布（HTML mock）原本约定<b>保留原样不改</b>，
+  <b>2026-11-08 的文案精简打破了这一条</b>：那一轮同时改了选项标签和散文说明的口径，
+  画布不跟着刷就会整页失真。所以现在画布里的<b>文字已按实现重刷</b>，
+  <b>版式、控件种类与配色仍保留原样</b>；文案口径本身见「滤镜调参」画布上方黄色 note 的最后一条。
+  其余凡画布与实现不一致处，都在紧邻画布的<b>黄色 note</b> 或文末「已识别的风险 / 本次明确不做」里写明差异与理由。
   已回填为实际值的部分：滤镜预设 &#8594; <code>-vf</code> 串对照表、注册点清单（A~<b>H</b>，第八处是设计阶段漏掉的
-  <code>shutdown.py</code>）、文件与类结构、worker 信号签名、验证结果与实测数据。
+  <code>shutdown.py</code>）、文件与类结构、worker 信号签名、验证结果与实测数据、控件文案。
   <br>落地产物：<code>windows/tools/video_enhance.py</code>（引擎）·
   <code>workers/video_enhance_worker.py</code>（6 stage 单 worker 类）·
   <code>windows/tools/video_enhance_hub.py</code>（5 子页 UI）·
@@ -584,14 +587,14 @@
             <span class="ch-ico">&#9733;</span>
             <h3>预设</h3><span class="ch-sub">选预设会覆盖下方全部滑块；再手动改则预设自动切到「自定义」</span>
             <div class="ch-right">
-              <span class="combo" style="width:210px">标准增强（推荐）</span>
+              <span class="combo" style="width:210px">标准增强</span>
               <span class="btn sm ghost">存为我的预设</span>
             </div>
           </div>
           <div class="flex wrap" style="gap:8px">
-            <span class="tag plain off">关闭（仅转码）</span>
+            <span class="tag plain off">关闭</span>
             <span class="tag plain info">轻度修复</span>
-            <span class="tag plain acc">标准增强（推荐）</span>
+            <span class="tag plain acc">标准增强</span>
             <span class="tag plain warn">强锐化</span>
             <span class="tag plain err">老片修复</span>
             <span class="tag plain on">动漫 / 线条</span>
@@ -606,7 +609,9 @@
                 <code>SegmentedWidget</code> 在本项目的 qfw 1.11.2 里<b>是存在的</b>，换掉它是取舍不是被迫：
                 这三处都是「选一个模式、联动置灰另一组控件」，<code>ComboBox</code> 的 <code>userData</code>
                 正好承载模式键，且与本页其它十几处下拉（算法/编码器/容器/输出模式）形态统一；
-                分段按钮在文字变长（如「目标体积（两遍编码）」）时会把整行顶宽。
+                分段按钮按文字自适应宽度，标签一变长就把整行顶宽；下拉是固定宽度，不受标签长度影响。
+                <b>补记</b>：本轮已把所有下拉标签精简成纯名称（如「目标体积」而非「目标体积（两遍编码）」），
+                顶宽这一条不再是现实压力，形态统一与 userData 承载模式键这两条才是留下来的理由。
                 <b>注意</b> qfw 的 <code>ComboBox</code> 是 <code>QPushButton</code> 不是 <code>QComboBox</code>，
                 <code>addItem</code> 的 userData 必须<b>用关键字传</b>（第二个位置参数是图标），
                 且没有 <code>view()/model()</code>。</li>
@@ -619,6 +624,21 @@
                 没有这行提示，用户拖一个当前算法根本不读的滑块时界面上没有任何东西解释它为什么没效果。
                 判定必须由 <code>"unsharp" in algo</code> 与 <code>"cas" in algo</code> 两个标志位组合出来——
                 只按「字符串里有没有 cas」判，两级算法会被说成只有 cas 生效。</li>
+            <li><b>文案口径（2026-11-08 定稿，此后新增控件照此写）。</b>
+                <b>选项标签只留名称</b>：<code>hqdn3d</code>、<code>libx264</code>、<code>标准增强</code>、
+                <code>目标体积</code>，不带任何括号说明。
+                <b>散文式说明只去括号、信息一条不删</b>：hint 行、卡片副标题、info/warning、tooltip、
+                <code>MessageBox</code>、日志行里的括号旁白一律改写成正常句子，或用 <code>·</code> / <code>—</code> 分隔；
+                状态类后缀也用 <code>·</code>，如 <code>libx264 · 不可用</code>、<code>○ hevc_nvenc · 未试编</code>。
+                <b>保留括号的只有两类</b>：正则分组，以及 Qt 文件对话框强制的
+                <code>名称 (*.ext)</code> 过滤器格式。
+                <br><b>代价要写清楚</b>：画布里那几行 <code>备选：nlmeans（质量高、极慢）…</code>
+                从未落地——下拉本身已经枚举了全部选项，再列一遍是重复。而标签精简之后，
+                各算法/编码器的「快慢与质量代价」在界面上<b>不再出现</b>，这是明确取舍不是遗漏。
+                要找回这类信息就写成卡里的 <code>_hint</code> 行，<b>不要塞回标签的括号里</b>。
+                目前仍在界面上承担解释职责的是三处动态文案：滤镜页 <code>lbl_sharpen_hint</code>「当前生效：…」、
+                编码页 <code>lbl_enc_state</code>（按真编结果给 CRF/CQ 区间建议）、
+                任务页 <code>lbl_cost</code>「预估：…」。</li>
           </ul>
         </div>
 
@@ -627,32 +647,32 @@
             <div class="card-h"><span class="ch-ico">&#8776;</span><h3>去噪</h3>
               <div class="ch-right"><span class="sw"><span class="track"></span></span></div></div>
             <div class="fld"><label>算法</label>
-              <span class="combo grow">hqdn3d（快 · 通用）</span></div>
+              <span class="combo grow">hqdn3d</span></div>
             <div class="hint" style="margin:-6px 0 12px 108px">
-              备选：<code>nlmeans</code>（质量高、极慢）· <code>atadenoise</code>（时序自适应）·
-              <code>vaguedenoiser</code>（小波）· <code>bm3d</code>（最慢最强）</div>
+              备选：<code>nlmeans</code> 质量高、极慢 · <code>atadenoise</code> 时序自适应 ·
+              <code>vaguedenoiser</code> 小波 · <code>bm3d</code> 最慢最强</div>
             <div class="fld"><label>亮度强度</label>
               <span class="sld grow"><span class="track" style="--p:37%"><span class="knob"></span></span><span class="val">1.5</span></span></div>
             <div class="fld"><label>色度强度</label>
               <span class="sld grow"><span class="track" style="--p:37%"><span class="knob"></span></span><span class="val">1.5</span></span></div>
             <div class="fld" style="margin-bottom:0"><label>时序强度</label>
               <span class="sld grow"><span class="track" style="--p:30%"><span class="knob"></span></span><span class="val">6.0</span></span></div>
-            <div class="hint">时序强度过高会拖影（快速移动的球会糊尾）</div>
+            <div class="hint">时序强度过高会拖影，快速移动的球会糊尾</div>
           </div>
 
           <div class="card">
             <div class="card-h"><span class="ch-ico">&#10023;</span><h3>锐化</h3>
               <div class="ch-right"><span class="sw"><span class="track"></span></span></div></div>
             <div class="fld"><label>算法</label>
-              <span class="combo grow">cas（对比度自适应 · 推荐）</span></div>
+              <span class="combo grow">cas</span></div>
             <div class="hint" style="margin:-6px 0 12px 108px">
-              备选：<code>unsharp</code>（传统 USM，参数多、易白边）</div>
+              备选：<code>unsharp</code> 传统 USM，参数多、易白边</div>
             <div class="fld"><label>强度</label>
               <span class="sld grow"><span class="track" style="--p:80%"><span class="knob"></span></span><span class="val">0.80</span></span></div>
             <div class="fld" style="margin-bottom:0"><label>USM 亮度矩阵</label>
               <span class="spin"><span class="sv">5</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
               <span class="spin"><span class="sv">5</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
-              <span class="hint" style="margin:0">仅 unsharp 生效（luma_msize_x/y）</span></div>
+              <span class="hint" style="margin:0">只有 unsharp 会读 luma_msize_x/y</span></div>
             <div class="infobar warn" style="margin:12px 0 0">
               <span class="ib-ico">!</span>
               <div>cas 强度 &gt; 1.2 时暗部会出现振铃与颗粒放大，建议配合去噪一起用。</div>
@@ -673,12 +693,12 @@
               <span class="spin"><span class="sv">1080</span><span class="ss"><b>&#9650;</b><b>&#9660;</b></span></span>
               <span class="hint" style="margin:0">宽度按 <code>scale=-2:H</code> 自动取偶</span></div>
             <div class="fld" style="margin-bottom:0"><label>插值算法</label>
-              <span class="combo grow">lanczos（推荐）</span></div>
-            <div class="hint">备选：<code>spline</code>（更锐但易振铃）· <code>bicubic</code>（快）· <code>area</code>（缩小用）</div>
+              <span class="combo grow">lanczos</span></div>
+            <div class="hint">备选：<code>spline</code> 更锐但易振铃 · <code>bicubic</code> 快 · <code>area</code> 缩小用</div>
           </div>
 
           <div class="card">
-            <div class="card-h"><span class="ch-ico">&#9681;</span><h3>色彩（eq）</h3>
+            <div class="card-h"><span class="ch-ico">&#9681;</span><h3>色彩 eq</h3>
               <div class="ch-right"><span class="sw"><span class="track"></span></span></div></div>
             <div class="fld"><label>对比度</label>
               <span class="sld grow"><span class="track" style="--p:52%"><span class="knob"></span></span><span class="val">1.04</span></span></div>
@@ -693,13 +713,13 @@
         </div>
 
         <div class="card">
-          <div class="card-h"><span class="ch-ico">&#8634;</span><h3>补帧（minterpolate）</h3>
+          <div class="card-h"><span class="ch-ico">&#8634;</span><h3>补帧 minterpolate</h3>
             <div class="ch-right"><span class="sw off"><span class="track"></span></span><span class="tag err">极慢 · 默认关</span></div></div>
           <div class="flex wrap">
             <label style="font-size:13px;color:var(--text2)">目标帧率</label>
             <span class="combo" style="width:110px">60</span>
             <label style="font-size:13px;color:var(--text2)">模式</label>
-            <span class="combo" style="width:150px">mci（运动补偿）</span>
+            <span class="combo" style="width:150px">mci</span>
             <span class="hint" style="margin:0">mi_mode=blend 快 10 倍但会有重影</span>
           </div>
           <div class="infobar err" style="margin:12px 0 0">
@@ -761,17 +781,17 @@
             <div class="card-h"><span class="ch-ico">&#9889;</span><h3>视频编码器</h3>
               <div class="ch-right"><span class="tag on">libx264 可用</span></div></div>
             <div class="fld"><label>编码器</label>
-              <span class="combo grow">libx264（CPU · 兼容性最好）</span></div>
+              <span class="combo grow">libx264</span></div>
             <div class="hint" style="margin:-6px 0 12px 108px">
               下拉项按「环境检测」的探测结果动态启用：<code>libx264</code> / <code>libx265</code> /
               <code>h264_nvenc</code> / <code>hevc_nvenc</code> / <code>av1_nvenc</code> / <code>libsvtav1</code>；
               探测不到的置灰并注明原因。</div>
             <div class="fld"><label>preset</label>
-              <span class="combo grow">slow（质量优先）</span></div>
+              <span class="combo grow">slow</span></div>
             <div class="hint" style="margin:-6px 0 12px 108px">
               <code>ultrafast&#8230;veryslow</code>；x264 每上一档约慢 2 倍、同 CRF 体积小 5~10%。nvenc 用 <code>p1&#8230;p7</code>。</div>
             <div class="fld" style="margin-bottom:0"><label>码率模式</label>
-              <span class="seg"><i class="on">CRF（恒定质量）</i><i>目标体积（两遍）</i></span></div>
+              <span class="seg"><i class="on">CRF</i><i>目标体积</i></span></div>
           </div>
 
           <div class="card">
@@ -799,14 +819,14 @@
           <div class="card">
             <div class="card-h"><span class="ch-ico">&#9835;</span><h3>音频与容器</h3></div>
             <div class="fld"><label>音频</label>
-              <span class="combo grow">直接复制（-c:a copy）</span></div>
-            <div class="hint" style="margin:-6px 0 12px 108px">备选：<code>aac 192k</code> 重编码 · <code>去除音轨（-an）</code></div>
+              <span class="combo grow">直接复制</span></div>
+            <div class="hint" style="margin:-6px 0 12px 108px">备选：<code>aac 192k</code> 重编码 · 去除音轨 <code>-an</code></div>
             <div class="fld"><label>容器</label>
               <span class="combo" style="width:120px">mp4</span>
               <span class="sw"><span class="track"></span></span>
-              <span class="hint" style="margin:0">+faststart（元数据前置，便于网络播放）</span></div>
+              <span class="hint" style="margin:0">+faststart 把元数据前置，便于网络播放；实现里的文案是「仅对 mp4 生效」</span></div>
             <div class="fld" style="margin-bottom:0"><label>像素格式</label>
-              <span class="combo grow">yuv420p（播放器兼容）</span></div>
+              <span class="combo grow">yuv420p</span></div>
             <div class="hint">源为 10bit/422 时强制转 8bit 420，否则很多播放器黑屏</div>
           </div>
 
@@ -817,7 +837,7 @@
               <span class="btn sm">浏览&#8230;</span></div>
             <div class="hint" style="margin:-6px 0 12px 108px">
               备选：<code>源文件同目录</code> / <code>设置里的 videos_dir</code> / <code>自定义</code>；
-              自定义时目录选择走 <code>tool_hub._pick_dir</code>（异步 QFileDialog，不冻结主线程）。</div>
+              自定义时目录选择走 <code>tool_hub._pick_dir</code>，它用异步 <code>QFileDialog</code>，不会冻结主线程。</div>
             <div class="fld"><label>命名模板</label>
               <input class="inp mono grow" value="{name}_enhanced{suffix}"></div>
             <div class="hint" style="margin:-4px 0 12px 108px">
@@ -1024,10 +1044,10 @@
         </div>
 
         <div class="stat-strip c5">
-          <div class="stat"><div class="num g">94.31</div><div class="lbl">VMAF（越高越好，&gt;93 优秀）</div></div>
+          <div class="stat"><div class="num g">94.31</div><div class="lbl">VMAF</div></div>
           <div class="stat"><div class="num c">41.82</div><div class="lbl">PSNR dB</div></div>
           <div class="stat"><div class="num c">0.9871</div><div class="lbl">SSIM</div></div>
-          <div class="stat"><div class="num a">186 &#8594; 121</div><div class="lbl">体积 MB（-35%）</div></div>
+          <div class="stat"><div class="num a">186 &#8594; 121</div><div class="lbl">体积 MB · -35%</div></div>
           <div class="stat"><div class="num">2m11s</div><div class="lbl">增强耗时</div></div>
         </div>
 
@@ -1037,11 +1057,11 @@
             <div class="ch-right"><span class="btn sm ghost">1:1 查看</span><span class="btn sm ghost">导出并排图</span></div></div>
           <div class="cmp">
             <div class="pane">
-              <div class="pane-h"><b>源（前）</b><span class="mono" style="margin-left:auto">1920x1080 · 8.1 Mbps</span></div>
+              <div class="pane-h"><b>源 · 处理前</b><span class="mono" style="margin-left:auto">1920x1080 · 8.1 Mbps</span></div>
               <div class="img a"><span class="lbl">before.png</span></div>
             </div>
             <div class="pane">
-              <div class="pane-h"><b>输出（后）</b><span class="mono" style="margin-left:auto">1920x1080 · 6.2 Mbps</span></div>
+              <div class="pane-h"><b>输出 · 处理后</b><span class="mono" style="margin-left:auto">1920x1080 · 6.2 Mbps</span></div>
               <div class="img b"><span class="lbl">after.png</span></div>
             </div>
           </div>
@@ -1295,9 +1315,9 @@
   <table>
     <thead><tr><th style="width:150px">预设</th><th>-vf 值</th><th style="width:230px">适用 / 代价</th></tr></thead>
     <tbody>
-      <tr><td>关闭（仅转码）</td><td class="mono">format=yuv420p</td><td>只换编码器或压体积，画质不动。最快。</td></tr>
+      <tr><td>关闭</td><td class="mono">format=yuv420p</td><td>只换编码器或压体积，画质不动。最快。</td></tr>
       <tr><td>轻度修复</td><td class="mono">hqdn3d=1:1:4:4,cas=0.4,eq=contrast=1.02:saturation=1.03,format=yuv420p</td><td>源本身干净，只想去压缩块效应。</td></tr>
-      <tr><td><b>标准增强（推荐）</b></td><td class="mono">hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06,format=yuv420p</td><td>默认值。台球录像通用。</td></tr>
+      <tr><td><b>标准增强</b></td><td class="mono">hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06,format=yuv420p</td><td>默认值，也是推荐档。台球录像通用。</td></tr>
       <tr><td>强锐化</td><td class="mono">hqdn3d=1:1:4:4,unsharp=5:5:1:5:5:0.0,cas=1,eq=contrast=1.05,format=yuv420p</td><td>糊片、失焦。易出白边，慎用于已清晰的源。</td></tr>
       <tr><td>老片修复</td><td class="mono">atadenoise=0a=0.02:0b=0.04:s=80,hqdn3d=2:2:8:8,cas=0.6,eq=contrast=1.08:brightness=0.02:saturation=1.08,format=yuv420p</td><td>强噪点、偏灰的老录像。两级去噪串联，慢。</td></tr>
       <tr><td>动漫 / 线条</td><td class="mono">hqdn3d=2:2:6:6,cas=1.2,eq=contrast=1.06:saturation=1.15,format=yuv420p</td><td>色块分明、线条锐利的内容。</td></tr>

@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""掉电截断 mp4 的无损修复后端（工具页「视频修复」工作区）
+"""掉电截断 mp4 的无损修复后端，服务工具页「视频修复」工作区
 
 设计稿：design/video_repair_tool.html
 
-录制端写 mp4 时把 mdat 的 size 字段留成 0（含义是「一直吃到文件尾」），索引盒
-moov 留到最后落盘。中途掉电就永远等不到 moov，播放器一律报 moov atom not found，
-但 mdat 里的媒体字节本身完好——那就是一条 MPEG-4 Part 2 裸码流（00 00 01 B6 帧
-起始码 + 00 00 01 B3 GOP 起始码）。修复思路是补回配置头后重新封装，不做任何转码：
+录制端写 mp4 时把 mdat 的 size 字段留成 0，意为一直吃到文件尾，索引盒 moov 留到
+最后落盘。中途掉电就永远等不到 moov，播放器一律报 moov atom not found，但 mdat
+里的媒体字节本身完好，那就是一条 MPEG-4 Part 2 裸码流，由 00 00 01 B6 帧起始码
+与 00 00 01 B3 GOP 起始码分隔。修复思路是补回配置头后重新封装，不做任何转码：
 
-  1. 从同机录制的正常文件里剥出 VOL 头（moov→stsd→esds 的 DecoderSpecificInfo）。
-     MPEG-4 短头码流内部不带 VOL，分辨率/量化参数只存在于这份配置里，没有它
+  1. 从同机录制的正常文件里剥出 VOL 头，即 moov→stsd→esds 的 DecoderSpecificInfo。
+     MPEG-4 短头码流内部不带 VOL，分辨率与量化参数只存在于这份配置里，没有它
      ffmpeg 连帧尺寸都无从得知。
   2. 按 GOP 边界裁掉尾部残帧：最后一个 VOP 只写了一部分，切在它上面会留下悬空
      GOP 头，解码器改报 header damaged，等于把坏帧换成整段报错。
@@ -27,7 +27,7 @@ import subprocess
 import tempfile
 import time
 
-# MPEG-4 Part 2 起始码：B3 = group_of_vop（GOP 头），B6 = visual_object（一帧）
+# MPEG-4 Part 2 起始码：B3 = group_of_vop 即 GOP 头，B6 = visual_object 即一帧
 GOP_CODE = b"\x00\x00\x01\xb3"
 VOP_CODE = b"\x00\x00\x01\xb6"
 # H.264 的 SPS 起始码，用来在体检时认出「不是 mp4v，本工具不修」
@@ -39,7 +39,7 @@ _DISCOVER_LIMIT = 20
 
 
 class RepairError(Exception):
-    """可展示给用户的修复失败原因（终端与 InfoBar 直接用这条文案）"""
+    """可展示给用户的修复失败原因，终端与 InfoBar 直接用这条文案"""
 
 
 class RepairCancelled(Exception):
@@ -58,12 +58,12 @@ def find_ffmpeg():
 
 
 def _no_window_flags():
-    """打包版（无控制台）里起子进程不能弹出黑框"""
+    """打包版没有控制台，起子进程不能弹出黑框"""
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _run_capture(cmd):
-    """跑完再取全部输出（ffprobe 这类秒级命令用）"""
+    """跑完再取全部输出，给 ffprobe 这类秒级命令用"""
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        encoding="utf-8", errors="replace",
                        creationflags=_no_window_flags())
@@ -73,7 +73,7 @@ def _run_capture(cmd):
 # ==================== mp4 盒结构 ====================
 
 def scan_boxes(path):
-    """顺序走顶层盒，返回结构体检结果（mmap，不把整个文件读进内存）
+    """顺序走顶层盒，返回结构体检结果；走 mmap，不把整个文件读进内存
 
     录像动辄几百 MB，read() 全量载入会直接吃掉同量级内存并把 UI 进程顶到换页。
     """
@@ -94,7 +94,7 @@ def scan_boxes(path):
                 btype = bytes(mm[pos + 4:pos + 8])
                 head = 8
                 if bsize == 1:
-                    # largesize：真实长度在随后 8 字节里（>4GB 的 mdat 会走这支）
+                    # largesize：真实长度在随后 8 字节里，>4GB 的 mdat 会走这支
                     if pos + 16 > size:
                         reason = "盒头声明 largesize 但文件已截断"
                         break
@@ -140,7 +140,7 @@ def scan_boxes(path):
 
 
 def scan_frames(path, off, size, head_scan=1 << 20):
-    """在 mdat 负载上扫起始码，返回帧/GOP 偏移（相对负载起点）与末帧残量
+    """在 mdat 负载上扫起始码，返回相对负载起点的帧/GOP 偏移与末帧残量
 
     顺带看一眼前 head_scan 字节里有没有 H.264 的 SPS：短头 MPEG-4 与 H.264 的
     修复路径完全不同，认错了会产出一个满屏马赛克的「成功」文件。
@@ -182,7 +182,7 @@ def scan_frames(path, off, size, head_scan=1 << 20):
 # ==================== 参考文件 ====================
 
 def parse_esds(buf):
-    """从 esds 盒负载里剥出 DecoderSpecificInfo（即 VOL 配置头）
+    """从 esds 盒负载里剥出 DecoderSpecificInfo，即 VOL 配置头
 
     描述符链 0x03 ES_Descriptor → 0x04 DecoderConfigDescriptor → 0x05
     DecoderSpecificInfo，每层长度是可变字节数的 7bit 编码。
@@ -230,7 +230,7 @@ def read_vol(path):
             at = mm.find(b"esds")
             if at < 0:
                 return None
-            # find 命中的是盒的类型字段，描述符从类型字段 +8 处开始（版本/标志 4B）
+            # find 命中的是盒的类型字段，描述符从 +8 处开始，前 4B 是版本与标志
             # 只取 64KB：esds 之后紧跟的就是 stsd 里的其他内容，够用且不必全量拷贝
             chunk = bytes(mm[at + 8: min(size, at + 8 + 65536)])
         finally:
@@ -243,7 +243,7 @@ def probe_reference(path, ffprobe=None):
     if ffprobe is None:
         _ff, ffprobe = find_ffmpeg()
     if not ffprobe:
-        raise RepairError("未找到 ffprobe，无法读取参考文件参数（请安装 ffmpeg 并加入 PATH）")
+        raise RepairError("未找到 ffprobe，请安装 ffmpeg 并加入 PATH")
     rc, out = _run_capture([
         ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
         "stream=codec_name,profile,width,height,r_frame_rate:format_tags=encoder",
@@ -334,8 +334,8 @@ def probe_broken(path, ffprobe=None):
         result["reason"] = boxes["reason"] or "无法解析 mp4 盒结构"
         return result
     if boxes["has_moov"]:
-        result["reason"] = ("已找到 moov 索引，文件不属于掉电截断；"
-                            "若仍打不开多半是 mdat 内部损坏，本工具不做猜测性修复")
+        result["reason"] = ("已找到 moov 索引，不属于掉电截断。若仍打不开多半是 "
+                            "mdat 内部损坏，本工具不处理")
         return result
     if not boxes["mdat_last"]:
         result["reason"] = boxes["reason"] or "mdat 不是最后一个盒，媒体切点不可信"
@@ -343,14 +343,13 @@ def probe_broken(path, ffprobe=None):
     frames = scan_frames(path, boxes["payload_off"], boxes["payload_size"])
     result["frames"] = frames
     if frames["is_h264"]:
-        result["reason"] = "码流是 H.264，当前版本只支持 MPEG-4 Part 2(mp4v)"
+        result["reason"] = "码流是 H.264，当前只支持 MPEG-4 Part 2"
         return result
     if not frames["frame_count"]:
-        result["reason"] = ("mdat 里找不到 MPEG-4 帧起始码（00 00 01 B6），"
-                            "不是本工具能修的码流")
+        result["reason"] = "mdat 里找不到 MPEG-4 帧起始码 00 00 01 B6，不是本工具能修的码流"
         return result
     if not frames["gop_count"]:
-        result["reason"] = "找不到 GOP 起始码（00 00 01 B3），无法确定安全裁剪点"
+        result["reason"] = "找不到 GOP 起始码 00 00 01 B3，无法确定安全裁剪点"
         return result
     result["ok"] = True
     result["reason"] = "符合掉电截断特征，可修复"
@@ -360,7 +359,7 @@ def probe_broken(path, ffprobe=None):
 def pick_cut(vops, gops, mode="auto"):
     """决定裸流裁到哪里
 
-    auto（默认）取「小于最后一个 VOP 偏移的最大 GOP 偏移」，把残帧连同它所属的
+    auto 是默认档，取「小于最后一个 VOP 偏移的最大 GOP 偏移」，把残帧连同它所属的
     GOP 头一起丢掉。vop 档直接切在最后一个 VOP 起点上，会把 GOP 头留在流尾变成
     悬空半头——实测解码器因此从「末帧损坏」升级成「header damaged」整段报错。
     """
@@ -394,7 +393,7 @@ def sha_range(path, off, size):
 
 
 def probe_output(path, ffprobe):
-    """ffprobe 数输出文件的真实帧数（-count_frames 逐帧解，nb_read_frames 才可信）"""
+    """ffprobe 数输出文件的真实帧数：-count_frames 逐帧解，nb_read_frames 才可信"""
     rc, out = _run_capture([
         ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
         "-show_entries",
@@ -503,7 +502,7 @@ def repair(broken, reference, out, fps=25, cut_mode="auto", verify_decode=True,
            on_line=None, should_stop=None, ffmpeg=None, ffprobe=None):
     """修复一个掉电截断的 mp4，返回校验报告 dict
 
-    失败抛 RepairError（文案可直接展示），用户取消抛 RepairCancelled。
+    失败抛 RepairError，文案可直接展示；用户取消抛 RepairCancelled。
     原文件全程只读，输出路径与输入相同时直接拒绝。
     """
     def say(msg):
@@ -524,7 +523,7 @@ def repair(broken, reference, out, fps=25, cut_mode="auto", verify_decode=True,
     if not os.path.isfile(reference):
         raise RepairError(f"参考文件不存在: {reference}")
     if os.path.abspath(broken) == os.path.abspath(out):
-        raise RepairError("输出路径不能与损坏文件相同（本工具不改写原件）")
+        raise RepairError("输出路径不能与损坏文件相同，本工具不改写原件")
 
     say("[1/4] 体检损坏文件…")
     boxes = scan_boxes(broken)
@@ -537,25 +536,24 @@ def repair(broken, reference, out, fps=25, cut_mode="auto", verify_decode=True,
         raise RepairError("mdat 里找不到 MPEG-4 起始码，不是本工具能修的码流")
     cut = pick_cut(frames["vops"], frames["gops"], cut_mode)
     payload_size = boxes["payload_size"]
-    say(f"      盒结构 ftyp/mdat(size=0 尾扩展)，负载 {payload_size:,} B，起点 0x{boxes['payload_off']:X}")
+    say(f"      盒结构 ftyp + mdat 尾扩展，负载 {payload_size:,} B，起点 0x{boxes['payload_off']:X}")
     say(f"      帧起始码 {frames['frame_count']} 个，GOP {frames['gop_count']} 个，"
         f"中位帧长 {frames['median_frame']:,} B")
-    say(f"      末帧残留 {frames['last_vop_tail']:,} B"
-        f"（{'明显偏短' if frames['last_frame_incomplete'] else '长度正常'}，"
-        f"随所属 GOP 丢弃）")
-    say(f"      裁剪点 0x{cut:X}（{cut_mode}），将丢弃 {payload_size - cut:,} B")
+    say(f"      末帧残留 {frames['last_vop_tail']:,} B · "
+        f"{'明显偏短' if frames['last_frame_incomplete'] else '长度正常'}，随 GOP 丢弃")
+    say(f"      裁剪点 0x{cut:X} · {cut_mode} 档，丢弃 {payload_size - cut:,} B")
 
     say("[2/4] 提取参考文件 VOL 配置头…")
     ref = probe_reference(reference, ffprobe)
     if ref["codec"] != "mpeg4":
-        raise RepairError(f"参考文件编码是 {ref['codec'] or '未知'}，需要 mpeg4（MPEG-4 Part 2）")
+        raise RepairError(f"参考文件编码是 {ref['codec'] or '未知'}，需要 mpeg4")
     if ref["has_audio"]:
-        raise RepairError("参考文件含音轨：流拷贝方案会丢掉音轨，本工具拒绝处理")
+        raise RepairError("参考文件含音轨，流拷贝会丢音轨，本工具不处理")
     vol = read_vol(reference)
     if not vol:
         raise RepairError("无法从参考文件的 esds 中提取 VOL 头，请换同机录制的正常文件")
     say(f"      {ref['width']}×{ref['height']} · {ref['fps']} fps · {ref['profile']} · "
-        f"VOL {len(vol)} B（{vol[:6].hex(' ')}）")
+        f"VOL {len(vol)} B · {vol[:6].hex(' ')}")
     if not fps or fps <= 0:
         fps = ref["fps"] or 25
     say(f"      封装帧率取 {fps} fps")
@@ -577,9 +575,9 @@ def repair(broken, reference, out, fps=25, cut_mode="auto", verify_decode=True,
                     break
                 dst.write(buf)
                 left -= len(buf)
-        say(f"      裸流已拼接 → {mpg}（{os.path.getsize(mpg):,} B）")
+        say(f"      裸流已拼接 → {mpg} · {os.path.getsize(mpg):,} B")
 
-        say("[3/4] ffmpeg 流拷贝重封装（-c:v copy，不转码）…")
+        say("[3/4] ffmpeg 流拷贝重封装，不转码…")
         # -c:v mpeg4 必须显式指定：裸流里没有 mpeg1 序列头，自动探测会误判成
         # mpeg1video 并报 "aspect ratio has forbidden 0 value"
         cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -588,12 +586,12 @@ def repair(broken, reference, out, fps=25, cut_mode="auto", verify_decode=True,
                "-avoid_negative_ts", "make_zero", out]
         rc, errors = _run_ffmpeg(cmd, say, should_stop)
         if rc != 0:
-            hint = ("（参考文件分辨率与损坏文件不一致时会出现此错误，请换同机录制的参考文件）"
+            hint = ("；常见原因是参考文件分辨率不一致，请换同机录制的参考文件"
                     if errors else "")
-            raise RepairError(f"ffmpeg 重封装失败，退出码 {rc}{hint}: "
-                              f"{'; '.join(errors)[:300]}")
+            raise RepairError(f"ffmpeg 重封装失败，退出码 {rc}: "
+                              f"{'; '.join(errors)[:300]}{hint}")
         size = os.path.getsize(out)
-        say(f"      已写出 {out}（{size:,} B）")
+        say(f"      已写出 {out} · {size:,} B")
 
         say("[4/4] 校验…")
         info = probe_output(out, ffprobe)
@@ -605,14 +603,14 @@ def repair(broken, reference, out, fps=25, cut_mode="auto", verify_decode=True,
         sha_src = sha_range(broken, boxes["payload_off"], cut)
         sha_out = sha_range(out, out_boxes["payload_off"] + len(vol), cut)
         sha_ok = sha_src == sha_out
-        say(f"      媒体字节 SHA-256 {sha_src[:16]}… "
-            f"{'与原文件负载前缀一致 → 无损' if sha_ok else '不一致 → 请人工核对'}")
+        say(f"      媒体字节 SHA-256 {sha_src[:16]}… · "
+            f"{'与原件负载前缀一致，无损' if sha_ok else '与原件不一致，请人工核对'}")
 
         decode_errors, decode_lines = (0, [])
-        # 重封装已经成功，此时再取消不该扔掉成品（Worker 取消路径会删 out），
-        # 所以只跳过校验、照常返回报告
+        # 重封装已成功，此时取消不该扔掉成品：Worker 的取消路径会删 out，
+        # 所以这里只跳过校验、照常返回报告
         if stopped():
-            say("      已请求取消，跳过校验：输出文件已生成并保留")
+            say("      已请求取消，跳过校验，输出文件保留")
             verify_decode = False
         if verify_decode:
             decode_errors, decode_lines = count_decode_errors(out, ffmpeg)

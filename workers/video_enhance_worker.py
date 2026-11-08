@@ -173,7 +173,7 @@ class VideoEnhanceWorker(QThread):
                 dst = ve.resolve_output_path(src, p, info, videos_dir)
                 if dst is None:
                     skipped += 1
-                    self.line.emit(f"[{i + 1}/{total}] 跳过（输出已存在）: "
+                    self.line.emit(f"[{i + 1}/{total}] 跳过，输出已存在: "
                                    f"{os.path.basename(src)}")
                     self.item_done.emit(i, src, "")
                     continue
@@ -265,7 +265,7 @@ class VideoEnhanceWorker(QThread):
             for kind in kinds:
                 self._stopped()
                 log_path = os.path.join(log_dir, f"{kind}.json") if kind == "vmaf" else None
-                self.line.emit(f"[评测] {kind} …（放大过的片子会先把参考源缩到同分辨率）")
+                self.line.emit(f"[评测] {kind} … 放大过的片子会先把参考源缩到同分辨率")
                 try:
                     score = ve.run_metric(src, dst, kind, ff, fp,
                                           on_line=self.line.emit,
