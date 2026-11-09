@@ -51,8 +51,8 @@ WORKER_ATTRS = (W_ENHANCE, W_PROBE, W_ENV, W_CMP)
 # 环境检测页要核对的滤镜：只列 UI 真会拼进 -vf 的那些，ffmpeg 上千个滤镜
 # 全列出来等于没列。psnr/ssim/libvmaf 归「质量对比」页用，一并在这里报。
 WANTED_FILTERS = ("hqdn3d", "atadenoise", "vaguedenoiser", "nlmeans", "bm3d",
-                  "cas", "unsharp", "eq", "scale", "minterpolate", "format",
-                  "psnr", "ssim", "libvmaf")
+                  "cas", "unsharp", "eq", "scale", "minterpolate", "fruc_vulkan",
+                  "format", "psnr", "ssim", "libvmaf")
 
 # 预设覆盖到的键集合：手动改了其中任何一个就要重新判定「当前还算哪个预设」
 _PRESET_KEYS = frozenset()
@@ -577,8 +577,17 @@ class EnhanceTaskPage(VePage):
         p = self._hub.params
         warn = []
         if p.get("interp_on"):
-            warn.append("已开启补帧：运动补偿插帧在 1080p 上约 0.1x 实时，"
-                        "10 分钟视频要跑 100 分钟；且高速小球容易插帧撕裂")
+            mode = p.get("interp_mode")
+            if mode == "fruc":
+                warn.append("已开启 GPU 光流补帧：需 NVIDIA RTX 30 以上显卡与 "
+                            "2026-09 之后的 ffmpeg 构建，能力由「环境检测」实测；"
+                            "高速小球与遮挡处仍可能撕裂")
+            elif mode == "blend":
+                warn.append("已开启 blend 补帧：速度快但有重影，"
+                            "快速移动的球会拖成两道影")
+            else:
+                warn.append("已开启补帧：运动补偿插帧在 1080p 上约 0.1x 实时，"
+                            "10 分钟视频要跑 100 分钟；且高速小球容易插帧撕裂")
         if p.get("scale_on") and p.get("scale_mode") == "ratio" \
                 and float(p.get("scale_ratio") or 0) >= 2:
             warn.append(f"放大 {p.get('scale_ratio')}x：像素数按平方增长，"
@@ -870,7 +879,9 @@ class FilterPage(VePage):
     """滤镜调参：预设 + 去噪 / 锐化 / 放大 / 色彩 / 补帧 + -vf 实时预览"""
 
     _RATIOS = [(1.5, "1.5x"), (2.0, "2x"), (3.0, "3x"), (4.0, "4x")]
-    _INTERP_MODES = [("mci", "mci"), ("blend", "blend")]
+    _INTERP_MODES = [("mci", "mci"), ("blend", "blend"), ("fruc", "GPU 光流")]
+    _INTERP_PERFS = [("", "默认"), ("slow", "slow"), ("medium", "medium"),
+                     ("fast", "fast")]
 
     def __init__(self, hub, parent=None):
         super().__init__(hub, "滤镜调参",
@@ -1077,7 +1088,8 @@ class FilterPage(VePage):
         return card
 
     def _build_interp(self, parent):
-        card, cv, right = _card(parent, "补帧 minterpolate")
+        card, cv, right = _card(parent, "补帧",
+                                "minterpolate 运动补偿 · blend 混合 · GPU 光流硬件插帧")
         self.sw_interp = self._switch(card, "interp_on")
         right.addWidget(self.sw_interp)
         r = QHBoxLayout()
@@ -1088,18 +1100,64 @@ class FilterPage(VePage):
         self.spin_fps.valueChanged.connect(lambda v: self._set("interp_fps", int(v)))
         r.addWidget(self.spin_fps)
         r.addWidget(BodyLabel("模式", card))
-        self.cmb_interp = _combo(card, self._INTERP_MODES, 260)
+        self.cmb_interp = _combo(card, self._INTERP_MODES, 200)
         self.cmb_interp.currentIndexChanged.connect(
             lambda _i: self._set("interp_mode",
                                  _combo_val(self.cmb_interp, "mci")))
         r.addWidget(self.cmb_interp)
         r.addStretch(1)
         cv.addLayout(r)
-        cv.addWidget(_hint(card, "⚠ 运动补偿插帧在 1080p 上大约 0.1x 实时速度，"
-                                 "10 分钟视频要跑 100 分钟；且台球这种高速小球容易出现"
-                                 "插帧撕裂。默认关闭，开启前请确认时长可接受。"))
+
+        # GPU 专属控件单独一行，只在选了 GPU 光流时出现：CPU 模式下摆两个灰控件
+        # 既占地方又让人误以为调了会生效
+        g = QHBoxLayout()
+        g.setSpacing(8)
+        self.lbl_perf = BodyLabel("GPU 档位", card)
+        g.addWidget(self.lbl_perf)
+        self.cmb_perf = _combo(card, self._INTERP_PERFS, 110)
+        self.cmb_perf.setToolTip("slow 画质最好最慢，fast 最快；默认走滤镜自带档位")
+        self.cmb_perf.currentIndexChanged.connect(
+            lambda _i: self._set("interp_perf", _combo_val(self.cmb_perf, "")))
+        g.addWidget(self.cmb_perf)
+        self.lbl_gpu_idx = BodyLabel("Vulkan 设备号", card)
+        g.addWidget(self.lbl_gpu_idx)
+        self.spin_gpu = CompactSpinBox(card)
+        self.spin_gpu.setRange(0, 15)
+        self.spin_gpu.setToolTip("多显卡时选到 NVIDIA RTX 30+ 那张；本机 0 号通常是独显")
+        self.spin_gpu.valueChanged.connect(
+            lambda v: self._set("interp_gpu_index", int(v)))
+        g.addWidget(self.spin_gpu)
+        g.addStretch(1)
+        cv.addLayout(g)
+        self._gpu_widgets = (self.lbl_perf, self.cmb_perf, self.lbl_gpu_idx,
+                             self.spin_gpu)
+
+        self.lbl_interp_hint = _hint(card, "")
+        cv.addWidget(self.lbl_interp_hint)
         self._interp_widgets = (self.spin_fps, self.cmb_interp)
         return card
+
+    def _interp_hint(self, p):
+        """补帧提示随模式与 GPU 探测结果变，返回 (文案, 颜色)"""
+        mode = p.get("interp_mode")
+        if mode == "fruc":
+            test = (self._hub.caps or {}).get("fruc_test")
+            if test is None:
+                return ("⚠ GPU 光流插帧需 NVIDIA RTX 30+ 与 2026-09 之后的 ffmpeg "
+                        "master 构建；到「环境检测」重新探测确认可用性。"
+                        "高速小球与遮挡场景仍可能插帧撕裂。", _C_MUTED)
+            ok, why = test
+            if ok:
+                return ("✔ GPU 光流插帧已就绪，接近实时；高速小球与遮挡场景"
+                        "仍可能插帧撕裂。", _C_SUCCESS)
+            return (f"✘ GPU 光流插帧不可用：{why}。请换 CPU 模式，"
+                    "或更新 ffmpeg 与显卡驱动。", _C_DANGER)
+        if mode == "blend":
+            return ("⚠ blend 只是混合相邻帧，快约百倍，但高速小球会拖成两道影，"
+                    "适合预览。", _C_MUTED)
+        return ("⚠ 运动补偿插帧在 1080p 上大约 0.1x 实时速度，10 分钟视频要跑 "
+                "100 分钟；且台球这种高速小球容易出现插帧撕裂。默认关闭，"
+                "开启前请确认时长可接受。", _C_MUTED)
 
     def _build_preview(self, parent):
         card, cv, right = _card(parent, "滤镜链实时预览",
@@ -1189,6 +1247,8 @@ class FilterPage(VePage):
             self.sw_interp.setChecked(bool(p.get("interp_on")))
             self.spin_fps.setValue(int(p.get("interp_fps") or 60))
             _combo_set(self.cmb_interp, p.get("interp_mode"))
+            _combo_set(self.cmb_perf, p.get("interp_perf") or "")
+            self.spin_gpu.setValue(int(p.get("interp_gpu_index") or 0))
 
         # 开关决定整组控件能不能动：关掉的组留着可编辑会让人以为改了会生效
         for on, widgets in ((p.get("denoise_on"), self._denoise_widgets),
@@ -1198,6 +1258,13 @@ class FilterPage(VePage):
                             (p.get("interp_on"), self._interp_widgets)):
             for w in widgets:
                 w.setEnabled(bool(on))
+        # GPU 控件只在补帧开启且选了光流模式时露面；提示文案随模式与探测结果变
+        gpu_on = bool(p.get("interp_on")) and p.get("interp_mode") == "fruc"
+        for w in self._gpu_widgets:
+            w.setVisible(gpu_on)
+            w.setEnabled(gpu_on)
+        text, color = self._interp_hint(p)
+        _paint(self.lbl_interp_hint, text, color)
         # 三种算法各有生效字段：cas 只看 sharpen_amount，unsharp 只看 usm_*，
         # unsharp+cas 两组都生效。判定必须由两个标志位组合出来——只按
         # 「字符串里有没有 cas」判，两级算法会被说成只有 cas 生效，
@@ -1226,7 +1293,13 @@ class FilterPage(VePage):
         # 耗时的量级只由「是否放大 / 是否补帧」决定，给个数比什么都不说强
         cost = []
         if p.get("interp_on"):
-            cost.append("补帧 ≈ 0.1x 实时")
+            mode = p.get("interp_mode")
+            if mode == "fruc":
+                cost.append("GPU 光流补帧 ≈ 实时")
+            elif mode == "blend":
+                cost.append("blend 补帧 ≈ 10x 实时")
+            else:
+                cost.append("补帧 ≈ 0.1x 实时")
         if p.get("scale_on"):
             h = ve.target_height(dict(p), info or {})
             src_h = int((info or {}).get("height") or 0)
@@ -1656,6 +1729,7 @@ class EnvPage(VePage):
         hub.start(W_ENV, "env", {
             "ffmpeg": hub.ffmpeg, "ffprobe": hub.ffprobe,
             "encoders": list(ve.ENCODERS),
+            "gpu_index": int(hub.params.get("interp_gpu_index") or 0),
         }, [("env_ready", hub.on_env_ready)])
 
     def _build_version(self, parent):
@@ -1706,6 +1780,11 @@ class EnvPage(VePage):
             grid.addWidget(lab, i // 5, i % 5)
             self._filter_labels[name] = lab
         cv.addLayout(grid)
+        # fruc_vulkan 在网格里只反映「编译进来没有」，能不能真跑还要看下面这行实测：
+        # 它依赖 NVIDIA 光流硬件与 Vulkan 设备号选对，跟 nvenc 一样得真跑一段才算数
+        self.lbl_fruc = CaptionLabel("", card)
+        self.lbl_fruc.setWordWrap(True)
+        cv.addWidget(self.lbl_fruc)
         cv.addWidget(_hint(card, "探测结果只缓存在内存、不写 settings，避免与真实环境脱节；"
                                  "只在三种时机重跑：打开本页、点「重新探测」、ffmpeg 路径被修改"))
         return card
@@ -1780,6 +1859,23 @@ class EnvPage(VePage):
             else:
                 _paint(lab, f"✗ {name}", _C_DANGER)
                 lab.setToolTip("这个 ffmpeg 构建里没有编译该编码器")
+
+        fruc = caps.get("fruc_test")
+        if not caps.get("ok"):
+            _paint(self.lbl_fruc, "○ GPU 光流插帧：尚未探测", _C_MUTED)
+        elif fruc is not None:
+            ok, why = fruc
+            if ok:
+                _paint(self.lbl_fruc, "✔ GPU 光流插帧 fruc_vulkan 就绪，"
+                       "「滤镜调参」里可选 GPU 光流", _C_SUCCESS)
+            else:
+                _paint(self.lbl_fruc, f"✘ GPU 光流插帧不可用：{why}", _C_DANGER)
+        elif "fruc_vulkan" in filters:
+            _paint(self.lbl_fruc, "○ GPU 光流插帧：构建里有 fruc_vulkan，尚未实测",
+                   _C_MUTED)
+        else:
+            _paint(self.lbl_fruc, "✘ 此 ffmpeg 构建没有 fruc_vulkan，"
+                   "需更新到 2026-09 之后的 master 构建", _C_DANGER)
         self.btn_redetect.setEnabled(not hub.worker_running(W_ENV))
 
 
@@ -2323,6 +2419,13 @@ class VideoEnhanceHub(PivotPage):
         if t is not None and not t[0]:
             self.info(f"当前编码器 {self.params.get('encoder')} 在这台机器上跑不通，"
                       f"请到「编码输出」换一个；原因：{t[1]}", "warning", duration=6000)
+        # 同理：选了 GPU 光流补帧但实测跑不通时只告警，不替他改回 mci。
+        # 用户可能正打算换显卡或更新 ffmpeg，偷偷换模式会让他以为 GPU 生效了
+        if self.params.get("interp_on") and self.params.get("interp_mode") == "fruc":
+            ft = self.caps.get("fruc_test")
+            if ft is not None and not ft[0]:
+                self.info("GPU 光流补帧在这台机器上跑不通，请到「滤镜调参」换回 "
+                          f"mci 或 blend；原因：{ft[1]}", "warning", duration=6000)
 
     def refresh_env(self):
         self.caps = {}

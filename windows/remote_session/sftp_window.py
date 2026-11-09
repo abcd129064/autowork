@@ -266,11 +266,32 @@ class _HealthCheckWorker(QThread):
 
 
 def _safe_release_worker(w):
-    """将 worker 放入 pending 集合，线程结束后自动移除并 deleteLater"""
+    """把 worker 挂到模块级强引用集合，线程结束后摘除并 deleteLater。
+
+    finished 是一次性信号：调用时线程若已结束，新挂的 lambda 永远不会触发，
+    worker 会永久留在集合里。isFinished() 分流 + connect 后二次复核，保证
+    任何时序下都只释放一次。
+    """
+    if w is None:
+        return
+    if w.isFinished():
+        w.deleteLater()
+        return
+    state = {'done': False}
+
+    def _release():
+        if state['done']:
+            return
+        state['done'] = True
+        _pending_workers.discard(w)
+        w.deleteLater()
+
+    # 闭包捕获 w 持强引用：PySide6 连接不保留 Python worker 引用，否则线程
+    # 还在跑时 w 被 GC 回收会触发 "Destroyed while thread is still running" qFatal
     _pending_workers.add(w)
-    # lambda 闭包捕获 w 是为了持强引用：PySide6 连接不保留 Python worker 引用，
-    # 否则线程还在跑时 w 被 GC 回收，触发 "Destroyed while thread is still running" qFatal
-    w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
+    w.finished.connect(_release)
+    if w.isFinished():
+        _release()
 
 
 class _TransferTable(TableWidget):
@@ -1140,6 +1161,10 @@ class SFTPPanel(QWidget):
         worker = _HealthCheckWorker(self._transport)
         worker.result.connect(self._on_health_check_result)
         self._health_worker = worker
+        # result 是跨线程 queued 槽：上一轮的槽可能在本轮 worker 运行期间才落地。
+        # 没有模块级保活时，任何一次引用被抹掉都会让 QThread 在运行中被析构，
+        # Qt 直接 qFatal abort（0xC0000409）。保活必须挂在 start() 之前。
+        _safe_release_worker(worker)
         worker.start()
 
     def _on_health_check_result(self, latency_ms):
@@ -1156,7 +1181,9 @@ class SFTPPanel(QWidget):
             self._set_health_indicator('orange', f'延迟较高 ({latency_ms}ms)')
         else:
             self._set_health_indicator('red', f'延迟过高 ({latency_ms}ms)')
-        self._health_worker = None
+        # 刻意不把 _health_worker 置 None：late 槽可能属于上一轮 worker，置空
+        # 会抹掉本轮正在运行的 worker 的唯一业务引用。互斥判断只看 isRunning()，
+        # 释放统一交给 _safe_release_worker 的 finished 回调。
 
     def _set_health_indicator(self, color, tooltip):
         """设置健康指示器颜色和提示"""
@@ -2313,6 +2340,10 @@ class SFTPPanel(QWidget):
             old_worker.error.disconnect()
         except Exception:
             pass
+        # error/success 是在 run() 的 finally（关 sftp + transport.join）之前
+        # 发出的，此刻旧线程往往还在跑；下面覆盖 info['worker'] 会抹掉它唯一
+        # 的强引用，先挂保活集合，否则 QThread 会在运行中析构触发 qFatal。
+        _safe_release_worker(old_worker)
         # 重置采样基准并清零进度：不重置 last_bytes 的话，新 worker 报的第一个
         # 累计字节会被拿去和旧任务的总量相减，速度瞬间变成负值或天文数字
         info['worker'] = worker
@@ -2815,10 +2846,21 @@ class SFTPPanel(QWidget):
         self._pending_refresh = set()
         # P2-1：排队任务不再启动（worker 未 start，仅置停标志后销毁）
         self._queued_transfers = []
-        # 等待健康检测 worker 完成
-        # 最多等 1s：健康检测只是 open_session/close 的短操作，等太久会拖慢关窗
-        if self._health_worker and self._health_worker.isRunning():
-            self._health_worker.wait(1000)
+        # 健康检测：先断结果槽再等线程。wait() 会阻塞 GUI 事件循环，队列里
+        # 已排队的 result 槽若留到面板 deleteLater 之后执行，会去改已删除的
+        # QLabel；断开连接后即使事件落地也没有槽可调用。
+        health_worker = self._health_worker
+        self._health_worker = None
+        if health_worker is not None:
+            try:
+                health_worker.result.disconnect()
+                if health_worker.isRunning():
+                    # 最多等 1s：健康检测只是 open_session/close 的短操作
+                    health_worker.wait(1000)
+                else:
+                    health_worker.deleteLater()
+            except (TypeError, RuntimeError):
+                pass
         transport = self._transport
         self._transport = None
         # 先置空引用掐断后续回调能看到的 transport，防止下面清理 worker 期间又被拿去操作

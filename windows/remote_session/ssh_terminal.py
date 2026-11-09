@@ -60,15 +60,30 @@ _pending_workers: set = set()
 
 
 def _safe_release_worker(w):
-    """把 worker 挂到模块级强引用集合，等线程自然结束后摘除并 deleteLater
+    """把 worker 挂到模块级强引用集合，等线程自然结束后摘除并 deleteLater。
 
-    调用点都是「窗口即将销毁」或「任务刚启动」的时刻：此时面板对 worker 的
-    引用随时可能随面板一起失效。没有这个集合兜底，垃圾回收可能在线程运行中
-    就回收包装对象，导致进程 abort。finished 由 worker 自己的线程在退出后发出，
-    lambda 里同时完成摘除与 deleteLater，不留悬挂对象。
+    finished 是一次性信号：若调用时线程已经结束，新挂的 lambda 不会触发，
+    worker 会永久留在集合里；因此先按 isFinished() 分流，挂完再复核一次，
+    避免「检查未结束 → 线程立刻结束 → 回调丢失」的竞态。
     """
+    if w is None:
+        return
+    if w.isFinished():
+        w.deleteLater()
+        return
+    state = {'done': False}
+
+    def _release():
+        if state['done']:
+            return
+        state['done'] = True
+        _pending_workers.discard(w)
+        w.deleteLater()
+
     _pending_workers.add(w)
-    w.finished.connect(lambda: (_pending_workers.discard(w), w.deleteLater()))
+    w.finished.connect(_release)
+    if w.isFinished():
+        _release()
 
 
 # ─── 配置门面读写（常用命令条配置） ─────────────────────────────────

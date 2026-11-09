@@ -638,7 +638,7 @@ def _preflight_env(mgr, monkeypatch, fake):
     monkeypatch.setattr(fr, "PARAMIKO_AVAILABLE", True)
     monkeypatch.setattr(fa, "get_frps_client", lambda: fake)
     notices = []
-    mgr._notify = lambda title, msg, error=False, notifier=None: \
+    mgr._notify = lambda title, msg, error=False, notifier=None, key=None: \
         notices.append((title, error))
     ensured = []
     mgr.ensure_visitor_async = _fake_ensure_async(ensured)

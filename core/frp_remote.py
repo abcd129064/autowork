@@ -92,6 +92,20 @@ _RECOVER_RESET_UPTIME_SEC = 60
 # 再拉）。只重试 autostart 一条链路，总开关/手动 apply 失败不自动重试。
 _AUTOSTART_RETRY_DELAYS_MS = (60000, 120000)
 
+# frps 预检挂起的最长等待：回执丢失（后台刷新异常、信号断开失败）时
+# 不能让打开请求永久静默，超时按感知不可用 fail-open 续接。
+_PREFLIGHT_TIMEOUT_MS = 20000
+
+
+def _session_bar_key(kind, snk, notifier=None):
+    """一次会话打开链路共用的 InfoBar key：受理/就绪/失败只占一条提示。
+
+    带 notifier（发起页面）标识：双宿主下同一 snk 可能从两个窗口同时发起，
+    模块级 _keyed_bars 不带宿主键会让它们共用一条提示。
+    """
+    host = id(notifier) if notifier is not None else 0
+    return f"session:{kind}:{snk}:{host}"
+
 # frpc admin API（热重载）：仅监听回环地址，端口/口令每次进程生成随机值。
 # 0.66.0 起 GET /api/reload 重读 TOML 并按 name+DeepEqual diff visitors，
 # 未变化的 visitor 完全不动（XTCP 会话不中断）；reload 不重读 common 配置
@@ -201,6 +215,12 @@ class RemoteSessionManager(QObject):
         self._tunnel_issues: set = set()
         # 静默预连有界重试（P1-2）：autostart 瞬态失败的已重试次数
         self._autostart_retries = 0
+        # 关窗标志：60/120s 的 QTimer.singleShot 没有句柄可取消，回调落地时
+        # 靠它直接返回，避免关窗清理完成后又去重建 QProcess 抢 _frpc_process。
+        self._shutting_down = False
+        # 预检挂起的打开请求与代次：超时兜底和正常回执靠 seq 互斥
+        self._pending_open = None
+        self._pending_seq = 0
         # P0-2（2026-09-24）：apply 热重载 HTTP 往返移后台线程的基建；
         # async_done 从工作线程 emit，Qt 自动 queued 回 GUI 线程分发回调
         self._bg_seq = 0
@@ -741,6 +761,8 @@ class RemoteSessionManager(QObject):
 
     def _autostart_retry(self):
         """延迟重试回调：仍走 autostart 全套前置判定（运行中/无隧道自动跳过）"""
+        if self._shutting_down:
+            return  # 关窗后 singleShot 仍会落地，不能再拉起 frpc
         result = self.autostart()
         if result in ("started", "reloaded", "restarted"):
             self.prewarm_async()  # 重试成功也补预热打洞
@@ -1178,6 +1200,8 @@ class RemoteSessionManager(QObject):
 
     def _recover_frpc(self):
         """P1-1 延迟自愈回调：拉起 frpc 恢复全部启用隧道"""
+        if self._shutting_down:
+            return  # 120s 档恰好落在关窗之后时，不能与 shutdown 抢 QProcess
         if self.is_running():
             return  # 期间用户已手动拉起，无需恢复
         if self.active_count() == 0:
@@ -1269,9 +1293,11 @@ class RemoteSessionManager(QObject):
             return
 
         # P0-1（2026-09-24）：受理即反馈——旧链路在预检/ensure 完成前无任何
-        # 提示（缓存过期时最长冻结 GUI 十秒级），用户会连点多次
+        # 提示（缓存过期时最长冻结 GUI 十秒级），用户会连点多次。
+        # 同 key 让后续「隧道就绪 / 已打开 / 失败」就地更新这一条，不再堆叠。
+        bar_key = _session_bar_key(kind, snk, notifier)
         self._notify("正在建立远程连接", f"{table_id or snk} → {snk}：已受理，"
-                     "正在准备隧道…", notifier=notifier)
+                     "正在准备隧道…", notifier=notifier, key=bar_key)
 
         # ---- 二期 P0 连接预检：frps 权威离线 → 秒提示，不盲等打洞超时 ----
         # 感知不可用（未配置/不可达/缓存过期）一律放行回退一期路径；
@@ -1287,21 +1313,50 @@ class RemoteSessionManager(QObject):
             # P0-1：缓存不可信时不再同步 refresh()（最坏 25s GUI 冻结）——
             # 挂起本次打开，后台感知刷新，回执后续接（_open_after_preflight）
             self._pending_open = (kind, snk, table_id, source, notifier)
+            seq = self._pending_seq = getattr(self, '_pending_seq', 0) + 1
             frps = get_frps_client()
             try:
                 frps.refresh_finished.disconnect(self._on_refresh_finished_resume)
             except (TypeError, RuntimeError):
                 pass  # 未连接过/接收者已销毁：无需断开
             frps.refresh_finished.connect(self._on_refresh_finished_resume)
+            # 回执可能因后台线程异常/感知通道关闭而永远不来，兜底 20s 放行。
+            # singleShot 只捕获 seq 与单例 self，不持有 notifier，窗口关了也安全。
+            QTimer.singleShot(_PREFLIGHT_TIMEOUT_MS,
+                              lambda s=seq: self._resume_pending_on_timeout(s))
             frps.request_refresh()
             return
         if state == "offline":
             self._notify("设备未在线",
                          f"{snk} 在 frps 上状态为 offline（设备断电/断网/现场 "
                          f"frpc 掉线），已跳过打洞等待。可稍后重试，或到"
-                         f"球桌管理页核对现场状态。", error=True, notifier=notifier)
+                         f"球桌管理页核对现场状态。", error=True,
+                         notifier=notifier, key=bar_key)
             self.log_message.emit(f"[远程会话] 预检拦截: {snk} frps offline，未发起打洞")
             return
+        self._open_after_preflight(kind, snk, table_id, source, notifier)
+
+    def _resume_pending_on_timeout(self, seq: int):
+        """预检回执超时的兜底：按感知不可用放行，避免打开请求永久静默。
+
+        只认当前代次的挂起请求；期间已被正常回执消费或又被新请求覆盖时
+        _pending_seq 已变化，旧定时器直接作废。
+        """
+        if getattr(self, '_pending_seq', 0) != seq:
+            return
+        pending = getattr(self, '_pending_open', None)
+        if not pending:
+            return
+        try:
+            from core.frps_admin import get_frps_client
+            get_frps_client().refresh_finished.disconnect(
+                self._on_refresh_finished_resume)
+        except (TypeError, RuntimeError):
+            pass
+        self._pending_open = None
+        self._pending_seq = seq + 1
+        kind, snk, table_id, source, notifier = pending
+        self.log_message.emit(f"[远程会话] 预检回执超时，fail-open 续接: {snk}")
         self._open_after_preflight(kind, snk, table_id, source, notifier)
 
     def _on_refresh_finished_resume(self, state: str):
@@ -1320,6 +1375,8 @@ class RemoteSessionManager(QObject):
             pass
         pending = getattr(self, "_pending_open", None)
         self._pending_open = None
+        # 作废本次挂起的超时定时器：正常回执已到，不能再让兜底重复续接
+        self._pending_seq = getattr(self, '_pending_seq', 0) + 1
         if not pending:
             return
         kind, snk, table_id, source, notifier = pending
@@ -1333,7 +1390,8 @@ class RemoteSessionManager(QObject):
             self._notify("设备未在线",
                          f"{snk} 在 frps 上状态为 offline（设备断电/断网/现场 "
                          f"frpc 掉线），已跳过打洞等待。可稍后重试，或到"
-                         f"球桌管理页核对现场状态。", error=True, notifier=notifier)
+                         f"球桌管理页核对现场状态。", error=True,
+                         notifier=notifier, key=_session_bar_key(kind, snk, notifier))
             self.log_message.emit(f"[远程会话] 预检拦截: {snk} frps offline，未发起打洞")
             return
         self._open_after_preflight(kind, snk, table_id, source, notifier)
@@ -1350,7 +1408,8 @@ class RemoteSessionManager(QObject):
                 videos_dir = str(_load_settings().get("videos_dir") or "").strip()
                 if videos_dir and os.path.isdir(videos_dir):
                     msg += f"，本地目录 videos{os.sep}{table_id}"
-            self._notify("正在建立远程连接", msg, notifier=notifier)
+            self._notify("正在建立远程连接", msg, notifier=notifier,
+                         key=_session_bar_key(kind, snk, notifier))
             # P2-4：轮询隧道端口监听就绪（200ms 间隔、8s 上限）替代固定延时——
             # 复用路径端口已在听首轮即中，冷启动快网早开、慢网不再赌输
             self.wait_ports_ready(
@@ -1361,7 +1420,8 @@ class RemoteSessionManager(QObject):
             snk, table_id=table_id, source=source,
             on_ready=_ready,
             on_error=lambda e: self._notify("远程准备失败", str(e),
-                                            error=True, notifier=notifier))
+                                            error=True, notifier=notifier,
+                                            key=_session_bar_key(kind, snk, notifier)))
 
     def open_direct_session(self, kind: str, host: str, port: int,
                             name: str = "", notifier=None,
@@ -1623,7 +1683,11 @@ class RemoteSessionManager(QObject):
     # ---------- 生命周期 ----------
 
     def shutdown(self):
-        """停止 frpc 并关闭全局会话窗口（仅主窗口 closeEvent 调用）"""
+        """停止 frpc、作废延迟回调并关闭全局会话窗口（仅主窗口 closeEvent 调用）"""
+        self._shutting_down = True
+        # 作废预检挂起：超时兜底的 singleShot 落地后 seq 不匹配会自行返回
+        self._pending_open = None
+        self._pending_seq += 1
         self._stop_frpc()
         win = self._session_window
         self._session_window = None
@@ -1635,17 +1699,24 @@ class RemoteSessionManager(QObject):
 
     # ---------- 提示 ----------
 
-    def _notify(self, title: str, msg: str, error: bool = False, notifier=None):
-        """InfoBar 提示（右下角，与项目规范一致）"""
+    def _notify(self, title: str, msg: str, error: bool = False,
+                notifier=None, key=None):
+        """InfoBar 提示；同 key 的多次状态更新复用同一条，不再堆叠。
+
+        带 key 的进度提示给足 15s：首次 duration 决定自动关闭时间，后续
+        就地更新不会重置定时器，太短会让用户在等待期看不到任何提示。
+        """
         try:
             parent = notifier
             if parent is None:
                 from PySide6.QtWidgets import QApplication
                 parent = QApplication.activeWindow()
             if error:
-                show_info_bar(msg, "error", title=title, parent=parent, duration=4000)
+                show_info_bar(msg, "error", title=title, parent=parent,
+                              duration=4000, key=key)
             else:
-                show_info_bar(msg, "info", title=title, parent=parent, duration=2000)
+                show_info_bar(msg, "info", title=title, parent=parent,
+                              duration=15000 if key else 2000, key=key)
         except Exception:
             pass
 

@@ -217,7 +217,9 @@ def default_params():
         "gamma": 1.0,
         "interp_on": False,
         "interp_fps": 60,
-        "interp_mode": "mci",         # mci（运动补偿，极慢）/ blend（快，有重影）
+        "interp_mode": "mci",         # mci 运动补偿极慢 / blend 快但有重影 / fruc GPU 光流
+        "interp_perf": "",            # GPU 档位，空走滤镜默认；slow / medium / fast
+        "interp_gpu_index": 0,        # Vulkan 设备号，多显卡时选到 NVIDIA 那张
         # ---- 编码 ----
         "encoder": "libx264",
         "codec_preset": "slow",
@@ -297,7 +299,8 @@ def detect_capabilities(ffmpeg):
     所以这里只报编译结果，真实可用性由 test_encoder() 单帧试编一次才算数。
     """
     cap = {"ffmpeg": ffmpeg, "version": "", "build": "", "encoders": set(),
-           "filters": set(), "has_vmaf": False, "ok": False, "reason": ""}
+           "filters": set(), "has_vmaf": False, "has_fruc": False,
+           "ok": False, "reason": ""}
     if not ffmpeg or not os.path.isfile(ffmpeg):
         cap["reason"] = "ffmpeg 未定位到，请在「环境检测」填路径或把它加进 PATH"
         return cap
@@ -334,6 +337,9 @@ def detect_capabilities(ffmpeg):
                 cap["filters"].add(t[1])
     cap["has_vmaf"] = ("libvmaf" in cap["filters"]
                        and "--enable-libvmaf" in cap["build"])
+    # 编译进来 ≠ 能跑：fruc_vulkan 还要 NVIDIA 光流硬件，真实可用性由
+    # test_fruc_vulkan() 真跑一段才算数，这里只报构建里有没有这个滤镜
+    cap["has_fruc"] = "fruc_vulkan" in cap["filters"]
     cap["ok"] = True
     return cap
 
@@ -357,6 +363,29 @@ def test_encoder(ffmpeg, encoder):
     if rc == 0:
         return True, ""
     return False, (out.strip().splitlines() or [f"exit={rc}"])[0][:200]
+
+
+def test_fruc_vulkan(ffmpeg, gpu_index=0):
+    """真跑一段极小片段验证 GPU 光流插帧可用，返回 (ok, reason)
+
+    滤镜编译进来 ≠ 这台机器能跑：fruc_vulkan 还要 NVIDIA RTX 30+ 的光流硬件与
+    VK_NV_optical_flow 驱动扩展，且 Vulkan 设备号要选到 N 卡。用 0.2s 的 lavfi
+    测试源走一遍完整 hwupload→fruc→hwdownload 链，把「构建太旧没这个滤镜 /
+    驱动缺失 / 选错显卡」挡在开始按钮之前，而不是让整批录像逐条失败。
+    """
+    if not ffmpeg:
+        return False, "ffmpeg 未定位"
+    idx = int(gpu_index or 0)
+    cmd = [ffmpeg, "-hide_banner", "-v", "error",
+           "-init_hw_device", f"vulkan=vk:{idx}", "-filter_hw_device", "vk",
+           "-f", "lavfi", "-i", "testsrc2=size=256x256:rate=30:duration=0.2",
+           "-vf", "format=yuv420p,hwupload,fruc_vulkan=fps=60,hwdownload,"
+                  "format=yuv420p",
+           "-an", "-f", "null", "-"]
+    rc, out = _run_capture(cmd, timeout=60)
+    if rc == 0:
+        return True, ""
+    return False, (out.strip().splitlines() or [f"exit={rc}"])[-1][:200]
 
 
 # ==================== 源文件探测 ====================
@@ -549,13 +578,30 @@ def _color_filter(p):
     return f"eq={':'.join(parts)}" if parts else ""
 
 
+def _uses_fruc(p):
+    """GPU 光流插帧是否生效：补帧开关打开且模式选了 fruc 才算
+
+    只看 interp_mode 会在补帧关闭时也注入 -init_hw_device，平白初始化一次显卡。
+    """
+    return bool(p.get("interp_on")) and p.get("interp_mode") == "fruc"
+
+
 def _interp_filter(p):
     fps = int(p.get("interp_fps") or 60)
     if fps <= 0:
         return ""
-    if p.get("interp_mode") == "blend":
+    mode = p.get("interp_mode")
+    if mode == "blend":
         # blend 只是把相邻帧混一下，快十倍但快速移动的球会拖成两道影
         return f"minterpolate=fps={fps}:mi_mode=blend"
+    if mode == "fruc":
+        # GPU 光流插帧：hwupload 进 Vulkan → fruc_vulkan 调 NVIDIA 光流硬件合成
+        # 中间帧 → hwdownload 回内存；设备旗标由 build_command 注入，perf 空走默认
+        opt = f"fps={fps}"
+        perf = str(p.get("interp_perf") or "").strip()
+        if perf in ("slow", "medium", "fast"):
+            opt += f":perf={perf}"
+        return f"format=yuv420p,hwupload,fruc_vulkan={opt},hwdownload"
     return (f"minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:"
             f"me_mode=bidir:vsbmc=1")
 
@@ -738,8 +784,13 @@ def build_command(src, dst, p, info=None, ffmpeg="ffmpeg", passlogfile=None,
     """
     info = info or {}
     chain = build_filter_chain(p, info)
-    cmd = [ffmpeg, "-hide_banner", "-nostats", "-progress", "pipe:1",
-           "-y", "-i", src, "-vf", chain]
+    cmd = [ffmpeg, "-hide_banner", "-nostats", "-progress", "pipe:1", "-y"]
+    if _uses_fruc(p):
+        # Vulkan 设备要在 -i 前初始化，filter_hw_device 把它绑给 hwupload/hwdownload。
+        # 设备号默认 0，但多显卡机器上 0 号不一定是 N 卡，故做成可调参数。
+        idx = int(p.get("interp_gpu_index") or 0)
+        cmd += ["-init_hw_device", f"vulkan=vk:{idx}", "-filter_hw_device", "vk"]
+    cmd += ["-i", src, "-vf", chain]
     cmd += _video_encode_args(p, info)
 
     if pass_no:

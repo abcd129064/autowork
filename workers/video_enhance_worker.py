@@ -221,6 +221,7 @@ class VideoEnhanceWorker(QThread):
             "ok": bool(cap.get("ok")), "reason": cap.get("reason", ""),
             "version": cap.get("version", ""), "build": cap.get("build", ""),
             "has_vmaf": bool(cap.get("has_vmaf")),
+            "has_fruc": bool(cap.get("has_fruc")),
             "encoders": sorted(cap.get("encoders") or []),
             "filters": sorted(cap.get("filters") or []),
             "tests": {},
@@ -247,6 +248,18 @@ class VideoEnhanceWorker(QThread):
             good, why = result["tests"][name]
             self.line.emit(f"  {'✓' if good else '✗'} {name}"
                            + (f" — {why}" if why else ""))
+        # GPU 光流插帧同样「编译进来 ≠ 能跑」：真跑一段极小片段验证硬件与驱动，
+        # 选错 Vulkan 设备号或构建太旧都会在这里露馅，而不是让整批录像逐条失败
+        self._stopped()
+        if result["has_fruc"]:
+            good, why = ve.test_fruc_vulkan(ff, self.params.get("gpu_index") or 0)
+            result["fruc_test"] = [bool(good), why]
+        else:
+            result["fruc_test"] = [False, "这个 ffmpeg 构建没有 fruc_vulkan，"
+                                          "需更新到 2026-09 之后的 master 构建"]
+        good, why = result["fruc_test"]
+        self.line.emit(f"  {'✓' if good else '✗'} GPU 光流插帧 fruc_vulkan"
+                       + (f" — {why}" if why else ""))
         self.env_ready.emit(result)
         self.finished_ok.emit(result)
 

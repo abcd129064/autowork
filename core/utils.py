@@ -5,6 +5,7 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 
 try:
@@ -18,6 +19,10 @@ except ImportError:
 RETRYABLE_KEYWORDS = ('Error reading SSH protocol banner', 'Server connection dropped')
 RETRY_MAX = 5
 RETRY_DELAY = 2  # 秒
+
+# 按业务 key 复用的 InfoBar：一次异步操作的多个阶段只保留一条可见提示。
+# 值由 bar.closedSignal 自行摘除，不会长期持有已关闭控件。
+_keyed_bars = {}
 
 
 def classify_conn_error(e):
@@ -55,10 +60,32 @@ def natural_sort_key(s):
             for part in re.split(r'(\d+)', s)]
 
 
+# join 超时后仍可能活着的 Transport：后台线程还在读 socket，一旦 Python
+# 引用归零、socket 被销毁就会命中 C 层 0xC0000409。留强引用直到它自行
+# inactive，是拿少量常驻内存换进程不崩。
+_retired_transports = set()
+_retired_lock = threading.Lock()
+_RETIRED_MAX = 32
+
+
+def _reap_retired_transports():
+    """惰性回收已退出的 Transport；关窗时也可显式调用做一次清理。"""
+    with _retired_lock:
+        for t in list(_retired_transports):
+            try:
+                if not t.is_active():
+                    _retired_transports.discard(t)
+            except Exception:
+                _retired_transports.discard(t)
+
+
 def safe_close_transport(transport, join_timeout=3):
-    """安全关闭 paramiko Transport：先 close 再 join 等待后台线程退出。
-    避免线程仍在读 socket 时 socket 被销毁导致 C 层崩溃 (0xC0000409)。
+    """安全关闭 paramiko Transport：close → join → 超时对象保活到线程退出。
+
+    close() 只是通知后台线程停止，join 超时说明线程尚未退出。此时若调用方
+    释放引用，底层 socket 会被销毁而线程仍在读，Windows 上表现为 0xC0000409。
     """
+    _reap_retired_transports()
     if transport is None:
         return
     try:
@@ -67,6 +94,17 @@ def safe_close_transport(transport, join_timeout=3):
         pass
     try:
         transport.join(join_timeout)
+    except Exception:
+        pass
+    try:
+        if not transport.is_active():
+            return
+        with _retired_lock:
+            # 上限保护：异常网络下不该无限堆积。最旧的直接丢弃——它已 close，
+            # 后台线程会随 socket 超时自行结束，丢弃只是少一层保险。
+            while len(_retired_transports) >= _RETIRED_MAX:
+                _retired_transports.pop()
+            _retired_transports.add(transport)
     except Exception:
         pass
 
@@ -124,12 +162,18 @@ def cleanup_log_dir(dir_path, max_files=500, max_age_days=30, suffix='.log'):
 
 
 def show_info_bar(message, message_type="info", title=None, duration=2500,
-                  parent=None, bottom_offset=0):
+                  parent=None, bottom_offset=0, key=None):
     """统一 InfoBar 提示：位置固定 BOTTOM_RIGHT，标题按类型自动映射。
 
     参数与主窗口 _show_info_bar 一致（message/message_type/title/duration），
     额外提供 parent（默认取当前活动窗口兜底）；返回 InfoBar 实例，
     便于调用方追加 Action/Widget（如「打开文件夹」按钮）。
+
+    key：同一次业务操作的多个阶段（受理 → 成功/失败）传同一个 key，后续
+    调用会**就地更新已有那一条**而不是再叠一条。异步链路常常连续发好几条
+    状态，不合并就会在右下角堆成一串重复提示。复用时沿用首次调用的
+    duration（InfoBar 的自动关闭定时器在 showEvent 里一次性排定，无法重置），
+    所以进度类提示的首条要给足覆盖整个等待期的时长。
 
     bottom_offset：在默认贴底位置基础上再向上抬升的像素数（2026-09-23 需求：
     设备状态页文件面板底部有迁移按钮行，贴底提示会遮挡按钮）。做法是给该条
@@ -152,6 +196,26 @@ def show_info_bar(message, message_type="info", title=None, duration=2500,
             'warning': InfoBarIcon.WARNING,
             'error': InfoBarIcon.ERROR}.get(message_type,
                                             InfoBarIcon.INFORMATION)
+    if key is not None:
+        bar = _keyed_bars.get(key)
+        if bar is not None:
+            try:
+                # _adjustText 会拿 self.title/self.content 重设标签，只改
+                # QLabel 会被它覆盖回去，所以属性与标签要一起更新。
+                bar.title = title
+                bar.content = message
+                bar.titleLabel.setText(title)
+                bar.contentLabel.setText(message)
+                # 按当前宽度重新换行；宽度未算出时可能抛算术异常，
+                # 此时保留上面的直接 setText，不能让提示更新打断业务。
+                try:
+                    bar._adjustText()
+                except Exception:
+                    pass
+                return bar
+            except RuntimeError:
+                # C++ 对象已被用户手动关闭/父窗口销毁，登记失效，走新建
+                _keyed_bars.pop(key, None)
     if bottom_offset:
         _patch_bottom_right_offset()
     # 不能用 InfoBar.success 等 classmethod：其内部创建后立即 show()，滑入动画
@@ -161,6 +225,9 @@ def show_info_bar(message, message_type="info", title=None, duration=2500,
                   position=InfoBarPosition.BOTTOM_RIGHT, parent=parent)
     if bottom_offset:
         bar.setProperty("bottomOffset", int(bottom_offset))
+    if key is not None:
+        _keyed_bars[key] = bar
+        bar.closedSignal.connect(lambda: _keyed_bars.pop(key, None))
     bar.show()
     return bar
 
