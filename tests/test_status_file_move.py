@@ -324,3 +324,29 @@ def test_silent_refresh_queues_instead_of_dropping():
     for name in ("_on_refresh_error", "_on_refresh_save_error"):
         assert "_refresh_worker = None" in _method_src(name), \
             f"{name} 未复位在途标记"
+
+
+def test_backfill_covered_dates_query_goes_through_worker():
+    """补漏的已覆盖日期查询必须走后台 Worker（主线程同步查 MySQL 会卡死 GUI）
+
+    用户报障：运维管理来回切页签概率性卡死 15-30s 后恢复。根因是
+    _backfill_missing_dates 由主线程定时器触发，内部 set(get_dates()) |
+    set(get_synced()) 是同步 MySQL 查询，半开连接挂到 read_timeout 即冻结界面，
+    与文件统计列点击假死同一机制。
+    """
+    body = _method_src("_backfill_missing_dates")
+    assert "_DBQueryWorker" in body, "补漏日期查询未走后台 Worker，会阻塞主线程"
+    # 主线程方法体里不能直接调日期查询函数（同步 MySQL）；赋值/传参不算调用
+    code = body.split('"""', 2)[-1]
+    assert "get_dates()" not in code and "get_synced()" not in code, \
+        "已覆盖日期查询仍在主线程同步执行（半开 MySQL 会卡死 GUI 15-30s）"
+    # 查询在途期间必须置 running，挡住定时器重入开出第二条查询
+    assert body.index("_backfill_running = True") < body.index("_DBQueryWorker"), \
+        "未在启动查询前置 running，定时器可能重入开出第二条查询"
+    # 合并逻辑落在后台 helper，缺失日期计算与链启动落在结果回调
+    assert "set(get_dates()) | set(get_synced())" in \
+        _method_src("_collect_covered_dates"), "已覆盖日期合并不在后台 helper 里"
+    ready = _method_src("_on_backfill_dates_ready")
+    assert "_backfill_next()" in ready, "补漏链未在日期就绪回调里启动"
+    assert "_backfill_running = False" in _method_src("_on_backfill_dates_error"), \
+        "日期查询失败未复位 running，后续补漏会被永久判为在途"

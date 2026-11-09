@@ -125,6 +125,20 @@ def test_wide_char_rendered_once(env):
     assert env.widget.screen_text()[0] == "中文abc"
 
 
+def test_wide_char_cursor_block_not_overwide(env):
+    """光标落在宽字符上时方块只包字形（占两格），不再多补一个 &nbsp; 宽出第三格。
+
+    旧实现给宽字符光标额外追加一个绿色 &nbsp;，方块比字宽出一格压到下一个字上，
+    正是用户截图里「光标直接盖在字符上」的来源之一。
+    """
+    env.widget.write_output("台球俱乐部\x1b[7G")   # CHA 到第7列(1基)=0基col6=乐
+    env.widget._render()
+    html = env.widget.toHtml()
+    assert html.count("background-color:#00ff00") == 1, "宽字符光标多画了一格方块"
+    assert html.count("乐") == 1
+    assert env.widget.screen_text()[0] == "台球俱乐部"
+
+
 # ── 3. 选区 / 滚动位置要保持 ────────────────────────────────────────────
 
 def test_selection_survives_render(env):
