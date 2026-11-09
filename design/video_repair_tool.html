@@ -372,6 +372,17 @@
 </div>
 
 <!-- ==================== 画布 2 ==================== -->
+<div class="note" style="border-left-color:var(--warning);">
+  <b>画布 1 与实现的差异（2026-11-08 UI 返工）：</b>画布里「完整解码校验 / 开始修复 / 打开输出目录 / 取消」
+  画在修复参数卡内部，实现已把这一行移出滚动区，钉在滚动区与运行输出卡之间的固定动作条
+  （<span class="path">main_window/tool_hub.py::VideoRepairWork._build_action_bar</span>）。
+  原因：默认窗口高度下卡片总高超过滚动视口，目的按钮落在折叠线以下，必须先往下滚才点得到。
+  同时滚动内容尾部的 <span class="mono-i">addStretch(1)</span> 改为把富余高度给最后一张卡
+  （<span class="mono-i">tl.addWidget(opt_card, 1)</span>），否则分隔条拖过卡片自然高度时富余被 stretch 吃掉，
+  卡片与运行输出之间浮出一条空白过渡带。首次显示按卡片自然高度分一次 splitter
+  （<span class="mono-i">_size_split_once</span>，延后一拍等布局算完），之后比例交给用户拖。
+  画布版式与控件种类保留原样，仅此处文字回填。
+</div>
 <div class="section-label">画布 2 <span>弹出面板形态 · HubPopoutWindow 左侧子导航（双注册的第 2 处，nav_icons 必须补齐否则静默退回内嵌 Pivot）</span></div>
 <div class="win">
   <div class="titlebar">

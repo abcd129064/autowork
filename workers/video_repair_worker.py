@@ -85,7 +85,8 @@ class VideoRepairWorker(QThread):
                          for t, p, s in (boxes.get("boxes") or [])[:12]],
             "payload_off": boxes.get("payload_off", 0),
             "payload_size": boxes.get("payload_size", 0),
-            "frames": {k: frames.get(k) for k in _FRAME_KEYS},
+            # 体检失败时后端不给帧统计：回传空 dict 而非全 None，界面靠真值判断有无
+            "frames": {k: frames.get(k) for k in _FRAME_KEYS} if frames else {},
             "reference": "", "ref_info": None, "vol_bytes": 0, "discovered": False,
         }
         if self.isInterruptionRequested():

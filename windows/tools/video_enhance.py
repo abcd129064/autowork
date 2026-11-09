@@ -50,7 +50,7 @@ DENOISE_ALGOS = [
 ]
 
 # 锐化算法。unsharp+cas 是「强锐化」预设用的组合：USM 提边缘，cas 再补对比度自适应
-# 那一层，比单独把 cas 拉到 1.5 更不容易出白边。
+# 那一层。cas 的 strength 上限是 1，想要更锐只能靠 USM 那一层加量。
 SHARPEN_ALGOS = [
     ("cas", "cas"),
     ("unsharp", "unsharp"),
@@ -176,7 +176,7 @@ PRESETS = {
                    "denoise_luma": 2.0, "denoise_chroma": 2.0,
                    "denoise_temporal": 6.0,
                    "sharpen_on": True, "sharpen_algo": "cas",
-                   "sharpen_amount": 1.2,
+                   "sharpen_amount": 1.0,
                    "color_on": True, "contrast": 1.06, "saturation": 1.15,
                    "brightness": 0.0, "gamma": 1.0},
     },
@@ -482,7 +482,9 @@ def _denoise_filter(p):
 
 def _sharpen_filter(p):
     algo = p.get("sharpen_algo") or "cas"
-    amount = _fnum(p.get("sharpen_amount", 0.8), 3)
+    # cas 的 strength 只收 0..1，越界时 ffmpeg 拒绝整条链、整批失败。旧版本滑块
+    # 量程到 2，用户配置里可能还存着 1.5 这样的值，这里 clamp 兜住 persisted 输入
+    amount = _fnum(min(1.0, max(0.0, float(p.get("sharpen_amount", 0.8)))), 3)
     if algo == "cas":
         return f"cas={amount}"
     if algo == "unsharp":
@@ -806,6 +808,22 @@ def parse_speed(line):
     return float(m.group(1)) if m else None
 
 
+# -progress 输出的全部键。值为 N/A 时 parse_progress 认不出，靠这张表兜住，
+# 否则补帧缓冲期的 out_time=N/A 会当成可读输出刷满终端
+_PROGRESS_KEYS = frozenset((
+    "frame", "fps", "bitrate", "total_size", "dup_frames", "drop_frames",
+    "stream_0_0_q", "speed", "out_time", "out_time_us", "out_time_ms"))
+
+
+def is_progress_line(line):
+    """判断一行是不是 -progress 的键值噪声，含值为 N/A 的行"""
+    s = (line or "").strip()
+    if s.startswith("progress="):
+        return True
+    key, sep, _val = s.partition("=")
+    return bool(sep) and key in _PROGRESS_KEYS
+
+
 # ==================== 执行 ====================
 
 def _kill(p):
@@ -887,9 +905,7 @@ def _stream_ffmpeg(cmd, on_line=None, should_stop=None, on_progress=None,
                     on_progress(pct, last_speed)
                 # 进度键值行每秒好几条，全转发会把终端刷成噪声，只留可读的那部分
                 continue
-            if line.startswith("progress=") or "=" in line and line.split("=")[0] in (
-                    "frame", "fps", "bitrate", "total_size", "dup_frames",
-                    "drop_frames", "stream_0_0_q", "speed"):
+            if is_progress_line(line):
                 continue
             if on_line:
                 on_line(line)

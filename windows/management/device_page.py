@@ -2396,22 +2396,40 @@ class DevicePage(QWidget):
             return
         src = self._active_source()
         if src == "kd":
-            worker_cls = DevicesFetchWorker
             save_func = table_db.save_kd
             get_dates = table_db.get_kd_dates
             get_synced = table_db.get_kd_synced_dates
         elif src == "xqzg":
-            worker_cls = SnookerOmFetchWorker
             save_func = table_db.save_xqzg
             get_dates = table_db.get_xqzg_dates
             get_synced = table_db.get_xqzg_synced_dates
         else:
             return
-        try:
-            # 已覆盖 = 有数据的分区 + 拉过但接口为空的日期（sync_meta）
-            covered = set(get_dates()) | set(get_synced())
-        except Exception:
-            return
+        # 已覆盖日期查询走后台 Worker：同步 MySQL 查询遇半开连接会挂到 read_timeout
+        # 卡死主线程 GUI；查询期间先置 running，挡住定时器重入开出第二条查询。
+        self._backfill_running = True
+        self._backfill_dates_worker = _DBQueryWorker(
+            self._collect_covered_dates, get_dates, get_synced)
+        # src/save_func 用默认参数快照：查询在途时用户切数据源，补漏链仍按
+        # 发起时的源落库，不会把 kd 数据写进 xqzg 表。
+        self._backfill_dates_worker.result_ready.connect(
+            lambda covered, s=src, sf=save_func:
+                self._on_backfill_dates_ready(covered, s, sf))
+        self._backfill_dates_worker.error.connect(self._on_backfill_dates_error)
+        self._backfill_dates_worker.start()
+
+    @staticmethod
+    def _collect_covered_dates(get_dates, get_synced):
+        """后台线程合并已覆盖日期：有数据的分区 + 拉过但接口为空的日期"""
+        return set(get_dates()) | set(get_synced())
+
+    def _on_backfill_dates_error(self, msg):
+        """已覆盖日期查询失败：放弃本次补漏，缺口仍在库里下次启动再补"""
+        self._backfill_running = False
+        logger.warning("历史补漏日期查询失败: %s", str(msg).split(chr(10))[0])
+
+    def _on_backfill_dates_ready(self, covered, src, save_func):
+        """已覆盖日期就绪：纯 Python 算缺失日期并启动串行补漏链（主线程无 IO）"""
         today = QDate.currentDate()
         start = None
         if covered:
@@ -2430,8 +2448,8 @@ class DevicePage(QWidget):
                 missing.append(s)
             d = d.addDays(1)
         if not missing:
+            self._backfill_running = False
             return
-        self._backfill_running = True
         self._backfill_queue = missing[:self._BACKFILL_MAX]
         self._backfill_save_func = save_func
         logger.info("历史补漏[%s]：缺失 %d 天，本次补 %d 天: %s",

@@ -102,7 +102,7 @@ class TestDesignContract:
         "restore": "atadenoise=0a=0.02:0b=0.04:s=80,hqdn3d=2:2:8:8,cas=0.6,"
                    "eq=contrast=1.08:brightness=0.02:saturation=1.08,"
                    "format=yuv420p",
-        "anime": "hqdn3d=2:2:6:6,cas=1.2,eq=contrast=1.06:saturation=1.15,"
+        "anime": "hqdn3d=2:2:6:6,cas=1,eq=contrast=1.06:saturation=1.15,"
                  "format=yuv420p",
     }
 
@@ -181,6 +181,23 @@ class TestFilterChain:
         assert ve._denoise_filter(_p(denoise_algo="atadenoise+hqdn3d")).count("=") >= 2
         both = ve._sharpen_filter(_p(sharpen_algo="unsharp+cas"))
         assert both.startswith("unsharp=") and both.endswith(",cas=0.8")
+
+    @pytest.mark.parametrize("amount", [1.5, 2.0, 99.0])
+    def test_cas_strength_clamped_to_ffmpeg_range(self, amount):
+        """cas 的 strength 只收 0..1，越界 ffmpeg 拒绝整条链、整批失败
+
+        旧版滑块量程到 2，用户配置里可能还存着越界值，引擎必须自己兜住。
+        """
+        assert ve._sharpen_filter(_p(sharpen_algo="cas",
+                                     sharpen_amount=amount)) == "cas=1"
+        both = ve._sharpen_filter(_p(sharpen_algo="unsharp+cas",
+                                     sharpen_amount=amount))
+        assert both.endswith(",cas=1")
+
+    def test_every_preset_cas_strength_within_ffmpeg_range(self):
+        for name, spec in ve.PRESETS.items():
+            amt = spec["params"].get("sharpen_amount", 0.8)
+            assert 0 <= amt <= 1, (name, amt)
 
     def test_nlmeans_rescales_instead_of_copying_hqdn3d_numbers(self):
         """hqdn3d 的 1.5 直接搬给 nlmeans 等于没去噪，量纲差 5 个数量级
@@ -488,6 +505,22 @@ class TestParseProgress:
     def test_speed_absent_returns_none(self):
         assert ve.parse_speed("frame=100") is None
         assert ve.parse_speed("") is None
+
+    @pytest.mark.parametrize("line", [
+        "out_time=N/A", "out_time_us=N/A", "out_time_ms=N/A",
+        "out_time_us=1000000", "frame=12", "fps=25.0", "speed=0.4x",
+        "bitrate=N/A", "total_size=N/A", "progress=continue"])
+    def test_progress_noise_lines_recognized(self, line):
+        """补帧缓冲期 out_time 全是 N/A，parse_progress 返回 None，
+        终端过滤必须靠键名兜住，否则 N/A 行刷满输出区"""
+        assert ve.is_progress_line(line)
+
+    @pytest.mark.parametrize("line", [
+        "", "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'x.mp4':",
+        "Stream #0:0[0x1](und): Video: mpeg4, yuv420p, 960x542",
+        "[libx264 @ 000001] kb/s:793.21", "完成: x_enhanced.mp4"])
+    def test_readable_lines_are_not_noise(self, line):
+        assert not ve.is_progress_line(line)
 
 
 # ==================== 输出路径 ====================

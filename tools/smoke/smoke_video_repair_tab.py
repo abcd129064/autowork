@@ -336,6 +336,28 @@ def main() -> int:
             check("5.4 体检判定损坏文件可修", bad["ok"] is True, bad["reason"])
             check("5.5 体检拒绝带 moov 的正常文件",
                   okref["ok"] is False and "moov" in okref["reason"], okref["reason"])
+            if th is not None:
+                # 体检失败时后端 frames=None：worker 若回传全 None 字典，界面格式化
+                # None 会抛 TypeError。同步调 _probe 不起线程，只验回传契约与落字
+                got = []
+                w = th_mod.VideoRepairWorker("probe", {"path": ref})
+                w.probed.connect(got.append)
+                w._probe(vr)
+                payload = got[0] if got else {}
+                check("5.11 体检失败回传空帧统计而非全 None",
+                      payload.get("frames") == {}, payload.get("frames"))
+                work._on_probed(payload)
+                check("5.12 失败结论落界面不抛且码流行退回占位",
+                      work.lbl_frames.text() == "码流：—"
+                      and work.lbl_verdict.text().startswith("✘"),
+                      (work.lbl_frames.text(), work.lbl_verdict.text()))
+                zero = dict(payload, frames={"frame_count": 0, "gop_count": 0,
+                                             "median_frame": 0, "last_vop_tail": 0,
+                                             "last_frame_incomplete": False})
+                work._on_probed(zero)
+                check("5.13 零帧统计退回占位而非展示一排 0",
+                      work.lbl_frames.text() == "码流：—", work.lbl_frames.text())
+                w.deleteLater()
             lines = []
             report = vr.repair(broken, ref, out, fps=25, cut_mode="auto",
                                verify_decode=True, on_line=lines.append,

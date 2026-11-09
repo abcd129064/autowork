@@ -314,6 +314,16 @@ def main() -> int:
     check("3.8 写回的键都是登记过的 enhance_* ",
           keys <= {"enhance_params", "enhance_history", "enhance_last_dir"}, keys)
 
+    # 行 pct 已是 0..100，总进度再乘 100 会把单条 16% 显示成 1600%
+    saved_rows = hub.rows
+    hub.rows = [{"state": "running", "pct": 16}, {"state": "queued", "pct": 0}]
+    hub.task_page._refresh_stats()
+    check("3.10 总进度取行百分比均值，不二次放大",
+          hub.task_page.strip.nums[4].text() == "8%",
+          hub.task_page.strip.nums[4].text())
+    hub.rows = saved_rows
+    hub.task_page._refresh_stats()
+
     try:
         hub.detach_workers()
         check("3.9 detach_workers 不抛", True)
@@ -548,6 +558,21 @@ def main() -> int:
                   isinstance(score, float) and score > 0, score)
         except Exception as e:
             check("8.10 PSNR 评测出数", False, repr(e))
+
+        # 只断言链字符串漏掉过 cas strength 越界这类「ffmpeg 拒收」缺陷：
+        # 这里把每个预设的链喂给真 ffmpeg 建一次滤镜图，1 帧 null 输出，秒级
+        bad = []
+        for name in sorted(ve.PRESETS):
+            chain = ve.build_filter_chain(
+                ve.apply_preset(ve.default_params(), name), info)
+            cmd = [ff, "-hide_banner", "-loglevel", "error",
+                   "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=1",
+                   "-filter_complex", f"[0:v]{chain}[vout]",
+                   "-map", "[vout]", "-frames:v", "1", "-f", "null", "-"]
+            pr = subprocess.run(cmd, capture_output=True)
+            if pr.returncode != 0:
+                bad.append((name, pr.stderr.decode("utf-8", "replace").strip()[:160]))
+        check("8.11 六个预设的滤镜链都能被真 ffmpeg 初始化", not bad, bad)
 
     print("\n结果：" + ("全部通过" if OK else "存在失败项"))
     return 0 if OK else 2

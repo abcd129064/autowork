@@ -1292,6 +1292,7 @@ def update_todesk_status(device_code: str, todesk_status) -> int:
         return 0
     action = "20" if status == "1" else "80"
     conn = _get_conn()
+
     row = conn.execute(
         "SELECT id FROM xqzg_status WHERE TRIM(device_code) = ? "
         "ORDER BY file_path DESC, id DESC LIMIT 1", (code,)).fetchone()

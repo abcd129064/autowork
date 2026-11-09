@@ -554,7 +554,8 @@ class EnhanceTaskPage(VePage):
         running = sum(1 for r in rows if r["state"] == "running")
         done = sum(1 for r in rows if r["state"] in ("done", "skipped"))
         failed = sum(1 for r in rows if r["state"] == "failed")
-        pct = sum(r["pct"] for r in rows) * 100 // len(rows) if rows else 0
+        # r["pct"] 已是 0..100，再乘 100 会把单条 16% 显示成总进度 1600%
+        pct = sum(r["pct"] for r in rows) // len(rows) if rows else 0
         self.strip.set(0, queued, _C_ACCENT if queued else None)
         self.strip.set(1, running, _C_ACCENT if running else None)
         self.strip.set(2, done, _C_SUCCESS if done else None)
@@ -975,7 +976,8 @@ class FilterPage(VePage):
         r.addWidget(self.cmb_sharpen, 1)
         cv.addLayout(r)
 
-        self.sld_sharpen = _FSlider(0, 2, 0.05, parent=card)
+        # cas 的 strength 上限是 1，量程给到 2 会让 ffmpeg 拒绝整条链
+        self.sld_sharpen = _FSlider(0, 1, 0.05, parent=card)
         self.sld_sharpen.valueChanged.connect(lambda v: self._set("sharpen_amount", v))
         r = _field(card, "强度")
         r.addWidget(self.sld_sharpen, 1)
@@ -998,7 +1000,8 @@ class FilterPage(VePage):
         cv.addLayout(r)
         cv.addWidget(_hint(card, "两个整数是 unsharp 的 luma_msize_x/y，只有 unsharp 会读；"
                                  "滑块是强度，cas 用 sharpen_amount、unsharp 用 usm_amount"))
-        cv.addWidget(_hint(card, "⚠ cas 强度 > 1.2 时暗部会出现振铃与颗粒放大，建议配合去噪一起用"))
+        cv.addWidget(_hint(card, "⚠ cas 强度上限 1，再锐只能换 unsharp+cas 靠 USM 加量；"
+                                 "接近 1 时暗部易出振铃与颗粒放大，建议配合去噪一起用"))
         self._sharpen_widgets = (self.cmb_sharpen, self.sld_sharpen, self.spin_lx,
                                  self.spin_ly, self.sld_usm)
         return card

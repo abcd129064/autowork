@@ -27,7 +27,7 @@ import socket
 import shutil
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QFrame, QScrollArea, QFileDialog, QHeaderView,
@@ -1930,10 +1930,23 @@ class VideoRepairWork(QWidget):
         tl.setSpacing(10)
         tl.addWidget(self._build_broken_card(top))
         tl.addWidget(self._build_ref_card(top))
-        tl.addWidget(self._build_opt_card(top, settings))
-        tl.addStretch(1)
-        scroll = _make_scroll(top, body)
-        scroll.setMinimumHeight(220)
+        # 富余高度交给最后一张卡：尾部放 stretch 的话，分隔条一旦拖得比卡片自然
+        # 高度还高，富余全被 stretch 吃掉，卡片与运行输出之间就浮出一条空白过渡带
+        tl.addWidget(self._build_opt_card(top, settings), 1)
+        self._scroll = _make_scroll(top, body)
+        self._scroll.setMinimumHeight(220)
+
+        # 动作条钉在滚动区外：开始修复是这页唯一的目的按钮，塞进可滚动卡片里
+        # 默认窗口高度下会落到折叠线以下，得先往下滚才点得到
+        topwrap = QWidget(body)
+        topwrap.setAutoFillBackground(False)
+        topwrap.setStyleSheet("background: transparent;")
+        twl = QVBoxLayout(topwrap)
+        twl.setContentsMargins(0, 0, 0, 0)
+        twl.setSpacing(10)
+        twl.addWidget(self._scroll, 1)
+        self._action_bar = self._build_action_bar(topwrap, settings)
+        twl.addWidget(self._action_bar)
 
         out_card = CardWidget(body)
         ol = QVBoxLayout(out_card)
@@ -1950,7 +1963,7 @@ class VideoRepairWork(QWidget):
         self.progress_bar.hide()
         ol.addWidget(self.progress_bar)
 
-        self.splitter = _make_vsplitter(body, scroll, out_card)
+        self.splitter = _make_vsplitter(body, topwrap, out_card)
         lay.addWidget(self.splitter, 1)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1959,6 +1972,31 @@ class VideoRepairWork(QWidget):
         if not self._ffmpeg:
             self.append_line("✘ 未找到 ffmpeg / ffprobe，请安装后加入 PATH")
         self._sync_buttons()
+        self._split_sized = False
+
+    def showEvent(self, ev):
+        """首次显示时按上半区自然高度分一次尺寸，之后交给用户拖
+
+        只分一次：每次切回本页都重设会把用户拖好的比例抹掉。
+        """
+        super().showEvent(ev)
+        if self._split_sized:
+            return
+        self._split_sized = True
+        # 延后一拍：showEvent 当下布局还没算完，sizeHint 拿到的是 Qt 的兜底值，
+        # 照它分会把参数卡压进滚动区，默认窗口下又得往下滚才看得全
+        QTimer.singleShot(0, self, self._size_split_once)
+
+    def _size_split_once(self):
+        """上半区给足卡片自然高度，剩下的全归运行输出
+
+        不能问 topwrap 的 sizeHint：QScrollArea 报的是被 Qt 压过的兜底值，比卡片
+        实际自然高度矮一截，照它分等于默认就把卡片压进滚动区。
+        """
+        spacing = self.splitter.widget(0).layout().spacing()
+        need = (self._scroll.widget().sizeHint().height()
+                + self._action_bar.sizeHint().height() + spacing)
+        self.splitter.setSizes([need, max(260, self.splitter.height() - need)])
 
     # ---------- 卡片构建 ----------
 
@@ -2056,7 +2094,7 @@ class VideoRepairWork(QWidget):
         return card
 
     def _build_opt_card(self, parent, settings):
-        """卡片 3：修复参数 + 操作行，默认值即已验证的正确口径"""
+        """卡片 3：修复参数，默认值即已验证的正确口径"""
         card = CardWidget(parent)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
@@ -2108,30 +2146,40 @@ class VideoRepairWork(QWidget):
         _pair(grid, 1, "输出文件:", self._cell(self.out_edit, self.btn_out, card),
               "完成后:", self.chk_open_dir, card)
 
-        self.chk_verify = CheckBox("完整解码校验", card)
-        self.chk_verify.setToolTip("逐帧解码确认不花屏，多花十几秒")
-        self.chk_verify.setChecked(bool(settings.get("repair_verify_decode", True)))
-        grid.addWidget(self.chk_verify, 2, 1, 1, 3)
         # 控件定宽、尾部空列吃剩余：与单杆视频表单同一套对齐规范
         grid.setColumnStretch(4, 1)
         v.addLayout(grid)
+        v.addStretch(1)
+        return card
 
-        btns = QHBoxLayout()
-        self.btn_start = PrimaryPushButton(FluentIcon.PLAY, "开始修复", card)
+    def _build_action_bar(self, parent, settings):
+        """固定动作条：挂在滚动区外，窗口再矮也不用滚动就点得到开始修复"""
+        bar = QWidget(parent)
+        bar.setAutoFillBackground(False)
+        bar.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        self.chk_verify = CheckBox("完整解码校验", bar)
+        self.chk_verify.setToolTip("逐帧解码确认不花屏，多花十几秒")
+        self.chk_verify.setChecked(bool(settings.get("repair_verify_decode", True)))
+        h.addWidget(self.chk_verify)
+
+        self.btn_start = PrimaryPushButton(FluentIcon.PLAY, "开始修复", bar)
         self.btn_start.clicked.connect(self._on_start)
-        btns.addWidget(self.btn_start)
-        self.btn_open_out = PushButton(FluentIcon.FOLDER, "打开输出目录", card)
+        h.addWidget(self.btn_start)
+        self.btn_open_out = PushButton(FluentIcon.FOLDER, "打开输出目录", bar)
         self.btn_open_out.clicked.connect(self._on_open_out)
         # 产物要修复成功才存在，先藏起来，_on_repaired 里再显示
         self.btn_open_out.hide()
-        btns.addWidget(self.btn_open_out)
-        self.btn_cancel = PushButton(FluentIcon.CLOSE, "取消", card)
+        h.addWidget(self.btn_open_out)
+        self.btn_cancel = PushButton(FluentIcon.CLOSE, "取消", bar)
         self.btn_cancel.clicked.connect(self._on_cancel)
-        btns.addWidget(self.btn_cancel)
-        btns.addStretch(1)
-        btns.addWidget(CaptionLabel("原文件只读 · 流拷贝不转码", card))
-        v.addLayout(btns)
-        return card
+        h.addWidget(self.btn_cancel)
+        h.addStretch(1)
+        h.addWidget(CaptionLabel("原文件只读 · 流拷贝不转码", bar))
+        return bar
 
     @staticmethod
     def _cell(edit, btn, parent):
@@ -2272,7 +2320,8 @@ class VideoRepairWork(QWidget):
             f"{_fmt_size(self._probe.get('payload_size', 0))}")
 
         frames = self._probe.get("frames") or {}
-        if frames:
+        # 零帧或全 None 都没有统计可展示：格式化 None 会直接抛 TypeError
+        if frames.get("frame_count"):
             # 偏短只是启发式：末帧后面不再有起始码，无法自证写完。auto 档两种情况
             # 都裁到最后一个 GOP 头，文案不能出现「完整」这种结论
             state = "明显偏短" if frames.get("last_frame_incomplete") else "长度正常"

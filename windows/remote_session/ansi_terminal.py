@@ -6,7 +6,7 @@
 实现——那一层零 Qt 依赖、可离线单测；本文件只做四件事：
 
 1. 键盘输入 → ``key_input`` 信号（复制/粘贴、IME、功能键映射）；
-2. 把屏幕网格渲染成 QTextEdit 的 HTML（增量行缓存 + 50ms 合并，~20fps）；
+2. 把屏幕网格渲染成 QTextEdit 的 HTML（增量行缓存 + 16ms 合并，~60fps）；
 3. 按控件实际尺寸算出 cols/rows，``grid_resized`` 通知上层同步远端 PTY；
 4. 终端观感：固定深色底、等宽字体、光标方块。
 
@@ -31,9 +31,15 @@ _BG = "#1e1e1e"
 _FG = "#e5e5e5"
 # 光标用反色 span 画成方块：QTextEdit 自带光标会随系统闪烁，且无法固定成终端样式
 _CURSOR_STYLE = f"background-color:#00ff00;color:{_BG};"
-# 与 QFont("Consolas", 10) 配套；line-height 必须与 _metrics() 的行高换算一致
-_PRE_STYLE = ("margin:0; font-family:Consolas,'Courier New',monospace; "
-              "font-size:10pt; line-height:1.3;")
+# 终端字体选新宋体：它的 ASCII 恰为 CJK 半宽（精确 2:1），宽字符占两格正好画满。
+# Consolas 的 CJK 回退字形宽≈1.82×ASCII，两格画不满 → 光标压字、删字看似错位。
+# setFont 与 _PRE_STYLE 共用 _FONT_FAMILIES，避免两处字体漂移导致实测行高失真。
+_FONT_FAMILIES = ["NSimSun", "SimSun", "Courier New", "monospace"]
+_FONT_PT = 10
+# CSS 里多词族名要加引号，通用族 monospace 不加
+_FONT_CSS = ",".join(f"'{f}'" if " " in f else f for f in _FONT_FAMILIES)
+_PRE_STYLE = (f"margin:0; font-family:{_FONT_CSS}; "
+              f"font-size:{_FONT_PT}pt; line-height:1.3;")
 # 必须与 _PRE_STYLE 里的 line-height 一致；只改一处会让网格行数与显示行数错位
 _LINE_HEIGHT = 1.3
 # 默认 120x40 只是首帧兜底；控件显示后会立即按真实尺寸重算
@@ -95,7 +101,9 @@ class ANSITerminalWidget(QTextEdit):
         super().__init__(parent)
         # 只读是相对 QTextEdit 的编辑能力而言：键盘输入由 keyPressEvent 接管后发往远端
         self.setReadOnly(True)
-        self.setFont(QFont("Consolas", 10))
+        font = QFont(_FONT_FAMILIES[0], _FONT_PT)
+        font.setFamilies(_FONT_FAMILIES)
+        self.setFont(font)
         self.setStyleSheet(
             f"QTextEdit {{ background-color: {_BG}; border: none; }}"
         )
@@ -116,9 +124,10 @@ class ANSITerminalWidget(QTextEdit):
         self._line_sig = None
         # 鼠标移动事件（终端上报拖动/悬停时需要）
         self.setMouseTracking(True)
-        # 渲染合并定时器：将高频 write_output 合并为一次 _render（~20fps）
+        # 渲染合并定时器：将高频 write_output 合并为一次 _render（~60fps）。
+        # 间隔直接决定按键回显延迟：50ms 时连续方向键/快打明显拖影，16ms 才跟手。
         self._render_timer = QTimer(self)
-        self._render_timer.setInterval(50)  # 50ms ≈ 20fps
+        self._render_timer.setInterval(16)  # 16ms ≈ 60fps
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render)
         # 增量渲染状态
@@ -157,7 +166,7 @@ class ANSITerminalWidget(QTextEdit):
         """写入终端数据（解析 ANSI 序列，延迟合并渲染）。
 
         解析是同步的，渲染才合并：PTY 一次 read 可能带回几十条序列，
-        每条都 setHtml 会把 UI 拖死，因此只重置 50ms 定时器。
+        每条都 setHtml 会把 UI 拖死，因此只在定时器空闲时启动一次 16ms 合并。
         """
         if not data:
             return
@@ -597,7 +606,10 @@ class ANSITerminalWidget(QTextEdit):
     # ─── 渲染 ─────────────────────────────────────────────────────────────
 
     def _schedule_render(self):
-        """调度渲染：50ms 内的多次 write_output 合并为一次 setHtml"""
+        """调度渲染：16ms 内的多次 write_output 合并为一次 setHtml。
+
+        定时器已在跑就不再重启：重启会让持续输出永远顺延、迟迟不画。
+        """
         if not self._render_timer.isActive():
             self._render_timer.start()
 
@@ -733,9 +745,9 @@ class ANSITerminalWidget(QTextEdit):
             if i == cursor_col:
                 flush()
                 glyph = '&nbsp;' if ch in (' ', WIDE_SENTINEL) else _escape(ch)
+                # 宽字符字形本身已占满两格，方块只包字形即可；再补一个 &nbsp;
+                # 会宽出第三格压到下一个字上（旧 Consolas 非 2:1 时的遗留补丁）
                 parts.append(f'<span style="{_CURSOR_STYLE}">{glyph}</span>')
-                if wide:
-                    parts.append(f'<span style="{_CURSOR_STYLE}">&nbsp;</span>')
                 run_attrs = None      # 光标后的文本重新开一个 run
                 i += 2 if wide else 1
                 continue
