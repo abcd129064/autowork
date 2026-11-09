@@ -34,6 +34,11 @@ class SettingsMixin:
         # NewLog 批量整理路径（设置面板可配置，保存后写入 settings.json）
         "newlog_excel_dir": os.path.expanduser(r"~\Desktop\excel"),
         "newlog_out_dir": os.path.expanduser(r"~\Desktop"),
+        # 画质提升用 ffmpeg / ffprobe：默认留空 = 走 PATH（shutil.which）。
+        # 不预填某个安装路径：ffmpeg 每台机器装哪儿都不一样，写死一个
+        # 不存在的路径反而会让 locate_ffmpeg 判定「填了但文件不存在」而拒绝兜底
+        "ffmpeg_path": "",
+        "ffprobe_path": "",
     }
     # 默认快捷键配置
     DEFAULT_SHORTCUTS = {

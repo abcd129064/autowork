@@ -7,8 +7,8 @@
 这些属性名属于跨文件隐式契约，不能改名。
 
 分层约定：不可见的菜单 QWidget/QMenu/按钮不再搬入本模块，只保留
-五个 QAction 与 `_menubar_widget` 空壳；smoke_fluent_mainwindow.py:75
-仍断言该空壳的 parentWidget() 不为 homeInterface。
+五个 QAction 与 `_menubar_widget` 空壳。空壳必须无父无子无布局，回归见
+tests/test_menu_actions.py::test_menubar_shell_is_empty_and_unparented。
 """
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QWidget

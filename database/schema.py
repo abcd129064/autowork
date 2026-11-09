@@ -6,7 +6,7 @@
 此前 SQLite DDL（database/table_db.py 的 ``_CREATE_*`` 常量）与 MySQL DDL
 （database/backend.py 的 ``MYSQL_DDL``、以及已下线的 database/mysql_sync.py
 镜像推送 DDL）三处手工重复维护，曾出现 xqzg_status 缺 file_path 列等漂移。
-本模块将全部 12 张表的列元数据收敛为单一来源，并提供两方言 DDL 生成器：
+本模块将全部表的列元数据收敛为单一来源，并提供两方言 DDL 生成器：
 
 - ``TABLE_COLUMNS``：列定义（列名、SQLite 类型、MySQL 类型、两方言默认值、
   两方言附加子句如 PRIMARY KEY / AUTO_INCREMENT）
@@ -61,6 +61,11 @@ TABLE_NAMES: List[str] = [
     "health_alerts",
     "aftersale_records",
     "ledger_records",
+    # 工作留痕（design/worklog_hub_v1.html，2026-11-06）：记录 + 成员两张表。
+    # 必须插在 chat_archive_* 之前——tests/test_schema_meta.py 与
+    # table_db._CREATE_CHAT_ARCHIVE_SQL 都依赖「归档三表恒为 TABLE_NAMES 尾部」
+    "worklog_records",
+    "worklog_members",
     # 企微售后群消息归档（来源可插拔入站契约，2026-10-06 剪贴板采集器落地）
     "chat_archive_messages",
     "chat_archive_tags",
@@ -72,6 +77,12 @@ CHAT_ARCHIVE_TABLES: Tuple[str, ...] = (
     "chat_archive_messages",
     "chat_archive_tags",
     "chat_archive_cursor",
+)
+
+# 工作留痕表分组：与归档表同理，table_db 建表脚本按此常量取表名
+WORKLOG_TABLES: Tuple[str, ...] = (
+    "worklog_records",
+    "worklog_members",
 )
 
 # MySQL 保留字列：生成 MySQL DDL 时列名需加反引号（与 backend 转换器
@@ -323,6 +334,40 @@ TABLE_COLUMNS = {
         ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
         ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
     ],
+    # ==================== 工作留痕（量化记录，2026-11-06） ====================
+    # 设计稿 design/worklog_hub_v1.html。work_date 定长 'YYYY-MM-DD' 字符串：
+    # 字典序即时间序，日/周/月区间在 database/worklog_db.py 用纯 datetime 算好
+    # 再下发，两方言都不需要 date()/strftime 这类 SQLite 专有函数。
+    "worklog_records": [
+        ColumnDef("id", "INTEGER", "INT", sqlite_extra="PRIMARY KEY",
+                  mysql_extra="AUTO_INCREMENT PRIMARY KEY"),
+        ColumnDef("work_date", "TEXT", "VARCHAR(32)", "''", "''"),
+        # member_id 关联 worklog_members.id；成员停用后历史记录仍指向它，
+        # 故不加外键约束（停用 ≠ 删除，归属必须保住）
+        ColumnDef("member_id", "INTEGER", "INT", "0", "0"),
+        ColumnDef("title", "TEXT", "VARCHAR(512)", "''", "''"),
+        ColumnDef("project", "TEXT", "VARCHAR(255)", "''", "''"),
+        ColumnDef("category", "TEXT", "VARCHAR(64)", "''", "''"),
+        # hours 允许半天粒度（对话框步进 0.5），REAL/DOUBLE 而非整型
+        ColumnDef("hours", "REAL", "DOUBLE", "0", "0"),
+        ColumnDef("progress", "INTEGER", "INT", "0", "0"),
+        ColumnDef("status", "TEXT", "VARCHAR(32)", "''", "''"),
+        # note 是长文本：MySQL TEXT 不允许 DEFAULT 子句（同 ledger.description）
+        ColumnDef("note", "TEXT", "TEXT", "''", None),
+        ColumnDef("created_at", "TEXT", "VARCHAR(32)", "''", "''"),
+        ColumnDef("updated_at", "TEXT", "VARCHAR(32)", "''", "''"),
+        # 软删除（稿 §4.1）：列表与统计一律带 deleted = 0，删错可从库里捞回
+        ColumnDef("deleted", "INTEGER", "TINYINT", "0", "0"),
+    ],
+    "worklog_members": [
+        ColumnDef("id", "INTEGER", "INT", sqlite_extra="PRIMARY KEY",
+                  mysql_extra="AUTO_INCREMENT PRIMARY KEY"),
+        ColumnDef("name", "TEXT", "VARCHAR(128)", "''", "''"),
+        ColumnDef("alias", "TEXT", "VARCHAR(128)", "''", "''"),
+        # active=0 表示停用：不出现在录入下拉里，但既有记录的归属照常显示
+        ColumnDef("active", "INTEGER", "TINYINT", "1", "1"),
+        ColumnDef("sort", "INTEGER", "INT", "0", "0"),
+    ],
     # ==================== 企微售后群消息归档（剪贴板采集器，2026-10-06） ====================
     # 入站契约与来源可插拔：source 区分采集适配器（wecom_clip = 企微客户端剪贴板
     # RPA / manual = 人工导出导入 / official = 官方会话存档 SDK），下游
@@ -415,6 +460,14 @@ TABLE_INDEXES = {
                  "idx_ledger_category", ("category",)),
         IndexDef("idx_ledger_signer", ("signer",),
                  "idx_ledger_signer", ("signer",)),
+    ],
+    "worklog_records": [
+        # 主查询口径：区间 + 软删除过滤（记录/时间轴/思维导图/统计四页共用）
+        IndexDef("idx_worklog_date_deleted", ("work_date", "deleted"),
+                 "idx_worklog_date_deleted", ("work_date", "deleted")),
+        # 成员维度汇总（成员统计表、按成员分组的时间轴/思维导图）
+        IndexDef("idx_worklog_member_date", ("member_id", "work_date"),
+                 "idx_worklog_member_date", ("member_id", "work_date")),
     ],
     "chat_archive_messages": [
         # 报告主查询：按群 + 时间段（room_id 分组，room_name 仅展示）

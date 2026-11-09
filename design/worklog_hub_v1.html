@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工作留痕面板 · 桌面端设计稿 v1（WorkLogHub · qfw 控件还原）</title>
+<style>
+  /* ===== 取自 core/design_tokens.py + styles/light.qss 真实 token ===== */
+  :root{
+    --accent:#00BCD4; --accent-hover:#00ACC1; --accent-press:#00838F;
+    --accent-soft:rgba(0,188,212,.15);
+    --bg:#F5F6F8; --surface:#FFFFFF; --border:#E0E0E0;
+    --text:#20242B; --text2:#6B7280; --text3:#9CA3AF;
+    --success:#1a9e6c; --warning:#c98a2d; --danger:#cf4452; --info:#0078d4;
+    --neutral:#5c6675;
+    --radius:6px; --radius-lg:8px;
+    --font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:var(--font);background:#dfe3e8;color:var(--text);
+       padding:28px 32px;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .doc-header{max-width:1180px;margin:0 auto 18px;}
+  .doc-header h1{font-size:22px;font-weight:700;margin-bottom:6px;}
+  .doc-header .meta{color:#5b6470;font-size:13px;line-height:1.7;}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;
+         font-weight:600;background:var(--accent-soft);color:var(--accent-press);margin-right:6px;}
+  .badge.g{background:rgba(26,158,108,.12);color:var(--success);}
+  .badge.w{background:rgba(201,138,45,.14);color:var(--warning);}
+  .note{max-width:1180px;margin:0 auto 22px;background:#fff;border:1px solid var(--border);
+        border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;
+        font-size:13px;color:var(--text2);line-height:1.8;}
+  .note b{color:var(--text);}
+  .note code{font-family:var(--mono);background:var(--bg);padding:1px 6px;border-radius:4px;
+             font-size:12px;color:var(--accent-press);}
+  .section-label{max-width:1180px;margin:34px auto 12px;font-size:15px;font-weight:700;color:#333;}
+  .section-label span{font-weight:400;color:#6b7280;font-size:13px;margin-left:8px;}
+
+  /* ===== 应用窗口外框（FluentWindow + Mica） ===== */
+  .win{max-width:1180px;margin:0 auto;background:var(--bg);border-radius:10px;
+       overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.18);border:1px solid #c9ced5;}
+  .titlebar{height:40px;background:linear-gradient(180deg,#fbfcfd,#f4f6f8);
+            border-bottom:1px solid var(--border);display:flex;align-items:center;
+            padding:0 0 0 16px;gap:8px;}
+  .titlebar .app-ico{width:16px;height:16px;border-radius:3px;
+            background:linear-gradient(135deg,var(--accent),#4dd0e1);}
+  .titlebar .app-name{font-size:12px;color:var(--text2);}
+  .titlebar .tb-btns{margin-left:auto;display:flex;height:100%;}
+  .titlebar .tb-btns i{width:46px;height:100%;display:flex;align-items:center;
+            justify-content:center;color:var(--text2);font-style:normal;font-size:14px;}
+  .titlebar .tb-btns i.close:hover{background:var(--danger);color:#fff;}
+  .app{display:flex;height:700px;}
+  .nav{width:200px;background:rgba(255,255,255,.7);border-right:1px solid var(--border);
+       padding:8px;flex-shrink:0;display:flex;flex-direction:column;}
+  .nav-item{display:flex;align-items:center;gap:12px;height:38px;padding:0 12px;
+       border-radius:var(--radius);color:var(--text);font-size:13.5px;position:relative;
+       margin-bottom:2px;}
+  .nav-item .ni{width:17px;height:17px;display:flex;align-items:center;justify-content:center;
+       color:var(--neutral);font-size:15px;}
+  .nav-item:hover{background:rgba(0,0,0,.045);}
+  .nav-item.active{background:rgba(0,0,0,.05);font-weight:600;}
+  .nav-item.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+       width:3px;height:16px;border-radius:2px;background:var(--text);}
+  .nav-item.new{color:var(--accent-press);}
+  .nav-item.new .ni{color:var(--accent);}
+  .nav-sep{height:1px;background:var(--border);margin:8px 6px;}
+  .nav-bottom{margin-top:auto;}
+  .nav-tag{font-size:10px;background:var(--accent);color:#fff;border-radius:4px;
+       padding:0 5px;margin-left:auto;font-weight:600;}
+  .content{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+
+  /* ===== Pivot 二级页签（大页容器规范：margins 24,10,0,0 · item 13px/24px/1px 12px） ===== */
+  .page-head{padding:22px 28px 6px;display:flex;align-items:flex-end;gap:14px;}
+  .page-title{font-size:24px;font-weight:700;}
+  .page-sub{color:var(--text3);font-size:13px;margin-top:3px;}
+  .popout{margin-left:auto;}
+  .pivot{display:flex;gap:2px;padding:6px 28px 0;border-bottom:1px solid var(--border);}
+  .pv-item{padding:7px 12px;font-size:13px;line-height:24px;color:var(--text2);cursor:pointer;
+       border-radius:6px 6px 0 0;position:relative;white-space:nowrap;}
+  .pv-item:hover{background:rgba(0,0,0,.04);}
+  .pv-item.active{color:var(--accent-press);font-weight:600;}
+  .pv-item.active::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;
+       border-radius:2px;background:var(--accent);}
+  .pv-body{flex:1;overflow:auto;padding:16px 28px 24px;}
+
+  /* ===== 控件还原标注 ===== */
+  .anno{display:inline-block;font-size:10.5px;color:var(--accent-press);background:var(--accent-soft);
+        border-radius:4px;padding:1px 7px;margin-left:7px;font-family:var(--mono);
+        vertical-align:middle;white-space:nowrap;}
+  .anno.blk{display:block;margin:5px 0 0;width:max-content;}
+  .impl-note{font-size:12px;color:var(--text2);line-height:1.8;background:var(--bg);
+        border:1px dashed var(--border);border-radius:var(--radius);padding:10px 14px;margin-top:12px;}
+  .impl-note b{color:var(--accent-press);font-family:var(--mono);font-size:11.5px;}
+
+  /* ===== qfw 卡片 ===== */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+        padding:16px 20px;margin-bottom:14px;}
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .card-h h3{font-size:15px;font-weight:600;}
+  .card-h .ch-right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+
+  /* ===== 量化汇总卡 ===== */
+  .stat-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;}
+  .scard{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+        padding:14px 16px;display:flex;align-items:center;gap:14px;}
+  .scard .k{font-size:12px;color:var(--text2);}
+  .scard .v{font-size:22px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;}
+  .scard .v small{font-size:11px;color:var(--text3);font-weight:400;}
+  .scard .ic{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;
+        justify-content:center;font-size:17px;flex-shrink:0;}
+  .ic.c1{background:rgba(0,188,212,.12);color:var(--accent-press);}
+  .ic.c2{background:rgba(0,120,212,.12);color:var(--info);}
+  .ic.c3{background:rgba(26,158,108,.12);color:var(--success);}
+  .ic.c4{background:rgba(201,138,45,.14);color:var(--warning);}
+  .pring{width:44px;height:44px;flex-shrink:0;}
+
+  /* ===== qfw 输入 / 按钮 ===== */
+  .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
+  .combo{position:relative;height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+        border-radius:var(--radius);background:var(--surface);display:flex;align-items:center;
+        padding:0 30px 0 11px;font-size:13px;color:var(--text);min-width:120px;}
+  .combo::after{content:"⌄";position:absolute;right:10px;top:50%;transform:translateY(-52%);
+        color:var(--text2);font-size:14px;}
+  .combo .cv{color:var(--text3);font-size:12px;margin-left:6px;}
+  .inp{height:33px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+       border-radius:var(--radius);background:var(--surface);padding:0 11px;font-size:13px;
+       color:var(--text);font-family:var(--font);}
+  .inp.search{width:200px;}
+  .datebox{display:inline-flex;align-items:center;gap:0;}
+  .datebox .combo{border-radius:var(--radius) 0 0 var(--radius);border-right:none;min-width:132px;}
+  .datebox .step{height:33px;width:24px;border:1px solid var(--border);border-bottom:2px solid #cfd4da;
+        display:flex;align-items:center;justify-content:center;color:var(--text2);font-size:11px;
+        background:var(--surface);}
+  .datebox .step:last-child{border-radius:0 var(--radius) var(--radius) 0;border-left:none;}
+  .btn{height:33px;padding:0 15px;border:1px solid var(--border);border-radius:var(--radius);
+       background:var(--surface);color:var(--text);font-size:13px;display:inline-flex;
+       align-items:center;gap:7px;font-family:var(--font);white-space:nowrap;}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  .btn.ghost{border-color:transparent;background:transparent;}
+  .btn.ghost:hover{background:rgba(0,0,0,.05);}
+  .btn.sm{height:28px;padding:0 11px;font-size:12px;}
+
+  /* ===== 表格（LeanTableDelegate 路径） ===== */
+  table{width:100%;border-collapse:collapse;}
+  thead th{text-align:left;font-size:12px;color:var(--text2);font-weight:600;padding:9px 12px;
+        border-bottom:1px solid var(--border);white-space:nowrap;background:var(--surface);}
+  tbody td{padding:10px 12px;border-bottom:1px solid #f0f1f3;font-size:13px;color:var(--text);
+        vertical-align:middle;}
+  tbody tr.grp td{background:var(--accent-soft);color:var(--accent-press);font-weight:600;
+        font-size:12.5px;padding:6px 12px;}
+  tbody tr:hover td{background:#fafbfc;}
+  tbody tr.grp:hover td{background:var(--accent-soft);}
+  td.num{font-variant-numeric:tabular-nums;}
+  .ops{display:flex;gap:10px;justify-content:flex-end;}
+  .ops a{color:var(--accent-press);text-decoration:none;font-size:12.5px;}
+  .ops a.del{color:var(--danger);}
+  .bar-mini{width:90px;height:6px;background:#eceff3;border-radius:6px;display:inline-block;
+        vertical-align:middle;margin-right:8px;}
+  .bar-mini i{display:block;height:100%;border-radius:6px;background:var(--accent);}
+
+  /* ===== 语义标签 ===== */
+  .tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 9px;
+       border-radius:999px;font-weight:600;}
+  .tag::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+  .tag.on{background:rgba(26,158,108,.12);color:var(--success);}
+  .tag.warn{background:rgba(201,138,45,.14);color:var(--warning);}
+  .tag.info{background:rgba(0,120,212,.12);color:var(--info);}
+  .tag.off{background:rgba(92,102,117,.12);color:var(--neutral);}
+  .tag.err{background:rgba(207,68,82,.12);color:var(--danger);}
+  .tag.acc{background:var(--accent-soft);color:var(--accent-press);}
+  .member{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;}
+  .avatar{width:20px;height:20px;border-radius:50%;color:#fff;font-size:10.5px;display:inline-flex;
+        align-items:center;justify-content:center;font-weight:600;}
+
+  /* ===== 时间轴 ===== */
+  .tl-day{margin-bottom:6px;}
+  .tl-day-head{display:flex;align-items:baseline;gap:10px;margin:6px 0 10px;}
+  .tl-date{font-weight:700;font-size:14px;}
+  .tl-wd{color:var(--text3);font-size:12px;}
+  .tl-sum{margin-left:auto;display:flex;gap:8px;}
+  .tl-body{position:relative;padding-left:22px;}
+  .tl-body::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;
+        background:var(--border);border-radius:2px;}
+  .tl-entry{position:relative;background:var(--surface);border:1px solid var(--border);
+        border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:8px;}
+  .tl-entry::before{content:"";position:absolute;left:-21px;top:16px;width:8px;height:8px;
+        border-radius:50%;background:var(--surface);border:3px solid var(--accent);}
+  .tl-entry.done::before{border-color:var(--success);}
+  .tl-title{font-weight:600;font-size:13.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .tl-meta{color:var(--text2);font-size:12px;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap;}
+
+  /* ===== 思维导图 ===== */
+  .mm-scroll{overflow:auto;border-radius:var(--radius);background:
+      radial-gradient(circle at 1px 1px,#dfe5ee 1px,transparent 0) 0 0/18px 18px,var(--surface);
+      border:1px solid var(--border);}
+
+  /* ===== 统计 ===== */
+  .seg{display:inline-flex;background:#e8ebf0;border-radius:8px;padding:3px;gap:2px;}
+  .seg button{padding:5px 16px;border-radius:6px;color:var(--text2);font-weight:600;font-size:12.5px;
+       border:none;background:none;font-family:var(--font);cursor:pointer;}
+  .seg button.on{background:var(--surface);color:var(--accent-press);
+       box-shadow:0 1px 4px rgba(32,36,43,.14);}
+  .charts{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;}
+  .bar-wrap{display:flex;align-items:flex-end;gap:10px;height:150px;padding:6px 4px 0;}
+  .bar-wrap .bw{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;height:100%;
+       justify-content:flex-end;}
+  .bar-wrap i{display:block;width:70%;max-width:38px;background:#93c7d1;border-radius:5px 5px 0 0;}
+  .bar-wrap .hot i{background:var(--accent);}
+  .bar-wrap .bv{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums;}
+  .bar-wrap .bl{font-size:11px;color:var(--text3);}
+
+  /* ===== 弹窗设计 ===== */
+  .dlg{max-width:1180px;margin:0 auto;background:var(--bg);border:1px solid #c9ced5;
+       border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.18);overflow:hidden;width:480px;}
+  .dlg-head{padding:16px 20px 10px;display:flex;align-items:center;gap:10px;}
+  .dlg-head h3{font-size:16px;font-weight:700;flex:1;}
+  .dlg-body{padding:6px 20px 16px;}
+  .fld{display:flex;align-items:center;gap:12px;margin-bottom:11px;}
+  .fld>label{width:76px;flex-shrink:0;font-size:13px;color:var(--text);}
+  .fld .ctl{flex:1;display:flex;align-items:center;gap:10px;}
+  .fld .inp,.fld .combo{flex:1;min-width:0;}
+  .prog-line{flex:1;display:flex;align-items:center;gap:10px;}
+  .prog-line .track{flex:1;height:4px;background:#e3e7ec;border-radius:4px;position:relative;}
+  .prog-line .track i{position:absolute;left:0;top:0;bottom:0;width:60%;background:var(--accent);
+       border-radius:4px;}
+  .prog-line .track b{position:absolute;left:60%;top:50%;transform:translate(-50%,-50%);
+       width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--accent);}
+  .prog-line .pv{width:40px;text-align:right;font-weight:700;color:var(--accent-press);font-size:13px;}
+  .dlg-foot{display:flex;justify-content:flex-end;gap:10px;padding:12px 20px;
+       border-top:1px solid var(--border);background:var(--surface);}
+
+  /* ===== 映射 / 要点表 ===== */
+  .kv-table{max-width:1180px;margin:0 auto 14px;}
+  .two-col{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  footer{max-width:1180px;margin:30px auto 0;color:#8a919c;font-size:12px;text-align:center;}
+  .hidden{display:none!important;}
+</style>
+</head>
+<body>
+
+<div class="doc-header">
+  <h1>工作留痕面板 · 桌面端设计稿 v1<span class="badge" style="margin-left:10px">WorkLogHub</span><span class="badge w">待评审</span></h1>
+  <div class="meta">
+    2026-11-06 · 功能参考 Super Productivity（23k★）与工作留痕 Web 版（<code>Desktop\worklog\index.html</code>）·
+    令牌取自 <code>core/design_tokens.py</code> · 目标实现 <code>windows/worklog/</code> 子包 ·
+    集成方式：主窗口新增左侧导航页（双宿主注册）
+  </div>
+</div>
+
+<div class="note">
+  <b>Super Productivity 概念映射</b> —— 本面板取 SP 的「任务即量化单元 + 工时表汇总」骨架，按 autowork 场景裁剪：
+  <table style="margin-top:10px">
+    <thead><tr><th>SP 概念</th><th>本面板对应</th><th>取舍</th></tr></thead>
+    <tbody>
+      <tr><td>Task（任务 + timeTracking）</td><td>工作记录（成员 / 日期 / 内容 / 工时 / 进度 / 状态）</td><td><span class="tag acc">采纳</span>「成员」为本面板新增维度（SP 无多人量化）</td></tr>
+      <tr><td>Project / Tag</td><td>项目 / 分类两个字段</td><td><span class="tag acc">采纳</span>扁平化，不搬嵌套层级</td></tr>
+      <tr><td>Subtasks</td><td>—</td><td><span class="tag off">不采纳</span>关联关系交给思维导图页按项目/分类聚合表达</td></tr>
+      <tr><td>Pomodoro / 时间盒</td><td>—</td><td><span class="tag off">不采纳</span>留痕工具不做计时器，工时事后录入</td></tr>
+      <tr><td>Worklog 汇总 / 导出</td><td>统计汇总页 + 一键复制文字报告</td><td><span class="tag acc">采纳</span>按日/周/月三周期</td></tr>
+      <tr><td>Schedule / Planning 视图</td><td>时间轴页（按天回看，非计划排期）</td><td><span class="tag warn">改造</span>去掉日历排期语义，纯历史回看</td></tr>
+      <tr><td>Jira / Git 集成</td><td>—</td><td><span class="tag off">不采纳</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ================================================================ -->
+<div class="section-label">① 主窗口 · 新导航页「工作留痕」 · 页签 1 记录量化 <span>双宿主规范：Pivot 二级导航，可「弹出此窗口」独立成窗</span></div>
+<div class="win">
+  <div class="titlebar">
+    <span class="app-ico"></span><span class="app-name">AutoWork</span>
+    <div class="tb-btns"><i>─</i><i>▢</i><i class="close">✕</i></div>
+  </div>
+  <div class="app">
+    <div class="nav">
+      <div class="nav-item"><span class="ni">◧</span>工作台</div>
+      <div class="nav-item"><span class="ni">⚙</span>运维管理</div>
+      <div class="nav-item"><span class="ni">☎</span>售后</div>
+      <div class="nav-item"><span class="ni">▶</span>跑视频</div>
+      <div class="nav-item"><span class="ni">⇄</span>远程</div>
+      <div class="nav-item"><span class="ni">🔧</span>工具</div>
+      <div class="nav-item new active"><span class="ni">✍</span>工作留痕<span class="nav-tag">NEW</span></div>
+      <div class="nav-sep"></div>
+      <div class="nav-bottom">
+        <div class="nav-item"><span class="ni">⚙</span>设置</div>
+        <div class="nav-item"><span class="ni">ⓘ</span>关于</div>
+      </div>
+      <div class="impl-note" style="margin-top:auto"><b>NavigationInterface</b><br>
+        新项注册两处：main_window/hub_pages.py + windows/management/window.py；
+        nav_icons 键名与页面名同步；qfw 图标用 <b>FluentIcon.EDIT</b>（无 NOTEBOOK 枚举，近似替代先例见远程页 LINK）</div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div><div class="page-title">工作留痕</div>
+        <div class="page-sub">每日工作留痕与量化管理 · 多成员 · 供向上汇报</div></div>
+        <button class="btn ghost popout">⧉ 弹出此窗口</button>
+        <span class="anno" style="margin-left:4px">HubPopoutWindow</span>
+      </div>
+      <div class="pivot" id="pivot">
+        <div class="pv-item active" data-t="t1">记录量化</div>
+        <div class="pv-item" data-t="t2">时间轴</div>
+        <div class="pv-item" data-t="t3">思维导图</div>
+        <div class="pv-item" data-t="t4">统计汇总</div>
+        <div class="pv-item" data-t="t5">成员与分类</div>
+        <span class="anno" style="align-self:center">Pivot · PivotPage 基建 · lock_pivot_width()</span>
+      </div>
+
+      <!-- ============ 页签1 记录量化 ============ -->
+      <div class="pv-body" id="t1">
+        <div class="stat-cards">
+          <div class="scard"><span class="ic c1">⏱</span>
+            <div><div class="k">今日工时（全成员）</div><div class="v">21.5 <small>h</small></div></div></div>
+          <div class="scard"><span class="ic c2">📋</span>
+            <div><div class="k">今日任务</div><div class="v">8 <small>项 · 3 人</small></div></div></div>
+          <div class="scard">
+            <svg class="pring" viewBox="0 0 44 44">
+              <circle cx="22" cy="22" r="17" fill="none" stroke="#eceff3" stroke-width="6"/>
+              <circle cx="22" cy="22" r="17" fill="none" stroke="#1a9e6c" stroke-width="6"
+                stroke-dasharray="75.4 106.8" stroke-linecap="round" transform="rotate(-90 22 22)"/>
+              <text x="22" y="26" text-anchor="middle" font-size="11" font-weight="700" fill="#1a9e6c">71%</text>
+            </svg>
+            <div><div class="k">今日完成率</div><div class="v" style="color:var(--success)">71<small>%</small></div></div>
+            <span class="anno" style="align-self:flex-start">ProgressRing</span></div>
+          <div class="scard"><span class="ic c4">👥</span>
+            <div><div class="k">本周人均工时</div><div class="v">6.2 <small>h/人·日</small></div></div></div>
+        </div>
+        <div class="toolbar">
+          <span class="datebox"><span class="combo">2026-11-06<span class="cv">周五</span></span>
+            <span class="step">▲</span><span class="step">▼</span></span>
+          <span class="anno">CalendarPicker(minWidth 150) + 前后步进 ToolButton</span>
+          <span class="combo">全部成员<span class="anno">ComboBox</span></span>
+          <span class="combo">全部分类</span>
+          <span class="combo">全部状态</span>
+          <input class="inp search" placeholder="🔍 搜索内容 / 项目 / 备注">
+          <span style="flex:1"></span>
+          <button class="btn">📋 复制周报</button>
+          <button class="btn primary">＋ 新增记录</button>
+          <span class="anno">PrimaryPushButton · EditRecordDialog(continuous 可选)</span>
+        </div>
+        <div class="card" style="padding:0">
+          <table>
+            <thead><tr>
+              <th style="width:96px">日期</th><th style="width:110px">成员</th><th>工作内容</th>
+              <th style="width:110px">项目</th><th style="width:84px">分类</th>
+              <th style="width:64px">工时</th><th style="width:130px">进度</th>
+              <th style="width:76px">状态</th><th style="width:96px;text-align:right">操作</th>
+            </tr></thead>
+            <tbody>
+              <tr class="grp"><td colspan="9">11月6日 周五 — 3 人 · 8 项 · 21.5h · 完成率 71%</td></tr>
+              <tr>
+                <td class="num">11-06</td>
+                <td><span class="member"><span class="avatar" style="background:#00BCD4">张</span>张工</span></td>
+                <td>售后排名 TOP10 接口联调，口径对齐 room_name+table_no</td>
+                <td>AutoWork</td><td><span class="tag acc">开发</span></td>
+                <td class="num">3.0h</td>
+                <td><span class="bar-mini"><i style="width:100%"></i></span>100%</td>
+                <td><span class="tag on">已完成</span></td>
+                <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">删除</a></div></td>
+              </tr>
+              <tr>
+                <td class="num">11-06</td>
+                <td><span class="member"><span class="avatar" style="background:#0078d4">李</span>李工</span></td>
+                <td>生产机 frp 隧道巡检，修复 4238 相机转发抖动</td>
+                <td>运维</td><td><span class="tag warn">运维</span></td>
+                <td class="num">1.5h</td>
+                <td><span class="bar-mini"><i style="width:60%"></i></span>60%</td>
+                <td><span class="tag info">进行中</span></td>
+                <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">删除</a></div></td>
+              </tr>
+              <tr>
+                <td class="num">11-06</td>
+                <td><span class="member"><span class="avatar" style="background:#1a9e6c">王</span>王工</span></td>
+                <td>整理自动更新 §7.4 SOP 文档</td>
+                <td>AutoWork</td><td><span class="tag" style="background:rgba(124,58,237,.12);color:#7c3aed">文档</span></td>
+                <td class="num">1.5h</td>
+                <td><span class="bar-mini"><i style="width:40%"></i></span>40%</td>
+                <td><span class="tag info">进行中</span></td>
+                <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">删除</a></div></td>
+              </tr>
+              <tr class="grp"><td colspan="9">11月5日 周四 — 3 人 · 7 项 · 19.0h · 完成率 86%</td></tr>
+              <tr>
+                <td class="num">11-05</td>
+                <td><span class="member"><span class="avatar" style="background:#00BCD4">张</span>张工</span></td>
+                <td>query_page 分页性能优化 338.9ms → 0.14ms，补回归用例</td>
+                <td>AutoWork</td><td><span class="tag acc">开发</span></td>
+                <td class="num">4.0h</td>
+                <td><span class="bar-mini"><i style="width:100%"></i></span>100%</td>
+                <td><span class="tag on">已完成</span></td>
+                <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">删除</a></div></td>
+              </tr>
+              <tr>
+                <td class="num">11-05</td>
+                <td><span class="member"><span class="avatar" style="background:#c98a2d">赵</span>赵工</span></td>
+                <td>新球助手门店配置远程答疑 ×3</td>
+                <td>售后支持</td><td><span class="tag" style="background:rgba(101,163,13,.12);color:#65a30d">沟通</span></td>
+                <td class="num">1.0h</td>
+                <td><span class="bar-mini"><i style="width:100%"></i></span>100%</td>
+                <td><span class="tag on">已完成</span></td>
+                <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">删除</a></div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="impl-note">
+          <b>QTableView + LeanTableDelegate</b>（core/lean_table_delegate.py，禁 cellWidget 列）·
+          按天分组行 = 委托绘制的分组背景行，不占模型列 ·
+          操作列 = <b>ops_link_delegate</b> 自绘链接（跑视频 ledger / 售后面板同款先例）·
+          汇总卡数值由 <b>SQL 聚合查询</b>（GROUP BY work_date）异步填充，Worker 信号 result/error 均须有落点 ·
+          进度列委托绘制（bar + 百分比），点击进度区可滚轮/双击步进 5%
+        </div>
+      </div>
+
+      <!-- ============ 页签2 时间轴 ============ -->
+      <div class="pv-body hidden" id="t2">
+        <div class="toolbar">
+          <span class="combo">按天 · 全部成员</span><span class="anno">ComboBox（按天/按成员 两轴切换）</span>
+          <span class="datebox"><span class="combo">2026-11-06<span class="cv">本周</span></span>
+            <span class="step">▲</span><span class="step">▼</span></span>
+          <span style="flex:1"></span>
+          <span style="font-size:12px;color:var(--text3)">时间轴为只读回看视图 · 点击条目跳转页签1 并定位记录</span>
+        </div>
+        <div class="tl-day">
+          <div class="tl-day-head"><span class="tl-date">11月6日 周五</span><span class="tl-wd">2026-11-06</span>
+            <span class="tl-sum">
+              <span class="tag acc">⏱ 21.5h</span><span class="tag info">📋 8 项</span><span class="tag on">✅ 71%</span>
+            </span></div>
+          <div class="tl-body">
+            <div class="tl-entry done">
+              <div class="tl-title">售后排名 TOP10 接口联调 <span class="member"><span class="avatar" style="background:#00BCD4">张</span>张工</span></div>
+              <div class="tl-meta"><span style="color:var(--accent-press)">● 开发</span><span>📁 AutoWork</span>
+                <span>⏱ 3.0h</span><span>进度 100%</span><span class="tag on">已完成</span></div>
+            </div>
+            <div class="tl-entry">
+              <div class="tl-title">生产机 frp 隧道巡检 <span class="member"><span class="avatar" style="background:#0078d4">李</span>李工</span></div>
+              <div class="tl-meta"><span style="color:var(--warning)">● 运维</span><span>⏱ 1.5h</span>
+                <span>进度 60%</span><span class="tag info">进行中</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tl-day">
+          <div class="tl-day-head"><span class="tl-date">11月5日 周四</span><span class="tl-wd">2026-11-05</span>
+            <span class="tl-sum"><span class="tag acc">⏱ 19.0h</span><span class="tag info">📋 7 项</span>
+            <span class="tag on">✅ 86%</span></span></div>
+          <div class="tl-body">
+            <div class="tl-entry done">
+              <div class="tl-title">分页查询性能优化与回归 <span class="member"><span class="avatar" style="background:#00BCD4">张</span>张工</span></div>
+              <div class="tl-meta"><span style="color:var(--accent-press)">● 开发</span><span>⏱ 4.0h</span>
+                <span class="tag on">已完成</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="impl-note">
+          自绘滚动区（<b>QScrollArea + QWidget 条目卡</b>），不引第三方时间轴库 ·
+          条目卡为轻量 QWidget（无 cellWidget），单屏仅渲染可视范围条目 ·
+          「按成员」模式 = 时间轴内再按成员分组小节；数据接口与页签 1 复用同一查询 Worker
+        </div>
+      </div>
+
+      <!-- ============ 页签3 思维导图 ============ -->
+      <div class="pv-body hidden" id="t3">
+        <div class="toolbar">
+          <span class="combo">按成员分组</span><span class="anno">ComboBox（成员/项目/分类/日期 四种分组）</span>
+          <span class="combo">本周</span>
+          <span style="flex:1"></span>
+          <span style="font-size:12px;color:var(--text3)">点击分支节点折叠 / 展开 · 双击任务节点打开编辑对话框</span>
+        </div>
+        <div class="mm-scroll" style="height:430px">
+          <svg width="1080" height="400" viewBox="0 0 1080 400">
+            <path d="M190,200 C260,200 260,80 330,80" fill="none" stroke="#cbd5e1" stroke-width="1.4"/>
+            <path d="M190,200 C260,200 260,200 330,200" fill="none" stroke="#cbd5e1" stroke-width="1.4"/>
+            <path d="M190,200 C260,200 260,320 330,320" fill="none" stroke="#cbd5e1" stroke-width="1.4"/>
+            <path d="M560,80 C610,80 610,50 660,50" fill="none" stroke="#00BCD4" stroke-width="1.8" opacity=".55"/>
+            <path d="M560,80 C610,80 610,110 660,110" fill="none" stroke="#00BCD4" stroke-width="1.8" opacity=".55"/>
+            <path d="M560,200 C610,200 610,180 660,180" fill="none" stroke="#0078d4" stroke-width="1.8" opacity=".55"/>
+            <path d="M560,200 C610,200 610,225 660,225" fill="none" stroke="#0078d4" stroke-width="1.8" opacity=".55"/>
+            <path d="M560,320 C610,320 610,300 660,300" fill="none" stroke="#1a9e6c" stroke-width="1.8" opacity=".55"/>
+            <rect x="24" y="176" rx="9" width="166" height="48" fill="#00BCD4"/>
+            <text x="44" y="196" font-size="13" font-weight="600" fill="#fff">本周工作总览</text>
+            <text x="44" y="213" font-size="11" fill="#ffffffcc">38 项 · 112.5h</text>
+            <rect x="330" y="56" rx="9" width="230" height="48" fill="#0097A7"/>
+            <text x="348" y="76" font-size="12.5" font-weight="600" fill="#fff">张工（12 项 · 42h）</text>
+            <text x="348" y="93" font-size="11" fill="#ffffffaa">13</text>
+            <text x="522" y="86" font-size="12" fill="#ffffffcc" text-anchor="middle">−</text>
+            <rect x="330" y="176" rx="9" width="230" height="48" fill="#0078d4"/>
+            <text x="348" y="196" font-size="12.5" font-weight="600" fill="#fff">李工（15 项 · 38.5h）</text>
+            <text x="348" y="213" font-size="11" fill="#ffffffaa">15</text>
+            <text x="522" y="206" font-size="12" fill="#ffffffcc" text-anchor="middle">−</text>
+            <rect x="330" y="296" rx="9" width="230" height="48" fill="#1a9e6c"/>
+            <text x="348" y="316" font-size="12.5" font-weight="600" fill="#fff">王工（11 项 · 32h）</text>
+            <text x="348" y="333" font-size="11" fill="#ffffffaa">11</text>
+            <text x="522" y="326" font-size="12" fill="#ffffffcc" text-anchor="middle">−</text>
+            <rect x="660" y="30" rx="9" width="330" height="38" fill="#fff" stroke="#00BCD455" stroke-width="1.2"/>
+            <text x="674" y="46" font-size="12" fill="#20242B">售后排名接口联调（口径对齐）</text>
+            <text x="674" y="61" font-size="10.5" fill="#94a3b8">3h · 100%</text>
+            <rect x="956" y="42" width="24" height="6" rx="3" fill="#eceff3"/>
+            <rect x="956" y="42" width="24" height="6" rx="3" fill="#00BCD4"/>
+            <rect x="660" y="92" rx="9" width="330" height="38" fill="#fff" stroke="#00BCD455" stroke-width="1.2"/>
+            <text x="674" y="108" font-size="12" fill="#20242B">query_page 分页性能优化</text>
+            <text x="674" y="123" font-size="10.5" fill="#94a3b8">4h · 100%</text>
+            <rect x="956" y="104" width="24" height="6" rx="3" fill="#eceff3"/>
+            <rect x="956" y="104" width="24" height="6" rx="3" fill="#00BCD4"/>
+            <rect x="660" y="162" rx="9" width="330" height="38" fill="#fff" stroke="#0078d455" stroke-width="1.2"/>
+            <text x="674" y="178" font-size="12" fill="#20242B">frp 隧道巡检与自愈验证</text>
+            <text x="674" y="193" font-size="10.5" fill="#94a3b8">1.5h · 60%</text>
+            <rect x="956" y="174" width="24" height="6" rx="3" fill="#eceff3"/>
+            <rect x="956" y="174" width="14.4" height="6" rx="3" fill="#0078d4"/>
+            <rect x="660" y="282" rx="9" width="330" height="38" fill="#fff" stroke="#1a9e6c55" stroke-width="1.2"/>
+            <text x="674" y="298" font-size="12" fill="#20242B">自动更新 SOP 文档整理</text>
+            <text x="674" y="313" font-size="10.5" fill="#94a3b8">1.5h · 40%</text>
+            <rect x="956" y="294" width="24" height="6" rx="3" fill="#eceff3"/>
+            <rect x="956" y="294" width="9.6" height="6" rx="3" fill="#1a9e6c"/>
+          </svg>
+        </div>
+        <div class="impl-note">
+          <b>QGraphicsView + QGraphicsScene</b> 自绘节点/贝塞尔连线（不引第三方导图库）·
+          根=周期汇总，二级=分组维度（成员/项目/分类/日期），叶子=任务（标题+工时+迷你进度条）·
+          折叠态存内存（不落库）；双击叶子 → <b>EditRecordDialog</b> ·
+          数据量护栏：单次渲染节点 &gt; 500 时 InfoBar 提示缩小周期范围（防场景卡顿）
+        </div>
+      </div>
+
+      <!-- ============ 页签4 统计汇总 ============ -->
+      <div class="pv-body hidden" id="t4">
+        <div class="toolbar">
+          <div class="seg"><button class="on">按日</button><button>按周</button><button>按月</button></div>
+          <span class="anno">SegmentedWidget</span>
+          <span class="combo">全部成员</span>
+          <span style="flex:1"></span>
+          <button class="btn primary">📋 复制本期文字报告</button>
+          <button class="btn">导出 Excel</button>
+        </div>
+        <div class="stat-cards">
+          <div class="scard"><span class="ic c1">⏱</span>
+            <div><div class="k">本期总工时</div><div class="v">112.5 <small>h</small></div></div></div>
+          <div class="scard"><span class="ic c2">📋</span>
+            <div><div class="k">本期任务数</div><div class="v">38 <small>项</small></div></div></div>
+          <div class="scard"><span class="ic c3">✅</span>
+            <div><div class="k">完成率</div><div class="v" style="color:var(--success)">78<small>%</small></div></div></div>
+          <div class="scard"><span class="ic c4">👥</span>
+            <div><div class="k">人均工时</div><div class="v">6.2 <small>h/人·日</small></div></div></div>
+        </div>
+        <div class="charts">
+          <div class="card"><div class="card-h"><h3>工时分布（近 7 天 · 按成员堆叠）</h3>
+            <span class="ch-right"><span class="tag acc">张工</span><span class="tag info">李工</span><span class="tag on">王工</span></span></div>
+            <div class="bar-wrap">
+              <div class="bw"><span class="bv">14.2</span><i style="height:62%"></i><span class="bl">10-31</span></div>
+              <div class="bw"><span class="bv">16.8</span><i style="height:73%"></i><span class="bl">11-01</span></div>
+              <div class="bw"><span class="bv">15.5</span><i style="height:68%"></i><span class="bl">11-02</span></div>
+              <div class="bw"><span class="bv">19.0</span><i style="height:83%"></i><span class="bl">11-03</span></div>
+              <div class="bw"><span class="bv">21.0</span><i style="height:92%"></i><span class="bl">11-04</span></div>
+              <div class="bw"><span class="bv">19.0</span><i style="height:83%"></i><span class="bl">11-05</span></div>
+              <div class="bw hot"><span class="bv">21.5</span><i style="height:94%"></i><span class="bl">11-06</span></div>
+            </div></div>
+          <div class="card"><div class="card-h"><h3>分类占比（按工时）</h3></div>
+            <div style="display:flex;gap:16px;align-items:center">
+              <svg width="130" height="130" viewBox="0 0 130 130" style="flex:none">
+                <circle r="46" cx="65" cy="65" fill="none" stroke="#eceff3" stroke-width="20"/>
+                <circle r="46" cx="65" cy="65" fill="none" stroke="#00BCD4" stroke-width="20"
+                  stroke-dasharray="115.6 173.4" transform="rotate(-90 65 65)"/>
+                <circle r="46" cx="65" cy="65" fill="none" stroke="#0078d4" stroke-width="20"
+                  stroke-dasharray="57.8 231.2" stroke-dashoffset="-115.6" transform="rotate(-90 65 65)"/>
+                <circle r="46" cx="65" cy="65" fill="none" stroke="#c98a2d" stroke-width="20"
+                  stroke-dasharray="43.4 245.6" stroke-dashoffset="-173.4" transform="rotate(-90 65 65)"/>
+                <text x="65" y="62" text-anchor="middle" font-size="17" font-weight="700" fill="#20242B">112.5</text>
+                <text x="65" y="78" text-anchor="middle" font-size="10" fill="#9CA3AF">总工时 h</text>
+              </svg>
+              <div style="font-size:12.5px;line-height:2.1">
+                <div>● 开发 <b>40%</b> · 45.0h</div>
+                <div><span style="color:var(--info)">●</span> 运维 <b>20%</b> · 22.5h</div>
+                <div><span style="color:var(--warning)">●</span> 会议/沟通 <b>15%</b> · 17.0h</div>
+                <div><span style="color:var(--neutral)">●</span> 文档/测试/其他 <b>25%</b> · 28.0h</div>
+              </div>
+            </div></div>
+        </div>
+        <div class="card" style="padding:0;margin-top:14px">
+          <table>
+            <thead><tr><th>成员</th><th>任务数</th><th>已完成</th><th>工时(h)</th><th>完成率</th><th>平均进度</th><th style="text-align:right">个人报告</th></tr></thead>
+            <tbody>
+              <tr><td><span class="member"><span class="avatar" style="background:#00BCD4">张</span>张工</span></td>
+                <td class="num">12</td><td class="num">10</td><td class="num">42.0</td><td class="num">83%</td><td class="num">91%</td>
+                <td><div class="ops"><a href="#">复制日报</a><a href="#">复制周报</a></div></td></tr>
+              <tr><td><span class="member"><span class="avatar" style="background:#0078d4">李</span>李工</span></td>
+                <td class="num">15</td><td class="num">11</td><td class="num">38.5</td><td class="num">73%</td><td class="num">80%</td>
+                <td><div class="ops"><a href="#">复制日报</a><a href="#">复制周报</a></div></td></tr>
+              <tr><td><span class="member"><span class="avatar" style="background:#1a9e6c">王</span>王工</span></td>
+                <td class="num">11</td><td class="num">9</td><td class="num">32.0</td><td class="num">82%</td><td class="num">85%</td>
+                <td><div class="ops"><a href="#">复制日报</a><a href="#">复制周报</a></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="impl-note">
+          图表 = <b>QPainter 自绘</b>（沿用售后总览 dashboard 先例：design/generator + 核心表 stats_spec_*.json 口径），
+          堆叠柱按成员语义色切片 · 「复制报告」= 后台拼文本 + <b>QClipboard</b> + show_info_bar 反馈 ·
+          导出 Excel 走独立不分页查询方法（教训：query_page 被夹 1~500，导出必须整表）
+        </div>
+      </div>
+
+      <!-- ============ 页签5 成员与分类 ============ -->
+      <div class="pv-body hidden" id="t5">
+        <div class="two-col">
+          <div class="card">
+            <div class="card-h"><h3>成员管理</h3>
+              <span class="ch-right"><button class="btn sm primary">＋ 添加成员</button></span></div>
+            <table>
+              <thead><tr><th>成员</th><th>别名</th><th>参与统计</th><th>排序</th><th style="text-align:right">操作</th></tr></thead>
+              <tbody>
+                <tr><td><span class="member"><span class="avatar" style="background:#00BCD4">张</span>张工</span></td>
+                  <td>zhang</td><td><span class="tag on">是</span></td><td class="num">1</td>
+                  <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">停用</a></div></td></tr>
+                <tr><td><span class="member"><span class="avatar" style="background:#0078d4">李</span>李工</span></td>
+                  <td>li</td><td><span class="tag on">是</span></td><td class="num">2</td>
+                  <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">停用</a></div></td></tr>
+                <tr><td><span class="member"><span class="avatar" style="background:#1a9e6c">王</span>王工</span></td>
+                  <td>wang</td><td><span class="tag on">是</span></td><td class="num">3</td>
+                  <td><div class="ops"><a href="#">编辑</a><a href="#" class="del">停用</a></div></td></tr>
+                <tr><td><span class="member"><span class="avatar" style="background:#c98a2d">赵</span>赵工</span></td>
+                  <td>zhao</td><td><span class="tag off">否</span></td><td class="num">4</td>
+                  <td><div class="ops"><a href="#">编辑</a><a href="#">启用</a></div></td></tr>
+              </tbody>
+            </table>
+            <div class="impl-note">停用 ≠ 删除：历史记录保留归属；不挂钩账号系统，成员名手输 + EditableComboBox 记忆历史写法</div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h3>分类管理</h3>
+              <span class="ch-right"><button class="btn sm primary">＋ 添加分类</button></span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;line-height:2.4">
+              <span class="tag acc">开发</span><span class="tag warn">运维</span>
+              <span class="tag" style="background:rgba(124,58,237,.12);color:#7c3aed">文档</span>
+              <span class="tag info">测试</span>
+              <span class="tag" style="background:rgba(101,163,13,.12);color:#65a30d">沟通</span>
+              <span class="tag off">学习</span><span class="tag off">其他</span>
+            </div>
+            <div class="impl-note">分类内置默认 7 项，可增改（有记录引用的分类禁删，仅可停用）；
+            颜色取语义色扩展板，落 <b>worklog_meta</b> 表或 config JSON</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<div class="section-label">② 新增 / 编辑工作记录对话框 <span>档位 S 480×380（DIALOG_SIZE）· 支持连续录入</span></div>
+<div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap;padding:4px 0 8px">
+  <div class="dlg">
+    <div class="dlg-head"><h3>新增工作记录</h3>
+      <span class="tag acc">连续录入</span>
+      <span class="anno">EditRecordDialog(continuous=True) 先例</span></div>
+    <div class="dlg-body">
+      <div class="fld"><label>成员 *</label><div class="ctl"><span class="combo">张工</span>
+        <span class="anno">ComboBox（成员表数据源）</span></div></div>
+      <div class="fld"><label>日期 *</label><div class="ctl"><span class="combo" style="min-width:150px">2026-11-06<span class="cv">周五</span></span>
+        <span class="anno">ZhDatePicker</span></div></div>
+      <div class="fld"><label>工作内容 *</label><div class="ctl"><input class="inp" value="售后排名 TOP10 接口联调"></div></div>
+      <div class="fld"><label>项目</label><div class="ctl"><span class="combo">AutoWork</span>
+        <span class="anno">EditableComboBox（记忆历史项目名）</span></div></div>
+      <div class="fld" style="gap:12px"><label>分类 / 状态</label><div class="ctl">
+        <span class="combo" style="flex:1">开发</span><span class="combo" style="flex:1">进行中</span></div></div>
+      <div class="fld"><label>工时(h)</label><div class="ctl">
+        <input class="inp" value="3.0" style="width:90px;flex:none;text-align:center">
+        <span style="font-size:12px;color:var(--text3)">步进 0.5 · 上限 24</span>
+        <span class="anno">FittedSpinBox（勿 setFixedWidth）</span></div></div>
+      <div class="fld"><label>完成进度</label><div class="ctl"><div class="prog-line">
+        <span class="track"><i></i><b></b></span><span class="pv">60%</span></div>
+        <span class="anno">Slider + 百分比联动；=100% 自动置「已完成」</span></div></div>
+      <div class="fld" style="align-items:flex-start"><label style="padding-top:6px">备注</label>
+        <div class="ctl"><input class="inp" placeholder="做了什么、结果如何、遗留问题…"></div></div>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" style="margin-right:auto">💾 保存并继续录入</button>
+      <button class="btn">取消</button>
+      <button class="btn primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<div class="section-label">③ 控件映射总表 <span>设计元素 → qfw / 项目既有组件 → 落点</span></div>
+<table class="kv-table card" style="padding:0">
+  <thead><tr><th style="width:200px">设计元素</th><th style="width:300px">qfw / 既有组件</th><th>实现要点</th></tr></thead>
+  <tbody>
+    <tr><td>左侧导航新页「工作留痕」</td><td><code>FluentWindow + NavigationInterface</code></td><td>双宿主注册（hub_pages.py + management/window.py）；nav_icons 键名同步；qfw 图标 <code>FluentIcon.EDIT</code></td></tr>
+    <tr><td>五个二级页签</td><td><code>Pivot</code>（PivotPage 基建）</td><td>margins 24,10,0,0 + lock_pivot_width()；PivotItem 字体 13px；itemClicked 回调吞参（*_args）</td></tr>
+    <tr><td>量化汇总卡</td><td><code>CardWidget</code> + <code>ProgressRing</code></td><td>SQL 聚合异步填充；Worker result/error 信号均须有落点</td></tr>
+    <tr><td>记录表格</td><td><code>QTableView + LeanTableDelegate</code></td><td>分组行 = 委托绘制；操作列 = ops_link_delegate；禁 cellWidget</td></tr>
+    <tr><td>工具栏过滤</td><td><code>ComboBox / CalendarPicker / SearchLineEdit</code></td><td>CalendarPicker minWidth 150 + 前后步进 ToolButton；查询/写槽分离 + _query_seq 代数守卫</td></tr>
+    <tr><td>周期切换</td><td><code>SegmentedWidget</code></td><td>统计页头部；切换即重查，非当前页不触发 showEvent 的坑要绕开（显式刷新入口）</td></tr>
+    <tr><td>图表</td><td>QPainter 自绘（先例：售后总览 dashboard）</td><td>堆叠柱 + 环图；令牌取色，禁硬编码</td></tr>
+    <tr><td>思维导图</td><td><b>QGraphicsView 自研</b>（无现成库）</td><td>节点/贝塞尔连线/折叠；&gt;500 节点 InfoBar 提示收窄周期</td></tr>
+    <tr><td>新增/编辑对话框</td><td><code>EditRecordDialog</code> 工厂（continuous=True 先例）</td><td>档位 S 480×380；validate() 恒 False 保弹窗 + 异步落库；工时用 FittedSpinBox</td></tr>
+    <tr><td>提示</td><td><code>core.utils.show_info_bar()</code></td><td>右下角、自动抬升；duration 禁 0（0=立即关闭）</td></tr>
+  </tbody>
+</table>
+
+<!-- ================================================================ -->
+<div class="section-label">④ 集成与实现要点 <span>落库 / 模块结构 / 双后端</span></div>
+<div class="two-col">
+  <div class="note" style="margin:0 auto">
+    <b>模块结构（沿用 windows/&lt;module&gt;/ 子包规范）</b>
+    <pre style="font-family:var(--mono);font-size:12px;line-height:1.9;margin-top:8px;color:var(--text2)">windows/worklog/
+├── __init__.py          # re-export shim（兼容旧 import 路径）
+├── hub.py               # WorkLogHub（Pivot 容器，五页签）
+├── records/page.py      # 页签1 记录量化
+├── timeline/page.py     # 页签2 时间轴
+├── mindmap/page.py      # 页签3 思维导图
+├── stats/page.py        # 页签4 统计汇总
+├── members/page.py      # 页签5 成员与分类
+└── dialogs.py           # EditWorklogDialog（含连续录入）
+database/worklog_db.py    # 数据访问层（thread-local 连接先例）
+database/schema.py        # worklog_records / worklog_members DDL 收敛于此</pre>
+  </div>
+  <div class="note" style="margin:0 auto">
+    <b>数据模型与双后端</b><br>
+    <code>worklog_records</code>：id · work_date · member_id · title · project ·
+    category · hours(REAL) · progress(INT) · status · note ·
+    created_at · updated_at · <b>deleted(软删除=1，先例与运维表一致)</b><br>
+    <code>worklog_members</code>：id · name · alias · active · sort<br><br>
+    ⚠️ SQLite 侧 <code>_ensure_initialized</code> 自动迁移；
+    <b>MySQL 侧需手动 ALTER TABLE</b>（挂账给用户，双后端行为不一致是既有红线）·
+    DDL 收敛进 schema.py（8 张核心表治理目标的延续）·
+    删除一律软删除；统计查询自动过滤 deleted=1
+  </div>
+</div>
+
+<footer>
+  design/worklog_hub_v1.html · 2026-11-06 · 设计稿评审通过后按 docs/DESIGN.md §6 流程 qfw 控件 1:1 还原进 windows/worklog/，实现后真机截图登记 design/shots/
+</footer>
+
+<script>
+/* 原型交互：Pivot 页签切换（仅为评审演示，非设计内容） */
+document.getElementById("pivot").addEventListener("click",function(e){
+  var it=e.target.closest(".pv-item"); if(!it) return;
+  document.querySelectorAll(".pv-item").forEach(function(x){x.classList.toggle("active",x===it);});
+  ["t1","t2","t3","t4","t5"].forEach(function(id){
+    document.getElementById(id).classList.toggle("hidden",id!==it.dataset.t);
+  });
+});
+</script>
+</body>
+</html>

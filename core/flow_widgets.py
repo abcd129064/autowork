@@ -63,6 +63,15 @@ class FlowToolbarScrollArea(QScrollArea):
         # 宽度一变，FlowLayout 的折行数就可能变，必须重算高度
         self._adjust_height()
 
+    def refreshHeight(self):
+        """外部改动内容宽度后主动要求重算高度
+
+        自身宽度没变、只有内容折行数变了（例如工具栏里的弹性占位改了宽度）
+        时不会收到 resizeEvent，高度会停在上一轮的定值：内容变矮留白，内容
+        变高被裁并弹出滚动条，滚动条又让内容更窄，形成回不去的死循环。
+        """
+        self._adjust_height()
+
     def _adjust_height(self):
         """按当前宽度计算流式内容实际高度，锁定自身高度，下方内容紧贴无空白"""
         w = self.widget()

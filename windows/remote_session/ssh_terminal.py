@@ -626,23 +626,20 @@ class SSHTerminalPanel(QWidget):
         decoder = codecs.getincrementaldecoder('utf-8')('replace')
         while not self._stop_event.is_set():
             try:
-                if channel.recv_ready():
-                    data = channel.recv(65536)
-                    # 空包 = 对端已关（sshd 收到 exit 或网络 RST 后 recv 返回 b''）。
-                    # 这不是异常，不能当 socket 错误处理，否则日志里会刷假告警。
-                    if not data:
-                        if not self._closing:
-                            self._output_signal.emit("\r\n[连接已断开]\r\n")
-                            self._link_lost_signal.emit()  # P2-4：事件驱动断线态
-                        break
-                    text = decoder.decode(data)
-                    if text:
-                        self._output_signal.emit(text)
-                else:
-                    # 无数据可读时用 Event.wait 而不是 time.sleep：两者的区别
-                    # 在于关闭时前者能立刻醒来，后者要白等满 50ms 才检查标志，
-                    # 连续几百轮就是肉眼可见的关标签卡顿。
-                    self._stop_event.wait(0.05)
+                # 阻塞 recv（建连时已设 0.1s 超时）：有数据立刻返回，空闲最多挂
+                # 0.1s 就抛 timeout 回来查 stop 标志。旧写法 recv_ready()+wait(0.05)
+                # 每包最多白等 50ms，连续方向键/快速输入的回显拖影就是这么来的。
+                data = channel.recv(65536)
+                # 空包 = 对端已关（sshd 收到 exit 或网络 RST 后 recv 返回 b''）。
+                # 这不是异常，不能当 socket 错误处理，否则日志里会刷假告警。
+                if not data:
+                    if not self._closing:
+                        self._output_signal.emit("\r\n[连接已断开]\r\n")
+                        self._link_lost_signal.emit()  # P2-4：事件驱动断线态
+                    break
+                text = decoder.decode(data)
+                if text:
+                    self._output_signal.emit(text)
             except socket.timeout:
                 continue
             except OSError:

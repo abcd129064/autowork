@@ -42,6 +42,12 @@ _C_LINE = "#3a4056"
 _TOP_NOTE = "全部参数按通道生效；能力位不支持的控件置灰"
 _TIP_NA = "设备侧未开放：core/dahua_sdk 暂无该字段的读写接口，按设计稿置灰占位"
 
+# 真机（DH-IPC-HAC9488XY-HY @ 4238）实测出来的两类"写了也没用"，口径分开写：
+# 固件对 SetConfig / SetNewDevConfig 一律回成功，界面事前分辨不了，只能在
+# 写后读回比对发现真相时按这两种说法提示，不能让用户以为参数已经改上。
+_TIP_RO_FW = "该固件接受写入但不落库（真机读回原值），本项只读"
+_TIP_DENY_FW = "该固件拒绝这组参数（SDK 回包校验失败），本项只读"
+
 # ---- 码流（ENCODE_VIDEO 1100）----
 _COMPRESSIONS_MAIN = [("H.264", 7), ("H.265", 8), ("MJPG", 5)]
 _COMPRESSIONS_EXTRA = [("H.264", 7), ("H.265", 8)]
@@ -58,13 +64,19 @@ _IFRAME_MAIN = [50, 25, 100]
 _IFRAME_EXTRA = [50]
 _QUALITY_LABELS = {1: "10%", 2: "30%", 3: "50%", 4: "60%", 5: "80%", 6: "100%"}
 _CUSTOM_RES = "__custom__"
+# set_encode_video 入参 → 设计稿字段名：写后读回不一致时按这个名字报给用户，
+# 直接打 width / bitrate_control 这种内部键名现场没人看得懂
+_STREAM_LABELS = {"compression": "编码模式", "bitrate_control": "码流控制",
+                  "framerate": "帧率", "iframe_interval": "I 帧间隔",
+                  "image_quality": "图像质量", "bitrate": "码率上限",
+                  "width": "分辨率", "height": "分辨率", "enable": "视频使能"}
 
 # ---- 图像属性（9601）：镜像/翻转/旋转已接线，防抖与色彩见各自注释 ----
 _ROTATIONS = [("不旋转", 0), ("顺时针 90°", 1), ("逆时针 90°", 2)]
 _COLOR_FIELDS = (("brightness", "亮度"), ("contrast", "对比度"),
                  ("saturation", "饱和度"), ("gamma", "Gamma"))
-_TIP_STABLE = ("SDK 9601 的 nStable（0 关闭 / 1 电子 / 2 光学）与 "
-               "nStableSensitivity 尚未在 core 开放，待真机验证后接线")
+_TIP_STABLE = ("9601 的 nStable 是防抖能力掩码（1 电子 / 2 光学 / 4 控件，按位或），"
+               "读取后按设备实际回报决定置灰")
 _TIP_SHARP = "VideoInOptions 的锐度 / 3D / 2D 降噪字段尚未导出，置灰占位"
 
 # ---- P2 组：曝光 1306 / 背光 1309 / 白平衡 / 日夜 / 补光 / 除雾 1312 ----
@@ -76,12 +88,15 @@ _EXPOSURE_MODES = [("自动", 0), ("手动区间", 4), ("手动固定", 6),
 # nAntiFlicker：SDK 注释为 0-Outdoor / 1-50Hz / 2-60Hz，设计稿把 0 写作「关闭」
 _ANTIFLICKERS = [("50Hz", 1), ("60Hz", 2), ("关闭", 0)]
 _TIP_ANTIFLICKER = "SDK nAntiFlicker：0=Outdoor（户外，即不做防闪烁）/ 1=50Hz / 2=60Hz"
-_TIP_SHUTTER = "曝光结构体的快门档（dbExposureValue1/2）未在 core 开放"
+_TIP_SHUTTER = ("快门时间在 1306 结构体里是 dbExposureValue1/2（毫秒，0.1~80），"
+                "与设计稿的 1/N 秒档没有可靠换算，未经真机确认前不下发")
 _BACK_MODES = [("关闭", 1), ("背光补偿", 2), ("宽动态", 3), ("强光抑制", 4)]
 _TIP_BLC_REGION = "1309 的 stuBacklightRegion（NET_RECT）未在 core 开放"
 _WB_MODES = [("自动", "Auto"), ("手动", "Manual"),
              ("室内", "Indoor"), ("室外", "Outdoor")]
-_TIP_WB_GAIN = "VideoInOptions 未导出红 / 蓝增益字段（设计稿标注：枚举待导出）"
+# 真机 VideoInOptions 回包里就有 GainRed / GainBlue（红 / 蓝增益），键名按回包写，
+# 不再按设计稿猜 WhiteBalanceGain；该固件整张表的写入不落库，靠写后读回兜底
+_TIP_WB_GAIN = "红 / 蓝增益对应 VideoInOptions 的 GainRed / GainBlue（白平衡手动模式下才有意义）"
 _DAYNIGHT_MODES = [("自动", 0), ("彩色", 1), ("黑白", 2)]
 _TIP_DAYNIGHT_TYPE = "DAYNIGHT_INFO 的电子 / 机械类型未在 core 开放"
 # Lighting.Mode 现有实现按 Auto/Off/Manual 下发；设计稿的白光/红外/智能属灯光
@@ -89,8 +104,11 @@ _TIP_DAYNIGHT_TYPE = "DAYNIGHT_INFO 的电子 / 机械类型未在 core 开放"
 _LIGHT_MODES = [("自动", "Auto"), ("关闭", "Off"), ("手动", "Manual")]
 _TIP_LIGHT_MODE = "Lighting.Mode 现按 Auto / Off / Manual 下发；白光 / 红外 / 智能待真机探针"
 _TIP_LIGHT_SENS = "Lighting.Sensitivity 未在 core 开放"
-_TIP_DEFOG = "1312 NET_VIDEOIN_DEFOG_INFO（关闭 1 / 自动 2 / 手动 3，强度 0-100）：该固件读取失败，core 未接入"
-_TIP_AUDIO_ENC = "音频使能 / 降噪 / 编码 / 采样率属 ENCODE_AUDIO 与音频结构体，core 未开放"
+_TIP_DEFOG = ("1312 NET_VIDEOIN_DEFOG_INFO：真机 GetConfig 直接回"
+              "「设备不支持当前操作」，本机没有透雾能力，整卡只读展示")
+_TIP_AUDIO_ENC = ("音频使能 / 编码 / 采样率在固件的 Encode JSON 里可读"
+                  "（MainFormat / ExtraFormat），但整张表的写入被固件拒绝，"
+                  "只能看不能改；降噪字段回包里根本没有")
 
 _COLS_2_MIN = 1300   # ≥1300：右侧卡片两列
 _COLS_3_MIN = 1850   # ≥1850：右侧卡片三列
@@ -286,6 +304,15 @@ class EncodePage(QWidget):
         # 色彩只有成功读回过才允许回写：否则滑块还是默认值，一把写下去
         # 会把亮度/对比度清成 0（画面全黑）
         self._color_loaded = False
+        # 同理推广到所有区块：键是 card/group 的标识，只有读回成功才放行「应用」。
+        # 未读取的滑块停在构造时的默认值上，直接应用等于把默认值写进设备。
+        self._read_ok: set = set()
+        # 写后读回证明"固件收了但不落库"的区块：apply 置灰，避免反复误写
+        self._no_land: set = set()
+        # 区块标识 → {"apply": 按钮, "widgets": [受影响的控件]}，
+        # 由 _wire_group / 各卡片构造器登记，置灰与放行都查这张表
+        self._sections: dict = {}
+        self._rebuilding_ch = False   # 通道下拉重建选项表时挡住换通道信号
         self.setObjectName("encodePage")
         # 卡片最小宽必须足够小：否则宽窗口切成多列后页面最小宽被撑大，
         # 窗口缩回时页面缩不下去 → 列数锁死 + 左列被挤出裁切（10-21 截图）
@@ -299,8 +326,11 @@ class EncodePage(QWidget):
         top = QHBoxLayout()
         top.addWidget(BodyLabel("通道", self))
         self._cmb_ch = ComboBox(self)
-        self._cmb_ch.addItem("1")
+        self._cmb_ch.addItem("1", userData=0)
         self._cmb_ch.setFixedWidth(70)
+        # 换通道=换一整套参数：已读状态作废，各区块必须重新读取才放行「应用」，
+        # 否则第 2 路会把第 1 路的现值当成本路目标写回去
+        self._cmb_ch.currentIndexChanged.connect(self._on_channel_changed)
         top.addWidget(self._cmb_ch)
         top.addSpacing(8)
         self._lb_state = CaptionLabel(_TOP_NOTE, self)
@@ -335,6 +365,14 @@ class EncodePage(QWidget):
         sv.setSpacing(8)
         self._cards[1] = self._build_stream_card(sv, "主码流", 1)
         self._cards[4] = self._build_stream_card(sv, "辅码流1", 4)
+        for f in (1, 4):
+            card = self._cards[f]
+            self._sections[f"stream{f}"] = {
+                "apply": card["apply"],
+                "widgets": [card["cmb_comp"], card["cmb_brc"], card["sld_fps"],
+                            card["cmb_res"], card["sld_q"], card["cmb_bitrate"],
+                            card["cmb_iframe"]]}
+            self._refresh_gate(f"stream{f}")
         sv.addStretch(1)
         self._stream_scroll.setWidget(host)
         left.addWidget(self._stream_scroll, 1)
@@ -373,12 +411,12 @@ class EncodePage(QWidget):
                 ("combo", "BLC 区域", None,
                  _opts("全屏", "上", "中", "下"), _TIP_BLC_REGION)])
         self._grp_white = self._build_group_card(
-            "白平衡", "P2 · 枚举待导出", [
+            "白平衡", "P2 · VideoInOptions", [
                 ("combo", "模式", "white_balance", _WB_MODES),
-                ("slider", "红色增益", None, 0, 100, _TIP_WB_GAIN),
-                ("slider", "蓝色增益", None, 0, 100, _TIP_WB_GAIN)])
+                ("slider", "红色增益", "gain_red", 0, 100, _TIP_WB_GAIN),
+                ("slider", "蓝色增益", "gain_blue", 0, 100, _TIP_WB_GAIN)])
         self._grp_daynight = self._build_group_card(
-            "日夜模式", "P2 · DAYNIGHT_INFO", [
+            "日夜模式", "P2 · VideoInOptions", [
                 ("checks", "类型", ("电子", "机械"), _TIP_DAYNIGHT_TYPE),
                 ("combo", "切换模式", "day_night", _DAYNIGHT_MODES),
                 ("slider", "灵敏度", "daynight_sensitivity", 0, 100),
@@ -418,30 +456,36 @@ class EncodePage(QWidget):
         self._grp_exposure["widgets"]["antiflicker"].setToolTip(_TIP_ANTIFLICKER)
         self._grp_light["widgets"]["mode"].setToolTip(_TIP_LIGHT_MODE)
         self._grp_defog["card"].setToolTip(_TIP_DEFOG)
+        # 图像属性是一个按钮管两段（9601 + VideoColor），放行与置灰都按整体判：
+        # 只要有一段还能落库，按钮就留着
+        self._sections["image"] = {
+            "apply": self._btn_img_apply,
+            "widgets": [self._chk_mirror, self._chk_flip, self._cmb_rotate,
+                        *self._clr.values()]}
+        self._refresh_gate("image")
 
+        # getter / setter 统一收 (client, channel, values)：通道来自顶栏下拉，
+        # 早先这些 lambda 不带 channel，切通道后读写的还是第 1 路
         self._wire_group(self._grp_exposure,
-                         lambda c: c.exposure(),
-                         lambda c, v: c.set_exposure(**v))
+                         lambda c, ch: c.exposure(ch),
+                         lambda c, ch, v: c.set_exposure(channel=ch, **v))
         self._wire_group(self._grp_backlight,
-                         lambda c: c.backlight(),
-                         lambda c, v: c.set_backlight(**v))
+                         lambda c, ch: c.backlight(ch),
+                         lambda c, ch, v: c.set_backlight(channel=ch, **v))
         self._wire_group(self._grp_white,
-                         lambda c: c.video_options(),
-                         lambda c, v: c.set_video_options(
-                             white_balance=v.get("white_balance")))
+                         lambda c, ch: c.video_options(ch),
+                         lambda c, ch, v: c.set_video_options(channel=ch, **v))
         self._wire_group(self._grp_daynight,
-                         lambda c: c.video_options(),
-                         lambda c, v: c.set_video_options(
-                             day_night=v.get("day_night"),
-                             daynight_sensitivity=v.get("daynight_sensitivity"),
-                             daynight_delay=v.get("daynight_delay")))
+                         lambda c, ch: c.video_options(ch),
+                         lambda c, ch, v: c.set_video_options(channel=ch, **v))
         self._wire_group(self._grp_light,
-                         lambda c: c.lighting(),
-                         lambda c, v: c.set_lighting(**v))
+                         lambda c, ch: c.lighting(ch),
+                         lambda c, ch, v: c.set_lighting(channel=ch, **v))
         self._wire_group(self._grp_audio,
-                         lambda c: c.audio_volume(),
-                         lambda c, v: c.set_audio_volume(vol_in=v.get("in"),
-                                                         vol_out=v.get("out")))
+                         lambda c, ch: c.audio_volume(ch),
+                         lambda c, ch, v: c.set_audio_volume(
+                             channel=ch, vol_in=v.get("in"),
+                             vol_out=v.get("out")))
         self._reflow_right(self.width())
 
     # ---------- 预览卡 ----------
@@ -559,6 +603,10 @@ class EncodePage(QWidget):
                            "D1=704×576 / 360P=640×360")
         cust = sp_w = sp_h = None
         res_cell = cmb_res
+        # 本机当前/最近一次读到的分辨率。自定义输入框拿它做初值：
+        # SpinBox 的默认值是量程下限 176×144，用户选中「自定义…」却没改数字就
+        # 点应用，等于把 176×144 写进设备
+        res_ref = {"w": 0, "h": 0}
         if main:
             cmb_res.addItem("自定义…", userData=_CUSTOM_RES)
             cust = QWidget(card)
@@ -572,9 +620,15 @@ class EncodePage(QWidget):
             ch.addWidget(sp_h)
             ch.addStretch(1)
             cust.hide()
-            cmb_res.currentIndexChanged.connect(
-                lambda _i, c=cust, cb=cmb_res:
-                c.setVisible(cb.currentData() == _CUSTOM_RES))
+
+            def _res_mode_changed(_i, c=cust, cb=cmb_res, sw=sp_w, sh=sp_h):
+                custom = cb.currentData() == _CUSTOM_RES
+                c.setVisible(custom)
+                if custom and res_ref["w"]:
+                    sw.setValue(res_ref["w"])
+                    sh.setValue(res_ref["h"])
+
+            cmb_res.currentIndexChanged.connect(_res_mode_changed)
             res_cell = QWidget(card)
             rw = QVBoxLayout(res_cell)
             rw.setContentsMargins(0, 0, 0, 0)
@@ -629,7 +683,8 @@ class EncodePage(QWidget):
         return {"fmt": fmt, "cmb_brc": cmb_brc, "cmb_comp": cmb_comp,
                 "sld_fps": sld_fps, "cmb_res": cmb_res, "sp_w": sp_w,
                 "sp_h": sp_h, "custom": cust, "sld_q": sld_q,
-                "cmb_bitrate": cmb_bitrate, "cmb_iframe": cmb_iframe}
+                "cmb_bitrate": cmb_bitrate, "cmb_iframe": cmb_iframe,
+                "res_ref": res_ref, "apply": btn_apply}
 
     # ---------- 图像属性卡 ----------
 
@@ -655,14 +710,16 @@ class EncodePage(QWidget):
         self._chk_mirror = _check(card, "开启（左右）")
         self._chk_flip = _check(card, "开启（上下 180°）")
         self._cmb_rotate = _combo(card, _ROTATIONS)
+        self._ph_stable = _ph_combo(card, ("关闭", "电子防抖", "光学防抖"),
+                                    _TIP_STABLE)
+        self._ph_stable_sens = _ph_slider(card, 0, 100, 50, _TIP_STABLE)
         g1 = QGridLayout()
         g1.setHorizontalSpacing(8)
         g1.setVerticalSpacing(6)
         _fill_grid(g1, card, [
             ("镜像", self._chk_mirror), ("翻转", self._chk_flip),
             ("旋转", self._cmb_rotate),
-            ("防抖", _ph_combo(card, ("关闭", "电子防抖", "光学防抖"), _TIP_STABLE)),
-            ("防抖灵敏度", _ph_slider(card, 0, 100, 50, _TIP_STABLE))])
+            ("防抖", self._ph_stable), ("防抖灵敏度", self._ph_stable_sens)])
         v.addLayout(g1)
 
         # -- 色彩（VideoColor JSON，读写分开排队，见 _on_read_image）--
@@ -671,7 +728,7 @@ class EncodePage(QWidget):
         cells = []
         for key, label in _COLOR_FIELDS:
             cell, sld, lb = _slider_cell(card, 0, 100, 50)
-            self._clr[key] = {"slider": sld, "label": lb}
+            self._clr[key] = {"slider": sld, "label": lb, "row": cell}
             cells.append((label, cell))
         g2 = QGridLayout()
         g2.setHorizontalSpacing(8)
@@ -696,12 +753,16 @@ class EncodePage(QWidget):
         btns = QHBoxLayout()
         btns.addStretch(1)
         btn_read = PushButton("读取图像属性", card)
-        btn_apply = PrimaryPushButton("应用图像属性", card)
+        self._btn_img_apply = PrimaryPushButton("应用图像属性", card)
         btn_read.clicked.connect(self._on_read_image)
-        btn_apply.clicked.connect(self._on_apply_image)
+        self._btn_img_apply.clicked.connect(self._on_apply_image)
         btns.addWidget(btn_read)
-        btns.addWidget(btn_apply)
+        btns.addWidget(self._btn_img_apply)
         v.addLayout(btns)
+        # 防抖控件留个引用：读到的 nStable 能力位决定它是真不支持还是本可开启
+        self._stable_widgets = [w for w in (getattr(self, "_ph_stable", None),
+                                            getattr(self, "_ph_stable_sens", None))
+                                if w is not None]
         return card
 
     # ---------- 通用分组卡（P2） ----------
@@ -731,6 +792,7 @@ class EncodePage(QWidget):
 
         widgets: dict = {}
         names: dict[str, dict] = {}
+        labels: dict[str, str] = {}
         cells = []
         for spec in specs:
             kind, label = spec[0], spec[1]
@@ -748,7 +810,9 @@ class EncodePage(QWidget):
                 key, lo, hi = spec[2], spec[3], spec[4]
                 tip = spec[5] if len(spec) > 5 else _TIP_NA
                 w, sld, lb = _slider_cell(card, lo, hi, lo)
-                store = {"slider": sld, "label": lb}
+                # row 也存着：置灰一栏要灰掉整行（滑块 + 数值标签），
+                # 只灰滑块会让标签看起来还是活的
+                store = {"slider": sld, "label": lb, "row": w}
             else:                                   # "check"
                 key, text = spec[2], spec[3]
                 tip = spec[4] if len(spec) > 4 else _TIP_NA
@@ -757,6 +821,7 @@ class EncodePage(QWidget):
                 _ph(card, w, tip)
             else:
                 widgets[key] = w if store is None else store
+                labels[key] = label
             cells.append((label, w))
 
         grid = QGridLayout()
@@ -774,13 +839,23 @@ class EncodePage(QWidget):
             btns.addWidget(btn_read)
             btns.addWidget(btn_apply)
             v.addLayout(btns)
+        # key 直接用卡名：卡名在本页唯一，省掉一份还得同步维护的别名表
         return {"card": card, "widgets": widgets, "names": names,
+                "labels": labels, "key": title,
                 "read": btn_read, "apply": btn_apply}
 
     def _wire_group(self, grp: dict, getter, setter):
-        grp["read"].clicked.connect(lambda _=False: self._read_group(grp, getter))
+        key = grp["key"]
+        # getter 一并存着：顶栏「读取全部」要按组遍历，靠这里记住的口径才和
+        # 单卡「读取」用的是同一个函数，不会两处各写一份漂移掉
+        grp["getter"], grp["setter"] = getter, setter
+        grp["read"].clicked.connect(
+            lambda _=False: self._read_group(grp, getter))
         grp["apply"].clicked.connect(
-            lambda _=False: self._apply_group(grp, getter, setter))
+            lambda _=False: self._apply_group(grp, setter))
+        self._sections[key] = {"apply": grp["apply"],
+                               "widgets": list(grp["widgets"].values())}
+        self._refresh_gate(key)
 
     def _fill_group(self, grp: dict, info: dict):
         names = grp.get("names", {})
@@ -814,38 +889,81 @@ class EncodePage(QWidget):
                 out[key] = w["slider"].value()
         return out
 
-    def _read_group(self, grp: dict, getter):
+    def _read_group(self, grp: dict, getter, quiet: bool = False,
+                    on_done=None):
         c = self._client()
         if not c:
-            _toast(self, "请先在「相机工具」页连接设备", duration=3000)
+            if not quiet:
+                _toast(self, "请先在「相机工具」页连接设备", duration=3000)
+            if on_done:
+                on_done(False)
             return
-        self._submit(lambda: getter(c),
-                     lambda info: (self._fill_group(grp, info),
-                                   _toast(self, "已读取", duration=1200)),
-                     lambda m: _toast(self, m, True, 3500))
+        ch = self._channel()
 
-    def _apply_group(self, grp: dict, getter, setter):
-        """写后读回校验：固件“接受但不落库”的组会明确提示未生效。"""
+        def done(info):
+            self._fill_group(grp, info)
+            # 记下读到的设备现值：判"这组写入是不是空转"要和读时基线比，
+            # 不能只比"请求值 vs 回值"——用户没动的字段本来就相等，
+            # 全表比会把只改了一个滑块的情况误判成"大部分生效"
+            grp["baseline"] = {k: info[k] for k in grp["widgets"]
+                               if k in info}
+            self._read_ok.add(grp["key"])
+            self._clear_no_land(grp["key"])
+            self._refresh_gate(grp["key"])
+            if not quiet:
+                _toast(self, "已读取", duration=1200)
+            if on_done:
+                on_done(True)
+
+        def fail(msg):
+            """分组读取失败的统一出口：单独读要提示，批量读只静默累计失败"""
+            if not quiet:
+                _toast(self, msg, True, 3500)
+            if on_done:
+                on_done(False)
+
+        self._submit(lambda: getter(c, ch), done, fail)
+
+    def _apply_group(self, grp: dict, setter):
+        """写后读回校验：固件“接受但不落库”的组会明确提示未生效。
+
+        core 的各 set_* 已经带回读，这里直接用它的返回值，不再额外发一次
+        GET——隧道下每个多余请求都是协议超时的机会。
+        """
         c = self._client()
         if not c:
             _toast(self, "请先在「相机工具」页连接设备", duration=3000)
             return
+        if grp["key"] not in self._read_ok:
+            _toast(self, "请先「读取」拿到设备现值再应用", duration=3000)
+            return
+        key = grp["key"]
+        ch = self._channel()
         vals = self._group_values(grp)
-
-        def work():
-            setter(c, vals)
-            return getter(c)
+        labels = grp.get("labels", {})
+        base = grp.get("baseline") or {}
 
         def done(info):
             self._fill_group(grp, info)
             bad = [k for k in vals
-                   if k in info and str(info[k]) != str(vals[k])]
-            if bad:
-                _toast(self, "该固件未生效：" + "、".join(bad), True, 4000)
-            else:
+                   if k in info and not _same_value(info[k], vals[k])]
+            # 用户真的改动过的字段（相对读取时的设备现值）
+            moved = [k for k in vals
+                     if k in base and not _same_value(base[k], vals[k])]
+            names = "、".join(labels.get(k, k) for k in bad)
+            if not bad:
                 _toast(self, "已应用", duration=1500)
+                return
+            if moved and all(k in bad for k in moved):
+                # 改过的一个都没落库=这组写入对本机是空转，再多点几次也只是
+                # 白等请求：置灰并写清依据，比让用户反复按更有用
+                self._mark_no_land(grp["key"], _TIP_RO_FW)
+                _toast(self, f"{grp['key']}未生效：{names}", True, 4000)
+            else:
+                _toast(self, "该固件未生效：" + names, True, 4000)
 
-        self._submit(work, done, lambda m: _toast(self, m, True, 3500))
+        self._submit(lambda: setter(c, ch, vals), done,
+                     lambda m: _toast(self, m, True, 3500))
 
     # ---------- 聚焦信息（P3 只读） ----------
 
@@ -883,11 +1001,13 @@ class EncodePage(QWidget):
         if not c:
             _toast(self, "请先在「相机工具」页连接设备", duration=3000)
             return
-        self._submit(c.video_options, self._fill_focus, self._toast_err)
+        ch = self._channel()
+        self._submit(lambda: c.video_options(ch),
+                     self._fill_focus, self._toast_err)
 
     def _fill_focus(self, info: dict):
-        self._lb_focus.setText(f"聚焦模式：{info.get('focus_mode', '-')}"
-                               f"　（焦距/变倍需 PTZ 能力位，后续接入）")
+        self._lb_focus.setText(f"聚焦模式：{info.get('focus_mode', '-')}　"
+                               f"（焦距/变倍需 PTZ 能力位，后续接入）")
 
     # ---------- 布局重排（右列 1/2/3 列自适应） ----------
 
@@ -926,6 +1046,66 @@ class EncodePage(QWidget):
 
     def _client(self):
         return self._cam._client if self._cam else None
+
+    def _channel(self) -> int:
+        """顶栏「通道」选中的设备通道号（界面从 1 起，SDK 从 0 起）。
+
+        所有读写都带上它：早先 core 把通道写死成 0，多通道设备上切下拉毫无
+        作用，读回来的永远是第 1 路，用户以为改的是第 2 路实际写的是第 1 路。
+        """
+        data = self._cmb_ch.currentData()
+        return int(data) if isinstance(data, int) else 0
+
+    def _on_channel_changed(self, _index: int):
+        """换通道=换一整套参数：已读态作废，各区块要重新读取才放行「应用」"""
+        if getattr(self, "_rebuilding_ch", False):
+            return                      # 重建选项表，不是用户真的换了通道
+        self._color_loaded = False
+        self._read_ok.clear()
+        for key in list(self._sections):
+            self._clear_no_land(key)     # 换通道的判定依据要重来，先把控件放开
+            self._refresh_gate(key)
+
+    def _set_land_state(self, key: str, landed: bool, reason: str = ""):
+        """按"这组写入是否落库"翻整栏控件与「应用」的可用态。
+
+        判成空转时不只灰按钮：控件一起置灰 + tooltip 写依据，用户才知道不是
+        自己操作错了。重新读到设备现值=换了一次判断依据，放行要还回去。
+        """
+        sec = self._sections.get(key) or {}
+        btn = sec.get("apply")
+        targets = list(sec.get("widgets") or []) + ([btn] if btn else [])
+        for w in targets:
+            # 滑块那一栏要灰整行（滑块 + 数值标签），只灰滑块标签还像活的
+            target = w.get("row", w) if isinstance(w, dict) else w
+            target.setEnabled(landed)
+            target.setToolTip("" if landed else reason)
+
+    def _mark_no_land(self, key: str, reason: str):
+        self._no_land.add(key)
+        self._set_land_state(key, False, reason)
+
+    def _clear_no_land(self, key: str):
+        if key in self._no_land:
+            self._set_land_state(key, True)
+            self._no_land.discard(key)
+
+    def _refresh_gate(self, key: str):
+        """未读到设备现值前压住「应用」：控件停在构造默认值上，
+        直接应用就是把默认值写进设备（色彩滑块停在 50、增益停在 0）"""
+        sec = self._sections.get(key)
+        if not sec:
+            return
+        btn = sec.get("apply")
+        if btn is None:
+            return
+        if key in self._no_land:
+            return                      # 已判定不落库的区块由 _mark_no_land 管着
+        ok = key in self._read_ok
+        btn.setEnabled(ok)
+        btn.setToolTip("" if ok else
+                       "先「读取」拿到设备现值：未读取时控件停在默认值，"
+                       "直接应用会把默认值写进设备")
 
     def _submit(self, fn, on_ok, on_err):
         """所有设备调用走「相机工具」页的串行队列：同一登录会话上并发发
@@ -982,9 +1162,10 @@ class EncodePage(QWidget):
         self._preview.setAttribute(Qt.WA_NativeWindow, True)
         hwnd = int(self._preview.winId())
         self._btn_pv_play.setEnabled(False)
+        ch = self._channel()   # 串行线程里不能再读 Qt 控件，入队前取好
 
         def work():
-            c.realplay_start(hwnd, channel=0, sub_stream=True)
+            c.realplay_start(hwnd, channel=ch, sub_stream=True)
 
         self._submit(
             work,
@@ -1062,48 +1243,111 @@ class EncodePage(QWidget):
     # ---------- 码流读写 ----------
 
     def _on_read(self, fmt: int | None = None):
-        """fmt=None 读主+辅（顶栏「读取全部」），否则只读卡上那一路"""
+        """fmt=None 读整页（顶栏「读取全部」），否则只读卡上那一路。
+
+        「读取全部」不只读两路码流：右侧图像属性与 P2 各组同样属于本页状态，
+        只读一半会让按钮名不副实，而且各组的「应用」在没读到现值前会被放行，
+        写下去的是滑块构造默认值。分组读取各自排队，core 层再补一次间距。
+        """
         c = self._client()
         if not c:
             _toast(self, "请先在「相机工具」页连接设备", duration=3000)
             return
-        if fmt is None:
-            self._submit(lambda: (c.encode_video(1), c.encode_video(4)),
-                         self._fill_all, self._toast_err)
+        if fmt is not None:
+            # 通道在入队前取好：work 跑在串行线程上，那里不能再读 Qt 控件
+            ch = self._channel()
+
+            def done_one(info):
+                self._fill_card(self._cards[fmt], info)
+                _toast(self, f"{_STREAM_NAMES[fmt]}已读取", duration=1500)
+
+            self._submit(lambda: c.encode_video(fmt, ch),
+                         done_one, self._toast_err)
             return
+        self._read_all(c)
 
-        def done(info):
-            self._fill_card(self._cards[fmt], info)
-            _toast(self, f"{_STREAM_NAMES[fmt]}已读取", duration=1500)
+    def _read_all(self, c):
+        """整页读取：两路码流一批，图像属性/色彩一批，其余分组各一批"""
+        ch = self._channel()
+        # 一批 = 一次排队：两路码流一批、图像属性+色彩一批、其余分组各一批
+        pending = {"n": 2 + len(self._group_list()), "bad": 0}
 
-        self._submit(lambda: c.encode_video(fmt), done, self._toast_err)
+        def tally(ok):
+            pending["n"] -= 1
+            if not ok:
+                pending["bad"] += 1
+            if pending["n"] > 0:
+                return
+            if pending["bad"]:
+                self._lb_state.setText(f"部分读取失败（{pending['bad']} 项）")
+                self._lb_state.setStyleSheet(f"color:{_C_WARN};")
+            else:
+                self._lb_state.setText("已读取（改完点各卡片「应用」）")
+                self._lb_state.setStyleSheet(f"color:{_C_OK};")
+            _toast(self, "已读取全部" if not pending["bad"]
+                   else f"读取完成，{pending['bad']} 项失败",
+                   error=bool(pending["bad"]), duration=2500)
+
+        self._submit(lambda: (c.encode_video(1, ch), c.encode_video(4, ch)),
+                     lambda pair: (self._fill_all(pair), tally(True)),
+                     lambda m: (self._toast_err(m), tally(False)))
+        self._read_image(quiet=True, on_done=tally)
+        for grp, getter in self._group_list():
+            self._read_group(grp, getter, quiet=True, on_done=tally)
+
+    def _group_list(self) -> list:
+        """已接线的 P2 分组：(grp, getter)，供整页读取遍历（除雾未接线，不在列）"""
+        return [(g, g["getter"]) for g in (self._grp_exposure,
+                                           self._grp_backlight,
+                                           self._grp_white,
+                                           self._grp_daynight,
+                                           self._grp_light,
+                                           self._grp_audio)]
 
     def _fill_all(self, pair):
-        main_info, extra_info = pair
-        self._fill_card(self._cards[1], main_info)
-        self._fill_card(self._cards[4], extra_info)
+        # 先按设备通道数重建下拉，再回填：反过来会让回填用上的通道号
+        # 与界面显示对不上，多通道设备第一次读取尤其明显
         chan = int(getattr(self._client(), "chan_num", 1) or 1)
         if self._cmb_ch.count() != chan:
-            self._cmb_ch.clear()
-            for i in range(1, chan + 1):
-                self._cmb_ch.addItem(str(i))
-        self._lb_state.setText("已读取（改完点各卡片「应用」）")
-        self._lb_state.setStyleSheet(f"color:{_C_OK};")
+            # 重建选项期间屏蔽换通道信号：clear/addItem 都会触发索引变化，
+            # 不挡住的话刚攒下的已读态会被自己清掉，各卡「应用」立刻又被压灰
+            self._rebuilding_ch = True
+            try:
+                self._cmb_ch.clear()
+                for i in range(1, chan + 1):
+                    self._cmb_ch.addItem(str(i), userData=i - 1)
+            finally:
+                self._rebuilding_ch = False
+        self._fill_card(self._cards[1], pair[0])
+        self._fill_card(self._cards[4], pair[1])
 
     def _fill_card(self, card: dict, info: dict):
-        _select_or_insert(card["cmb_brc"], info["bitrate_control"],
+        """按设备回值回填一路码流卡；缺键一律跳过，不拿默认值冒充现值。
+
+        「已读」状态在这里落：只有真正回填过设备现值的那一路才放行「应用」，
+        判定和回填在同一处，不会出现状态说读过了、控件还停在默认值。
+        """
+        key = f"stream{card['fmt']}"
+        self._read_ok.add(key)
+        self._clear_no_land(key)
+        self._refresh_gate(key)
+        _select_or_insert(card["cmb_brc"], info.get("bitrate_control"),
                           names=_BRC_NAMES)
-        _select_or_insert(card["cmb_comp"], info["compression"],
+        _select_or_insert(card["cmb_comp"], info.get("compression"),
                           names=_COMPRESSION_NAMES)
-        card["sld_fps"].setValue(int(round(info["framerate"])))
-        self._fill_resolution(card, int(info["width"]), int(info["height"]))
-        card["sld_q"].setValue(int(info["image_quality"]))
-        _select_or_insert(card["cmb_bitrate"], info["bitrate"], " KB/s")
-        _select_or_insert(card["cmb_iframe"], info["iframe_interval"])
-        if card["fmt"] == 4:
+        if info.get("framerate") is not None:
+            card["sld_fps"].setValue(int(round(info["framerate"])))
+        if info.get("width") is not None and info.get("height") is not None:
+            self._fill_resolution(card, int(info["width"]), int(info["height"]))
+        if info.get("image_quality") is not None:
+            card["sld_q"].setValue(int(info["image_quality"]))
+        _select_or_insert(card["cmb_bitrate"], info.get("bitrate"), " KB/s")
+        _select_or_insert(card["cmb_iframe"], info.get("iframe_interval"))
+        if card["fmt"] == 4 and info.get("width") is not None:
             self._update_pv_info(info)
 
     def _fill_resolution(self, card: dict, w: int, h: int):
+        card["res_ref"]["w"], card["res_ref"]["h"] = w, h
         cmb = card["cmb_res"]
         for i in range(cmb.count()):
             if cmb.itemData(i) == (w, h):
@@ -1140,33 +1384,102 @@ class EncodePage(QWidget):
             _toast(self, "请先在「相机工具」页连接设备", duration=3000)
             return
         fmts = (1, 4) if fmt is None else (fmt,)
+        for f in fmts:
+            if f"stream{f}" not in self._read_ok:
+                _toast(self, "请先「读取」拿到设备现值再应用", duration=3000)
+                return
+        ch = self._channel()
         params = {f: _card_params(self._cards[f]) for f in fmts}
 
         def work():
-            return tuple(c.set_encode_video(f, **params[f]) for f in fmts)
+            """逐路「写→读回」；被设备拒写时也要把真实值读回来。
 
-        if fmt is None:
-            # set_encode_video 写后会重读，回显设备真实值比回显入参可信
-            self._submit(work, self._fill_all, self._toast_err)
-            return
+            辅码流改分辨率在 4238 上会被固件直接拒掉（SDK err 21）。写失败后
+            如果不管卡片，界面就停在用户刚选的那个设备根本不认的档位上，
+            看起来像是已经改上了。
+            """
+            out = {}
+            for f in fmts:
+                err = None
+                try:
+                    info = c.set_encode_video(f, channel=ch, **params[f])
+                except Exception as e:  # noqa: BLE001 拒绝写入也要回读纠偏
+                    err = str(e)
+                    try:
+                        info = c.encode_video(f, ch)
+                    except Exception:  # noqa: BLE001 回读也失败就保持卡片现值
+                        info = None
+                out[f] = (info, _diff_stream(params[f], info) if info else [],
+                          err)
+            return out
 
-        def done(results):
-            self._fill_card(self._cards[fmt], results[0])
-            _toast(self, f"{_STREAM_NAMES[fmt]}已应用", duration=1800)
+        def done(res):
+            errs, bad = [], []
+            for f, (info, miss, err) in res.items():
+                if info is not None:
+                    self._fill_card(self._cards[f], info)
+                if err:
+                    errs.append(f"{_STREAM_NAMES[f]}：{err}")
+                if miss:
+                    bad.append(f"{_STREAM_NAMES[f]}未生效：{'、'.join(miss)}")
+            if errs:
+                _toast(self, "；".join(errs), True, 4500)
+            if bad:
+                _toast(self, "；".join(bad), True, 4000)
+            if not errs and not bad:
+                name = "码流参数" if fmt is None else _STREAM_NAMES[fmt]
+                _toast(self, f"{name}已应用", duration=1800)
 
         self._submit(work, done, self._toast_err)
 
     # ---------- 图像属性读写 ----------
 
-    def _on_read_image(self):
+    def _read_image(self, quiet: bool = False, on_done=None):
+        """9601 与 VideoColor 一批读：一次排队，任一失败不拖累另一个"""
         c = self._client()
         if not c:
-            _toast(self, "请先在「相机工具」页连接设备", duration=3000)
+            if not quiet:
+                _toast(self, "请先在「相机工具」页连接设备", duration=3000)
+            if on_done:
+                on_done(False)
             return
-        # 9601 与 VideoColor 是两条独立配置：分开排队，任一失败不拖累另一个
-        self._submit(c.image_ctrl, self._fill_image, self._toast_err)
-        self._submit(c.video_color, self._fill_color,
-                     lambda m: _toast(self, f"色彩读取失败：{m}", True, 3500))
+        ch = self._channel()
+
+        def work():
+            res = {}
+            for name, fn in (("ctrl", lambda: c.image_ctrl(ch)),
+                             ("color", lambda: c.video_color(ch))):
+                try:
+                    res[name] = fn()
+                except Exception as e:  # noqa: BLE001 两条配置各自成败分开报
+                    res[name] = None
+                    res.setdefault("errs", []).append(str(e))
+            return res
+
+        def done(res):
+            for msg in res.get("errs", []):
+                self._toast_err(msg)
+            ok = res.get("ctrl") is not None
+            if ok:
+                # 先放开控件再回填：_clear_no_land 会把镜像/翻转一并 enable，
+                # 反过来就让能力位不支持的勾选框又被点亮了
+                self._clear_no_land("image")
+                self._fill_image(res["ctrl"], quiet=True)
+            if res.get("color") is not None:
+                self._fill_color(res["color"], quiet=True)
+            if ok:
+                self._read_ok.add("image")
+                self._refresh_gate("image")
+            if not quiet:
+                _toast(self, "图像属性已读取" if ok else "图像属性读取失败",
+                       error=not ok, duration=1800)
+            if on_done:
+                on_done(ok)
+
+        self._submit(work, done, self._toast_err)
+
+    def _on_read_image(self):
+        self._read_image()
 
     def _fill_image(self, info: dict, quiet: bool = False):
         self._chk_mirror.setChecked(bool(info.get("mirror")))
@@ -1175,6 +1488,16 @@ class EncodePage(QWidget):
         # bMirror / bFlip 是能力位（是否支持）：不支持就置灰，别让用户反复点应用
         self._chk_mirror.setEnabled(bool(info.get("supports_mirror", True)))
         self._chk_flip.setEnabled(bool(info.get("supports_flip", True)))
+        # 防抖按 nStable 能力掩码决定：真机常年回 0（本机没有防抖），
+        # 这时占位就是设备事实，而不是我们没接线
+        stable = int(info.get("stable") or 0)
+        if stable:
+            kinds = [name for name, bit in (("电子", 1), ("光学", 2), ("控件", 4))
+                     if stable & bit]
+            for w in self._stable_widgets:
+                w.setEnabled(True)
+                w.setToolTip(f"设备回报 nStable={stable}（{'/'.join(kinds)}），"
+                             f"写入通道待 core 开放后才能接线")
         if not quiet:
             _toast(self, "图像属性已读取", duration=1500)
 
@@ -1194,51 +1517,77 @@ class EncodePage(QWidget):
             _toast(self, "色彩已读取", duration=1500)
 
     def _on_apply_image(self):
+        """一次排队写两段（9601 + VideoColor）再合并判定。
+
+        拆成两次排队时错误会各弹一条、而且色彩那段不看图像那段的结论；
+        合并成一个任务后能给出「这一整卡都没落库」这种可操作的判断。
+        """
         c = self._client()
         if not c:
             _toast(self, "请先在「相机工具」页连接设备", duration=3000)
             return
-        req = (self._chk_mirror.isChecked(), self._chk_flip.isChecked(),
-               self._cmb_rotate.currentData())
+        if "image" not in self._read_ok:
+            _toast(self, "请先「读取图像属性」拿到设备现值再应用", duration=3000)
+            return
+        ch = self._channel()
+        req = {"mirror": self._chk_mirror.isChecked(),
+               "flip": self._chk_flip.isChecked(),
+               "rotate": self._cmb_rotate.currentData()}
+        color = ({k: w["slider"].value() for k, w in self._clr.items()}
+                 if self._color_loaded else None)
 
         def work():
-            return c.set_image_ctrl(mirror=req[0], flip=req[1], rotate=req[2])
+            out = {}
+            try:
+                out["ctrl"] = c.set_image_ctrl(channel=ch, **req)
+            except Exception as e:  # noqa: BLE001 旋转被拒时也要看色彩的结果
+                out["ctrl"], out["ctrl_err"] = None, str(e)
+            if color is not None:
+                try:
+                    out["color"] = c.set_video_color(channel=ch, **color)
+                except Exception as e:  # noqa: BLE001
+                    out["color"], out["color_err"] = None, str(e)
+            return out
 
-        def done(info: dict):
-            # 4238 固件实测 9601 写入不落库（读回仍是原值）——写后比对，
-            # 未生效时明确提示，不假装成功
-            applied = (bool(info.get("mirror")) == req[0]
-                       and bool(info.get("flip")) == req[1]
-                       and int(info.get("rotate", 0)) == int(req[2]))
-            self._fill_image(info, quiet=True)
-            if applied:
+        def done(res):
+            bad = []
+            ctrl_ok = color_ok = None          # None=这段没参与本轮判定
+            if res.get("ctrl_err"):
+                bad.append("图像属性写入被设备拒绝")
+                ctrl_ok = False
+            elif res.get("ctrl") is not None:
+                got = res["ctrl"]
+                self._fill_image(got, quiet=True)
+                miss = [n for n, k in (("镜像", "mirror"), ("翻转", "flip"),
+                                       ("旋转", "rotate"))
+                        if not _same_value(got.get(k), req[k])]
+                bad.extend(miss)
+                ctrl_ok = not miss
+            if res.get("color_err"):
+                bad.append("色彩写入被设备拒绝")
+                color_ok = False
+            elif color is not None and res.get("color") is not None:
+                got = res["color"]
+                self._fill_color(got, quiet=True)
+                miss = [label for k, label in _COLOR_FIELDS
+                        if not _same_value(got.get(k.capitalize()), color[k])]
+                bad.extend(miss)
+                color_ok = not miss
+
+            # 参与判定的两段都告诉我"一个字段都没落地"=这一整卡对本机是空转，
+            # 置灰别再白写；只要有一段真的落库，按钮就留着
+            verdicts = [v for v in (ctrl_ok, color_ok) if v is not None]
+            if bad and verdicts and not any(verdicts):
+                self._mark_no_land("image", _TIP_RO_FW)
+            if res.get("ctrl_err"):
+                self._toast_err(res["ctrl_err"])
+            if res.get("color_err"):
+                self._toast_err(res["color_err"])
+            if not bad:
                 _toast(self, "图像属性已应用", duration=1800)
             else:
-                _toast(self, "该固件未接受图像属性写入（读回未生效）",
-                       duration=4000)
-
-        self._submit(work, done, self._toast_err)
-        if self._color_loaded:
-            self._apply_color(c)
-
-    def _apply_color(self, c):
-        """色彩回写：只有成功读取过才发（否则滑块还是默认值，会把画面写黑）"""
-        vals = {k: w["slider"].value() for k, w in self._clr.items()}
-
-        def work():
-            c.set_video_color(**vals)
-            return c.video_color()
-
-        def done(info: dict):
-            self._fill_color(info, quiet=True)
-            bad = [k for k in vals
-                   if str(info.get(k.capitalize())) != str(vals[k])]
-            if bad:
-                labels = dict(_COLOR_FIELDS)
-                _toast(self, "该固件未生效：" + "、".join(labels[k] for k in bad),
+                _toast(self, "该固件未生效：" + "、".join(dict.fromkeys(bad)),
                        True, 4000)
-            else:
-                _toast(self, "色彩已应用", duration=1500)
 
         self._submit(work, done, self._toast_err)
 
@@ -1246,6 +1595,43 @@ class EncodePage(QWidget):
 # ---------------------------------------------------------------- 模块级助手
 
 _STREAM_NAMES = {1: "主码流", 4: "辅码流1"}
+# 逐字段比对时的报出顺序（同设计稿卡面上的从上到下）
+_STREAM_ORDER = ("enable", "compression", "bitrate_control", "framerate",
+                 "width", "iframe_interval", "image_quality", "bitrate")
+
+
+def _same_value(got, want) -> bool:
+    """设备回值与请求值算不算同一档位。
+
+    不能直接 str() 比：nFrameRate 是 c_float，写 20 回来 20.0，按字符串判就成
+    了"没生效"的假阴性（真机第一轮探针就被它带偏过）。bool 与数字也要分开判：
+    能力位回 1 不等于开关处于 True。
+    """
+    if got is None or want is None:
+        return got is None and want is None
+    if isinstance(got, bool) or isinstance(want, bool):
+        return bool(got) == bool(want)
+    try:
+        return abs(float(got) - float(want)) < 1e-6
+    except (TypeError, ValueError):
+        return str(got).strip() == str(want).strip()
+
+
+def _diff_stream(request: dict, info: dict) -> list:
+    """请求值 vs 设备回值逐字段比，返回没落地的设计稿字段名。
+
+    宽/高合成一条「分辨率」：设备只认成对写入，分开报只会重复刷同一件事。
+    """
+    bad, seen = [], set()
+    for key in _STREAM_ORDER:
+        want = request.get(key)
+        if want is None or _same_value(info.get(key), want):
+            continue
+        label = _STREAM_LABELS.get(key, key)
+        if label not in seen:
+            seen.add(label)
+            bad.append(label)
+    return bad
 
 
 def _pv_value(parent, text: str) -> CaptionLabel:

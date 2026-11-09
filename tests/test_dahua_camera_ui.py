@@ -38,6 +38,9 @@ class _FakeClient:
         self.serial, self.chan_num = "SER-TEST-001", 2
         self._ptz = ptz
         self.closed = False
+        # no_land 里的组名模拟 4238 固件：SetConfig 回成功但读回还是原值
+        self.no_land: set = set()
+        self.calls: list = []
 
     def ptz_supported(self, channel=0):
         return self._ptz
@@ -50,32 +53,57 @@ class _FakeClient:
 
     def realplay_start(self, hwnd, channel=0, sub_stream=True):
         self.realplay_hwnd = hwnd
+        self.realplay_channel = channel
 
-    # ---- 编码配置（编码页数据源，v2 双卡） ----
-    def encode_video(self, stream=1):
+    # ---- 编码配置（编码页数据源，v2 双卡）----
+    # 帧率/画质/增益都刻意取"不等于控件默认值"的数（默认 25fps、画质 5、
+    # 滑块下限 0）：回填值撞上默认值时断言永远为真，读到没读到都看不出来。
+    def encode_video(self, stream=1, channel=0):
+        self.calls.append(("encode_video", stream, channel))
         base = {"enable": True, "compression": 7, "bitrate_control": 1,
-                "framerate": 25.0, "iframe_interval": 50, "image_quality": 5}
+                "framerate": 30.0 if stream == 1 else 15.0,
+                "iframe_interval": 50, "image_quality": 3}
         if stream == 1:
-            base.update(width=1920, height=1080, bitrate=4096)
+            base.update(width=1920, height=1080, bitrate=6144)
         else:
             base.update(width=640, height=360, bitrate=512)
+        # 设备按通道各存一套参数：第 2 路刻意给不同值，用来抓"通道没接线"
+        if channel:
+            base.update(framerate=20.0, bitrate=2048)
         return base
 
-    # ---- P2 分组（曝光/背光/音量/JSON 配置） ----
+    def set_encode_video(self, stream=1, channel=0, **kw):
+        if not hasattr(self, "encode_calls"):
+            self.encode_calls = []
+        self.encode_calls.append((stream, kw))
+        self.calls.append(("set_encode_video", stream, channel))
+        got = {**self.encode_video(stream, channel), **kw}
+        # 模拟"固件收了但不落库"：把请求过的字段全部退回设备原值
+        if f"stream{stream}" in self.no_land:
+            got = self.encode_video(stream, channel)
+        return got
+
+    # ---- P2 分组（曝光/背光/音量/JSON 配置）----
     def exposure(self, channel=0):
         return {"mode": 0, "antiflicker": 0,
                 "compensation": getattr(self, "exp_comp", 50),
                 "gain": 1, "gain_min": 0, "gain_max": 50}
 
     def set_exposure(self, channel=0, **kw):
-        if kw.get("compensation") is not None:
+        if "曝光" not in self.no_land and kw.get("compensation") is not None:
             self.exp_comp = int(kw["compensation"])
         return self.exposure()
 
     def backlight(self, channel=0):
-        return {"mode": 1, "wide_dynamic": 50, "glare": 50}
+        return {"mode": getattr(self, "bl_mode", 1),
+                "wide_dynamic": getattr(self, "bl_wd", 50), "glare": 50}
 
     def set_backlight(self, channel=0, **kw):
+        if "背光" not in self.no_land:
+            for k, attr in (("mode", "bl_mode"),
+                            ("wide_dynamic", "bl_wd")):
+                if kw.get(k) is not None:
+                    setattr(self, attr, int(kw[k]))
         return self.backlight()
 
     def audio_volume(self, channel=0):
@@ -91,39 +119,64 @@ class _FakeClient:
 
     def video_options(self, channel=0):
         return {"day_night": 0, "switch_mode": 0, "daynight_sensitivity": 2,
-                "daynight_delay": 6, "white_balance": "Auto",
-                "color_temp": 100, "focus_mode": 0, "exposure_mode": 0}
+                "daynight_delay": 6,
+                "white_balance": getattr(self, "wb", "Auto"),
+                "color_temp": 100, "gain_red": getattr(self, "gr", 20),
+                "gain_blue": getattr(self, "gb", 30),
+                "focus_mode": 0, "exposure_mode": 0}
 
     def set_video_options(self, channel=0, **kw):
-        return None
+        if "白平衡" not in self.no_land:
+            for k, attr in (("white_balance", "wb"),
+                            ("gain_red", "gr"), ("gain_blue", "gb")):
+                if kw.get(k) is not None:
+                    setattr(self, attr, kw[k])
+        return self.video_options(channel)
 
     def lighting(self, channel=0):
-        return {"mode": "Auto", "correction": 50}
+        return {"mode": getattr(self, "lg_mode", "Auto"),
+                "correction": getattr(self, "lg_corr", 50)}
 
     def set_lighting(self, channel=0, **kw):
-        return None
+        if "补光" not in self.no_land:
+            if kw.get("mode") is not None:
+                self.lg_mode = kw["mode"]
+            if kw.get("correction") is not None:
+                self.lg_corr = int(kw["correction"])
+        return self.lighting()
 
-    # ---- 图像属性（9601） ----
+    # ---- 图像属性（9601）与色彩（VideoColor）----
     def image_ctrl(self, channel=0):
         return {"supports_mirror": True, "supports_flip": True,
                 "mirror": getattr(self, "img_mirror", False),
                 "flip": getattr(self, "img_flip", False),
-                "rotate": getattr(self, "img_rotate", 0)}
+                "rotate": getattr(self, "img_rotate", 0),
+                "stable": 0, "stable_sensitivity": 0}
 
     def set_image_ctrl(self, channel=0, **kw):
-        if kw.get("mirror") is not None:
-            self.img_mirror = bool(kw["mirror"])
-        if kw.get("flip") is not None:
-            self.img_flip = bool(kw["flip"])
-        if kw.get("rotate") is not None:
-            self.img_rotate = int(kw["rotate"])
+        if "image" not in self.no_land:
+            if kw.get("mirror") is not None:
+                self.img_mirror = bool(kw["mirror"])
+            if kw.get("flip") is not None:
+                self.img_flip = bool(kw["flip"])
+            if kw.get("rotate") is not None:
+                self.img_rotate = int(kw["rotate"])
         return self.image_ctrl(channel)
 
-    def set_encode_video(self, stream=1, **kw):
-        if not hasattr(self, "encode_calls"):
-            self.encode_calls = []
-        self.encode_calls.append((stream, kw))
-        return {**self.encode_video(stream), **kw}
+    def video_color(self, channel=0):
+        # 亮度刻意给 62（滑块默认 50）：回填是否真的发生要有可见差异才测得出来
+        return {"Brightness": getattr(self, "clr_Brightness", 62),
+                "Contrast": getattr(self, "clr_Contrast", 50),
+                "Saturation": getattr(self, "clr_Saturation", 50),
+                "Gamma": getattr(self, "clr_Gamma", 50),
+                "Hue": 50, "ChromaSuppress": 50}
+
+    def set_video_color(self, channel=0, **kw):
+        if "image" not in self.no_land:
+            for k, v in kw.items():
+                if v is not None:
+                    setattr(self, f"clr_{k.capitalize()}", int(v))
+        return self.video_color(channel)
 
     def close(self):
         self.closed = True
@@ -412,14 +465,16 @@ def test_encode_page_read_fills(qapp, monkeypatch):
     """v2 双卡：读取后主/辅码流各控件按设备现值回填"""
     page, ep, fake = _make_encode_page(qapp, monkeypatch)
     ep._on_read()
-    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 2)
     main, extra = ep._cards[1], ep._cards[4]
-    # 主码流 1080P@4096 VBR H.264
+    assert main["sld_fps"].value() == 30           # 主码流
+    assert extra["sld_fps"].value() == 15          # 辅码流
+    # 主码流 1080P@6144 VBR H.264 画质 50%
     assert main["cmb_res"].currentData() == (1920, 1080)
     assert main["cmb_comp"].currentData() == 7
     assert main["cmb_brc"].currentData() == 1
-    assert main["cmb_bitrate"].currentData() == 4096
-    assert main["sld_q"].value() == 5            # 80%
+    assert main["cmb_bitrate"].currentData() == 6144
+    assert main["sld_q"].value() == 3              # 50%
     # 辅码流 360P@512
     assert extra["cmb_res"].currentData() == (640, 360)
     assert extra["cmb_bitrate"].currentData() == 512
@@ -429,15 +484,15 @@ def test_encode_page_apply_calls_set(qapp, monkeypatch):
     """应用到设备：两条码流各一次 RMW 写，参数取自卡片控件"""
     page, ep, fake = _make_encode_page(qapp, monkeypatch)
     ep._on_read()
-    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 25)
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 2)
     main = ep._cards[1]
-    # 6144 是设计稿主码流「码率上限」的选项之一（v6：4096/6144/8192）
-    _set_combo(main["cmb_bitrate"], 6144)
+    # 8192 是设计稿主码流「码率上限」的选项之一（v6：4096/6144/8192）
+    _set_combo(main["cmb_bitrate"], 8192)
     _set_combo(main["cmb_comp"], 8)              # H.265
     ep._on_apply()
     assert _wait(qapp, lambda: len(getattr(fake, "encode_calls", [])) >= 2)
     calls = dict(fake.encode_calls)
-    assert calls[1]["bitrate"] == 6144
+    assert calls[1]["bitrate"] == 8192
     assert calls[1]["compression"] == 8
     assert calls[4]["bitrate"] == 512            # 辅码流原值照写（RMW 全字段）
 
@@ -586,13 +641,190 @@ def test_preview_resume_delayed_after_page_switch(qapp, monkeypatch):
 
 
 def test_encode_page_image_apply(qapp, monkeypatch):
-    """图像属性应用：镜像/旋转写入走 client.set_image_ctrl 并回填"""
+    """图像属性应用：先读取放行，再走 set_image_ctrl 写镜像/旋转并回填"""
     page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read_image()
+    assert _wait(qapp, lambda: "image" in ep._read_ok)
     ep._chk_mirror.setChecked(True)
     _select_combo_by_data(ep._cmb_rotate, 1)
     ep._on_apply_image()
     assert _wait(qapp, lambda: fake.image_ctrl()["mirror"] is True)
     assert fake.image_ctrl()["rotate"] == 1
+
+
+def test_encode_apply_blocked_until_read(qapp, monkeypatch):
+    """未读取不放行「应用」：滑块停在构造默认值（增益 0、色彩 50），
+    这时写下去的是默认值而不是设备现值——真机上等于把画面写黑"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    assert not ep._cards[1]["apply"].isEnabled()
+    assert not ep._grp_exposure["apply"].isEnabled()
+    assert not ep._btn_img_apply.isEnabled()
+    assert not ep._color_loaded
+    ep._cards[1]["sld_fps"].setValue(1)      # 未读取态下的控件值就是默认值
+    ep._on_apply(1)
+    qapp.processEvents()
+    time.sleep(0.4)
+    qapp.processEvents()
+    assert not getattr(fake, "encode_calls", None)     # 一次设备写入都不该发
+
+
+def test_encode_read_all_covers_right_column(qapp, monkeypatch):
+    """「读取全部」不只读两路码流：图像属性与各分组同样要拿到设备现值，
+    否则按钮名不副实，而且各组的「应用」会被无依据放行"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 9)
+    for key in ("image", "曝光", "背光", "白平衡", "日夜模式", "补光", "音频"):
+        assert key in ep._read_ok, f"{key} 没被读取全部覆盖"
+    # 除雾整卡未接线，不该出现在已读集合里（设备 1312 直接回不支持）
+    assert "除雾" not in ep._read_ok
+
+
+def test_encode_channel_reaches_device(qapp, monkeypatch):
+    """顶栏通道下拉必须真的传到设备：早先 core 把通道写死 0，
+    切到第 2 路读回来的还是第 1 路的值"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 2)
+    assert ep._cmb_ch.count() == 2
+    ep._cmb_ch.setCurrentIndex(1)                  # 切到通道 2
+    assert "stream1" not in ep._read_ok, "换通道后已读态应作废"
+    assert not ep._cards[1]["apply"].isEnabled()
+    ep._on_read()
+    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 20)
+    assert ("encode_video", 1, 1) in fake.calls
+    assert ("encode_video", 4, 1) in fake.calls
+
+
+def test_encode_apply_uses_selected_channel(qapp, monkeypatch):
+    """应用同样按选中通道下发，否则第 2 路的改动会写到第 1 路上"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 2)
+    ep._cmb_ch.setCurrentIndex(1)
+    ep._on_read()
+    assert _wait(qapp, lambda: ep._cards[1]["sld_fps"].value() == 20)
+    ep._on_apply(1)
+    assert _wait(qapp, lambda: ("set_encode_video", 1, 1) in fake.calls)
+
+
+def test_encode_custom_resolution_prefills_device_value(qapp, monkeypatch):
+    """选中「自定义…」时宽/高初值取设备现值：SpinBox 下限是 176×144，
+    用户选了自定义却没填数字就点应用，等于把 176×144 写进设备"""
+    from windows.camera.encode_page import _CUSTOM_RES
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 2)
+    main = ep._cards[1]
+    assert (main["sp_w"].value(), main["sp_h"].value()) != (1920, 1080)
+    _select_combo_by_data(main["cmb_res"], _CUSTOM_RES)
+    assert (main["sp_w"].value(), main["sp_h"].value()) == (1920, 1080)
+    main["apply"].click()
+    assert _wait(qapp, lambda: bool(getattr(fake, "encode_calls", None)))
+    assert fake.encode_calls[-1][1]["width"] == 1920
+
+
+def test_encode_no_land_disables_apply(qapp, monkeypatch):
+    """写后读回一个字段都没落地=这组写入对本机空转：置灰并写清依据，
+    别让用户反复按着白等请求"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    fake.no_land.add("补光")
+    grp = ep._grp_light
+    grp["read"].click()
+    assert _wait(qapp, lambda: "补光" in ep._read_ok)
+    assert grp["apply"].isEnabled()
+    grp["widgets"]["correction"]["slider"].setValue(77)
+    grp["apply"].click()
+    assert _wait(qapp, lambda: "补光" in ep._no_land)
+    assert not grp["apply"].isEnabled()
+    assert not grp["widgets"]["correction"]["row"].isEnabled()
+    assert "不落库" in grp["widgets"]["correction"]["row"].toolTip()
+    # 重新读取=换了一次判断依据，放行要还回去
+    fake.no_land.discard("补光")
+    grp["read"].click()
+    assert _wait(qapp, lambda: "补光" not in ep._no_land)
+    assert grp["apply"].isEnabled()
+
+
+def test_encode_framerate_compare_not_stringly(qapp, monkeypatch):
+    """帧率按数值比：nFrameRate 是 c_float，写 20 回来 20.0，
+    str 比会误判成"没生效"（真机探针第一轮就栽在这里）"""
+    from windows.camera.encode_page import _same_value
+    assert _same_value(20.0, 20)
+    assert _same_value(True, 1)
+    assert not _same_value(20.0, 25)
+    assert _same_value("Auto", "Auto")
+    assert not _same_value(None, 0)
+
+
+def test_encode_image_no_land_disables_card(qapp, monkeypatch):
+    """4238 实测：9601 与 VideoColor 写入都"接受但不落库"。
+    两段一致判空转才置灰整卡，任一段真落库就必须留着按钮"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read_image()
+    assert _wait(qapp, lambda: "image" in ep._read_ok)
+    assert ep._btn_img_apply.isEnabled()
+    ep._clr["brightness"]["slider"].setValue(80)
+    ep._chk_mirror.setChecked(True)
+    fake.no_land.add("image")
+    ep._on_apply_image()
+    assert _wait(qapp, lambda: "image" in ep._no_land)
+    assert not ep._btn_img_apply.isEnabled()
+    assert not ep._clr["brightness"]["row"].isEnabled()
+    assert fake.video_color()["Brightness"] == 62, "设备值不该被谎报成 80"
+    assert ep._clr["brightness"]["slider"].value() == 62, "卡片要回到设备真值"
+
+
+def test_encode_partial_land_keeps_apply_enabled(qapp, monkeypatch):
+    """只有一段没落库（色彩能写、9601 不能）时不能整卡置灰：
+    一刀切会把还能用的写入通道一起关掉"""
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read_image()
+    assert _wait(qapp, lambda: "image" in ep._read_ok)
+
+    def _only_color_sticks(channel=0, **kw):
+        if "image" not in fake.no_land:
+            for k, v in kw.items():
+                if v is not None:
+                    setattr(fake, f"clr_{k.capitalize()}", int(v))
+        return fake.video_color(channel)
+
+    def _ctrl_never_lands(channel=0, **kw):
+        return fake.image_ctrl(channel)
+
+    fake.set_video_color = _only_color_sticks
+    fake.set_image_ctrl = _ctrl_never_lands
+    ep._clr["saturation"]["slider"].setValue(70)
+    ep._chk_mirror.setChecked(True)
+    ep._on_apply_image()
+    # 等假设备真的收到色彩写入（fake 状态只在 set_video_color 里变），
+    # 滑块本来就停在 70，拿它当完成条件会立刻为真
+    assert _wait(qapp, lambda: fake.video_color()["Saturation"] == 70)
+    assert "image" not in ep._no_land, "色彩真的落库了，不该整卡置灰"
+    assert ep._btn_img_apply.isEnabled()
+
+
+def test_encode_rejected_write_resyncs_card(qapp, monkeypatch):
+    """设备直接拒写（辅码流改分辨率撞 SDK err 21）时，卡片必须回读设备真值：
+    停在被拒档位上会让人以为已经改上了"""
+    from core.dahua_sdk import DahuaSdkError
+    page, ep, fake = _make_encode_page(qapp, monkeypatch)
+    ep._on_read()
+    assert _wait(qapp, lambda: len(ep._read_ok) >= 2)
+
+    def _deny(stream=1, channel=0, **kw):
+        if "width" in kw:
+            raise DahuaSdkError("写入编码配置失败：设备拒绝了这组参数", "rejected")
+        return fake.encode_video(stream, channel)
+
+    fake.set_encode_video = _deny
+    extra = ep._cards[4]
+    _select_combo_by_data(extra["cmb_res"], (1280, 720))
+    ep._on_apply(4)
+    # 等的是卡片本身回到设备真值：res_ref 在读取阶段就已经是 640，
+    # 拿它当完成条件会立刻为真，测不到写失败后的那次回读
+    assert _wait(qapp, lambda: extra["cmb_res"].currentData() == (640, 360))
+    assert extra["res_ref"]["w"] == 640, "被拒档位残留在卡片上"
 
 
 def _select_combo_by_data(combo, data):

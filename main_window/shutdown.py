@@ -16,10 +16,11 @@ from PySide6.QtCore import QProcess, QThread
 def shutdown_main_window(host) -> None:
     """执行主窗口关闭前的资源清理（不调用 super().closeEvent）。"""
     # -1. 先停掉迁入侧边导航的业务子页后台线程
-    # 运维/售后/跑视频各 Hub 子页的 worker 挂页面属性上，原先由各
+    # 运维/售后/跑视频/工作留痕各 Hub 子页的 worker 挂页面属性上，原先由各
     # FluentWindow 面板的 closeEvent 统一 detach；迁入主窗口后必须在此
     # 补上，否则关闭时线程仍在跑会报 QThread: Destroyed while running
-    for hub_name in ("management_hub", "aftersale_hub", "ledger_hub"):
+    for hub_name in ("management_hub", "aftersale_hub", "ledger_hub",
+                     "worklog_hub"):
         hub = getattr(host, hub_name, None)
         if hub is not None:
             try:
@@ -116,8 +117,15 @@ def shutdown_main_window(host) -> None:
         except RuntimeError:
             pass
 
-    # 7b. 清理批量整理 worker（NewLog 整理 / 打包上传，中断并短等待）
-    for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker'):
+    # 7b. 清理工具页 worker（批量整理 / 打包上传 / 单杆视频 / 视频修复体检与修复 /
+    # 画质提升四路，中断并短等待）
+    # 画质提升的四个属性名必须与 video_enhance_hub.WORKER_ATTRS、
+    # hub_popout._BUSY_ATTRS 三处一致：漏登记这里，关窗后 ffmpeg 子进程还在跑，
+    # 会一直占着 CPU 与输出文件句柄（worker 收到中断才会 _kill 子进程）
+    for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker',
+                 '_video_probe_worker', '_video_repair_worker',
+                 '_ve_enhance_worker', '_ve_probe_worker',
+                 '_ve_env_worker', '_ve_cmp_worker'):
         nw = getattr(host, attr, None)
         if nw is not None:
             setattr(host, attr, None)

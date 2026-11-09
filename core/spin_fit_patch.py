@@ -15,11 +15,12 @@ qfluentwidgets 的 `SpinBox`（`InlineSpinBoxBase`）用 `setButtonSymbols(NoBut
 `QEvent.FontChange` 时重算。
 
 用法：端口/多位数字微调框直接用 `FittedSpinBox(parent, sample="65535")`；
-已有点位把 `SpinBox(...)` 换成它并**删掉原来的 `setFixedWidth(...)`**
-（否则又会被按钮压住）。需要保留设计稿定宽时用 `refit(min_width=...)` 把它当下限。
+小数（工时等 0.5 步进）用 `FittedDoubleSpinBox`。已有点位把 `SpinBox(...)`
+换成它们并**删掉原来的 `setFixedWidth(...)`**（否则又会被按钮压住）。
+需要保留设计稿定宽时用 `refit(min_width=...)` 把它当下限。
 """
 from PySide6.QtCore import QEvent
-from qfluentwidgets import SpinBox
+from qfluentwidgets import DoubleSpinBox, SpinBox
 
 # 右侧按钮区实测宽度（px）：up 31 + down 31 + spacing 5 + 右边距 4
 _BUTTON_ZONE = 71
@@ -35,26 +36,16 @@ def spin_width_for(spin, sample: str = "65535") -> int:
             + _BUTTON_ZONE)
 
 
-class FittedSpinBox(SpinBox):
-    """宽度随字体自适应的 SpinBox（端口等多位数字场景）
+class _FitWidthMixin:
+    """宽度自适应的实现体：SpinBox / DoubleSpinBox 共用一份算法
 
-    Args:
-        sample: 该控件可能出现的最长文本（端口默认 "65535"；带后缀时传
-            ``f"{最大值}{后缀}"``）。构造后若改了 range/suffix，可再调
-            :meth:`refit` 重算。
-
-    注意：类属性 `_fit_sample/_fit_min` 是**兜底值**——qfw `SpinBoxBase.__init__`
+    类属性 `_fit_sample/_fit_min` 是**兜底值**——qfw `SpinBoxBase.__init__`
     里就调了 `setFont()`，会先触发一次 FontChange（此时实例属性还没赋值），
     没有类属性兜底就会在构造期抛 AttributeError。
     """
 
     _fit_sample: str = "65535"
     _fit_min: int = 0
-
-    def __init__(self, parent=None, sample: str = "65535"):
-        super().__init__(parent)
-        self._fit_sample = str(sample)
-        self._apply_fit()
 
     def set_fit_sample(self, sample: str):
         """更新用于计算宽度的样本文本并立即重算"""
@@ -78,3 +69,31 @@ class FittedSpinBox(SpinBox):
         super().changeEvent(event)
         if event.type() == QEvent.Type.FontChange:
             self._apply_fit()
+
+
+class FittedSpinBox(_FitWidthMixin, SpinBox):
+    """宽度随字体自适应的整数 SpinBox（端口等多位数字场景）
+
+    Args:
+        sample: 该控件可能出现的最长文本（端口默认 "65535"；带后缀时传
+            ``f"{最大值}{后缀}"``）。构造后若改了 range/suffix，可再调
+            :meth:`refit` 重算。
+    """
+
+    def __init__(self, parent=None, sample: str = "65535"):
+        super().__init__(parent)
+        self._fit_sample = str(sample)
+        self._apply_fit()
+
+
+class FittedDoubleSpinBox(_FitWidthMixin, DoubleSpinBox):
+    """小数版自适应微调框：工时这类 0.5 步进的量
+
+    qfw `SpinBox` 没有 setDecimals（整数专用），0.5 步进只能落在
+    DoubleSpinBox 上；宽度算法与整数版完全一致，所以共用 mixin。
+    """
+
+    def __init__(self, parent=None, sample: str = "24.0"):
+        super().__init__(parent)
+        self._fit_sample = str(sample)
+        self._apply_fit()

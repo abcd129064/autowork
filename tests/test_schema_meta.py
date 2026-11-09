@@ -199,6 +199,35 @@ CREATE TABLE IF NOT EXISTS ledger_records (
 CREATE INDEX IF NOT EXISTS idx_ledger_category ON ledger_records(category, id);
 CREATE INDEX IF NOT EXISTS idx_ledger_signer ON ledger_records(signer);
 """,
+    # ---- 工作留痕（2026-11-06 新增，design/worklog_hub_v1.html） ----
+    "worklog_records": """
+CREATE TABLE IF NOT EXISTS worklog_records (
+    id INTEGER PRIMARY KEY,
+    work_date TEXT DEFAULT '',
+    member_id INTEGER DEFAULT 0,
+    title TEXT DEFAULT '',
+    project TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    hours REAL DEFAULT 0,
+    progress INTEGER DEFAULT 0,
+    status TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    created_at TEXT DEFAULT '',
+    updated_at TEXT DEFAULT '',
+    deleted INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_worklog_date_deleted ON worklog_records(work_date, deleted);
+CREATE INDEX IF NOT EXISTS idx_worklog_member_date ON worklog_records(member_id, work_date);
+""",
+    "worklog_members": """
+CREATE TABLE IF NOT EXISTS worklog_members (
+    id INTEGER PRIMARY KEY,
+    name TEXT DEFAULT '',
+    alias TEXT DEFAULT '',
+    active INTEGER DEFAULT 1,
+    sort INTEGER DEFAULT 0
+);
+""",
     # ---- 企微售后群消息归档（2026-10-06 新增，来源可插拔入站契约） ----
     "chat_archive_messages": """
 CREATE TABLE IF NOT EXISTS chat_archive_messages (
@@ -425,6 +454,35 @@ GOLDEN_MYSQL_DDL = {
             INDEX idx_ledger_signer (signer)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    # ---- 工作留痕（2026-11-06 新增） ----
+    "worklog_records": """
+        CREATE TABLE IF NOT EXISTS worklog_records (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            work_date VARCHAR(32) DEFAULT '',
+            member_id INT DEFAULT 0,
+            title VARCHAR(512) DEFAULT '',
+            project VARCHAR(255) DEFAULT '',
+            category VARCHAR(64) DEFAULT '',
+            hours DOUBLE DEFAULT 0,
+            progress INT DEFAULT 0,
+            status VARCHAR(32) DEFAULT '',
+            note TEXT,
+            created_at VARCHAR(32) DEFAULT '',
+            updated_at VARCHAR(32) DEFAULT '',
+            deleted TINYINT DEFAULT 0,
+            INDEX idx_worklog_date_deleted (work_date, deleted),
+            INDEX idx_worklog_member_date (member_id, work_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    "worklog_members": """
+        CREATE TABLE IF NOT EXISTS worklog_members (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(128) DEFAULT '',
+            alias VARCHAR(128) DEFAULT '',
+            active TINYINT DEFAULT 1,
+            sort INT DEFAULT 0
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
     # ---- 企微售后群消息归档（2026-10-06 新增） ----
     "chat_archive_messages": """
         CREATE TABLE IF NOT EXISTS chat_archive_messages (
@@ -478,18 +536,24 @@ def normalize(sql: str) -> str:
     return re.sub(r"\s+", " ", sql.strip())
 
 
-def test_table_names_cover_all_twelve_tables():
-    """TABLE_NAMES 覆盖全部 12 张双方言表（todesk_override 覆盖层已弃用：
+def test_table_names_cover_all_dual_dialect_tables():
+    """TABLE_NAMES 覆盖全部双方言表（todesk_override 覆盖层已弃用：
     显示口径改用 xqzg todesk_action，与网页端一致）"""
     assert schema.TABLE_NAMES == [
         "billiard_tables", "sync_meta", "xqzg_status", "kd_status",
         "submission_log", "device_mapping", "health_alerts",
         "aftersale_records", "ledger_records",
+        "worklog_records", "worklog_members",
         "chat_archive_messages", "chat_archive_tags", "chat_archive_cursor",
     ]
     assert set(schema.TABLE_NAMES) == set(GOLDEN_SQLITE_DDL) == set(GOLDEN_MYSQL_DDL)
     # 归档表分组常量与 TABLE_NAMES 尾部一致（table_db 建表脚本按它取表名）
     assert tuple(schema.TABLE_NAMES[-3:]) == schema.CHAT_ARCHIVE_TABLES
+    # 工作留痕两表必须排在归档三表之前，否则上面那条尾部断言就废了
+    assert list(schema.WORKLOG_TABLES) == ["worklog_records", "worklog_members"]
+    tail = schema.TABLE_NAMES[-len(schema.CHAT_ARCHIVE_TABLES
+                                     ) - len(schema.WORKLOG_TABLES):]
+    assert tail == list(schema.WORKLOG_TABLES) + list(schema.CHAT_ARCHIVE_TABLES)
 
 
 # ==================== SQLite 方言逐表等价 ====================
@@ -537,6 +601,44 @@ def test_sqlite_ddl_aftersale_records():
 def test_sqlite_ddl_ledger_records():
     assert normalize(schema.to_sqlite_ddl("ledger_records")) == normalize(
         GOLDEN_SQLITE_DDL["ledger_records"])
+
+
+def test_sqlite_ddl_worklog_records():
+    assert normalize(schema.to_sqlite_ddl("worklog_records")) == normalize(
+        GOLDEN_SQLITE_DDL["worklog_records"])
+
+
+def test_sqlite_ddl_worklog_members():
+    assert normalize(schema.to_sqlite_ddl("worklog_members")) == normalize(
+        GOLDEN_SQLITE_DDL["worklog_members"])
+
+
+def test_worklog_records_indexes_cover_query_paths():
+    """两条索引对应记录页的两条主查询：区间+软删除、成员维度汇总"""
+    idx = {(i.sqlite_name, i.sqlite_cols)
+           for i in schema.TABLE_INDEXES["worklog_records"]}
+    assert ("idx_worklog_date_deleted", ("work_date", "deleted")) in idx
+    assert ("idx_worklog_member_date", ("member_id", "work_date")) in idx
+
+
+def test_worklog_records_has_soft_delete_column():
+    """软删除是稿 §4.1 的硬要求：物理删除会让误删无从恢复"""
+    cols = {c.name for c in schema.TABLE_COLUMNS["worklog_records"]}
+    assert "deleted" in cols
+    deleted = next(c for c in schema.TABLE_COLUMNS["worklog_records"]
+                   if c.name == "deleted")
+    assert (deleted.sqlite_type, deleted.mysql_type) == ("INTEGER", "TINYINT")
+    assert deleted.sqlite_default == deleted.mysql_default == "0"
+
+
+def test_worklog_note_has_no_mysql_default():
+    """MySQL TEXT 列不允许 DEFAULT 子句（同 ledger_records.description 口径）"""
+    note = next(c for c in schema.TABLE_COLUMNS["worklog_records"]
+                if c.name == "note")
+    assert note.mysql_type == "TEXT"
+    assert note.mysql_default is None
+    assert note.sqlite_default == "''"
+    assert "note TEXT," in schema.to_mysql_ddl("worklog_records")
 
 
 # ==================== 企微售后群消息归档表（2026-10-06 新增） ====================
@@ -615,6 +717,24 @@ def test_mysql_ddl_aftersale_records():
 def test_mysql_ddl_ledger_records():
     assert normalize(schema.to_mysql_ddl("ledger_records")) == normalize(
         GOLDEN_MYSQL_DDL["ledger_records"])
+
+
+def test_mysql_ddl_worklog_records():
+    assert normalize(schema.to_mysql_ddl("worklog_records")) == normalize(
+        GOLDEN_MYSQL_DDL["worklog_records"])
+
+
+def test_mysql_ddl_worklog_members():
+    assert normalize(schema.to_mysql_ddl("worklog_members")) == normalize(
+        GOLDEN_MYSQL_DDL["worklog_members"])
+
+
+def test_worklog_tables_in_backend_mysql_ddl():
+    """MySQL 侧建表由 backend.MYSQL_DDL 派生自 TABLE_NAMES，漏登记就永远建不出来"""
+    from database import backend
+    for table in schema.WORKLOG_TABLES:
+        assert table in backend.MYSQL_DDL
+        assert backend.MYSQL_DDL[table] == schema.to_mysql_ddl(table)
 
 
 def test_mysql_ddl_chat_archive_messages():

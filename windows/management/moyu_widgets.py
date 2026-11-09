@@ -209,6 +209,7 @@ class _Board2048(QWidget):
 
     SIZE = 4
     score_changed = Signal(int)  # 本次合并新增分数
+    round_reset = Signal()       # 重开一局（R 键 / 重新开始按钮共用）
 
     def __init__(self, parent=None):
         """初始化空盘：棋盘内容全部交给 reset 生成，避免两处初始化漂移"""
@@ -237,6 +238,8 @@ class _Board2048(QWidget):
         self._won_cont = False
         self._spawn()
         self._spawn()
+        # 分数归零由控件侧监听此信号完成：R 键不经过按钮，不清就累加
+        self.round_reset.emit()
         self.update()
 
     def _spawn(self):
@@ -473,6 +476,7 @@ class Game2048Widget(QWidget):
 
         self._board = _Board2048(self)
         self._board.score_changed.connect(self._on_score)
+        self._board.round_reset.connect(self._on_round_reset)
         layout.addWidget(self._board, 1)
 
     def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
@@ -495,12 +499,18 @@ class Game2048Widget(QWidget):
             self._lbl_best.setText(f"最高分：{self._best}")
             save_moyu_state({"best_2048": self._best})
 
-    def _restart(self):
-        """重新开始：重开棋盘并清零得分"""
-        # 得分计数在控件侧，棋盘 reset 不会动它，必须在这里同步清零
-        self._board.reset()
+    def _on_round_reset(self):
+        """棋盘重开（R 键或按钮）：同步清零本局得分
+
+        R 键直接作用在棋盘上，不经过按钮回调；分数归零只听这一个信号，
+        两条重开路径才不会漏掉任何一条。
+        """
         self._score = 0
         self._lbl_score.setText("得分：0")
+
+    def _restart(self):
+        """重新开始：只清棋盘，得分随 round_reset 信号归零"""
+        self._board.reset()
         self._board.setFocus()
 
 
@@ -530,6 +540,7 @@ class _SnakeBoard(QWidget):
     CELL_MIN, CELL_MAX = 14, 30   # 边长区间：小面板保得住、大屏不失控
     score_changed = Signal(int)
     state_changed = Signal(str)  # idle / running / paused / over
+    round_reset = Signal()       # 换局重置（开始新局 / 重开 / 切难度共用）
 
     def __init__(self, parent=None, level=_SNAKE_DEFAULT_LEVEL):
         """按难度建盘：格子尺寸交给 _grid_geom，蛇身与食物由 _reset 生成
@@ -567,6 +578,9 @@ class _SnakeBoard(QWidget):
         self._queue.clear()
         self._state = "idle"
         self._food = self._spawn_food()
+        # 新局起点：控件侧监听此信号清零得分。结束后按方向键/「开始」
+        # 开新局也走这里，不清则上一局的分数会累加进新局与最高分判定
+        self.round_reset.emit()
 
     def _spawn_food(self):
         """在非蛇身格随机放食物；占满全场返回 None
@@ -861,6 +875,7 @@ class SnakeWidget(QWidget):
         self._board = _SnakeBoard(self, level=self._level)
         self._board.score_changed.connect(self._on_score)
         self._board.state_changed.connect(self._on_state)
+        self._board.round_reset.connect(self._on_round_reset)
         # 棋盘自己会按可用宽高算格边长，给满 stretch 让它吃掉页高；
         # 不留弹性项的话多余高度会被可拉伸的信息栏子布局吞掉，
         # 标签在拉高的格子里居中——就是信息栏上方那条通栏空白
@@ -872,17 +887,15 @@ class SnakeWidget(QWidget):
         self._board.setFocus(reason)
 
     def _on_level(self, _index):
-        """难度切换：重开棋局、刷新该档最高分并记住选择
+        """难度切换：重开棋局（得分随 round_reset 归零）、刷新该档最高分并记住选择
 
-        切档必须先清零本局得分，否则低难度攒的分数会带进高难度纪录。
+        切档先清零本局得分，低难度攒的分数才不会带进高难度纪录。
         """
         level = self._combo_level.currentData()
         if not level:
             return
         self._level = level
         self._board.set_level(level)
-        self._score = 0
-        self._lbl_score.setText("得分：0")
         self._best = _level_bests("best_snake",
                                   _SNAKE_DEFAULT_LEVEL).get(level, 0)
         self._lbl_best.setText(f"最高分：{self._best}")
@@ -903,13 +916,17 @@ class SnakeWidget(QWidget):
         else:
             self._board.start()
 
-    def _restart(self):
-        """重开：清零得分并清盘重新开局
+    def _on_round_reset(self):
+        """新局开始：同步清零本局得分
 
-        得分必须先归零，否则上一局的分数会带进新一局的高分判定。
+        「开始」在终局后开新局、「重开」按钮、切难度三条路都经棋盘
+        _reset 发射此信号，得分归零不需要每条调用路径各自记得清。
         """
         self._score = 0
         self._lbl_score.setText("得分：0")
+
+    def _restart(self):
+        """重开：清盘重新开局（得分随 round_reset 归零）"""
         self._board.restart()
         self._board.setFocus()
 

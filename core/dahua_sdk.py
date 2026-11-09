@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -33,13 +34,57 @@ _NETSDK_BOOTED = False
 _NETSDK_LOCK = threading.Lock()
 _NETSDK_MOD = None  # import 后的 NetSDK 模块命名空间缓存
 
+# 同一会话上两次配置请求的最小间距。UI 执行层（_SerialCaller）只在两次
+# submit 之间节流，一次 submit 内部往往是连着好几个请求（读主+辅两路码流、
+# RMW 的读-写-回读），隧道下这种背靠背会报 Protocol error。
+_CFG_MIN_GAP_S = 0.25
+
+# SDK 原文错误串 → (处置建议, 归类)。归类决定调用方怎么处理：
+# rejected=设备拒收这组参数（要回读纠偏）；unsupported=该项对本机不存在
+# （要置灰，重试也没用）；transport=链路问题（唯一值得重试的一类）；
+# illegal=我方入参问题。
+# ⚠ "funcntion" 是大华 wheel 里的拼写错误，照抄才能匹配上。
+_ERR_HINTS = (
+    ("verify returned data",
+     "设备拒绝了这组参数（回包校验失败）：该档位或该组合本机不支持",
+     "rejected"),
+    ("does not support current operation",
+     "该固件不支持这个配置项", "unsupported"),
+    ("does not support this funcntion",
+     "该配置名未被固件开放", "unsupported"),
+    ("user parameter is illegal",
+     "入参非法：结构体必填字段（dwSize / emFormatType / emCfgType）缺失或越界",
+     "illegal"),
+    ("no sufficient buffer",
+     "回包超出缓冲区长度", "illegal"),
+    ("protocol error",
+     "链路协议超时：请求太密或隧道抖动", "transport"),
+    ("network timeout", "链路超时", "transport"),
+    ("can not operate right now", "设备忙：稍后重试", "transport"),
+    ("have no operation right", "账号权限不足，配置被拒", "rejected"),
+)
+
+
+def classify_error(raw: str) -> tuple:
+    """SDK 原始错误串 → (处置建议, 归类)；认不出的原样返回、归类 other。"""
+    low = (raw or "").lower()
+    for needle, hint, kind in _ERR_HINTS:
+        if needle in low:
+            return hint, kind
+    return (raw or "未知错误"), "other"
+
 
 class DahuaSdkError(Exception):
     """本层对外的唯一异常类型。
 
-    SDK 返回的整数错误码在这里翻成中文消息后再抛：调用方只需展示，不必
-    再理解 vendor 的错误码体系；要原始码时看打出的 GetLastErrorMessage。
+    SDK 的错误在这里翻成能照做的中文再抛：调用方只需展示，不必理解 vendor
+    的错误码体系。kind 带上失败归类（rejected / unsupported / transport /
+    illegal / other），让上层能区分「重试一次」和「这档位设备不认」。
     """
+
+    def __init__(self, message: str, kind: str = "other"):
+        super().__init__(message)
+        self.kind = kind
 
 
 # ---------------------------------------------------------------- 加载
@@ -135,6 +180,10 @@ class DahuaClient:
     不保证线程安全：预览与抓图回调都直接比对 self._login_id。
     """
 
+    # 配置请求节流状态；真会话在 __init__ 里各自新建锁，这里只作默认值兜底
+    _last_cfg = 0.0
+    _pace_lock = None
+
     def __init__(self, host: str, port: int, user: str, password: str):
         """登录设备并读取序列号与通道数；失败直接抛 DahuaSdkError。
 
@@ -167,6 +216,9 @@ class DahuaClient:
         self.chan_num = int(getattr(dev_info, "nChanNum", 1) or 1)
         # 预览句柄单独记：close() 里可能还没预览过，用 0 表示未开流
         self._play_id = 0
+        # 上一次配置请求的时刻（monotonic 秒）；_pace 用它补出最小间距
+        self._last_cfg = 0.0
+        self._pace_lock = threading.Lock()
         logger.info("大华登录成功 %s:%s serial=%s", host, port, self.serial)
 
     @staticmethod
@@ -387,6 +439,41 @@ class DahuaClient:
                     self._sdk.GetLastErrorMessage())
         return True
 
+    # ---------- 配置请求通道（节流 + 错误翻译） ----------
+
+    def _pace(self) -> None:
+        """把相邻配置请求的间距补到 _CFG_MIN_GAP_S 以上。
+
+        必须在 core 层做而不是指望 UI：一次 UI 任务里连着发好几个请求是常态
+        （读主+辅两路码流、RMW 的读-写-回读、音量 1202+1203 两次读），
+        UI 的串行队列只在任务之间留间距，任务内部漏不掉。
+
+        两个状态走类属性默认值：单测用 object.__new__ 绕过登录构造半只客户端，
+        实例属性不存在时这里不能跟着一起崩。
+        """
+        if self._pace_lock is None:
+            self._pace_lock = threading.Lock()
+        with self._pace_lock:
+            wait = _CFG_MIN_GAP_S - (time.monotonic() - self._last_cfg)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_cfg = time.monotonic()
+
+    def _cfg(self, api: str, *args):
+        """GetConfig/SetConfig/GetNewDevConfig/SetNewDevConfig 的统一出口。
+
+        所有配置流量都从这里走，节流就不会有漏网的调用点；预览、云台、
+        抓图这类非配置请求不归它管。
+        """
+        self._pace()
+        return getattr(self._sdk, api)(*args)
+
+    def _fail(self, op: str) -> DahuaSdkError:
+        """把 SDK 末位错误翻成「发生了什么 + 该怎么办」，带上失败归类。"""
+        raw = str(self._sdk.GetLastErrorMessage() or "").strip()
+        hint, kind = classify_error(raw)
+        return DahuaSdkError(f"{op}失败：{hint}（SDK: {raw}）", kind)
+
     # ---------- OSD ----------
 
     _BLEND_MAIN = 1     # EM_A_NET_EM_OSD_BLEND_TYPE.MAIN（主码流）
@@ -408,35 +495,33 @@ class DahuaClient:
                 size = m.sizeof(struct_obj)
                 buf = m.create_string_buffer(size)
                 m.memmove(buf, m.byref(struct_obj), size)
-                if not self._sdk.GetConfig(self._login_id, cfg_id, channel, buf,
-                                           size, 2000, None):
-                    raise DahuaSdkError(
-                        f"读取 OSD 配置({cfg_id})失败：{self._sdk.GetLastErrorMessage()}")
+                if not self._cfg("GetConfig", self._login_id, cfg_id, channel,
+                                 buf, size, 2000, None):
+                    raise self._fail(f"读取 OSD 配置({cfg_id})")
                 return struct_obj.__class__.from_buffer_copy(buf)
             # ⚠ 官方包装 SetConfig 内部已做 byref(szInBuffer)，这里必须传结构体实例，
             #   再 byref 会炸 TypeError（byref argument must be a ctypes instance）
-            if not self._sdk.SetConfig(self._login_id, cfg_id, channel,
-                                       struct_obj, m.sizeof(struct_obj),
-                                       2000, 0, None):
-                raise DahuaSdkError(
-                    f"写入 OSD 配置({cfg_id})失败：{self._sdk.GetLastErrorMessage()}")
+            if not self._cfg("SetConfig", self._login_id, cfg_id, channel,
+                             struct_obj, m.sizeof(struct_obj), 2000, 0, None):
+                raise self._fail(f"写入 OSD 配置({cfg_id})")
 
         return self._with_retry(_call)
 
     def _with_retry(self, fn, retries: int = 1, pause: float = 0.4):
         """隧道下配置请求背靠背会 "Protocol error/timeout"（2026-10-07 实测：
-        无间距 24 请求挂 4，300ms 间距 0 挂）。执行层另有节流，这里兜底重试。"""
-        import time as _t
+        无间距 24 请求挂 4，300ms 间距 0 挂）。执行层另有节流，这里兜底重试。
+
+        只对链路类失败重试：设备拒收（rejected）和固件不支持（unsupported）
+        是确定性结论，重试只会白等一倍时间，还会把误写风险翻倍。"""
         last: Exception | None = None
         for _ in range(retries + 1):
             try:
                 return fn()
             except DahuaSdkError as e:
-                msg = str(e)
                 last = e
-                if "Protocol error" not in msg and "timeout" not in msg.lower():
+                if getattr(e, "kind", "other") != "transport":
                     raise
-                _t.sleep(pause)
+                time.sleep(pause)
         raise last
 
     def _read_osd(self, cfg_id: int, channel: int, cls):
@@ -580,10 +665,9 @@ class DahuaClient:
             st.emCfgType = cfg_type
         buf = m.create_string_buffer(m.sizeof(st))
         m.memmove(buf, m.byref(st), m.sizeof(st))
-        if not self._sdk.GetConfig(self._login_id, cfg_id, channel, buf,
-                                   m.sizeof(st), 2000, None):
-            raise DahuaSdkError(
-                f"读取配置 0x{cfg_id:x} 失败：{self._sdk.GetLastErrorMessage()}")
+        if not self._cfg("GetConfig", self._login_id, cfg_id, channel, buf,
+                         m.sizeof(st), 2000, None):
+            raise self._fail(f"读取配置 0x{cfg_id:x}")
         return cls.from_buffer_copy(buf)
 
     def exposure(self, channel: int = 0) -> dict:
@@ -609,10 +693,9 @@ class DahuaClient:
                 g.nCompensation = int(compensation)
             if gain is not None:
                 g.nGain = int(gain)
-            if not self._sdk.SetConfig(self._login_id, 1306, channel, g,
-                                       m.sizeof(g), 2000, 0, None):
-                raise DahuaSdkError(
-                    f"写入曝光失败：{self._sdk.GetLastErrorMessage()}")
+            if not self._cfg("SetConfig", self._login_id, 1306, channel, g,
+                             m.sizeof(g), 2000, 0, None):
+                raise self._fail("写入曝光")
 
         self._with_retry(_apply)
         return self.exposure(channel)
@@ -638,10 +721,9 @@ class DahuaClient:
                 g.nWideDynamicRange = int(wide_dynamic)
             if glare is not None:
                 g.nGlareInhibition = int(glare)
-            if not self._sdk.SetConfig(self._login_id, 1309, channel, g,
-                                       m.sizeof(g), 2000, 0, None):
-                raise DahuaSdkError(
-                    f"写入背光失败：{self._sdk.GetLastErrorMessage()}")
+            if not self._cfg("SetConfig", self._login_id, 1309, channel, g,
+                             m.sizeof(g), 2000, 0, None):
+                raise self._fail("写入背光")
 
         self._with_retry(_apply)
         return self.backlight(channel)
@@ -662,17 +744,15 @@ class DahuaClient:
             if vol_in is not None:
                 g = self._cfg_struct(1202, m.NET_AUDIOIN_VOLUME_INFO, channel)
                 g.nVolume = int(vol_in)
-                if not self._sdk.SetConfig(self._login_id, 1202, channel, g,
-                                           m.sizeof(g), 2000, 0, None):
-                    raise DahuaSdkError(
-                        f"写入输入音量失败：{self._sdk.GetLastErrorMessage()}")
+                if not self._cfg("SetConfig", self._login_id, 1202, channel, g,
+                                 m.sizeof(g), 2000, 0, None):
+                    raise self._fail("写入输入音量")
             if vol_out is not None:
                 g = self._cfg_struct(1203, m.NET_AUDIOOUT_VOLUME_INFO, channel)
                 g.nVolume = int(vol_out)
-                if not self._sdk.SetConfig(self._login_id, 1203, channel, g,
-                                           m.sizeof(g), 2000, 0, None):
-                    raise DahuaSdkError(
-                        f"写入输出音量失败：{self._sdk.GetLastErrorMessage()}")
+                if not self._cfg("SetConfig", self._login_id, 1203, channel, g,
+                                 m.sizeof(g), 2000, 0, None):
+                    raise self._fail("写入输出音量")
 
         self._with_retry(_apply)
         return self.audio_volume(channel)
@@ -680,103 +760,155 @@ class DahuaClient:
     # ---------- JSON 配置（VideoColor / VideoInOptions / Lighting） ----------
 
     def json_config(self, name: str, channel: int = 0) -> dict:
-        """GetNewDevConfig 取 JSON 配置的 params 段（失败抛异常）。"""
+        """GetNewDevConfig 取 JSON 配置的 params 段（失败抛异常）。
+
+        缓冲区给到 128 KB：VideoInOptions 这类配置把 Normal/Night/Dusk 三套
+        时段参数都塞在同一张 table 里，真机回包 5.6 KB 起步，老设备能翻倍；
+        一旦截断得到的是半截 JSON，报错还看不出生病的是缓冲区大小。
+        """
         m = self._m
-        buf = m.create_string_buffer(32768)
+        size = 131072
+        buf = m.create_string_buffer(size)
         err = m.c_int(0)
-        ok = self._with_retry(lambda: self._sdk.GetNewDevConfig(
-            self._login_id, name, channel, buf, 32768, err, 2000, None))
+        ok = self._with_retry(lambda: self._cfg(
+            "GetNewDevConfig", self._login_id, name, channel, buf, size,
+            err, 2000, None))
         if not ok:
-            raise DahuaSdkError(
-                f"读取 {name} 失败：{self._sdk.GetLastErrorMessage()}")
+            raise self._fail(f"读取 {name}")
         import json
         raw = buf.value.decode(errors="replace")
+        if raw.count("{") > raw.count("}"):
+            # 尾部缺花括号=被缓冲区截断，别再往下解析半截 JSON
+            raise DahuaSdkError(
+                f"读取 {name} 失败：回包超出 {size} 字节缓冲区，已截断",
+                "illegal")
         try:
             return json.loads(raw).get("params", {})
         except ValueError as e:
-            raise DahuaSdkError(f"{name} 回包不是 JSON：{e}") from e
+            raise DahuaSdkError(f"{name} 回包不是 JSON：{e}", "illegal") from e
 
     def set_json_config(self, name: str, params: dict, channel: int = 0) -> None:
-        """SetNewDevConfig 写 JSON。注意部分固件“接受但不落库”，调用方须读回校验。"""
+        """SetNewDevConfig 写 JSON。注意部分固件“接受但不落库”，调用方须读回校验。
+
+        ⚠ 长度必须按**字节**报：ensure_ascii=False 时中文配置名（通道名称等）
+        一个字符占 2~3 字节，按 len(str) 传会把载荷截断，设备收到半截 JSON
+        仍可能回成功，读回却是旧值——看起来像"固件不落库"，实际是自己写坏了。
+        """
         import json
         m = self._m
-        payload = json.dumps(params, ensure_ascii=False)
-        data = m.create_string_buffer(payload.encode())
+        data = json.dumps(params, ensure_ascii=False).encode()
         err = m.c_int(0)
-        ok = self._with_retry(lambda: self._sdk.SetNewDevConfig(
-            self._login_id, name, channel, data, len(payload), err, 0, 2000))
+        ok = self._with_retry(lambda: self._cfg(
+            "SetNewDevConfig", self._login_id, name, channel,
+            m.create_string_buffer(data), len(data), err, 0, 2000))
         if not ok:
-            raise DahuaSdkError(
-                f"写入 {name} 失败：{self._sdk.GetLastErrorMessage()}")
+            raise self._fail(f"写入 {name}")
+
+    @staticmethod
+    def _rows(params: dict, key: str = "table") -> list:
+        """把 JSON 配置的 table 归一成行列表：有的固件回 list，有的回 dict。"""
+        t = params.get(key)
+        if isinstance(t, list):
+            return [r for r in t if isinstance(r, dict)]
+        if isinstance(t, dict):
+            return [t]
+        return []
+
+    @staticmethod
+    def _active_row(rows: list) -> dict:
+        """取当前生效的那一行色彩时段。
+
+        VideoColor 按 TimeSection 分时段，首列 1/0 才是启用位（真机回包里
+        第 1 行是 "1 00:00:00-24:00:00"、后两行都是 "0 …"）。按 table[0]
+        取纯靠行序凑巧：固件把停用时段排在前面时，读到的是一行没人用的参数，
+        用户点应用又把它写回生效行，画面色彩就被改掉了。
+        """
+        for r in rows:
+            if str(r.get("TimeSection", "")).strip().startswith("1"):
+                return r
+        return rows[0] if rows else {}
 
     def video_color(self, channel: int = 0) -> dict:
-        params = self.json_config("VideoColor", channel)
-        row = (params.get("table") or [{}])
-        row = row[0] if isinstance(row, list) and row else row
+        rows = self._rows(self.json_config("VideoColor", channel))
+        row = self._active_row(rows)
         return {k: int(row.get(k, 0)) for k in
                 ("Brightness", "Contrast", "Saturation", "Gamma",
                  "Hue", "ChromaSuppress")}
 
-    def set_video_color(self, channel: int = 0, **kw) -> None:
-        """改色彩：整表回写（表内按 Day/Night 分时段，仅改各时段同名字段）。"""
+    def set_video_color(self, channel: int = 0, **kw) -> dict:
+        """改色彩：只动生效行（整表回写，仅改该行同名字段），写后读回。"""
         params = self.json_config("VideoColor", channel)
-        rows = params.get("table")
-        rows = rows if isinstance(rows, list) else [rows]
-        valid = {"Brightness": "Brightness", "Contrast": "Contrast",
-                 "Saturation": "Saturation", "Gamma": "Gamma",
-                 "Hue": "Hue", "ChromaSuppress": "ChromaSuppress"}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            for k, field in valid.items():
-                if kw.get(k.lower()) is not None:
-                    row[field] = int(kw[k.lower()])
+        rows = self._rows(params)
+        if not rows:
+            raise DahuaSdkError("写入色彩失败：设备未回 VideoColor 表", "unsupported")
+        row = self._active_row(rows)
+        valid = ("Brightness", "Contrast", "Saturation", "Gamma",
+                 "Hue", "ChromaSuppress")
+        for field in valid:
+            v = kw.get(field.lower())
+            if v is not None:
+                row[field] = int(v)
         self.set_json_config("VideoColor", {"table": rows}, channel)
+        return self.video_color(channel)
 
     def video_options(self, channel: int = 0) -> dict:
-        t = self.json_config("VideoInOptions", channel).get("table") or {}
+        rows = self._rows(self.json_config("VideoInOptions", channel))
+        t = rows[0] if rows else {}
         return {"day_night": int(t.get("DayNightColor", 0)),
                 "switch_mode": int(t.get("SwitchMode", 0)),
                 "daynight_sensitivity": int(t.get("DayNightSensitivity", 0)),
                 "daynight_delay": int(t.get("DayNightSwitchDelay", 0)),
                 "white_balance": str(t.get("WhiteBalance") or ""),
                 "color_temp": int(t.get("ColorTemperatureLevel", 0)),
+                "gain_red": int(t.get("GainRed", 0)),
+                "gain_blue": int(t.get("GainBlue", 0)),
                 "focus_mode": int(t.get("FocusMode", 0)),
                 "exposure_mode": int(t.get("ExposureMode", 0))}
 
-    def set_video_options(self, channel: int = 0, **kw) -> None:
+    def set_video_options(self, channel: int = 0, **kw) -> dict:
+        """改 VideoInOptions：只写显式给出的字段，写后读回。
+
+        字段名映射以真机回包为准（红/蓝增益在 GainRed / GainBlue，不是设计稿
+        猜的 WhiteBalanceGain）；未列出的字段照原样回写，避免清零。
+        """
         m = {"day_night": "DayNightColor", "switch_mode": "SwitchMode",
              "daynight_sensitivity": "DayNightSensitivity",
              "daynight_delay": "DayNightSwitchDelay",
              "white_balance": "WhiteBalance",
              "color_temp": "ColorTemperatureLevel",
+             "gain_red": "GainRed", "gain_blue": "GainBlue",
              "focus_mode": "FocusMode"}
         params = self.json_config("VideoInOptions", channel)
-        table = params.get("table") or {}
+        rows = self._rows(params)
+        if not rows:
+            raise DahuaSdkError("写入视频输入选项失败：设备未回 table",
+                                "unsupported")
+        table = rows[0]
         for k, field in m.items():
             if kw.get(k) is not None:
                 table[field] = kw[k]
         self.set_json_config("VideoInOptions", {"table": table}, channel)
+        return self.video_options(channel)
 
     def lighting(self, channel: int = 0) -> dict:
-        t = self.json_config("Lighting", channel).get("table") or [{}]
-        row = t[0] if isinstance(t, list) and t else t
+        row = self._active_row(self._rows(self.json_config("Lighting", channel)))
         return {"mode": str(row.get("Mode") or ""),
                 "correction": int(row.get("Correction", 0))}
 
     def set_lighting(self, channel: int = 0, *, mode=None,
-                     correction=None) -> None:
+                     correction=None) -> dict:
         params = self.json_config("Lighting", channel)
-        rows = params.get("table")
-        rows = rows if isinstance(rows, list) else [rows]
+        rows = self._rows(params)
+        if not rows:
+            raise DahuaSdkError("写入补光失败：设备未回 Lighting 表",
+                                "unsupported")
         for row in rows:
-            if not isinstance(row, dict):
-                continue
             if mode is not None:
                 row["Mode"] = mode
             if correction is not None:
                 row["Correction"] = int(correction)
         self.set_json_config("Lighting", {"table": rows}, channel)
+        return self.lighting(channel)
 
     # ---------- 图像属性（镜像/翻转/旋转，CFG_VIDEO_IMAGE_CTRL=9601） ----------
 
@@ -788,26 +920,36 @@ class DahuaClient:
         st.dwSize = m.sizeof(st)
         buf = m.create_string_buffer(m.sizeof(st))
         m.memmove(buf, m.byref(st), m.sizeof(st))
-        if not self._sdk.GetConfig(self._login_id, self._CFG_IMAGE_CTRL, channel,
-                                   buf, m.sizeof(st), 2000, None):
-            raise DahuaSdkError(
-                f"读取图像属性失败：{self._sdk.GetLastErrorMessage()}")
+        if not self._cfg("GetConfig", self._login_id, self._CFG_IMAGE_CTRL,
+                         channel, buf, m.sizeof(st), 2000, None):
+            raise self._fail("读取图像属性")
         return m.NET_EM_CFG_VIDEO_IMAGE_CTRL_INFO.from_buffer_copy(buf)
 
     def image_ctrl(self, channel: int = 0) -> dict:
         """读镜像/翻转/旋转。bMirror/bFlip 是能力位（是否支持），
         当前态在 bHorizontalFlip（左右镜像）/bVerticalFlip（上下翻转）/
-        nRotate90（0 无、1 顺时针 90°、2 逆时针 90°）。"""
+        nRotate90（0 无、1 顺时针 90°、2 逆时针 90°）。
+
+        nStable 同样是能力位（按位：1 电子防抖 / 2 光学防抖 / 4 控件防抖），
+        一并回给上层：真机上这几位常年为 0，页面据此把防抖做成禁用而不是
+        摆一个能点但永远不会生效的控件。
+        """
         g = self._with_retry(lambda: self._image_ctrl_struct(channel))
         return {"supports_mirror": bool(g.bMirror),
                 "supports_flip": bool(g.bFlip),
                 "mirror": bool(g.bHorizontalFlip),
                 "flip": bool(g.bVerticalFlip),
-                "rotate": int(g.nRotate90)}
+                "rotate": int(g.nRotate90),
+                "stable": int(g.nStable),
+                "stable_sensitivity": int(g.nStableSensitivity)}
 
     def set_image_ctrl(self, channel: int = 0, *, mirror=None, flip=None,
                        rotate=None) -> dict:
-        """RMW 写镜像/翻转/旋转：只改给定字段，其余保留设备现值。"""
+        """RMW 写镜像/翻转/旋转：只改给定字段，其余保留设备现值。
+
+        ⚠ 4238 真机实测：bHorizontalFlip/bVerticalFlip 写入被接受但读回原值，
+        nRotate90 直接被拒（SDK err 21）。调用方必须读回比对再报成败。
+        """
         m = self._m
 
         def _apply():
@@ -818,10 +960,9 @@ class DahuaClient:
                 g.bVerticalFlip = bool(flip)
             if rotate is not None:
                 g.nRotate90 = int(rotate)
-            if not self._sdk.SetConfig(self._login_id, self._CFG_IMAGE_CTRL,
-                                       channel, g, m.sizeof(g), 2000, 0, None):
-                raise DahuaSdkError(
-                    f"写入图像属性失败：{self._sdk.GetLastErrorMessage()}")
+            if not self._cfg("SetConfig", self._login_id, self._CFG_IMAGE_CTRL,
+                             channel, g, m.sizeof(g), 2000, 0, None):
+                raise self._fail("写入图像属性")
 
         self._with_retry(_apply)
         return self.image_ctrl(channel)
@@ -831,7 +972,7 @@ class DahuaClient:
     STREAM_MAIN = 1    # EM_A_NET_EM_FORMAT_TYPE.EM_FORMAT_MAIN_NORMAL
     STREAM_EXTRA1 = 4  # EM_FORMAT_EXTRA1
 
-    def _encode_video_struct(self, stream: int):
+    def _encode_video_struct(self, stream: int, channel: int = 0):
         """GetConfig(ENCODE_VIDEO=1100) 读指定码流的完整结构体（RMW 基线）"""
         m = self._m
         st = m.NET_ENCODE_VIDEO_INFO()
@@ -841,15 +982,20 @@ class DahuaClient:
         # 因为 GetConfig 会校验这两个字段是否已初始化
         buf = m.create_string_buffer(m.sizeof(st))
         m.memmove(buf, m.byref(st), m.sizeof(st))
-        if not self._sdk.GetConfig(self._login_id, 1100, 0, buf,
-                                   m.sizeof(st), 2000, None):
-            raise DahuaSdkError(f"读取编码配置失败：{self._sdk.GetLastErrorMessage()}")
+        if not self._cfg("GetConfig", self._login_id, 1100, channel, buf,
+                         m.sizeof(st), 2000, None):
+            raise self._fail("读取编码配置")
         return m.NET_ENCODE_VIDEO_INFO.from_buffer_copy(buf)
 
-    def encode_video(self, stream: int = STREAM_MAIN) -> dict:
-        """读码流视频参数。stream: 1=主码流, 4=辅码流1"""
+    def encode_video(self, stream: int = STREAM_MAIN, channel: int = 0) -> dict:
+        """读码流视频参数。stream: 1=主码流, 4=辅码流1；channel 从 0 起。
+
+        channel 必带：早先这里把通道写死成 0，多通道设备上切通道下拉毫无
+        作用，读回来的永远是第 1 路。
+        """
         # 读取也重试：隧道下背靠背 GET 同样会偶发 Protocol error
-        g = self._with_retry(lambda: self._encode_video_struct(stream))
+        g = self._with_retry(
+            lambda: self._encode_video_struct(stream, channel))
         return {"enable": bool(g.bVideoEnable),
                 "compression": int(g.emCompression),
                 "width": int(g.nWidth), "height": int(g.nHeight),
@@ -859,19 +1005,25 @@ class DahuaClient:
                 "iframe_interval": int(g.nIFrameInterval),
                 "image_quality": int(g.emImageQuality)}
 
-    def set_encode_video(self, stream: int = STREAM_MAIN, *, enable=None,
-                         compression=None, width=None, height=None,
+    def set_encode_video(self, stream: int = STREAM_MAIN, *,
+                         enable=None, compression=None, width=None, height=None,
                          bitrate=None, bitrate_control=None, framerate=None,
-                         iframe_interval=None, image_quality=None) -> dict:
+                         iframe_interval=None, image_quality=None,
+                         channel: int = 0) -> dict:
         """RMW 写码流参数：只改给定字段，其余保留设备现值；写后返回新读。
         compression: 7=H.264 8=H.265；bitrate_control: 0=CBR 1=VBR；
-        bitrate 单位 kbps；image_quality: 1-6（10%~100%，VBR 下生效）。"""
+        bitrate 单位 kbps；image_quality: 1-6（10%~100%，VBR 下生效）。
+
+        4238 真机逐字段实测结论（其余档位均落库）：辅码流改分辨率会被固件直接
+        拒掉（SDK err 21，主码流反而可以），所以调用方不能假设写一定生效，
+        必须拿本方法的返回值与入参比对。
+        """
         m = self._m
 
         # 把"读-改-写"整体放进重试闭包：只重试写不重读，会拿着过期基线
         # 覆盖掉别人刚改的字段
         def _apply():
-            g = self._encode_video_struct(stream)
+            g = self._encode_video_struct(stream, channel)
             if enable is not None:
                 g.bVideoEnable = bool(enable)
             if compression is not None:
@@ -890,15 +1042,14 @@ class DahuaClient:
                 g.nIFrameInterval = int(iframe_interval)
             if image_quality is not None:
                 g.emImageQuality = int(image_quality)
-            if not self._sdk.SetConfig(self._login_id, 1100, 0, g,
-                                       m.sizeof(g), 2000, 0, None):
-                raise DahuaSdkError(
-                    f"写入编码配置失败：{self._sdk.GetLastErrorMessage()}")
+            if not self._cfg("SetConfig", self._login_id, 1100, channel, g,
+                             m.sizeof(g), 2000, 0, None):
+                raise self._fail("写入编码配置")
 
-        # 写成功后重新读一次：设备可能拒绝某些组合（如 4K 配高帧率）并静默
+        # 写成功后重新读一次：设备可能拒绝某些组合（如辅码流换分辨率）并静默
         # 改回，回显设备真实值比回显入参更可信
         self._with_retry(_apply)
-        return self.encode_video(stream)
+        return self.encode_video(stream, channel)
 
     # ---------- 通道名称文字 ----------
     # 首选 GetConfig/SetConfig(ENCODE_CHANNELTITLE=1108, NET_ENCODE_CHANNELTITLE_INFO
@@ -914,8 +1065,8 @@ class DahuaClient:
         st.dwSize = m.sizeof(st)
         buf = m.create_string_buffer(m.sizeof(st))
         m.memmove(buf, m.byref(st), m.sizeof(st))
-        if self._sdk.GetConfig(self._login_id, self._CFG_ENCODE_CHANNELTITLE,
-                               channel, buf, m.sizeof(st), 2000, None):
+        if self._cfg("GetConfig", self._login_id, self._CFG_ENCODE_CHANNELTITLE,
+                     channel, buf, m.sizeof(st), 2000, None):
             got = m.NET_ENCODE_CHANNELTITLE_INFO.from_buffer_copy(buf)
             return bytes(got.szChannelName).split(b"\x00")[0].decode(
                 "gbk", errors="replace").strip()
@@ -932,37 +1083,38 @@ class DahuaClient:
         st = m.NET_ENCODE_CHANNELTITLE_INFO()
         st.dwSize = m.sizeof(st)
         st.szChannelName = text.encode("gbk", errors="replace")[:255]
-        if self._sdk.SetConfig(self._login_id, self._CFG_ENCODE_CHANNELTITLE,
-                               channel, st, m.sizeof(st), 2000, 0, None):
+        if self._cfg("SetConfig", self._login_id, self._CFG_ENCODE_CHANNELTITLE,
+                     channel, st, m.sizeof(st), 2000, 0, None):
             return
         # 老固件兜底：NewDevConfig（按 GET 回包格式选 JSON / table）
         raw = self._get_channel_name_raw(channel)
         # 回包是 JSON 说明是新固件，table 文本则是老固件，两种载荷不能混用
         if raw.lstrip().startswith("{"):
             import json
-            payload = json.dumps({"table": {"Name": text}},
-                                 ensure_ascii=False)
-            enc = "utf-8"
+            data = json.dumps({"table": {"Name": text}},
+                              ensure_ascii=False).encode()
         else:
             payload = self._build_channel_name_payload(
                 self._extract_channel_name_field(raw), text)
-            enc = "gbk"
+            data = payload.encode("gbk")
         err = m.c_int(0)
         # ⚠ 官方包装 SetNewDevConfig 内部对 szInBuffer 做 pointer()——必须传 ctypes
         #   缓冲，传 Python bytes 会炸 TypeError("_type_ must have storage info")
-        data = m.create_string_buffer(payload.encode(enc))
-        ok = self._sdk.SetNewDevConfig(self._login_id, "ChannelTitle", channel,
-                                       data, len(payload), err, 0, 2000)
+        # ⚠ 长度同样只能取字节数：通道名是中文时字符数远小于字节数，
+        #   按 len(str) 传会把名称截成半个字
+        ok = self._cfg("SetNewDevConfig", self._login_id, "ChannelTitle",
+                       channel, m.create_string_buffer(data), len(data),
+                       err, 0, 2000)
         if not ok:
-            raise DahuaSdkError(f"设置通道名称失败：{self._sdk.GetLastErrorMessage()}")
+            raise self._fail("设置通道名称")
 
     def _get_channel_name_raw(self, channel: int) -> str:
         """取 NewDevConfig("ChannelTitle") 的原始文本；失败返回空串。"""
         m = self._m
         buf = m.create_string_buffer(4096)
         err = m.c_int(0)
-        ok = self._sdk.GetNewDevConfig(self._login_id, "ChannelTitle", channel,
-                                       buf, 4096, err, 2000, None)
+        ok = self._cfg("GetNewDevConfig", self._login_id, "ChannelTitle",
+                       channel, buf, 4096, err, 2000, None)
         if not ok:
             return ""
         return buf.value.decode(errors="replace")
