@@ -1712,15 +1712,23 @@ class VisitorWork(QWidget):
         if not kw:
             return
         if self._cand_worker is not None and self._cand_worker.isRunning():
-            # 快速连续输入：打断旧查询并断开信号，避免过期候选覆盖新结果
+            # 快速连续输入：打断旧查询并断开信号，避免过期候选覆盖新结果。
+            # disconnect(self) 对 Python lambda 连接无效，必须逐个断开 slot。
             self._cand_worker.requestInterruption()
-            self._cand_worker.disconnect(self)
+            for sig, slot in getattr(self, '_cand_slots', []):
+                try:
+                    sig.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
         self._cand_worker = AftersaleDBWorker(
             table_db.query_page, 1, 20, kw,
             include_test=False, include_manual=False, include_tuidan=False)
-        self._cand_worker.result_ready.connect(
-            lambda result, k=kw: self._on_table_candidates(k, result))
-        self._cand_worker.error.connect(lambda _m: self._hide_table_candidates())
+        on_result = lambda result, k=kw: self._on_table_candidates(k, result)
+        on_error = lambda _m: self._hide_table_candidates()
+        self._cand_worker.result_ready.connect(on_result)
+        self._cand_worker.error.connect(on_error)
+        self._cand_slots = [(self._cand_worker.result_ready, on_result),
+                            (self._cand_worker.error, on_error)]
         self._cand_worker.start()
 
     def _on_table_candidates(self, kw, result):

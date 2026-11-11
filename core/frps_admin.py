@@ -331,6 +331,11 @@ class FrpsAdminClient(QObject):
         # 定时器与「立即感知」按钮可能撞在一起：同一时刻只允许一个后台
         # 线程，否则并发 GET 会让熔断计数与状态机互相覆盖。
         if self._bg_busy:
+            # 不能静默 return：RemoteSessionManager 会把打开请求挂到
+            # refresh_finished 上等续接，丢回执会让它永久挂起（界面假死）。
+            # 用当前状态立即回一次，等待方按「感知不可用」fail-open 放行；
+            # 正在跑的 job 结束时仍会照常发出它自己那次回执。
+            self.refresh_finished.emit(self._state)
             return
         self._bg_busy = True
 

@@ -324,6 +324,8 @@
   画布不跟着刷就会整页失真。所以现在画布里的<b>文字已按实现重刷</b>，
   <b>版式、控件种类与配色仍保留原样</b>；文案口径本身见「滤镜调参」画布上方黄色 note 的最后一条。
   其余凡画布与实现不一致处，都在紧邻画布的<b>黄色 note</b> 或文末「已识别的风险 / 本次明确不做」里写明差异与理由。
+  <b>2026-11-09 又刷了一处取值</b>：cas 的 strength 被 ffmpeg 限定在 0–1，原画布警告语与「动漫 / 线条」预设写的
+  1.2 会让整条链被拒收，现已把滑块量程、预设、警告语与预设对照表统一收到 0–1。
   已回填为实际值的部分：滤镜预设 &#8594; <code>-vf</code> 串对照表、注册点清单（A~<b>H</b>，第八处是设计阶段漏掉的
   <code>shutdown.py</code>）、文件与类结构、worker 信号签名、验证结果与实测数据、控件文案。
   <br>落地产物：<code>windows/tools/video_enhance.py</code>（引擎）·
@@ -675,7 +677,7 @@
               <span class="hint" style="margin:0">只有 unsharp 会读 luma_msize_x/y</span></div>
             <div class="infobar warn" style="margin:12px 0 0">
               <span class="ib-ico">!</span>
-              <div>cas 强度 &gt; 1.2 时暗部会出现振铃与颗粒放大，建议配合去噪一起用。</div>
+              <div>cas 强度上限 1，再锐只能换 unsharp+cas 靠 USM 加量；接近 1 时暗部易出振铃与颗粒放大，建议配合去噪一起用。</div>
             </div>
           </div>
         </div>
@@ -1320,7 +1322,7 @@
       <tr><td><b>标准增强</b></td><td class="mono">hqdn3d=1.5:1.5:6:6,cas=0.8,eq=contrast=1.04:saturation=1.06,format=yuv420p</td><td>默认值，也是推荐档。台球录像通用。</td></tr>
       <tr><td>强锐化</td><td class="mono">hqdn3d=1:1:4:4,unsharp=5:5:1:5:5:0.0,cas=1,eq=contrast=1.05,format=yuv420p</td><td>糊片、失焦。易出白边，慎用于已清晰的源。</td></tr>
       <tr><td>老片修复</td><td class="mono">atadenoise=0a=0.02:0b=0.04:s=80,hqdn3d=2:2:8:8,cas=0.6,eq=contrast=1.08:brightness=0.02:saturation=1.08,format=yuv420p</td><td>强噪点、偏灰的老录像。两级去噪串联，慢。</td></tr>
-      <tr><td>动漫 / 线条</td><td class="mono">hqdn3d=2:2:6:6,cas=1.2,eq=contrast=1.06:saturation=1.15,format=yuv420p</td><td>色块分明、线条锐利的内容。</td></tr>
+      <tr><td>动漫 / 线条</td><td class="mono">hqdn3d=2:2:6:6,cas=1,eq=contrast=1.06:saturation=1.15,format=yuv420p</td><td>色块分明、线条锐利的内容。</td></tr>
       <tr><td colspan="3" style="background:var(--bg);color:var(--text2);font-size:12.5px">
         上表是 <code>build_filter_chain(apply_preset(default_params(), k))</code> 的<b>逐字输出</b>（落地后回填）。
         两处与直觉不同：<b>(1)</b> <code>_fnum()</code> 会削掉尾随 <code>.0</code>，所以滑块上的 <code>1.0</code>

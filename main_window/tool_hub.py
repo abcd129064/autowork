@@ -2320,7 +2320,8 @@ class VideoRepairWork(QWidget):
             f"{_fmt_size(self._probe.get('payload_size', 0))}")
 
         frames = self._probe.get("frames") or {}
-        if frames:
+        # 零帧或全 None 都没有统计可展示：格式化 None 会直接抛 TypeError
+        if frames.get("frame_count"):
             # 偏短只是启发式：末帧后面不再有起始码，无法自证写完。auto 档两种情况
             # 都裁到最后一个 GOP 头，文案不能出现「完整」这种结论
             state = "明显偏短" if frames.get("last_frame_incomplete") else "长度正常"

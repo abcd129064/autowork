@@ -166,9 +166,17 @@ class RemoteSessionWindow(FramelessWindow):
                 return
 
     def shutdown_all(self):
-        """关闭所有会话面板并释放资源"""
+        """关闭所有会话面板并释放资源
+
+        与 _remove_tab_at 对齐补 deleteLater：只调 shutdown 会把面板留在
+        对象树里，运行中的 worker late 信号仍可能打到这些控件上。
+        """
         for panel in list(self._panels):
             self._shutdown_panel(panel)
+            try:
+                panel.deleteLater()
+            except RuntimeError:
+                pass
         self._panels.clear()
 
     # ------------------------------------------------------------------ 内部逻辑

@@ -15,6 +15,20 @@ from PySide6.QtCore import QProcess, QThread
 
 def shutdown_main_window(host) -> None:
     """执行主窗口关闭前的资源清理（不调用 super().closeEvent）。"""
+    # -2. 先停全局单例的周期感知与质量探测：它们的 QTimer/daemon 线程
+    # 独立于窗口生命周期，关窗后仍会每 30s 发射信号到已销毁的页面。
+    # 只停源头，不去逐个 disconnect 远程页的 lambda——PySide6 为 Python
+    # callable 建的代理 receiver 亲和 GUI 线程，信号会自动 queued。
+    try:
+        from core.frps_admin import get_frps_client
+        get_frps_client().stop()
+    except Exception:
+        pass
+    try:
+        from core.visitor_probe import get_prober
+        get_prober().stop()
+    except Exception:
+        pass
     # -1. 先停掉迁入侧边导航的业务子页后台线程
     # 运维/售后/跑视频/工作留痕各 Hub 子页的 worker 挂页面属性上，原先由各
     # FluentWindow 面板的 closeEvent 统一 detach；迁入主窗口后必须在此

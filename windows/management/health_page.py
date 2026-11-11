@@ -1249,10 +1249,10 @@ class HealthPage(QWidget):
         穿透到 Qt 主线程槽，留在主线程里就是按钮卡在「处理中…」且界面僵住。
         标记失败也必须走收尾流程，否则按钮再也回不到可用状态；
         后续 DB 操作会自动降级到本地库，业务不必中断。
-        这里一律把 _health_worker 置空，成功与失败都不能留下一个"仍在跑"的
-        假引用，否则下次点击会被自己的互斥检查挡回去。
+        刻意不把 _health_worker 置空：互斥检查用的是 isRunning()，已结束的
+        worker 不会挡住下次点击；而 late 槽置空可能抹掉新一轮正在运行的
+        worker 引用，导致 QThread 运行中被析构触发 0xC0000409。
         """
-        self._health_worker = None
         self._btn_resolved.setText("已处理")
         if ok_names:
             self._mark_worker = AftersaleDBWorker(
@@ -1297,7 +1297,6 @@ class HealthPage(QWidget):
         不重新勾选任何行：用户刚勾的那几台还得再点一次，
         但保留勾选状态，至少不用重新找。
         """
-        self._health_worker = None
         self._btn_resolved.setText("已处理")
         self._update_resolved_enabled()
         show_info_bar(str(msg), "error", title="重置失败",

@@ -41,6 +41,8 @@ class FakeWorker(QThread):
         self.device_code = device_code
         self.table_id = table_id
         self.turn_on = turn_on
+        # 产品代码给每个 worker 打代次戳，回调靠它丢弃 late 信号
+        self._todesk_seq = None
 
     def isRunning(self):
         return True  # 池中恒视为运行中（覆盖拒绝/打断分支）
@@ -62,8 +64,10 @@ it_b = p._table.item(1, col)
 wa = FakeWorker("DEV_A", "49-04", True)
 wb = FakeWorker("DEV_B", "49-05", False)
 p._todesk_ctx_map = {
-    "DEV_A": {"row": 0, "old_status": "1", "turn_on": True, "name": "49-04"},
-    "DEV_B": {"row": 1, "old_status": "0", "turn_on": False, "name": "49-05"},
+    "DEV_A": {"device_code": "DEV_A", "old_status": "1",
+              "turn_on": True, "name": "49-04"},
+    "DEV_B": {"device_code": "DEV_B", "old_status": "0",
+              "turn_on": False, "name": "49-05"},
 }
 # 连接方式与产品代码一致（闭包捕获 worker）
 wa.sent_ok.connect(lambda ww=wa: p._on_todesk_sent(ww))
@@ -85,7 +89,7 @@ p._todesk_workers = {"DEV_A": wa}
 orig_exec = tp.MessageBox.exec
 tp.MessageBox.exec = lambda self: False
 p._toggle_todesk(0)  # row0 DEV_A 当前 '1'，点关闭=反向 → 走打断分支
-assert getattr(wa, "interrupted", False) and getattr(wa, "disconnected", False)
+assert getattr(wa, "interrupted", False), "反向指令应打断旧轮询（late 信号由 seq 守卫丢弃）"
 print("2) 反向指令打断旧轮询 PASS")
 
 # ---- 3) 同方向拒绝：把 A 状态设为 '0'，再点（开启=反向？不，'0'→点开启，
