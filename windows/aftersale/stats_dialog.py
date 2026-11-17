@@ -106,7 +106,7 @@ class _DailyBarChart(QWidget):
             d = self._data[idx]
             QToolTip.showText(
                 self.mapToGlobal(e.position().toPoint()),
-                f"{d['date']} · {d['count']} 条（已解决 {d['resolved']}）", self)
+                f"{d['date']}　{d['count']} 条　已解决 {d['resolved']}", self)
         else:
             QToolTip.hideText()
             if self._hover != -1:
@@ -194,7 +194,7 @@ class _DailyBarChart(QWidget):
 # ==================== 地区水平条形图（QPainter 自绘） ====================
 
 class _HBarList(QWidget):
-    """水平条形列表：label | 条形 | 数量 · 占比（语义色轮换，降序输入）
+    """水平条形列表：label | 条形 | 数量　占比（语义色轮换，降序输入）
 
     行可点击：rowClicked 发射该行地区名，供「点击联动」筛选记录列表。
     """
@@ -238,7 +238,7 @@ class _HBarList(QWidget):
         super().mousePressEvent(e)
 
     def paintEvent(self, _e):
-        """逐行画「标签 + 条形 + 数量·占比」，条形长度相对当前最大行。
+        """逐行画「标签 + 条形 + 数量　占比」，条形长度相对当前最大行。
 
         颜色按行序轮换：地区之间没有语义色差异，轮换只为视觉可分；
         条形长度必须相对 max_v 而非 total，否则长尾地区会全部看不见。
@@ -259,7 +259,7 @@ class _HBarList(QWidget):
         p.setFont(f)
         text_c = QColor(_text_color())
         bar_x = self.LABEL_W + 8
-        # 右侧固定留 128px 放「N 条 · 百分比」，否则数字会被条形压住
+        # 右侧固定留 128px 放「N 条　百分比」，否则数字会被条形压住
         bar_w = max(20.0, self.width() - bar_x - 128)
         for i, (label, count) in enumerate(self._rows):
             y = 4 + i * self.ROW_H
@@ -276,7 +276,7 @@ class _HBarList(QWidget):
             p.drawText(QRectF(bar_x + bar_w + 8, y, 120, 18),
                        Qt.AlignmentFlag.AlignLeft
                        | Qt.AlignmentFlag.AlignVCenter,
-                       f"{count} 条 · {pct}%")
+                       f"{count} 条　{pct}%")
 
 
 # ==================== 类型表「构成」列堆叠条 delegate ====================
@@ -369,7 +369,7 @@ class AfterSaleStatsDialog(QDialog):
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 14, 18, 16)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # 头部：统计范围说明 + 刷新
         head = QHBoxLayout()
@@ -391,7 +391,7 @@ class AfterSaleStatsDialog(QDialog):
 
         # KPI 行（六项）
         kpi_row = QHBoxLayout()
-        kpi_row.setSpacing(10)
+        kpi_row.setSpacing(8)
         # key → (卡片, 数字标签, 副文案) 三元组；刷新时按 key 定位，省去六组属性名
         self._kpis = {}
         # 六项 KPI 的顺序即视觉顺序，key 同时是 query_stats_detail 的 summary 字段名
@@ -408,14 +408,10 @@ class AfterSaleStatsDialog(QDialog):
         trend_card = CardWidget(self)
         tlay = QVBoxLayout(trend_card)
         tlay.setContentsMargins(16, 12, 16, 10)
-        tlay.setSpacing(6)
+        tlay.setSpacing(4)
         thead = QHBoxLayout()
         thead.setSpacing(8)
         thead.addWidget(BodyLabel("每日售后趋势", trend_card))
-        hint = CaptionLabel("按发生日期（缺失回退填写时间）· 峰值日高亮 · 悬停查看数量",
-                            trend_card)
-        hint.setStyleSheet("color: %s; background: transparent;" % _muted_color())
-        thead.addWidget(hint)
         thead.addStretch(1)
         self._trend_seg = SegmentedWidget(trend_card)
         self._trend_seg.addItem("cycle", "当前周期")
@@ -448,7 +444,7 @@ class AfterSaleStatsDialog(QDialog):
         region_card = CardWidget(self)
         rlay = QVBoxLayout(region_card)
         rlay.setContentsMargins(16, 12, 16, 10)
-        rlay.setSpacing(6)
+        rlay.setSpacing(4)
         rhead = QHBoxLayout()
         rhead.setSpacing(8)
         rhead.addWidget(BodyLabel("地区分布", region_card))
@@ -477,11 +473,11 @@ class AfterSaleStatsDialog(QDialog):
         type_card = CardWidget(self)
         t2lay = QVBoxLayout(type_card)
         t2lay.setContentsMargins(16, 12, 16, 10)
-        t2lay.setSpacing(6)
+        t2lay.setSpacing(4)
         t2head = QHBoxLayout()
         t2head.addWidget(BodyLabel("问题类型分布", type_card))
         t2head.addStretch(1)
-        t2hint = CaptionLabel("与导出「统计图表」同口径", type_card)
+        t2hint = CaptionLabel("与导出同口径", type_card)
         t2hint.setStyleSheet(
             "color: %s; background: transparent;" % _muted_color())
         t2head.addWidget(t2hint)
@@ -522,7 +518,7 @@ class AfterSaleStatsDialog(QDialog):
         card = CardWidget(self)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         cap = CaptionLabel(label, card)
         num = QLabel("—", card)
         num.setAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -550,7 +546,7 @@ class AfterSaleStatsDialog(QDialog):
         kw = str(f.get("keyword") or "").strip()
         kw_txt = f"关键词「{kw}」" if kw else "无关键词"
         self._lbl_scope.setText(
-            f"统计范围：{cyc_txt} · {typ_txt} · {kw_txt}")
+            f"统计范围：{cyc_txt}　{typ_txt}　{kw_txt}")
 
     def _trend_range(self) -> tuple:
         """按趋势分段选择返回 (trend_start, trend_end)（YYYY-MM-DD，空=不过滤）
@@ -656,7 +652,7 @@ class AfterSaleStatsDialog(QDialog):
             # 日均按有记录的天数算，而非趋势区间总天数，免得空白期拉低均值
             total_d = sum(d["count"] for d in daily)
             self._lbl_chart.setText(
-                f"{n} 天有记录 · 合计 {total_d} 条 · 日均 {round(total_d / n, 1)}")
+                f"{n} 天有记录　合计 {total_d} 条　日均 {round(total_d / n, 1)}")
         elif total == 0:
             self._lbl_chart.setText("当前筛选下暂无售后记录")
         else:

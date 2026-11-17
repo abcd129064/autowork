@@ -382,7 +382,7 @@ class SSHTerminalPanel(QWidget):
         """
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(2)
+        layout.setSpacing(4)
 
         # 断线通知条：默认隐藏，只在真正断开或连接失败时出现
         # 常驻显示会让「连接中」和「已断开」看起来一样，用户分不清该不该等。
@@ -393,7 +393,7 @@ class SSHTerminalPanel(QWidget):
         )
         bar_layout = QHBoxLayout(self._reconnect_bar)
         bar_layout.setContentsMargins(8, 2, 8, 2)
-        bar_layout.setSpacing(6)
+        bar_layout.setSpacing(4)
         self._reconnect_label = QLabel("连接已断开")
         bar_layout.addWidget(self._reconnect_label)
         bar_layout.addStretch()
@@ -417,7 +417,7 @@ class SSHTerminalPanel(QWidget):
         # 底部工具条：从上到下依次是命令、目录、取证、外开工具与状态灯
         # 顺序按使用频率排，最左边是最高频的常用命令。
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(6)
+        btn_layout.setSpacing(4)
 
         # 常用命令条：下拉按钮 + 管理入口
         self._cmd_menu_btn = DropDownPushButton("常用命令")

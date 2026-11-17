@@ -227,7 +227,7 @@ def resolve_credentials(kind: str, *,
 def source_hint(kind: str, creds: Credentials) -> str:
     """界面提示一句话：凭据来源 + 是否已落盘 + 该 kind 的键名
 
-    例：``凭据来源：已保存（DPAPI 加密）· ssh_pass 已落盘，重启后仍在``
+    例：``凭据来源：已保存（DPAPI 加密）　 ssh_pass 已落盘，重启后仍在``
     """
     _user_key, pass_key = credential_keys(kind)
     if creds.source_persisted:
@@ -236,7 +236,7 @@ def source_hint(kind: str, creds: Credentials) -> str:
         tail = f"{pass_key} 未落盘，关闭窗口即丢失"
     else:
         tail = f"{pass_key} 不会写入配置文件"
-    return f"凭据来源：{creds.source_text} · {tail}"
+    return f"凭据来源：{creds.source_text}　{tail}"
 
 
 # ==================== 本次会话凭据（不落盘） ====================

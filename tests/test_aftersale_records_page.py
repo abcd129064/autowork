@@ -215,11 +215,11 @@ def test_records_page_first_load(qapp, db):
         # 默认 ORDER BY id DESC
         assert [r["problem"] for r in page._rows] == ["p2", "p1", "p0"]
         # 分页 / 统计 / 数据源 / 周期标题
-        assert page._lbl_page.text() == "1/1 · 共 3 条"
+        assert page._lbl_page.text() == "1 / 1"
         assert page._lbl_stats.text() == "共 3 条"
         assert page._lbl_source.text() == "数据源: 本地 SQLite"
         assert page._lbl_cycle.text().startswith("周期:")
-        assert page._lbl_overview.text().startswith("概览 ·")
+        assert page._lbl_overview.text() == "概览"
         # 概览四卡
         assert page._card_total[2].text() == "3"
         assert page._card_unresolved[2].text() == "3"
@@ -257,12 +257,12 @@ def test_records_page_pagination(qapp, db):
     page = _open_page(qapp, db)
     try:
         assert _wait(page, lambda: page._table.rowCount() == 60)
-        assert page._lbl_page.text() == "1/2 · 共 65 条"
+        assert page._lbl_page.text() == "1 / 2"
         assert page._btn_prev.isEnabled() is False
         assert page._btn_next.isEnabled() is True
         page._step_page(1)
         assert _wait(page, lambda: page._table.rowCount() == 5)
-        assert page._lbl_page.text() == "2/2 · 共 65 条"
+        assert page._lbl_page.text() == "2 / 2"
         assert page._btn_prev.isEnabled() is True
         assert page._btn_next.isEnabled() is False
     finally:
@@ -332,7 +332,7 @@ def test_records_page_header_sort_cross_page(qapp, db):
         assert _wait(page, lambda: (
             page._table.rowCount() == 5 and len(page._rows) == 5
             and page._rows[0]["problem"] == "p60"))
-        assert page._lbl_page.text() == "2/2 · 共 65 条"
+        assert page._lbl_page.text() == "2 / 2"
         # 回第 1 页再点同一列 → 降序，首尾随全量顺序翻转
         page._step_page(-1)
         assert _wait(page, lambda: page._table.rowCount() == 60)

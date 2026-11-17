@@ -162,7 +162,7 @@ class EditWorklogDialog(QDialog):
         self.spin_hours.setSingleStep(0.5)
         self.spin_hours.refit(90)           # 稿 221：宽 90，禁 setFixedWidth 宽区间
         r.ctl.addWidget(self.spin_hours)
-        note = CaptionLabel("步进 0.5 · 上限 24", body)
+        note = CaptionLabel("步进 0.5　上限 24", body)
         note.setFont(px_font(TYPE_SCALE_PX["sm"]))
         note.setTextColor(*text_color_tier(3))
         r.ctl.addWidget(note)

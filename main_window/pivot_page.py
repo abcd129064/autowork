@@ -64,10 +64,12 @@ class PivotPage(QWidget):
         self.btn_popout.clicked.connect(self._on_popout)
         self.btn_popout.raise_()
 
-        # 常驻文本提示（2026-09-20 反馈）：纯图标按钮辨识度不足，
-        # 在按钮左侧固定显示「点击此按钮弹出面板」，随按钮一起定位/显隐
-        self.lbl_popout_hint = BodyLabel("点击此按钮弹出面板", self)
+        # 基类不常驻提示文字：按钮 tooltip 已说明语义，文字会挤占切换条右端。
+        # 属性必须保留：worklog / 工具类子类会 setText 复用这颗 label，
+        # hub_popout.py 也会对它 setVisible，删掉会直接 AttributeError。
+        self.lbl_popout_hint = BodyLabel("", self)
         self.lbl_popout_hint.setObjectName("popoutHintLabel")
+        self.lbl_popout_hint.setVisible(False)
         self.lbl_popout_hint.raise_()
 
     def _on_popout(self):
@@ -85,21 +87,22 @@ class PivotPage(QWidget):
         self._sync_popout_hint()
 
     def _sync_popout_hint(self):
-        """提示文本与弹出按钮同显隐（弹出窗口内隐藏按钮时文本一并隐藏）"""
+        """基类保持提示隐藏；子类 setText 后才随按钮一起显隐。"""
         visible = self.btn_popout.isVisible()
-        self.lbl_popout_hint.setVisible(visible)
+        if self.lbl_popout_hint.text():
+            self.lbl_popout_hint.setVisible(visible)
         if visible:
             self._reposition_popout_btn()
 
     def _reposition_popout_btn(self):
-        """按钮贴页面右上角（垂直对齐 Pivot 切换条行中部），
-        提示文本紧贴按钮左侧并垂直居中"""
+        """按钮贴页面右上角；子类启用了提示时，提示紧贴按钮左侧垂直居中。"""
         x = self.width() - self.btn_popout.width() - 16
         self.btn_popout.move(x, 10)
         hint = self.lbl_popout_hint
-        hint.adjustSize()
-        hint.move(x - hint.width() - 8,
-                  10 + (self.btn_popout.height() - hint.height()) // 2)
+        if hint.isVisible():
+            hint.adjustSize()
+            hint.move(x - hint.width() - 8,
+                      10 + (self.btn_popout.height() - hint.height()) // 2)
 
     # ---------- 注册 ----------
 
@@ -236,7 +239,7 @@ class CardPage(QWidget):
 
         lay = QVBoxLayout(body)
         lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(10)
+        lay.setSpacing(8)
 
         lay.addWidget(TitleLabel(title, self))
         d = CaptionLabel(desc, self)
@@ -251,7 +254,7 @@ class CardPage(QWidget):
             v.setContentsMargins(16, 12, 16, 12)
             v.setSpacing(4)
             row = QHBoxLayout()
-            row.setSpacing(10)
+            row.setSpacing(8)
             btn = PushButton(icon, label, card)
             btn.setFixedWidth(150)
             btn.clicked.connect(lambda _=False, k=key: self._fire(k))

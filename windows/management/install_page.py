@@ -114,12 +114,12 @@ class InstallPage(QWidget):
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # --- 工具栏 --- 搜索框固定 300px：不固定会跟着窗口一起变宽，把右侧的
         # 导出/筛选/同步按钮挤到换行或截断。
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        toolbar.setSpacing(4)
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText(
             "搜索")
@@ -194,7 +194,7 @@ class InstallPage(QWidget):
         # --- 分页栏 --- 「正在加载中」是初始文案，首查完成后由 _update_pager 换成
         # 「共 N 台」；留空会让窗口在首查返回前显示一个没有任何反馈的空表。
         pager = QHBoxLayout()
-        pager.setSpacing(6)
+        pager.setSpacing(4)
         self._lbl_info = QLabel("正在加载中，请稍等", self)
         pager.addWidget(self._lbl_info)
         pager.addStretch(1)

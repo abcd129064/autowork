@@ -200,7 +200,7 @@ class FileListPanel(QWidget):
         self._migrate_wrap.hide()
         btn_row = QHBoxLayout(self._migrate_wrap)
         btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(6)
+        btn_row.setSpacing(4)
         self._migrate_btns = {}
         for dest in MIGRATE_DEST_OPTIONS:
             btn = PushButton(dest, self)
@@ -215,7 +215,7 @@ class FileListPanel(QWidget):
         layout.addWidget(self._migrate_wrap)
 
         # 这行提示是面板唯一的功能发现入口：三个操作都没有常驻按钮
-        hint = CaptionLabel("拖选复制 · 双击打开图片 · 右键更多", self)
+        hint = CaptionLabel("拖选复制、双击打开图片、右键更多", self)
         layout.addWidget(hint)
 
     def _apply_theme(self):
@@ -275,7 +275,7 @@ class FileListPanel(QWidget):
             name_item.setToolTip(fname)
             self._list.setItem(r, 0, name_item)
         code = self._row.get("table_id") or self._row.get("device_code", "")
-        self._lbl_title.setText(f"{self._title} · {code} · {len(self._entries)} 个")
+        self._lbl_title.setText(f"{self._title}　{code}　{len(self._entries)} 个")
 
     def refresh_if_visible(self):
         """数据刷新后，若面板可见则异步重新加载当前设备的文件列表
@@ -780,11 +780,11 @@ class DevicePage(QWidget):
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # --- 工具栏 ---
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        toolbar.setSpacing(4)
         toolbar.addWidget(QLabel("日期:", self))
         # 日历用缓存视图（见 _apply_calendar_cache）而不是默认构造：默认每次
         # 弹出都要现生成七万多个日期项，首次打开要等半秒
@@ -803,7 +803,7 @@ class DevicePage(QWidget):
         # 步进按钮与选择器合成一组：查历史分区时连点「前一天」比开日历快，
         # 间距压到 2px 让三者看起来像一个控件
         date_group = QHBoxLayout()
-        date_group.setSpacing(2)
+        date_group.setSpacing(4)
         date_group.addWidget(self._date_picker)
         date_group.addWidget(self._btn_date_prev)
         date_group.addWidget(self._btn_date_next)
@@ -889,7 +889,7 @@ class DevicePage(QWidget):
         # 状态栏固定格式：左侧总数、右侧数据日期，中段页码与每页条数靠伸缩
         # 撑开；窗口变窄时先压缩文字，避免控件互相重叠。
         pager = QHBoxLayout()
-        pager.setSpacing(6)
+        pager.setSpacing(4)
         self._lbl_info = QLabel("", self)
         pager.addWidget(self._lbl_info)
         pager.addStretch(1)
@@ -1267,7 +1267,7 @@ class DevicePage(QWidget):
                         tip = f"设备状态: {text}"
                         if hf >= _HF_THRESHOLD:
                             # 高频问题设备：状态列标红，tooltip 显示提交次数
-                            text = f"{text} · 高频问题"
+                            text = f"{text}　高频问题"
                             color = _HF_COLOR
                             tip += f"\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）"
                         cell = QTableWidgetItem(text)
@@ -1973,7 +1973,7 @@ class DevicePage(QWidget):
                                       bottom_offset=self._info_raise()))
         self._collect_workers.append(worker)
         worker.start()
-        show_info_bar(f"{device_id}{'（' + fuzzy_note + '）' if fuzzy_note else ''} · "
+        show_info_bar(f"{device_id}{'（' + fuzzy_note + '）' if fuzzy_note else ''}　"
                       f"{len(bases)} 个视频/日志 → upload 目录", "info",
                       title="收集中", parent=self,
                       duration=1500 if not fuzzy_note else 3500,
@@ -2154,7 +2154,7 @@ class DevicePage(QWidget):
             table_db.update_submission_upload(str(info or ""), True)
         except Exception:
             pass
-        show_info_bar(f"{info} · 本地 upload 目录已清空", "success",
+        show_info_bar(f"{info}　本地 upload 目录已清空", "success",
                       title="上传成功", parent=self, duration=5000, bottom_offset=self._info_raise())
 
     def _on_upload_fail(self, msg):

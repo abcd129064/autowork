@@ -128,9 +128,9 @@ class RecordsPage(QWidget):
 
         # --- 页头：标题 + 数据源状态 ---
         head = QHBoxLayout()
-        head.setSpacing(10)
+        head.setSpacing(8)
         head_box = QVBoxLayout()
-        head_box.setSpacing(1)
+        head_box.setSpacing(4)
         # head_box.addWidget(TitleLabel("记录与统计", self))
         # head.addLayout(head_box)
         head.addStretch(1)
@@ -140,7 +140,7 @@ class RecordsPage(QWidget):
 
         # --- 四分类指标卡 + 总数卡（需求5：点击跳转对应筛选） ---
         cards_row = QHBoxLayout()
-        cards_row.setSpacing(10)
+        cards_row.setSpacing(8)
         self._cards = {}
         self._card_widgets = {}
         for key, title in (("total", "总记录"), ("问题", "问题"),
@@ -174,8 +174,8 @@ class RecordsPage(QWidget):
         toolbar_scroll.setWidget(toolbar_widget)
         from qfluentwidgets import FlowLayout
         toolbar = FlowLayout(toolbar_widget)
-        toolbar.setHorizontalSpacing(6)
-        toolbar.setVerticalSpacing(6)
+        toolbar.setHorizontalSpacing(4)
+        toolbar.setVerticalSpacing(4)
         toolbar.setContentsMargins(2, 4, 2, 4)
 
         # --- 日期筛选（需求1+2 重构：基准日历 + 快捷范围，控件对齐主面板） ---
@@ -333,7 +333,7 @@ class RecordsPage(QWidget):
 
         # --- 分页 ---
         bottom = QHBoxLayout()
-        bottom.setSpacing(6)
+        bottom.setSpacing(4)
         self._lbl_stats = CaptionLabel("", self)
         bottom.addWidget(self._lbl_stats)
         bottom.addStretch(1)
@@ -363,7 +363,7 @@ class RecordsPage(QWidget):
         card = CardWidget(self)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         lbl = CaptionLabel(title, card)
         num = QLabel("0", card)
         num.setStyleSheet(
@@ -430,9 +430,7 @@ class RecordsPage(QWidget):
                            SEMANTIC["warning"])
         self._lbl_source.setText(text)
         self._lbl_source.setStyleSheet(f"color: {color};")
-        self._lbl_source.setToolTip(
-            "关闭 MySQL 后自动读写本地 SQLite；"
-            "MySQL 恢复可用时会自动切回并合并兜底增量")
+        self._lbl_source.setToolTip("MySQL 断开时改用本地库，恢复后自动合并")
 
     # ---------- 筛选条件 ----------
 

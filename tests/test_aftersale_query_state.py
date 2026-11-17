@@ -80,10 +80,10 @@ def test_pages_of_edges(total, size, expected):
 
 
 @pytest.mark.parametrize("page_no, total, size, expected", [
-    (1, 65, 60, "1/2 · 共 65 条"),
-    (2, 65, 60, "2/2 · 共 65 条"),
-    (1, 0, 60, "1/1 · 共 0 条"),
-    (3, 5, 0, "3/5 · 共 5 条"),
+    (1, 65, 60, "1 / 2"),
+    (2, 65, 60, "2 / 2"),
+    (1, 0, 60, "1 / 1"),
+    (3, 5, 0, "3 / 5"),
 ])
 def test_pager_text_matches_ui_copy(page_no, total, size, expected):
     assert qs.pager_text(page_no, total, size) == expected
@@ -134,15 +134,15 @@ def test_row_tooltip_full_record_has_every_field_in_order():
         "填写人: 沈喆\n"
         "发生时间: 2026-08-20 10:00\n"
         "类型: 问题\n"
-        "位置: 一号房 · A区 · 3号桌\n"
+        "位置: 一号房　A区　3号桌\n"
         "问题: 贴球\n"
         "发生原因: 识别延迟\n"
-        "是否解决: 是\n"
-        "是否我们主动发起: 是\n"
-        "是否是我们的问题: 否\n"
+        "已解决: 是\n"
+        "主动发起: 是\n"
+        "我方问题: 否\n"
         "解决方案: 调参\n"
         "解决人: 朱华国\n"
-        "响应时间: 2小时"
+        "解决时间: 2小时"
     )
 
 
@@ -152,23 +152,23 @@ def test_row_tooltip_empty_record_falls_back_to_no():
         "填写人: \n"
         "发生时间: \n"
         "类型: \n"
-        "位置:  ·  · \n"
+        "位置: 　　\n"
         "问题: \n"
         "发生原因: \n"
-        "是否解决: 否\n"
-        "是否我们主动发起: 否\n"
-        "是否是我们的问题: 否\n"
+        "已解决: 否\n"
+        "主动发起: 否\n"
+        "我方问题: 否\n"
         "解决方案: \n"
         "解决人: \n"
-        "响应时间: "
+        "解决时间: "
     )
 
 
 def test_row_tooltip_falsey_flags_use_no_not_python_repr():
     rec = {"resolved": 0, "is_initiative": "", "is_our_problem": None}
     text = qs.row_tooltip(rec)
-    assert "是否解决: 否" in text
-    assert "是否我们主动发起: 否" in text
-    assert "是否是我们的问题: 否" in text
+    assert "已解决: 否" in text
+    assert "主动发起: 否" in text
+    assert "我方问题: 否" in text
     assert "False" not in text
     assert "None" not in text

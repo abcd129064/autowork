@@ -523,9 +523,9 @@ def test_build_report_text_segments_by_member(db):
     text = wdb.build_report_text(*wdb.week_range("2026-11-06"),
                                  title="本周工作")
     assert text.startswith("本周工作（2026-11-02 ~ 2026-11-08）")
-    assert "【张工】2 项 · 7.0h" in text
+    assert "【张工】2 项　7.0h" in text
     assert "分页性能优化" in text and "接口联调" in text
-    assert text.rstrip().endswith("合计：6 项 · 13.0h · 完成率 66.7%")
+    assert text.rstrip().endswith("合计：6 项　13.0h　完成率 66.7%")
 
 
 def test_build_report_text_single_day_span(db):

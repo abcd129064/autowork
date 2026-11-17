@@ -42,13 +42,13 @@ class EntryPage(QWidget):
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # 页头
         head = QHBoxLayout()
         head.setSpacing(12)
         head_l = QVBoxLayout()
-        head_l.setSpacing(2)
+        head_l.setSpacing(4)
         # head_l.addWidget(TitleLabel("填写录入", self))
         # head_l.addWidget(CaptionLabel(
         #     "提交后写入数据库，"
@@ -76,7 +76,7 @@ class EntryPage(QWidget):
 
         # 操作条：必填进度 + 清空/提交
         bar = QHBoxLayout()
-        bar.setSpacing(10)
+        bar.setSpacing(8)
         self._prog = ProgressBar(view)
         self._prog.setRange(0, 3)
         self._prog.setValue(0)

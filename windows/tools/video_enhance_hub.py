@@ -100,7 +100,7 @@ def _page_head(parent, title, sub):
     _transparent(head)
     v = QVBoxLayout(head)
     v.setContentsMargins(28, 20, 28, 6)
-    v.setSpacing(3)
+    v.setSpacing(4)
     t = TitleLabel(title, head)
     f = QFont(t.font())
     f.setPixelSize(TYPE_SCALE_PX["2xl"])
@@ -121,7 +121,7 @@ def _card(parent, title, sub=""):
     card = CardWidget(parent)
     v = QVBoxLayout(card)
     v.setContentsMargins(16, 14, 16, 14)
-    v.setSpacing(10)
+    v.setSpacing(8)
     h = QHBoxLayout()
     h.setSpacing(8)
     h.addWidget(StrongBodyLabel(title, card))
@@ -132,7 +132,7 @@ def _card(parent, title, sub=""):
     else:
         h.addStretch(1)
     right = QHBoxLayout()
-    right.setSpacing(6)
+    right.setSpacing(4)
     h.addLayout(right)
     v.addLayout(h)
     return card, v, right
@@ -229,13 +229,13 @@ class _StatStrip(QWidget):
         _transparent(self)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(10)
+        row.setSpacing(8)
         self.nums = []
         for text in labels:
             c = CardWidget(self)
             v = QVBoxLayout(c)
             v.setContentsMargins(12, 8, 12, 8)
-            v.setSpacing(2)
+            v.setSpacing(4)
             n = TitleLabel("0", c)
             nf = QFont(n.font())
             nf.setPixelSize(TYPE_SCALE_PX["xl"])
@@ -271,7 +271,7 @@ class _ImagePane(QWidget):
         super().__init__(parent)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
+        v.setSpacing(4)
         h = QHBoxLayout()
         h.setSpacing(8)
         h.addWidget(StrongBodyLabel(title, self))
@@ -531,9 +531,9 @@ class EnhanceTaskPage(VePage):
         pg = self.table.item(i, 7)
         if pg is not None:
             if r["state"] == "running":
-                pg.setText(f"{r['pct']}% · {r['speed']:.1f}x")
+                pg.setText(f"{r['pct']}%　{r['speed']:.1f}x")
             elif r["state"] == "done":
-                pg.setText(f"100% · 用时 {_fmt_dur(r['elapsed'])}")
+                pg.setText(f"100%　用时 {_fmt_dur(r['elapsed'])}")
             elif r["state"] == "failed":
                 pg.setText(r.get("reason") or "失败")
             elif r["state"] == "skipped":
@@ -1089,7 +1089,7 @@ class FilterPage(VePage):
 
     def _build_interp(self, parent):
         card, cv, right = _card(parent, "补帧",
-                                "minterpolate 运动补偿 · blend 混合 · GPU 光流硬件插帧")
+                                "minterpolate 运动补偿、blend 混合、GPU 光流硬件插帧")
         self.sw_interp = self._switch(card, "interp_on")
         right.addWidget(self.sw_interp)
         r = QHBoxLayout()
@@ -1166,8 +1166,7 @@ class FilterPage(VePage):
         self.btn_copy_vf.clicked.connect(self._on_copy_vf)
         right.addWidget(self.btn_copy_vf)
         self.btn_frame = PushButton(FluentIcon.PHOTO, "抽一帧预览", card)
-        self.btn_frame.setToolTip("在指定时间点上各跑一次单帧 ffmpeg，一份取原帧、一份过完"
-                                  "滤镜链，秒级出图，结果并排显示在「质量对比」子页")
+        self.btn_frame.setToolTip("对比指定时间点的原帧与滤镜效果")
         self.btn_frame.clicked.connect(self._on_preview)
         right.addWidget(self.btn_frame)
 
@@ -1548,7 +1547,7 @@ class EncodePage(VePage):
             for name, spec in ve.ENCODERS.items():
                 # 探测过且明确失败 → 置灰但保留在列表里，让用户看得到「为什么不能用」
                 bad = name in tested and not tested[name][0]
-                text = spec["label"] + (" · 不可用" if bad else "")
+                text = spec["label"] + ("（不可用）" if bad else "")
                 self.cmb_encoder.addItem(text, userData=name)
                 # qfw 的 ComboBox 是 QPushButton 不是 QComboBox，没有 view()/model()，
                 # 置灰只能走它自己的 setItemEnabled；原因文案没有单项 tooltip 可挂，
@@ -1660,8 +1659,7 @@ class EnvPage(VePage):
         self.btn_redetect.clicked.connect(self._on_redetect)
         right.addWidget(self.btn_redetect)
         self.btn_save_paths = PushButton(FluentIcon.SAVE_AS, "写入设置", card)
-        self.btn_save_paths.setToolTip("把当前两个路径固化进 config/paths.json，"
-                                       "换 PATH 后也不会失效")
+        self.btn_save_paths.setToolTip("保存当前路径，重启后仍有效")
         self.btn_save_paths.clicked.connect(self._on_save_paths)
         right.addWidget(self.btn_save_paths)
 
@@ -1736,7 +1734,7 @@ class EnvPage(VePage):
         card, cv, _right = _card(parent, "版本与构建")
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(6)
+        grid.setVerticalSpacing(4)
         self._ver_labels = {}
         for row, key in enumerate(("version", "build", "vmaf", "ffmpeg")):
             grid.addWidget(CaptionLabel(
@@ -1755,7 +1753,7 @@ class EnvPage(VePage):
     def _build_encoders(self, parent):
         card, cv, _right = _card(parent, "可用编码器", "解析 ffmpeg -encoders 后逐个真编一帧")
         grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
         self._enc_labels = {}
         for i, name in enumerate(ve.ENCODERS):
@@ -1772,7 +1770,7 @@ class EnvPage(VePage):
         card, cv, _right = _card(parent, "可用滤镜",
                                 "解析 ffmpeg -filters；本页结果决定「滤镜调参」里哪些选项真的能跑")
         grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
         self._filter_labels = {}
         for i, name in enumerate(WANTED_FILTERS):
@@ -1855,7 +1853,7 @@ class EnvPage(VePage):
                 _paint(lab, f"{'✓' if ok else '✗'} {name}", _C_SUCCESS if ok else _C_DANGER)
                 lab.setToolTip(why or "")
             elif name in compiled:
-                _paint(lab, f"○ {name} · 未试编", _C_MUTED)
+                _paint(lab, f"○ {name}　未试编", _C_MUTED)
             else:
                 _paint(lab, f"✗ {name}", _C_DANGER)
                 lab.setToolTip("这个 ffmpeg 构建里没有编译该编码器")
@@ -1946,8 +1944,8 @@ class ComparePage(VePage):
         card2, c2, _r2 = _card(body, "抽帧对比", "同一时间点各跑一次单帧 ffmpeg 输出 PNG")
         panes = QHBoxLayout()
         panes.setSpacing(12)
-        self.pane_src = _ImagePane("源 · 处理前", card2)
-        self.pane_dst = _ImagePane("输出 · 处理后", card2)
+        self.pane_src = _ImagePane("源　处理前", card2)
+        self.pane_dst = _ImagePane("输出　处理后", card2)
         panes.addWidget(self.pane_src, 1)
         panes.addWidget(self.pane_dst, 1)
         c2.addLayout(panes)
@@ -2108,10 +2106,10 @@ class ComparePage(VePage):
         if r.get("reason"):
             bits.append(f"⚠ {r['reason']}")
         bits.append(f"PNG 落 {os.path.dirname(src_png or dst_png) or '临时目录'}")
-        self.lbl_png.setText(" · ".join(bits))
+        self.lbl_png.setText("　".join(bits))
         hub.task_page.append_line(
             f"▶ 抽帧完成：{os.path.basename(src_png)} / {os.path.basename(dst_png)}"
-            + (f" · {r['reason']}" if r.get("reason") else ""))
+            + (f"　{r['reason']}" if r.get("reason") else ""))
 
     def _on_stop(self):
         w = self._hub.worker(W_CMP)

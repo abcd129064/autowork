@@ -23,7 +23,10 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
     SpinBox, SegmentedWidget, ProgressBar, FlowLayout)
 
-from core.design_tokens import SEMANTIC, lighten, darken
+from core.design_tokens import (SEMANTIC, lighten, darken,
+    UI_V2, ui_color, ui_hover_colors, ui_qss)
+
+UI = UI_V2  # 本模块内简写，避免每行重复字典下标
 from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import is_acrylic_enabled
 from core.theme_qss import current_accent_hex
@@ -65,13 +68,14 @@ class EditRecordDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.form)
         # MessageBoxBase 无系统标题栏，顶部自建 TitleLabel 标明用途（编辑/新增）
         ttl = TitleLabel(title, self)
+        ttl.setStyleSheet(ui_qss("title"))
         self.viewLayout.insertWidget(0, ttl)
         self.yesButton.setText("保存并继续" if self._continuous else "保存")
         # 连续模式下「完成」是唯一的关窗出口，比「取消」更贴合语义
         self.cancelButton.setText("完成" if self._continuous else "取消")
         self.yesButton.clicked.connect(self._on_yes)
         # 弹窗宽度：表单控件较宽
-        self.widget.setMinimumWidth(560)
+        self.widget.setMinimumWidth(UI["size"]["dialog_min_w"])
 
     def _on_yes(self):
         """收集表单值；连续录入模式下改走异步落库。
@@ -193,16 +197,19 @@ class QuickPhraseDialog(QDialog):
         self.phrases = aftersale_db.load_quick_phrases()
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
-        root.setSpacing(12)
+        # 四边统一 16px：常用句浮窗是表单录入的延伸，间距与表单同源
+        root.setContentsMargins(
+            UI["space"]["md"], UI["space"]["md"],
+            UI["space"]["md"], UI["space"]["md"])
+        root.setSpacing(UI["space"]["sm"])
 
         tip = CaptionLabel(
-            "点击任意常用句即可复制到剪贴板（窗口可拖动，不影响售后面板）", self)
+            "点击复制", self)
         tip.setWordWrap(True)
         root.addWidget(tip)
 
         self._list = QListWidget(self)
-        self._list.setFixedHeight(220)
+        self._list.setFixedHeight(UI["size"]["quick_list"])
         self._list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self._list.itemClicked.connect(self._on_copy)
@@ -212,7 +219,7 @@ class QuickPhraseDialog(QDialog):
 
         # 手动添加行：输入框 + 添加按钮（回车 / 点按钮均触发）
         add_row = QHBoxLayout()
-        add_row.setSpacing(8)
+        add_row.setSpacing(UI["space"]["xs"])
         self._input = LineEdit(self)
         self._input.setPlaceholderText("输入新的常用句，回车或点「添加」…")
         self._input.returnPressed.connect(self._on_add)
@@ -224,7 +231,7 @@ class QuickPhraseDialog(QDialog):
 
         # 底部：复制选中（不关闭，可连续复制）+ 关闭
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        btn_row.setSpacing(UI["space"]["xs"])
         btn_row.addStretch(1)
         self._btn_copy = PushButton(FluentIcon.COPY, "复制选中", self)
         self._btn_copy.clicked.connect(self._on_copy_selected)
@@ -284,8 +291,10 @@ class ImportPreviewDialog(QDialog):
         self.resize(1180, 660)
         self.setMinimumSize(900, 480)
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(
+            UI["space"]["md"], UI["space"]["md"],
+            UI["space"]["md"], UI["space"]["md"])
+        root.setSpacing(UI["space"]["sm"])
 
         # 字段要求提示。表头必须与列名完全一致：导入按中文表头映射字段，
         # 模糊匹配会让错列在不知不觉中写进库
@@ -294,13 +303,13 @@ class ImportPreviewDialog(QDialog):
         missing = [h for h in (*req, *opt) if h not in excel_headers]
         tip = ("表格需要以下列（表头需与列名完全一致）\n"
                f"必填：{'、'.join(req)}\n"
-               f"可选：{'、'.join(opt)}")
+               f"可选：{'、'.join(opt)}\n"
+               "\n自动补充：填写时间=导入时间、填写人=Excel导入、"
+               "发生时间=导入当日、周期=按当前周期设置归属")
         # 缺列不阻断导入：可选列留空即可；必填列缺失会体现为大量空字段，
         # 用户可在确认前从预览里发现
         if missing:
             tip += f"\n\n⚠ 当前表格缺失列：{'、'.join(missing)}（缺失的可选列将留空，是否解决默认「否」）"
-        tip += ("\n自动补充：填写时间=导入时间、填写人=Excel导入、"
-                "发生时间=导入当日、周期=按当前周期设置归属")
         lbl = CaptionLabel(tip, self)
         lbl.setWordWrap(True)
         root.addWidget(lbl)
@@ -334,7 +343,7 @@ class ImportPreviewDialog(QDialog):
 
         # 底部：统计 + 取消/确认
         bottom = QHBoxLayout()
-        bottom.setSpacing(6)
+        bottom.setSpacing(UI["space"]["xs"])
         more = "" if len(rows) <= 20 else f"（预览前 20 行）"
         # 明确写出「预览前 20 行」，否则用户会以为只解析出 20 条记录
         self._lbl_count = CaptionLabel(

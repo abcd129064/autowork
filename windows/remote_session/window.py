@@ -142,7 +142,7 @@ class TunnelPanelWindow(FramelessWindow):
         records = mgr.records()
         running = mgr.is_running()
         self._status_label.setText(
-            f"frpc {'运行中' if running else '未启动'} · {len(records)} 条隧道")
+            f"frpc {'运行中' if running else '未启动'}　{len(records)} 条隧道")
         self._stop_all_btn.setEnabled(bool(records))
         self._hint.setVisible(not records)
 

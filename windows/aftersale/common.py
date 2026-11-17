@@ -22,7 +22,8 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
     SpinBox, SegmentedWidget, ProgressBar, FlowLayout)
 
-from core.design_tokens import SEMANTIC, lighten, darken
+from core.design_tokens import (SEMANTIC, lighten, darken,
+    UI_V2, ui_color, ui_hover_colors, ui_qss)
 from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import is_acrylic_enabled
 from core.theme_qss import current_accent_hex
@@ -78,28 +79,31 @@ def _default_creator() -> str:
 
 # 桌号候选列表 QSS：与下拉框同风格。用占位符而非固定色值，深浅主题切换时
 # 由 _style_cand_list 重新注入，避免维护两套完整样式表
+# 圆角 R8/R4、间距 8/16、字号 12、线宽 1px 全部由 V2 token 注入。
+# 占位符由 _style_cand_list 按主题填充，模板本身不写死任何色值。
 _CAND_LIST_QSS_TMPL = """
 QListWidget {{
     background-color: {popup_bg};
-    border: 1px solid {border};
-    border-radius: 6px;
+    border: {line_w}px solid {border};
+    border-radius: {card_radius}px;
     color: {text};
     outline: none;
-    padding: 2px;
+    padding: {pad}px;
+    font-size: {font}px;
 }}
-QListWidget::item {{ padding: 4px 8px; border-radius: 4px; }}
+QListWidget::item {{ padding: {pad}px {pad2}px; border-radius: {ctl_radius}px; }}
 QListWidget::item:hover {{ background-color: {item_hover}; }}
 QListWidget::item:selected {{ background-color: {accent}; color: #ffffff; }}
-QListWidget::item:disabled {{ color: #909090; padding: 10px 8px; }}
+QListWidget::item:disabled {{ color: {disabled}; padding: {pad}px {pad2}px; }}
 QScrollBar:vertical {{
     background: transparent;
-    width: 6px;
-    margin: 2px 0;
+    width: {scroll_w}px;
+    margin: 0;
 }}
 QScrollBar::handle:vertical {{
     background: {border};
-    border-radius: 3px;
-    min-height: 24px;
+    border-radius: {ctl_radius}px;
+    min-height: {chip_h}px;
 }}
 QScrollBar::handle:vertical:hover {{ background: {item_hover}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
@@ -118,13 +122,22 @@ def _style_cand_list(widget):
     颜色在调用时现取：qfluentwidgets 的强调色可被用户随时修改，缓存
     样式表会让候选列表停留在旧强调色上。
     """
-    accent = _accent_hex()
-    if isDarkTheme():
-        c = dict(popup_bg="#2f2f2f", border="#484848", text="#e8eaed",
-                 item_hover="#3a3a3a", accent=accent)
-    else:
-        c = dict(popup_bg="#ffffff", border="#c9c9c9", text="#1f1f1f",
-                 item_hover="#f0f0f0", accent=accent)
+    dark = isDarkTheme()
+    hov = ui_hover_colors(dark)
+    c = dict(popup_bg=ui_color("control", dark),
+             border=ui_color("line", dark),
+             text=ui_color("body", dark),
+             item_hover=hov["bg"],
+             disabled=ui_color("disabled", dark),
+             accent=_accent_hex(),
+             line_w=UI_V2["line"]["width"],
+             card_radius=UI_V2["radius"]["card"],
+             ctl_radius=UI_V2["radius"]["control"],
+             pad=UI_V2["space"]["xs"],
+             pad2=UI_V2["space"]["md"],
+             font=UI_V2["type"]["caption"]["size"],
+             scroll_w=UI_V2["space"]["xs"],
+             chip_h=UI_V2["size"]["chip"])
     widget.setStyleSheet(_CAND_LIST_QSS_TMPL.format(**c))
 
 
@@ -154,22 +167,28 @@ class _SectionCard(CardWidget):
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
+        s, r = UI_V2["space"], UI_V2["radius"]
         self.content_layout = QVBoxLayout(self)
-        self.content_layout.setContentsMargins(16, 12, 16, 14)
-        self.content_layout.setSpacing(10)
+        # 四边统一 16px：旧值 (16,12,16,14) 让标题与内容的光学基线对不齐
+        self.content_layout.setContentsMargins(s["md"], s["md"], s["md"], s["md"])
+        self.content_layout.setSpacing(s["sm"])
+        self.setStyleSheet("CardWidget { border-radius: %dpx; }" % r["card"])
         head = QHBoxLayout()
-        head.setSpacing(7)
+        head.setSpacing(s["xs"])
         bar = QLabel(self)
-        bar.setFixedSize(3, 12)
+        # 竖条 4x16 落在网格上；2px 圆角是它的半宽，不做装饰性 1px
+        bar.setFixedSize(UI_V2["base"], s["md"])
         bar.setStyleSheet(
-            f"background: {_accent_hex()}; border-radius: 1px;")
+            f"background: {_accent_hex()}; border-radius: 2px;")
         try:
             qconfig.themeColorChanged.connect(lambda _c: bar.setStyleSheet(
-                f"background: {_accent_hex()}; border-radius: 1px;"))
+                f"background: {_accent_hex()}; border-radius: 2px;"))
         except Exception:
             pass
         head.addWidget(bar)
-        head.addWidget(BodyLabel(title, self))
+        ttl = BodyLabel(title, self)
+        ttl.setStyleSheet(ui_qss("title"))
+        head.addWidget(ttl)
         head.addStretch(1)
         self.content_layout.addLayout(head)
 
@@ -198,7 +217,13 @@ class YesNoSegment(SegmentedWidget):
         self.addItem("否", "否")
         self.addItem("是", "是")
         self.setCurrentItem(default)
-        self.setFixedHeight(30)
+        # Pivot 的 hBoxLayout 带 SetMinimumSize 约束：布局激活时会拿内部
+        # SegmentedItem 的最小高度（库默认 26px）反写父控件 minimumHeight，
+        # 只在外层 setFixedHeight(32) 会在 show 时被冲回 26。把 item 也锁到
+        # 32px，布局算出的最小高度本身就是 32，不必在 showEvent 里追赶。
+        for item in self.items.values():
+            item.setFixedHeight(UI_V2["size"]["control"])
+        self.setFixedHeight(UI_V2["size"]["control"])
 
     def value(self) -> str:
         key = self.currentRouteKey()
@@ -219,22 +244,21 @@ class YesNoSegment(SegmentedWidget):
 
 
 def _field_label(text, required=False, parent=None) -> QLabel:
-    """字段标签：12px 次级文本色；必填追加红色 * 富文本
+    """字段标签：统一 12/16/400，必填追加语义红 * 富文本。
 
-    深色主题下标签用亮灰（#c5c8ce），浅色主题用深灰（#444b55）。
-    init 即按当前主题设色，避免深色主题下标签呈黑色与背景同色看不清
-    （themeChanged 只在主题「改变」时触发，深色启动时初始样式会失效）。
+    颜色走中性灰阶的 secondary 角色、亮暗反相；构造期即设色，因为
+    themeChanged 只在主题「改变」时触发，深色启动时初始样式会失效。
     """
     lb = QLabel(parent)
     if required:
-        lb.setText(text + ' <span style="color:#cf4452;">*</span>')
+        lb.setText(text + ' <span style="color:%s;">*</span>'
+                   % SEMANTIC["danger"])
     else:
         lb.setText(text)
 
     def _apply():
-        lb.setStyleSheet("font-size: 12px; color: %s;"
-            " background: transparent;" % (
-                "#c5c8ce" if isDarkTheme() else "#444b55"))
+        lb.setStyleSheet("%s color: %s; background: transparent;" % (
+            ui_qss("caption"), ui_color("secondary", isDarkTheme())))
 
     _apply()
     try:
@@ -252,12 +276,13 @@ def _inline_error(text, parent=None) -> QLabel:
     """
     lb = QLabel(text, parent)
     lb.setStyleSheet(
-        "font-size: 11px; color: #cf4452; background: transparent;")
+        "%s color: %s; background: transparent;"
+        % (ui_qss("error"), SEMANTIC["danger"]))
     lb.setVisible(False)
     return lb
 
 # 表格展示列（信息整合版：位置列合并球房+地区+桌号，填写人并入填写时间，
-# 解决人并入响应时间；完整信息仍保留在行 tooltip，第 0 列为勾选列）
+# 解决人并入解决时间；完整信息仍保留在行 tooltip，第 0 列为勾选列）
 TABLE_COLUMNS = (
     ("created_at", "填写时间", 128),
     ("occurred_at", "发生时间", 128),
@@ -275,7 +300,7 @@ TABLE_COLUMNS = (
 _COL_CHECK = 0  # 勾选列列号
 
 # 是/否徽章语义色（元组：是 → 前色，否 → 后色）：
-# 是否解决 绿/红、是否是我们问题 橙/灰、是否主动发起 蓝/灰；徽章底色由运行时加透明度生成
+# 已解决 绿/红、我方问题 橙/灰、主动发起 蓝/灰；徽章底色由运行时加透明度生成
 _YES_NO_COLORS = {
     "resolved": (SEMANTIC["success"], SEMANTIC["danger"]),
     "is_our_problem": (SEMANTIC["warning"], SEMANTIC["neutral"]),
@@ -293,16 +318,20 @@ def _badge_label(text: str, color: str, parent=None) -> QLabel:
     """
     lb = QLabel(text, parent)
     lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    lb.setFixedHeight(20)
+    lb.setFixedHeight(UI_V2["size"]["chip"])
     lb.setStyleSheet(
-        f"QLabel {{ background: {_hex_rgba(color, 30)}; color: {color};"
-        " border-radius: 9px; padding: 0 9px; font-size: 12px; }")
+        "QLabel { background: %s; color: %s; border-radius: %dpx;"
+        " padding: 0 %dpx; %s }" % (
+            _hex_rgba(color, 30), color, UI_V2["radius"]["pill"],
+            UI_V2["space"]["xs"], ui_qss("caption")))
     return lb
 
 
+# 圆角 R4、内边距 8px、字号 12、线宽 1px 全由 token 注入；hover 只切换
+# 统一的边框与底色状态，不做逐帧动画。
 _ROW_BTN_TMPL = (
-    "QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {bd};"
-    " border-radius: 4px; padding: 2px 8px; font-size: 12px; }}"
+    "QPushButton {{ background: {bg}; color: {fg}; border: {line_w}px solid {bd};"
+    " border-radius: {radius}px; padding: {pad_v}px {pad_h}px; font-size: {font}px; }}"
     "QPushButton:hover {{ background: {hov}; border-color: {hov_bd}; }}"
     "QPushButton:pressed {{ background: {prs}; }}"
 )
@@ -314,7 +343,9 @@ def _row_btn_css(style: str) -> str:
     强调色实时读取当前主题（与迁移按钮同套路），hover/pressed 由令牌派生。
     """
     from core.theme_qss import current_accent_hex
+    dark = isDarkTheme()
     accent = current_accent_hex()
+    hov = ui_hover_colors(dark)
     if style == "primary":
         kw = dict(bg=accent, fg="#ffffff", bd=accent,
                   hov=lighten(accent, 0.12), hov_bd=lighten(accent, 0.12),
@@ -323,13 +354,15 @@ def _row_btn_css(style: str) -> str:
         d = SEMANTIC["danger"]
         kw = dict(bg="transparent", fg=d, bd=_hex_rgba(d, 140),
                   hov=_hex_rgba(d, 26), hov_bd=d, prs=_hex_rgba(d, 46))
-    else:  # ghost：中性描边（深浅主题各一套灰，跟随主题切换）
-        if isDarkTheme():
-            kw = dict(bg="transparent", fg="#c8d0dc", bd="#484848",
-                      hov="#333333", hov_bd="#5c5c5c", prs="#3a3a3a")
-        else:
-            kw = dict(bg="transparent", fg="#333333", bd="#c9c9c9",
-                      hov="#f0f0f0", hov_bd="#a6a6a6", prs="#e4e4e4")
+    else:
+        kw = dict(bg="transparent", fg=ui_color("body", dark),
+                  bd=ui_color("line", dark), hov=hov["bg"],
+                  hov_bd=hov["line"], prs=ui_color("hover", dark))
+    kw.update(line_w=UI_V2["line"]["width"],
+              radius=UI_V2["radius"]["control"],
+              pad_v=UI_V2["space"]["xs"],
+              pad_h=UI_V2["space"]["xs"],
+              font=UI_V2["type"]["caption"]["size"])
     return _ROW_BTN_TMPL.format(**kw)
 
 
@@ -350,7 +383,7 @@ def _row_btn(text: str, style: str, on_click, parent=None,
     回调始终按无参签名调用，不用为每个按钮写适配函数。
     """
     btn = _QPushButton(text, parent)
-    btn.setFixedHeight(24)
+    btn.setFixedHeight(UI_V2["size"]["chip"])
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setStyleSheet(css if css is not None else _row_btn_css(style))
     btn.clicked.connect(lambda _=False: on_click())

@@ -96,7 +96,7 @@ class _IconCard(CardWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 8, 6, 6)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         self._icon_btn = ToolButton(icon, self)
         self._icon_btn.setFixedSize(40, 40)
         self._icon_btn.setIconSize(QSize(22, 22))
@@ -153,7 +153,7 @@ class _ControlItem(QWidget):
 
         box = QVBoxLayout(self)
         box.setContentsMargins(10, 8, 10, 8)
-        box.setSpacing(6)
+        box.setSpacing(4)
         # 控件水平居中
         center = QHBoxLayout()
         center.addStretch(1)
@@ -396,10 +396,9 @@ class _MediaPlayerDialog(QDialog):
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
+        root.setSpacing(8)
         root.addWidget(TitleLabel("多媒体播放", self))
-        root.addWidget(CaptionLabel(
-            "qfluentwidgets 已移除 VideoWidget/MediaPlayBar；", self))
+        root.addWidget(CaptionLabel("播放控件暂不可用", self))
 
         self._screen = QLabel(self)
         self._screen.setMinimumSize(560, 315)
@@ -704,7 +703,7 @@ class _WidgetGalleryTab(QWidget):
 
         v = QVBoxLayout(container)
         v.setContentsMargins(24, 16, 24, 20)
-        v.setSpacing(14)
+        v.setSpacing(12)
         v.addWidget(self._group_card("按钮 Buttons", self._fill_buttons, container))
         v.addWidget(self._group_card("输入 Inputs", self._fill_inputs, container))
         v.addWidget(self._group_card("显示 Display", self._fill_display, container))
@@ -732,7 +731,7 @@ class _WidgetGalleryTab(QWidget):
         box.setSpacing(8)
         box.addWidget(SubtitleLabel(title, card))
         flow = FlowLayout()
-        flow.setSpacing(10)
+        flow.setSpacing(8)
         box.addLayout(flow)
         fill_fn(flow, card)
         return card

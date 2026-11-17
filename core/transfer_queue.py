@@ -157,7 +157,7 @@ def total_pending(store) -> int:
 
 
 def describe_pending(records) -> str:
-    """给提示框用的一句话摘要，如 "3 个未完成的传输任务（上传 2 · 下载 1）" """
+    """给提示框用的一句话摘要，如 "3 个未完成的传输任务（上传 2　下载 1）" """
     counts = {}
     valid = 0
     for raw in (records or []):
@@ -172,7 +172,7 @@ def describe_pending(records) -> str:
     if not valid:
         return "没有未完成的传输任务"
     # 只列实际出现的类型：没有下载任务就不写「下载 0」。
-    detail = " · ".join(f"{label} {n}" for label, n in counts.items())
+    detail = "　".join(f"{label} {n}" for label, n in counts.items())
     return f"{valid} 个未完成的传输任务（{detail}）"
 
 

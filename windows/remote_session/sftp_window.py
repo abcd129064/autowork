@@ -766,7 +766,7 @@ class SFTPPanel(QWidget):
         )
         bar_layout = QHBoxLayout(self._reconnect_bar)
         bar_layout.setContentsMargins(8, 2, 8, 2)
-        bar_layout.setSpacing(6)
+        bar_layout.setSpacing(4)
         self._reconnect_label = QLabel('连接已断开')
         bar_layout.addWidget(self._reconnect_label)
         # stretch 把按钮顶到最右：提示文字长度随错误原因变化，不用 stretch 时

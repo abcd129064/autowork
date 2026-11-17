@@ -75,7 +75,7 @@ class TransferSizeMismatch(Exception):
             head += f" 预期 {self.expected} 字节"
         if self.actual is not None:
             head += f"、实际 {self.actual} 字节（相差 {self.delta:+d}）"
-        return f"{head} · {self.hint()}"
+        return f"{head}　{self.hint()}"
 
 
 def describe_size(num) -> str:

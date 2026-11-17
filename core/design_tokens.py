@@ -210,3 +210,128 @@ LEGACY_MAP = {
     "#fa8c16": SEMANTIC["warning"],
     "#f0a020": SEMANTIC["warning"],
 }
+
+
+# ----------------------------------------------------------------------------
+# V2 视觉对齐令牌（2026-11-18，售后面板先行）
+#   刻意与上方 SPACE / RADIUS / CONTROL 并存：旧值被 worklog、tools 等模块
+#   直接消费，改旧值会静默改动别人的界面。新增命名空间让迁移按模块推进，
+#   全仓迁移完再合并，避免一次性大爆炸式的视觉回归。
+# ----------------------------------------------------------------------------
+
+# 纯中性灰，R=G=B 无色彩偏向；亮暗主题共用这一套，只做角色反相
+NEUTRAL = {
+    50: "#FAFAFA", 100: "#F5F5F5", 200: "#EDEDED", 300: "#E0E0E0",
+    400: "#C4C4C4", 500: "#9E9E9E", 600: "#737373", 700: "#575757",
+    800: "#3F3F3F", 900: "#272727", 950: "#171717",
+}
+
+UI_V2 = {
+    "base": 4,
+    "space": {
+        "2xs": 4, "xs": 8, "sm": 12, "md": 16,
+        "lg": 24, "xl": 32, "2xl": 48, "3xl": 64,
+    },
+    "type": {
+        "title":   {"size": 16, "line": 24, "weight": 500},
+        "body":    {"size": 14, "line": 20, "weight": 400},
+        "caption": {"size": 12, "line": 16, "weight": 400},
+        "number":  {"size": 28, "line": 32, "weight": 600},
+    },
+    "size": {
+        "control": 32, "chip": 24, "table_row": 40, "table_head": 20,
+        "overview_card": 96, "button_min_w": 88, "icon": 32,
+        "textarea": 64, "dialog_min_w": 560,
+        "field_wide": 320, "field_mid": 160, "field_narrow": 140,
+        # ZhDatePicker 在 show 时会把最小宽度强制到 240（中文年月日完整显示），
+        # 构造期设更小的值会被库覆盖，令牌因此登记实际生效值
+        "date": 240, "step_btn": 32, "cand_list": 132,
+        "progress": 72, "resolver": 220, "quick_list": 220,
+    },
+    "radius": {"dialog": 12, "card": 8, "control": 4, "pill": 9999},
+    "shadow": {
+        "e1": "0 1px 2px rgba(23,23,23,0.06)",
+        "e2": "0 4px 12px rgba(23,23,23,0.10)",
+        "e3": "0 12px 32px rgba(23,23,23,0.16)",
+    },
+    "line": {"width": 1},
+    # 位移 token 保留给 Web / WinUI3 复用。Qt 布局管理器会在下一次 resize
+    # 时重置 move()，桌面端因此用等价的边框与底色状态表达上浮，见
+    # windows/aftersale/common.py 的 hover 样式工厂。
+    "motion": {"duration_ms": 250, "easing": "cubic-bezier(0, 0, 0.2, 1)",
+               "hover_lift_px": -2},
+}
+
+_UI_ROLE_LIGHT = {
+    "page": NEUTRAL[50], "card": NEUTRAL[100], "control": "#FFFFFF",
+    "hover": NEUTRAL[200], "line": NEUTRAL[300],
+    "disabled": NEUTRAL[400], "caption": NEUTRAL[500],
+    "secondary": NEUTRAL[600], "body": NEUTRAL[700],
+    "title": NEUTRAL[800], "number": NEUTRAL[900], "strong": NEUTRAL[950],
+}
+_UI_ROLE_DARK = {
+    "page": NEUTRAL[950], "card": NEUTRAL[900], "control": NEUTRAL[800],
+    "hover": NEUTRAL[700], "line": NEUTRAL[700],
+    "disabled": NEUTRAL[600], "caption": NEUTRAL[500],
+    "secondary": NEUTRAL[400], "body": NEUTRAL[300],
+    "title": NEUTRAL[200], "number": NEUTRAL[100], "strong": NEUTRAL[50],
+}
+
+
+def ui_color(role: str, dark: bool = False) -> str:
+    """按语义角色取中性灰；暗色主题用同一色板反相，不维护第二套色值。"""
+    table = _UI_ROLE_DARK if dark else _UI_ROLE_LIGHT
+    return table.get(role, table["body"])
+
+
+def ui_hover_colors(dark: bool = False) -> dict:
+    """统一 hover 状态色：所有可 hover 控件共用，禁止逐个微调。"""
+    return {"line": ui_color("disabled", dark),
+            "bg": ui_color("hover", dark),
+            "text": ui_color("title", dark)}
+
+
+def ui_qss(kind: str) -> str:
+    """生成字号与字重 QSS，颜色交给调用方按主题注入。
+
+    Qt 样式表不解析 line-height，写进去只会得到一条被静默忽略的规则；
+    行高改由 UI_V2["type"][*]["line"] 在布局层约束。这里也不写 color，
+    让 qfluentwidgets 的主题色继续生效，避免切换主题后残留旧色。
+    """
+    t = UI_V2["type"]["caption" if kind in ("label", "caption", "error")
+                      else "title" if kind == "title" else "body"]
+    return "font-size: %dpx; font-weight: %d;" % (t["size"], t["weight"])
+
+
+def ui_self_check() -> list:
+    """V2 契约自检：返回违规项列表，空列表表示令牌自洽。"""
+    errs = []
+    base = UI_V2["base"]
+    for key, val in UI_V2["space"].items():
+        if val % base:
+            errs.append("space.%s=%s not multiple of %s" % (key, val, base))
+    for key, val in UI_V2["size"].items():
+        if val % base:
+            errs.append("size.%s=%s not multiple of %s" % (key, val, base))
+    for key, t in UI_V2["type"].items():
+        if t["line"] % base:
+            errs.append("type.%s line-height off grid" % key)
+        if t["weight"] not in (400, 500, 600):
+            errs.append("type.%s weight out of range" % key)
+    r = UI_V2["radius"]
+    if r["dialog"] - base != r["card"] or r["card"] - base != r["control"]:
+        errs.append("concentric radius broken")
+    for key, val in r.items():
+        if key != "pill" and val % base:
+            errs.append("radius.%s off grid" % key)
+    if len(NEUTRAL) != 11:
+        errs.append("NEUTRAL not 11 levels")
+    for level, hx in NEUTRAL.items():
+        rgb = hx[1:]
+        if not (rgb[0:2] == rgb[2:4] == rgb[4:6]):
+            errs.append("Gray-%s not neutral" % level)
+    if len(UI_V2["shadow"]) != 3 or UI_V2["motion"]["duration_ms"] != 250:
+        errs.append("shadow levels or motion duration off contract")
+    if UI_V2["line"]["width"] != 1:
+        errs.append("divider width not 1px")
+    return errs

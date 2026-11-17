@@ -52,11 +52,11 @@ def pages_of(total: int, page_size: int) -> int:
 
 
 def pager_text(page_no: int, total: int, page_size: int) -> str:
-    """页脚文案 1/2 · 共 65 条；文案被单测锁定，改格式要同步改测试。
+    """页脚只显示页码；总数由左侧统计标签承载，改格式要同步改测试。
 
     页数统一走 pages_of，避免这里和翻页按钮的可点范围算出不一致。
     """
-    return "%d/%d · 共 %d 条" % (page_no, pages_of(total, page_size), total)
+    return "%d / %d" % (page_no, pages_of(total, page_size))
 
 
 def col_key(col: int, table_columns, check_col: int = 0):
@@ -81,14 +81,14 @@ def row_tooltip(rec: dict) -> str:
         f"填写人: {rec.get('creator') or ''}\n"
         f"发生时间: {rec.get('occurred_at') or ''}\n"
         f"类型: {rec.get('issue_type') or ''}\n"
-        f"位置: {rec.get('room_name') or ''} · "
-        f"{rec.get('region') or ''} · {rec.get('table_no') or ''}\n"
+        f"位置: {rec.get('room_name') or ''}　"
+        f"{rec.get('region') or ''}　{rec.get('table_no') or ''}\n"
         f"问题: {rec.get('problem') or ''}\n"
         f"发生原因: {rec.get('cause') or ''}\n"
-        f"是否解决: {rec.get('resolved') or '否'}\n"
-        f"是否我们主动发起: {rec.get('is_initiative') or '否'}\n"
-        f"是否是我们的问题: {rec.get('is_our_problem') or '否'}\n"
+        f"已解决: {rec.get('resolved') or '否'}\n"
+        f"主动发起: {rec.get('is_initiative') or '否'}\n"
+        f"我方问题: {rec.get('is_our_problem') or '否'}\n"
         f"解决方案: {rec.get('solution') or ''}\n"
         f"解决人: {rec.get('resolver') or ''}\n"
-        f"响应时间: {rec.get('response_time') or ''}")
+        f"解决时间: {rec.get('response_time') or ''}")
 

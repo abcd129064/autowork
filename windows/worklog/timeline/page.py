@@ -30,7 +30,7 @@ from windows.worklog.common import (AvatarDot, CardBox, ColorLabel, DateBox,
 from windows.worklog.controller import WorklogController
 
 # 稿 415 的下拉只有一处，anno 说是「按天/按成员 两轴切换」，文案照抄稿面
-_MODES = ("按天 · 全部成员", "按成员 · 全部成员")
+_MODES = ("按天　全部成员", "按成员　全部成员")
 
 
 class _EntryCard(CardBox):
@@ -187,7 +187,7 @@ class TimelinePage(WorklogPage):
 
         bar.addRight()
         self._note = CaptionLabel(
-            "时间轴为只读回看视图 · 点击条目跳转页签1 并定位记录", bar)
+            "时间轴为只读回看视图", bar)
         self._note.setFont(px_font(TYPE_SCALE_PX["sm"]))
         self._note.setTextColor(*text_color_tier(3))
         bar.addWidget(self._note)

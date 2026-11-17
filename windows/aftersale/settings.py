@@ -67,11 +67,11 @@ class CycleSettingsPage(QWidget):
         card = CardWidget(self)
         vbox = QVBoxLayout(card)
         vbox.setContentsMargins(16, 14, 16, 14)
-        vbox.setSpacing(10)
+        vbox.setSpacing(8)
         vbox.addWidget(BodyLabel("统计周期设置", card))
         vbox.addWidget(CaptionLabel(
-            "周期决定售后记录按发生时间归属的统计区间（周二起周一止为原默认）；"
-            "保存后立即生效，历史记录的归属按新规则重新计算，无需手工修改", card))
+            "周期决定记录的统计区间\n"
+            "保存后立即生效，历史记录按新规则重算", card))
 
         # 周期模式单选
         self._rb_tue = RadioButton("周二 ~ 周一（原默认，每周二开始）", card)
@@ -234,7 +234,7 @@ class SettingsPage(QWidget):
         content = QWidget(self)
         cl = QVBoxLayout(content)
         cl.setContentsMargins(24, 20, 24, 20)
-        cl.setSpacing(14)
+        cl.setSpacing(12)
 
         # 周期设置卡片
         self.cycle_page = CycleSettingsPage(content)

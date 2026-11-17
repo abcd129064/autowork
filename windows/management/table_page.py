@@ -179,11 +179,11 @@ class TablePage(QWidget):
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # --- 工具栏 ---
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        toolbar.setSpacing(4)
         # 搜索框只转发输入事件，防抖与查询交给 _on_search_input → _search_timer；
         # 直接在这里连 _load_local 会逐字查库，打一个字卡一次。
         self._search_edit = SearchLineEdit(self)
@@ -306,7 +306,7 @@ class TablePage(QWidget):
         # 分页栏控件只负责显示：页码、按钮可用性、计数文本统一由 _update_pager
         # 刷新，翻页逻辑不散落在各个回调里。
         pager = QHBoxLayout()
-        pager.setSpacing(6)
+        pager.setSpacing(4)
         self._lbl_info = QLabel("正在加载...", self)
         pager.addWidget(self._lbl_info)
         pager.addStretch(1)
@@ -559,7 +559,7 @@ class TablePage(QWidget):
                             cell.setForeground(color)
                         if hf >= _HF_THRESHOLD:
                             # 高频问题设备：状态列标红 + tooltip 显示提交次数
-                            cell.setText(f"{val} · 高频问题")
+                            cell.setText(f"{val}　高频问题")
                             cell.setForeground(_HF_COLOR)
                             cell.setToolTip(
                                 f"{tip}\n近 {_HF_DAYS} 天提交 {hf} 次（精度/问题）")
@@ -669,7 +669,7 @@ class TablePage(QWidget):
             tips.append(ver_tip)
         if ver_err:
             tips.append("版本号条件无效，已忽略")
-        suffix = f"（{' · '.join(tips)}）" if tips else ""
+        suffix = f"（{'　'.join(tips)}）" if tips else ""
         self._lbl_info.setText(f"共 {self._total} 条{suffix}")
 
     # ---------- 交互 ----------

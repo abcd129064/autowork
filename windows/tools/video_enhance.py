@@ -80,7 +80,7 @@ ENCODERS = {
     "libx264": {
         "label": "libx264", "quality_flag": "-crf",
         "presets": X264_PRESETS, "two_pass": True, "hw": False,
-        "crf_hint": "视觉无损 16~18 · 推荐 18~20 · 网络分发 23",
+        "crf_hint": "视觉无损 16~18、推荐 18~20、网络分发 23",
     },
     "libx265": {
         "label": "libx265", "quality_flag": "-crf",
@@ -1251,4 +1251,4 @@ def summarize_params(p):
         bits.append(f"{enc} {p.get('target_mb')}MB 两遍")
     else:
         bits.append(f"{enc} crf{p.get('crf')} {p.get('codec_preset')}")
-    return " · ".join(bits)
+    return "　".join(bits)

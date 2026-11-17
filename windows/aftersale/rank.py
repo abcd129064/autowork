@@ -110,14 +110,14 @@ def _fetch_rank_options():
 # ==================== 排行横向条形图（QPainter 自绘） ====================
 
 class _RankHBarChart(QWidget):
-    """排行横向条形图：名称 | 条形 | 数量 · 占比（TOP N 行，降序输入）
+    """排行横向条形图：名称 | 条形 | 数量　占比（TOP N 行，降序输入）
 
     行可点击：rowClicked 发射该行序号（与页面 _rows 同序），由页面分发
     （球房级行点击=下钻该球房，球桌级行点击=跳转明细）。悬停行淡色高亮。
     """
 
     # 行高 32 是「条形 16px + 上下各 8px 呼吸」的结果，再矮条形就会糊成一片。
-    # 名称列 150px 恰好放得下「XX球房(XX店)」，数值列 96px 放得下「1234 · 56%」。
+    # 名称列 150px 恰好放得下「XX球房(XX店)」，数值列 96px 放得下「1234　56%」。
     ROW_H = 32
     LABEL_W = 150
     VAL_W = 96
@@ -184,7 +184,7 @@ class _RankHBarChart(QWidget):
             if fm.horizontalAdvance(name) > self.LABEL_W - 6:
                 QToolTip.showText(
                     self.mapToGlobal(e.position().toPoint()),
-                    f"{name} · {int(r.get('total') or 0)} 条 · "
+                    f"{name}　{int(r.get('total') or 0)} 条　"
                     f"{int(r.get('share') or 0)}%", self)
             else:
                 QToolTip.hideText()
@@ -271,7 +271,7 @@ class _RankHBarChart(QWidget):
             p.drawText(
                 QRectF(bar_x + bar_w + 8, y, self.VAL_W, self.ROW_H),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                f"{n} · {int(r.get('share') or 0)}%")
+                f"{n}　{int(r.get('share') or 0)}%")
 
 
 # ==================== 售后排行页 ====================
@@ -356,8 +356,8 @@ class RankPage(QWidget):
         toolbar_widget = QWidget(self)
         toolbar_scroll.setWidget(toolbar_widget)
         toolbar = FlowLayout(toolbar_widget)
-        toolbar.setHorizontalSpacing(6)
-        toolbar.setVerticalSpacing(6)
+        toolbar.setHorizontalSpacing(4)
+        toolbar.setVerticalSpacing(4)
         toolbar.setContentsMargins(2, 4, 2, 4)
 
         # 时间范围的五个入口放在一个分段控件里：它们是互斥选项，
@@ -418,16 +418,16 @@ class RankPage(QWidget):
         self._resolved_seg = YesNoSegment("", self, include_all=True)
         self._resolved_seg.currentItemChanged.connect(
             lambda _k: self._on_filter_changed())
-        toolbar.addWidget(CaptionLabel("是否解决：", self))
+        toolbar.addWidget(CaptionLabel("已解决：", self))
         toolbar.addWidget(self._resolved_seg)
         self._our_problem_seg = YesNoSegment("", self, include_all=True)
-        self._our_problem_seg.setToolTip("是否是我们的问题")
+        self._our_problem_seg.setToolTip("我方问题")
         self._our_problem_seg.currentItemChanged.connect(
             lambda _k: self._on_filter_changed())
         toolbar.addWidget(CaptionLabel("我方问题：", self))
         toolbar.addWidget(self._our_problem_seg)
         self._initiative_seg = YesNoSegment("", self, include_all=True)
-        self._initiative_seg.setToolTip("是否我们主动发起")
+        self._initiative_seg.setToolTip("主动发起")
         self._initiative_seg.currentItemChanged.connect(
             lambda _k: self._on_filter_changed())
         toolbar.addWidget(CaptionLabel("主动发起：", self))
@@ -447,10 +447,10 @@ class RankPage(QWidget):
         self._btn_query.clicked.connect(self._load)
         toolbar.addWidget(self._btn_query)
         self._btn_reset = PushButton(FluentIcon.SYNC, "重置", self)
-        self._btn_reset.setToolTip("恢复默认筛选（近 90 天 · 全部分类）")
+        self._btn_reset.setToolTip("恢复默认筛选")
         self._btn_reset.clicked.connect(self._on_reset)
         toolbar.addWidget(self._btn_reset)
-        self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出 xlsx", self)
+        self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出", self)
         self._btn_export.setToolTip("导出当前排行（含指标列）为 xlsx")
         self._btn_export.clicked.connect(self._on_export)
         toolbar.addWidget(self._btn_export)
@@ -460,7 +460,7 @@ class RankPage(QWidget):
         # 四张卡等权平分一行（addWidget 的 stretch 都是 1）：数字长度接近，
         # 按内容给宽度会出现某张卡明显更宽、看起来像更重要。
         cards_row = QHBoxLayout()
-        cards_row.setSpacing(10)
+        cards_row.setSpacing(8)
         self._card_rooms = self._make_card(cards_row)
         self._card_tables = self._make_card(cards_row)
         self._card_total = self._make_card(cards_row)
@@ -622,7 +622,7 @@ class RankPage(QWidget):
         card = CardWidget(self)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         lbl = CaptionLabel("", card)
         num = QLabel("0", card)
         num.setStyleSheet(
@@ -888,7 +888,7 @@ class RankPage(QWidget):
         num.setStyleSheet(base)
         # 球桌的唯一键是「球房 + 桌号」，不是桌号本身：
         # 各家球房的 1 号桌是同一串字符，按桌号去重会把它们合成一张。
-        sub.setText("去重球房·桌号对")
+        sub.setText("按球房与桌号去重")
 
         _c, lbl, num, sub = self._card_total
         lbl.setText("记录总数")
@@ -1171,9 +1171,9 @@ class RankPage(QWidget):
         # 正好在最后一行数据之下空出一行。
         s = self._summary
         last = len(self._rows) + 2
-        summary_note = (f"口径：共 {int(s.get('total') or 0)} 条记录 · "
-                        f"覆盖球房 {int(s.get('rooms') or 0)} · "
-                        f"覆盖球桌 {int(s.get('tables') or 0)} · "
+        summary_note = (f"口径：共 {int(s.get('total') or 0)} 条记录　"
+                        f"覆盖球房 {int(s.get('rooms') or 0)}　"
+                        f"覆盖球桌 {int(s.get('tables') or 0)}　"
                         f"未解决 {int(s.get('unresolved') or 0)}")
         ws.cell(row=last, column=1, value=summary_note).font = header_font
         # 列宽按内容长度硬编码：openpyxl 不会自动适配，

@@ -98,9 +98,9 @@ def cell_for(key: str, rec: dict, row_bg=None) -> CellSpec:
                              str(rec.get("creator") or "")),
             font=FONT_SMALL)
     if key == "location":
-        # 显示文本是换行/点号拼串，排序由 SQL 按球房、地区、桌号逐级做
+        # 显示文本是换行与全角空格拼串，排序由 SQL 按球房、地区、桌号逐级做
         return CellSpec(
-            text="%s\n%s · %s" % (str(rec.get("room_name") or ""),
+            text="%s\n%s　%s" % (str(rec.get("room_name") or ""),
                                   str(rec.get("region") or ""),
                                   str(rec.get("table_no") or "")),
             font=FONT_SMALL)

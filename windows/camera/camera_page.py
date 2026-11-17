@@ -210,24 +210,24 @@ class DahuaCameraWork(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # ---- 三列布局：登录卡(含 frps 隧道) | 预览 | 云台（设计稿 camera_tool_frps_v2.html）----
         cols = QHBoxLayout()
-        cols.setSpacing(10)
+        cols.setSpacing(8)
 
         login_card = CardWidget(self)
         login_card.setFixedWidth(300)
         lv = QVBoxLayout(login_card)
         lv.setContentsMargins(14, 12, 14, 12)
-        lv.setSpacing(6)
+        lv.setSpacing(4)
         lv.addWidget(BodyLabel("设备登录", login_card))
 
         def _field(label_text: str, widget: QWidget):
             box = QWidget(login_card)
             fv = QVBoxLayout(box)
             fv.setContentsMargins(0, 0, 0, 0)
-            fv.setSpacing(2)
+            fv.setSpacing(4)
             cap = CaptionLabel(label_text, box)
             cap.setStyleSheet("color:#9aa1b5;")
             fv.addWidget(cap)
@@ -257,7 +257,7 @@ class DahuaCameraWork(QWidget):
         # ---- frps 相机隧道（登录卡底部，*_cam 快速选用 + 搜索，2026-10-09） ----
         lv.addSpacing(6)
         fh = QHBoxLayout()
-        fh.setSpacing(6)
+        fh.setSpacing(4)
         self._lb_frps = BodyLabel("📡 frps 相机隧道", login_card)
         self._lb_frps_cnt = CaptionLabel("", login_card)
         self._lb_frps_cnt.setStyleSheet("color:#4f8cff;")
@@ -337,7 +337,7 @@ class DahuaCameraWork(QWidget):
         grid_w = QWidget(ptz_card)
         grid = QGridLayout(grid_w)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(6)
+        grid.setSpacing(4)
         self._ptz_btns: dict[str, PushButton] = {}
         for i, (cmd, label) in enumerate(_DIR_KEYS):
             btn = PushButton(label, grid_w)
@@ -352,7 +352,7 @@ class DahuaCameraWork(QWidget):
         ptz.addWidget(grid_w, 0, Qt.AlignCenter)
 
         zf = QGridLayout()
-        zf.setSpacing(6)
+        zf.setSpacing(4)
         self._zf_btns: list[PushButton] = []
         for col, (title, add, dec) in enumerate((
                 ("变倍", "ZOOM_ADD_CONTROL", "ZOOM_DEC_CONTROL"),
@@ -379,7 +379,7 @@ class DahuaCameraWork(QWidget):
         self._preset_panel = QWidget(ptz_card)
         pp = QVBoxLayout(self._preset_panel)
         pp.setContentsMargins(0, 4, 0, 0)
-        pp.setSpacing(6)
+        pp.setSpacing(4)
         phead = QHBoxLayout()
         phead.addWidget(BodyLabel("预置点", self._preset_panel))
         phead.addStretch(1)
@@ -426,7 +426,7 @@ class DahuaCameraWork(QWidget):
 
         # ---- OSD 卡 ----
         osd_row = QHBoxLayout()
-        osd_row.setSpacing(10)
+        osd_row.setSpacing(8)
         self._card_chn = self._build_osd_card(
             osd_row, "chn", "通道标题", text_hint="叠加文字", has_pos=True,
             has_blends=True)
@@ -545,7 +545,7 @@ class DahuaCameraWork(QWidget):
         self._set_ptz_enabled(ptz_ok)
         self._lb_state.setText(
             f"● {client.serial or client.host}（通道 {client.chan_num}）"
-            f"{' · PT机型' if ptz_ok else ' · 固定镜头'}")
+            f"{'　PT机型' if ptz_ok else '　固定镜头'}")
         _toast(self, f"连接成功：{client.serial}")
         self._osd_get("chn")
         self._osd_get("time")
@@ -592,7 +592,7 @@ class DahuaCameraWork(QWidget):
         for p in shown:
             status, _color = _CAM_STATUS.get(p["status"], ("未知", ""))
             item = QListWidgetItem(
-                f"{p['name']}  ·  {status} · {p['remotePort'] or '-'}")
+                f"{p['name']}　{status}　{p['remotePort'] or '-'}")
             item.setData(Qt.UserRole, p)
             item.setToolTip(f"隧道: {p['name']}\n状态: {status}\n"
                             f"远程端口: {p['remotePort'] or '-'}\n"
