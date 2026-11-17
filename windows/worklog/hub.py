@@ -80,10 +80,10 @@ class WorkLogHub(PivotPage):
         head = QWidget(self)
         row = QHBoxLayout(head)
         row.setContentsMargins(28, 22, 28, 6)   # 稿 73 padding: 22px 28px 6px
-        row.setSpacing(14)
+        row.setSpacing(12)
 
         col = QVBoxLayout()
-        col.setSpacing(3)                        # 稿 75 margin-top: 3px
+        col.setSpacing(4)                        # 列内间距按 4px 网格
         title = TitleLabel("工作留痕", head)
         tf = QFont(title.font())
         tf.setPixelSize(TYPE_SCALE_PX["3xl"])    # 稿 74：24px
@@ -91,7 +91,7 @@ class WorkLogHub(PivotPage):
         title.setFont(tf)
         col.addWidget(title)
 
-        sub = CaptionLabel("每日工作留痕与量化管理 · 多成员 · 供向上汇报", head)
+        sub = CaptionLabel("每日工作留痕与量化管理", head)
         sf = QFont(sub.font())
         sf.setPixelSize(TYPE_SCALE_PX["base"])   # 稿 75：13px
         sub.setFont(sf)

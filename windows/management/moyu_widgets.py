@@ -417,7 +417,7 @@ class _Board2048(QWidget):
         overlay = None
         if self._won and not self._won_cont:
             # 胜利用金色、结束用白色，两种遮罩一眼可分
-            overlay = ("达成 2048！", "回车继续游戏 · R 重新开始")
+            overlay = ("达成 2048！", "回车继续游戏　R 重新开始")
         elif self._over:
             overlay = ("游戏结束", "按 R 重新开始")
         if overlay:
@@ -465,7 +465,7 @@ class Game2048Widget(QWidget):
         bar.addSpacing(16)
         bar.addWidget(self._lbl_best)
         bar.addStretch(1)
-        hint = CaptionLabel("方向键 / WASD 移动 · R 重开", self)
+        hint = CaptionLabel("方向键 / WASD 移动　R 重开", self)
         hint.setStyleSheet("color: #8a8f98;")
         bar.addWidget(hint)
         bar.addSpacing(12)
@@ -859,7 +859,7 @@ class SnakeWidget(QWidget):
         self._combo_level.currentIndexChanged.connect(self._on_level)
         bar.addWidget(self._combo_level)
         bar.addStretch(1)
-        hint = CaptionLabel("方向键 / WASD 移动 · R 重开 · 难度越高节奏越快",
+        hint = CaptionLabel("方向键 / WASD 移动　R 重开　难度越高节奏越快",
                             self)
         hint.setStyleSheet("color: #8a8f98;")
         bar.addWidget(hint)
@@ -1394,10 +1394,10 @@ class _MinesBoard(QWidget):
             for x in range(self._cols):
                 self._draw_cell(p, x, y, dead, cell, x0, y0)
         overlay = {
-            "idle": ("扫雷", "左键翻开 · 右键插旗 · 首点必定安全"),
+            "idle": ("扫雷", "左键翻开、右键插旗、首点必定安全"),
             "paused": ("已暂停", "点击棋盘或「继续」恢复计时"),
-            "over": ("踩雷了", "按 R 换新局 · 按 T 同图重试"),
-            "win": ("排雷成功", f"用时 {self._seconds} 秒 · 按 R 重开"),
+            "over": ("踩雷了", "按 R 换新局　按 T 同图重试"),
+            "win": ("排雷成功", f"用时 {self._seconds} 秒　按 R 重开"),
         }.get(self._state)
         if overlay:
             _draw_overlay(p, x0, y0, w, h, overlay[0], overlay[1])
@@ -1585,7 +1585,7 @@ class MinesweeperWidget(QWidget):
         self._combo_level.currentIndexChanged.connect(self._on_level)
         bar.addWidget(self._combo_level)
         bar.addStretch(1)
-        hint = CaptionLabel("左键翻开 · 右键插旗 · 双击数字展开邻域 · R 重开 · T 同图重试 · A 自动标雷", self)
+        hint = CaptionLabel("左键翻开　右键插旗　双击数字展开邻域　R 重开　T 同图重试　A 自动标雷", self)
         hint.setStyleSheet("color: #8a8f98;")
         bar.addWidget(hint)
         bar.addSpacing(12)
@@ -2319,7 +2319,7 @@ class MoyuReaderWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
         # ---- 工具栏 ----
         bar = QHBoxLayout()
@@ -2400,7 +2400,7 @@ class MoyuReaderWidget(QWidget):
         bv.setContentsMargins(0, 0, 0, 0)
         bv.setSpacing(4)
         bv_title = BodyLabel("系统日志（实时）", boss_view)
-        bv_cap = CaptionLabel("自动采集 · 滚动刷新", boss_view)
+        bv_cap = CaptionLabel("自动采集　滚动刷新", boss_view)
         bv_cap.setStyleSheet("color: #8a8f98;")
         self._boss_log = QTextBrowser(boss_view)
         self._boss_log.setReadOnly(True)
@@ -2621,7 +2621,7 @@ class MoyuReaderWidget(QWidget):
         text = data.get("text") or ""
         self._current_ratio = 0.0
         title = (data.get("title") or "").strip()
-        source = f"{title} · {_norm_host(url)}" if title else f"正在阅读：{url}"
+        source = f"{title}　{_norm_host(url)}" if title else f"正在阅读：{url}"
         self._set_text(text, source)
         self._update_nav(data)
         save_moyu_state({"reader_last_url": url})

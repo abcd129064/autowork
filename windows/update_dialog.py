@@ -30,7 +30,7 @@ def _human_size(n) -> str:
     """把字节数转成人类可读字符串；非法或非正数返回空串。
 
     调用方会把结果直接拼进文案，空串比「0 B」干净：大小未知时显示
-    「完整包 · 大小未知」，而不是自相矛盾的「完整包 · 0 B」。
+    「完整包　大小未知」，而不是自相矛盾的「完整包　0 B」。
     """
     try:
         n = float(n or 0)
@@ -85,7 +85,7 @@ class UpdateDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.titleLabel)
 
         head = QHBoxLayout()
-        head.setSpacing(6)
+        head.setSpacing(4)
         self.ver_label = BodyLabel(
             f"{self._local_version or '当前版本'}  →  {remote}", self)
         self.ver_label.setObjectName("updateVerLabel")
@@ -93,7 +93,7 @@ class UpdateDialog(MessageBoxBase):
         head.addStretch(1)
         size_txt = _human_size(pkg.get("size"))
         self.meta_label = CaptionLabel(
-            ("增量更新 · " if self._mode == "incremental" else "完整包 · ")
+            ("增量更新　" if self._mode == "incremental" else "完整包　")
             + (size_txt or "大小未知"), self)
         self.meta_label.setObjectName("updateMetaLabel")
         head.addWidget(self.meta_label)

@@ -304,7 +304,7 @@ class ConnDiagWidget(QWidget):
 
         # --- 工具栏 ---
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        toolbar.setSpacing(4)
 
         # 明细 / 统计 视图切换：用 Pivot 与远程会话其他页保持同一种导航语汇
         self._pivot = Pivot(self)
@@ -385,7 +385,7 @@ class ConnDiagWidget(QWidget):
         # 用滚动区而不是整页替换：设备多时统计表会超出窗口高度
         self._stats_body = QVBoxLayout()
         self._stats_body.setContentsMargins(0, 0, 6, 0)
-        self._stats_body.setSpacing(10)
+        self._stats_body.setSpacing(8)
         self._stats_body.addStretch(1)
         holder = QWidget(self._stack)
         holder.setLayout(self._stats_body)
@@ -400,7 +400,7 @@ class ConnDiagWidget(QWidget):
         self._lbl_info = QLabel("正在加载...", self)
         status.addWidget(self._lbl_info)
         status.addStretch(1)
-        self._lbl_hint = QLabel("失败记录置顶 · 右键行可复制完整内容（含调用栈）", self)
+        self._lbl_hint = QLabel("失败记录置顶　右键行可复制完整内容", self)
         self._lbl_hint.setStyleSheet("color: gray;")
         status.addWidget(self._lbl_hint)
         root.addLayout(status)
@@ -565,11 +565,11 @@ class ConnDiagWidget(QWidget):
                 self._refresh_stats()
             self._stack.setCurrentIndex(1)
             self._lbl_hint.setText(
-                "双击设备行可跳转明细视图并过滤该设备 · 统计遵循上方过滤条件")
+                "双击设备行可跳转明细视图")
         else:
             self._stack.setCurrentIndex(0)
             self._lbl_hint.setText(
-                "失败记录置顶 · 右键行可复制完整内容（含调用栈）")
+                "失败记录置顶　右键行可复制完整内容")
 
     def _refresh_stats(self):
         """按当前过滤后的记录重建统计视图（刷新/过滤变化后调用）。
@@ -658,7 +658,7 @@ class ConnDiagWidget(QWidget):
         lay = QVBoxLayout(wrap)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
-        title = QLabel(f"设备连接质量汇总（成功率升序，最差在前 · 共 {len(hosts)} 台）", wrap)
+        title = QLabel(f"设备连接质量汇总（成功率升序，最差在前　共 {len(hosts)} 台）", wrap)
         f = title.font(); f.setBold(True); title.setFont(f)
         lay.addWidget(title)
         lay.addWidget(t)

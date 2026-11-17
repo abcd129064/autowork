@@ -588,8 +588,7 @@ class RemoteMixin:
         combo.setObjectName(u"p2p_table_search")
         combo.setPlaceholderText("从球桌库选择")
         combo.setClearButtonEnabled(True)
-        combo.setToolTip("选择球桌后自动回填 snk 并加入下方列表；\n"
-                         "可输入球桌名 / 球房名 / snk 模糊搜索")
+        combo.setToolTip("可按球桌名、球房名或 snk 搜索")
         # 宽度固定：ComboBoxBase.setText 会 adjustSize()，长球桌名/球房名/snk
         # 回填时会把控件拉宽进而撑破 290px 面板；setFixedWidth 下只省略号截断，
         # 且宽度恒定——弹层锚定控件位置，控件宽度不再因文本变化而抖动

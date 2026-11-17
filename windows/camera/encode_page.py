@@ -131,7 +131,7 @@ def _badge(parent, text: str, kind: str = "p1") -> CaptionLabel:
     lb = CaptionLabel(text, parent)
     lb.setStyleSheet(f"color:{color};border:1px solid {border};"
                      f"border-radius:9px;padding:0 9px;font-size:11px;")
-    # Ignored：徽标文字较长（ENCODE_VIDEO 1100 · emFormatType=1），若按
+    # Ignored：徽标文字较长（ENCODE_VIDEO 1100　emFormatType=1），若按
     # minimumSizeHint 参与布局会把卡片最小宽顶到左列放不下
     lb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
     return lb
@@ -199,7 +199,7 @@ def _slider_cell(parent, lo, hi, val, fmt=None):
     row = QWidget(parent)
     hl = QHBoxLayout(row)
     hl.setContentsMargins(0, 0, 0, 0)
-    hl.setSpacing(6)
+    hl.setSpacing(4)
     sld = QSlider(Qt.Horizontal, row)
     sld.setRange(int(lo), int(hi))
     sld.setMinimumWidth(70)
@@ -320,7 +320,7 @@ class EncodePage(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 6, 8, 8)
-        root.setSpacing(6)
+        root.setSpacing(4)
 
         # ---- 顶栏：通道 + 说明 + 读取全部 ----
         top = QHBoxLayout()
@@ -344,7 +344,7 @@ class EncodePage(QWidget):
 
         # ---- 两列主体 ----
         blocks = QHBoxLayout()
-        blocks.setSpacing(10)
+        blocks.setSpacing(8)
 
         # 左列：上预览（固定）/ 下码流（滚动）
         # 设计稿左列约 480~550px：套容器限最大宽，避免被窗口拉伸后卡片过宽；
@@ -355,9 +355,9 @@ class EncodePage(QWidget):
         self._left_box = left_box
         left = QVBoxLayout(left_box)
         left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(6)
+        left.setSpacing(4)
         left.addWidget(self._build_preview_card())
-        left.addWidget(_sep("左下 · 常用码流参数（固定）", left_box))
+        left.addWidget(_sep("左下　常用码流参数（固定）", left_box))
         self._stream_scroll = _make_scroll(self)
         host = QWidget(self._stream_scroll)
         sv = QVBoxLayout(host)
@@ -382,8 +382,8 @@ class EncodePage(QWidget):
         right_box = QWidget(self)
         rv = QVBoxLayout(right_box)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(6)
-        rv.addWidget(_sep("右侧 · 其他卡片（独立滚动）", right_box))
+        rv.setSpacing(4)
+        rv.addWidget(_sep("右侧　其他卡片（独立滚动）", right_box))
         self._right_scroll = _make_scroll(self)
         self._right_host = QWidget(self._right_scroll)
         self._right_grid = QGridLayout(self._right_host)
@@ -397,7 +397,7 @@ class EncodePage(QWidget):
 
         # ---- 右列卡片（顺序与设计稿一致）----
         self._grp_exposure = self._build_group_card(
-            "曝光", "P2 · 1306/1308", [
+            "曝光", "P2　1306/1308", [
                 ("combo", "曝光模式", "mode", _EXPOSURE_MODES),
                 ("combo", "抗闪", "antiflicker", _ANTIFLICKERS),
                 ("slider", "曝光补偿", "compensation", 0, 100),
@@ -405,36 +405,36 @@ class EncodePage(QWidget):
                  _opts("1/25", "1/100", "1/10000"), _TIP_SHUTTER),
                 ("slider", "增益", "gain", 0, 100)])
         self._grp_backlight = self._build_group_card(
-            "背光", "P2 · 1309", [
+            "背光", "P2　1309", [
                 ("combo", "背光模式", "mode", _BACK_MODES),
                 ("slider", "宽动态等级", "wide_dynamic", 0, 100),
                 ("combo", "BLC 区域", None,
                  _opts("全屏", "上", "中", "下"), _TIP_BLC_REGION)])
         self._grp_white = self._build_group_card(
-            "白平衡", "P2 · VideoInOptions", [
+            "白平衡", "P2　VideoInOptions", [
                 ("combo", "模式", "white_balance", _WB_MODES),
                 ("slider", "红色增益", "gain_red", 0, 100, _TIP_WB_GAIN),
                 ("slider", "蓝色增益", "gain_blue", 0, 100, _TIP_WB_GAIN)])
         self._grp_daynight = self._build_group_card(
-            "日夜模式", "P2 · VideoInOptions", [
+            "日夜模式", "P2　VideoInOptions", [
                 ("checks", "类型", ("电子", "机械"), _TIP_DAYNIGHT_TYPE),
                 ("combo", "切换模式", "day_night", _DAYNIGHT_MODES),
                 ("slider", "灵敏度", "daynight_sensitivity", 0, 100),
                 ("combo", "延时", "daynight_delay",
                  [("0 s", 0), ("2 s", 2), ("5 s", 5)])])
         self._grp_light = self._build_group_card(
-            "补光", "P2 · LIGHTING_SCHEME", [
+            "补光", "P2　LIGHTING_SCHEME", [
                 ("combo", "灯光模式", "mode", _LIGHT_MODES),
                 ("slider", "补光强度", "correction", 0, 100),
                 ("combo", "灵敏度", None,
                  _opts("0", "1", "3", "5"), _TIP_LIGHT_SENS)])
         self._grp_defog = self._build_group_card(
-            "除雾", "P2 · 1312", [
+            "除雾", "P2　1312", [
                 ("combo", "除雾模式", None,
                  _opts("关闭", "自动", "手动"), _TIP_DEFOG),
                 ("slider", "强度", None, 0, 100, _TIP_DEFOG)], wired=False)
         self._grp_audio = self._build_group_card(
-            "音频", "P2 · 1202 + 编码", [
+            "音频", "P2　1202 + 编码", [
                 ("check", "音频使能", None, "开启", _TIP_AUDIO_ENC),
                 ("check", "降噪", None, "开启", _TIP_AUDIO_ENC),
                 ("slider", "输入音量", "in", 0, 100),
@@ -496,18 +496,18 @@ class EncodePage(QWidget):
         card = CardWidget(self)
         v = QVBoxLayout(card)
         v.setContentsMargins(12, 10, 12, 10)
-        v.setSpacing(6)
+        v.setSpacing(4)
         head = QHBoxLayout()
         head.setSpacing(8)
         head.addWidget(BodyLabel("预览画面", card))
-        head.addWidget(_badge(card, "辅码流 · RealPlayEx"))
+        head.addWidget(_badge(card, "辅码流　RealPlayEx"))
         head.addWidget(_badge(card, "共享登录会话"))
         head.addStretch(1)
         v.addLayout(head)
 
         wrap = QHBoxLayout()
         wrap.setContentsMargins(0, 0, 0, 0)
-        wrap.setSpacing(10)
+        wrap.setSpacing(8)
         self._pv_wrap = wrap        # 全屏时借出画布，退出时按索引还原
         self._preview = _PreviewCanvas(card)
         self._preview.setMinimumSize(200, 200)
@@ -522,7 +522,7 @@ class EncodePage(QWidget):
         info = QGridLayout()
         info.setHorizontalSpacing(8)
         info.setVerticalSpacing(4)
-        self._lb_pv_stream = _pv_value(card, "辅码流1 · 未读取")
+        self._lb_pv_stream = _pv_value(card, "辅码流1　未读取")
         self._lb_pv_fps = _pv_value(card, "-")
         self._lb_pv_codec = _pv_value(card, "-")
         self._lb_pv_state = _pv_value(card, "● 未连接")
@@ -535,8 +535,8 @@ class EncodePage(QWidget):
         sv.addLayout(info)
         sv.addStretch(1)            # 设计稿 .pvbar{margin-top:auto}
         bar = QGridLayout()
-        bar.setHorizontalSpacing(6)
-        bar.setVerticalSpacing(6)
+        bar.setHorizontalSpacing(4)
+        bar.setVerticalSpacing(4)
         self._btn_pv_play = PrimaryPushButton("开始预览", side)
         self._btn_pv_stop = PushButton("停止", side)
         self._btn_pv_snap = PushButton("抓图存档", side)
@@ -555,7 +555,7 @@ class EncodePage(QWidget):
 
         # 画布是 SDK 直渲的原生 HWND，上面盖不住 Qt 子控件，说明文字只能放画布外
         self._lb_pv_hint = CaptionLabel(
-            "预览画布（原生 HWND 直渲）· 切页停流 · 切回延迟 1s 恢复", card)
+            "预览画布", card)
         self._lb_pv_hint.setStyleSheet(f"color:{_C_SUB};font-size:11px;")
         self._lb_pv_hint.setAlignment(Qt.AlignCenter)
         self._lb_pv_hint.setWordWrap(True)
@@ -577,11 +577,11 @@ class EncodePage(QWidget):
         card = CardWidget(self)
         v = QVBoxLayout(card)
         v.setContentsMargins(14, 10, 14, 10)
-        v.setSpacing(6)
+        v.setSpacing(4)
         head = QHBoxLayout()
         head.setSpacing(8)
         head.addWidget(BodyLabel(title, card))
-        head.addWidget(_badge(card, f"ENCODE_VIDEO 1100 · emFormatType={fmt}"
+        head.addWidget(_badge(card, f"ENCODE_VIDEO 1100　emFormatType={fmt}"
                               if main else f"emFormatType={fmt}"))
         head.addWidget(_badge(card, "P1"))
         head.addStretch(1)
@@ -632,7 +632,7 @@ class EncodePage(QWidget):
             res_cell = QWidget(card)
             rw = QVBoxLayout(res_cell)
             rw.setContentsMargins(0, 0, 0, 0)
-            rw.setSpacing(3)
+            rw.setSpacing(4)
             rw.addWidget(cmb_res)
             rw.addWidget(cust)
 
@@ -665,7 +665,7 @@ class EncodePage(QWidget):
                      ("图像质量", q_cell)]
         g = QGridLayout()
         g.setHorizontalSpacing(8)
-        g.setVerticalSpacing(6)
+        g.setVerticalSpacing(4)
         _fill_grid(g, card, cells)
         v.addLayout(g)
 
@@ -696,7 +696,7 @@ class EncodePage(QWidget):
         card.setMinimumWidth(0)
         v = QVBoxLayout(card)
         v.setContentsMargins(14, 10, 14, 10)
-        v.setSpacing(6)
+        v.setSpacing(4)
         head = QHBoxLayout()
         head.setSpacing(8)
         head.addWidget(BodyLabel("图像属性", card))
@@ -715,7 +715,7 @@ class EncodePage(QWidget):
         self._ph_stable_sens = _ph_slider(card, 0, 100, 50, _TIP_STABLE)
         g1 = QGridLayout()
         g1.setHorizontalSpacing(8)
-        g1.setVerticalSpacing(6)
+        g1.setVerticalSpacing(4)
         _fill_grid(g1, card, [
             ("镜像", self._chk_mirror), ("翻转", self._chk_flip),
             ("旋转", self._cmb_rotate),
@@ -732,7 +732,7 @@ class EncodePage(QWidget):
             cells.append((label, cell))
         g2 = QGridLayout()
         g2.setHorizontalSpacing(8)
-        g2.setVerticalSpacing(6)
+        g2.setVerticalSpacing(4)
         _fill_grid(g2, card, cells)
         v.addLayout(g2)
 
@@ -740,7 +740,7 @@ class EncodePage(QWidget):
         v.addWidget(_subhead("清晰度 / 降噪", card))
         g3 = QGridLayout()
         g3.setHorizontalSpacing(8)
-        g3.setVerticalSpacing(6)
+        g3.setVerticalSpacing(4)
         _fill_grid(g3, card, [
             ("锐度模式", _ph_combo(card, ("自动", "手动"), _TIP_SHARP)),
             ("锐度值", _ph_slider(card, 0, 100, 55, _TIP_SHARP)),
@@ -1369,7 +1369,7 @@ class EncodePage(QWidget):
     def _update_pv_info(self, info: dict):
         """预览侧栏实时信息：预览走的就是辅码流1，所以取这一路的回值"""
         self._lb_pv_stream.setText(
-            f"辅码流1 · {int(info['width'])}×{int(info['height'])}")
+            f"辅码流1　{int(info['width'])}×{int(info['height'])}")
         self._lb_pv_fps.setText(f"{int(round(info['framerate']))} fps")
         comp = _COMPRESSION_NAMES.get(int(info["compression"]),
                                       str(info["compression"]))

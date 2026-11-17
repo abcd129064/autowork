@@ -22,7 +22,10 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     setCustomStyleSheet, qconfig, isDarkTheme, ZhDatePicker, RadioButton,
     SpinBox, SegmentedWidget, ProgressBar, FlowLayout)
 
-from core.design_tokens import SEMANTIC, lighten, darken
+from core.design_tokens import (SEMANTIC, lighten, darken,
+    UI_V2, ui_color, ui_hover_colors, ui_qss)
+
+UI = UI_V2  # 本模块内简写，避免每行重复字典下标
 from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import is_acrylic_enabled
 from core.theme_qss import current_accent_hex
@@ -52,17 +55,21 @@ class EntryPage(QWidget):
     def _init_ui(self):
         # 外边距与记录页一致（左右 20），标题不贴边
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(
+            UI["space"]["lg"], UI["space"]["md"],
+            UI["space"]["lg"], UI["space"]["md"])
+        root.setSpacing(UI["space"]["lg"])
 
         # 周期指示芯片（2026-09-07 从页头移到底部操作条、与必填进度同行：
         # 页头左侧标题早已删除，原行只剩右侧一个小芯片、单独占一行浪费
         # 垂直空间）
         self._cycle_chip = CaptionLabel(self)
         self._cycle_chip.setStyleSheet(
-            "background: %s; color: %s; border-radius: 10px;"
-            " padding: 3px 10px;" % (
-                _hex_rgba(SEMANTIC["info"], 18), SEMANTIC["info"]))
+            "background: %s; color: %s; border-radius: %dpx;"
+            " padding: %dpx %dpx; %s" % (
+                _hex_rgba(SEMANTIC["info"], 18), SEMANTIC["info"],
+                UI["size"]["chip"] // 2, UI["space"]["2xs"],
+                UI["space"]["sm"], ui_qss("caption")))
 
         # 表单滚动区：内容按自身高度排布，不拉伸铺满整页；
         # 操作条随内容放在最后一栏控件下方（与修改前一致）
@@ -77,14 +84,15 @@ class EntryPage(QWidget):
         view.setStyleSheet("QWidget { background: transparent; }")
         scroll.setWidget(view)
         layout = QVBoxLayout(view)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(12)
+        layout.setContentsMargins(
+            0, UI["space"]["2xs"], 0, UI["space"]["2xs"])
+        layout.setSpacing(UI["space"]["sm"])
         self.form = AftersaleForm(view)
         layout.addWidget(self.form)
 
         # 操作条：必填进度 + 清空/提交（表单末栏下方，右对齐）
         bar = QHBoxLayout()
-        bar.setSpacing(10)
+        bar.setSpacing(UI["space"]["sm"])
         self._prog = ProgressBar(view)
         _total_required = len(self.form._required_map())  # 必填项数随表单联动
         self._prog.setRange(0, _total_required)
@@ -92,22 +100,22 @@ class EntryPage(QWidget):
         # 进度条只做视觉提示，具体缺项由右侧文案点名，避免条内文字被截断
         self._prog.setTextVisible(False)
         # 固定宽度，避免「还差 N 项」文案变长时把右侧按钮挤得跳动
-        self._prog.setFixedWidth(72)
+        self._prog.setFixedWidth(UI["size"]["progress"])
         bar.addWidget(self._prog)
         self._prog_text = CaptionLabel("必填项 0/%d 已填写" % _total_required, view)
         bar.addWidget(self._prog_text)
-        # 周期指示芯片（本周期 mm/dd – mm/dd · 按发生时间自动归属）：
+        # 周期指示芯片（本周期 mm/dd - mm/dd）：
         # 与必填进度同行（2026-09-07 上移页头取消，减少单独一行）
         bar.addWidget(self._cycle_chip)
         bar.addStretch(1)
         self._btn_clear = PushButton(FluentIcon.DELETE, "清空", view)
         self._btn_clear.setToolTip("清空表单全部内容")
-        self._btn_clear.setFixedHeight(34)
+        self._btn_clear.setFixedHeight(UI["size"]["control"])
         self._btn_clear.clicked.connect(self._on_clear)
         bar.addWidget(self._btn_clear)
         self._btn_submit = PrimaryPushButton(FluentIcon.ACCEPT, "提交记录", view)
         self._btn_submit.setToolTip("校验必填项后写入数据库")
-        self._btn_submit.setFixedHeight(34)
+        self._btn_submit.setFixedHeight(UI["size"]["control"])
         self._btn_submit.clicked.connect(self._on_submit)
         bar.addWidget(self._btn_submit)
         layout.addLayout(bar)
@@ -153,10 +161,10 @@ class EntryPage(QWidget):
                 aftersale_db.current_cycle_start(), "%Y/%m/%d")
             end = start + timedelta(
                 days=aftersale_db.cycle_span_days() - 1)
-            self._cycle_chip.setText("本周期 %s – %s · 按发生时间自动归属" % (
+            self._cycle_chip.setText("本周期 %s - %s" % (
                 start.strftime("%m/%d"), end.strftime("%m/%d")))
         except Exception:
-            self._cycle_chip.setText("按发生时间自动归属")
+            self._cycle_chip.setText("周期未设置")
 
     def _update_required_progress(self, *_a):
         """实时刷新必填进度；填齐转绿，缺项用琥珀色逐个点名。
@@ -175,20 +183,22 @@ class EntryPage(QWidget):
             self._prog_text.setStyleSheet("color: %s;" % SEMANTIC["success"])
             self._prog.setStyleSheet(
                 "QProgressBar { background: %s; border: none;"
-                " border-radius: 2px; } QProgressBar::chunk {"
-                " background: %s; border-radius: 2px; }" % (
+                " border-radius: %dpx; } QProgressBar::chunk {"
+                " background: %s; border-radius: %dpx; }" % (
                     _hex_rgba(SEMANTIC["success"], 18),
-                    SEMANTIC["success"]))
+                    UI["radius"]["control"], SEMANTIC["success"],
+                    UI["radius"]["control"]))
         else:
             self._prog_text.setText("还差 %d 项：%s" % (
                 len(bad), "、".join(bad)))
             self._prog_text.setStyleSheet("color: %s;" % SEMANTIC["warning"])
             self._prog.setStyleSheet(
                 "QProgressBar { background: %s; border: none;"
-                " border-radius: 2px; } QProgressBar::chunk {"
-                " background: %s; border-radius: 2px; }" % (
+                " border-radius: %dpx; } QProgressBar::chunk {"
+                " background: %s; border-radius: %dpx; }" % (
                     _hex_rgba(SEMANTIC["warning"], 18),
-                    SEMANTIC["warning"]))
+                    UI["radius"]["control"], SEMANTIC["warning"],
+                    UI["radius"]["control"]))
 
     def _on_clear(self):
         self.form.clear_form()

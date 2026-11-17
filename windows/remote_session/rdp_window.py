@@ -105,7 +105,7 @@ class RDPPanel(QWidget):
         self._reconnect_overlay.hide()
         ol = QVBoxLayout(self._reconnect_overlay)
         ol.setContentsMargins(0, 0, 0, 0)
-        ol.setSpacing(10)
+        ol.setSpacing(8)
         ol.addStretch(1)
         self._overlay_hint = BodyLabel('远程会话已结束', self._reconnect_overlay)
         self._overlay_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)

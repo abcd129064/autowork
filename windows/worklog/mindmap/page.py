@@ -8,7 +8,7 @@
 节点坐标照抄稿 468-505 的 SVG：根 x=24 / 166×48、二级 x=330 / 230×48、
 叶子 x=660 / 330×38、叶间距 24、块间距 32。稿里二级节点第二行是个裸数字
 （"13"，与同行括号里的"12 项"还对不上），按示意稿笔误处理，实装改成
-「已完成 X 项 · 完成率 Y%」；连线同理——稿把李工那条连到 y=180 而节点中心
+「已完成 X 项　完成率 Y%」；连线同理——稿把李工那条连到 y=180 而节点中心
 在 200，实装一律连到节点几何中心。
 """
 from __future__ import annotations
@@ -140,7 +140,7 @@ class _NodeItem(QGraphicsObject):
 
 
 class _RootNode(_NodeItem):
-    """根节点（稿 483-485）：主色实底 + 「本周工作总览」+「38 项 · 112.5h」"""
+    """根节点（稿 483-485）：主色实底 + 「本周工作总览」+「38 项　112.5h」"""
 
     def __init__(self, title, sub):
         super().__init__(_ROOT_W, _ROOT_H)
@@ -165,7 +165,7 @@ class _RootNode(_NodeItem):
 
 
 class _GroupNode(_NodeItem):
-    """二级分支（稿 486-490）：分组色实底 + 名称（N 项 · Xh）+ −/+ 折叠钮"""
+    """二级分支（稿 486-490）：分组色实底 + 名称（N 项　Xh）+ −/+ 折叠钮"""
 
     def __init__(self, key, label, sub, hex_color, collapsed=False):
         super().__init__(_GROUP_W, _GROUP_H)
@@ -243,7 +243,7 @@ class _LeafNode(_NodeItem):
                          fm.elidedText(title, Qt.TextElideMode.ElideRight,
                                        int(text_w)))
         progress = int(self.rec.get("progress") or 0)
-        sub = "%sh · %d%%" % (fmt_hours(self.rec.get("hours")), progress)
+        sub = "%sh　%d%%" % (fmt_hours(self.rec.get("hours")), progress)
         painter.setPen(QColor(mm["leaf_sub"]))
         painter.setFont(px_font(10.5))
         painter.drawText(QRectF(14, 19, text_w, 14),
@@ -442,7 +442,7 @@ class MindmapPage(WorklogPage):
 
         bar.addRight()
         self._note = BodyLabel(
-            "点击分支节点折叠 / 展开 · 双击任务节点打开编辑对话框", bar)
+            "单击折叠分支　双击编辑任务", bar)
         self._note.setFont(px_font(TYPE_SCALE_PX["sm"]))
         self._note.setTextColor(*text_color_tier(3))
         bar.addWidget(self._note)
@@ -617,7 +617,7 @@ class MindmapPage(WorklogPage):
             collapsed = bool(self._collapsed.get(key))
             hours = sum(float(r.get("hours") or 0) for r in recs)
             node = _GroupNode(key,
-                              "%s（%d 项 · %sh）"
+                              "%s（%d 项　%sh）"
                               % (label, len(recs), fmt_hours(hours)),
                               self._group_sub(recs), color, collapsed)
             node.clicked.connect(self._on_group_clicked)
@@ -645,7 +645,7 @@ class MindmapPage(WorklogPage):
         bottom = cursor - _BLOCK_GAP
         root_top = self._center_of(blocks) - _ROOT_H / 2.0
         root = _RootNode("%s工作总览" % period_text,
-                         "%d 项 · %sh"
+                         "%d 项　%sh"
                          % (len(rows),
                             fmt_hours(sum(float(r.get("hours") or 0)
                                           for r in rows))))
@@ -688,7 +688,7 @@ class MindmapPage(WorklogPage):
         done = sum(1 for r in recs
                    if r.get("status") == worklog_db.DONE_STATUS)
         rate = int(round(done * 100.0 / len(recs))) if recs else 0
-        return "已完成 %d 项 · 完成率 %d%%" % (done, rate)
+        return "已完成 %d 项　完成率 %d%%" % (done, rate)
 
     # ---------------- 交互 ----------------
 

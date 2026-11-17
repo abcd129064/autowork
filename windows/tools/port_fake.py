@@ -41,9 +41,8 @@ class PortFakeWidget(QWidget):
         v.setSpacing(8)
 
         tip = CaptionLabel(
-            "点击「占用」后端口将被真实监听，netstat -ano 显示 LISTENING，"
-            "模拟本机有服务在监听；可同时占用多个端口，关闭弹窗时自动释放。", self)
-        # 提示文案偏长，必须允许换行，否则窄窗口下会被截断。
+            "占用后真实监听端口，支持多个同时占用，关闭弹窗自动释放", self)
+        # 允许折行：窄窗口下说明不会被截断。
         tip.setWordWrap(True)
         v.addWidget(tip)
 

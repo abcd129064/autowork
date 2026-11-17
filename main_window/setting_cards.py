@@ -86,7 +86,7 @@ class SettingRow(CardWidget):
             lay.addWidget(self._icon_w)
 
         text_col = QVBoxLayout()
-        text_col.setSpacing(2)
+        text_col.setSpacing(4)
         t = BodyLabel(title, self)
         t.setStyleSheet("font-weight: 600;")
         text_col.addWidget(t)
@@ -201,7 +201,7 @@ class SettingGroup(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(2, 0, 0, 0)
-        outer.setSpacing(10)
+        outer.setSpacing(8)
         if title:
             t = CaptionLabel(title, self)
             t.setStyleSheet("font-weight: 600; padding: 2px 4px;")

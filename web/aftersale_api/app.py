@@ -861,3 +861,16 @@ def put_prefs(payload: dict = Body(...), user = Depends(require_auth)):
             "VALUES (%s, %s, NOW()) ON DUPLICATE KEY UPDATE prefs=%s, updated_at=NOW()",
             [user, raw, raw])
     return {"ok": True}
+
+
+# ===== MySQL 同步 API 化（步骤 1）：/api/sync 命名空间，纯增量挂载 =====
+# 生产是 /opt/aftersale-web/ 下的单文件模块（uvicorn app:app），本地按包导入；
+# 两种形态都要能加载同目录的 sync_api，故相对导入失败时回退绝对导入。
+# 桌面端是原生 HTTP 客户端，不受 CORS allow_methods=["GET"] 限制。
+try:
+    from . import sync_api as _sync_api
+except ImportError:
+    import sync_api as _sync_api
+
+_sync_api.set_db_factory(_db)
+app.include_router(_sync_api.router)

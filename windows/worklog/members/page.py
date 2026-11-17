@@ -297,7 +297,7 @@ class MembersPage(WorklogPage):
         for cat in self._categories:
             name = cat.get("name") or ""
             active = bool(cat.get("active"))
-            text = name if active else "%s · 已停用" % name
+            text = name if active else "%s（已停用）" % name
             pill = TagPill(text, host)
             fg, bg = (category_tag(name) if active
                       else tag_colors("neutral"))

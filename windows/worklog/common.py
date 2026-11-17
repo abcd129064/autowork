@@ -481,7 +481,7 @@ class SummaryCard(CardBox):
         col = QWidget(self)
         col_lay = QVBoxLayout(col)
         col_lay.setContentsMargins(0, 0, 0, 0)
-        col_lay.setSpacing(2)               # 稿 .v 的 margin-top:2px
+        col_lay.setSpacing(4)               # 列内间距按 4px 网格
         self.k_label = CaptionLabel(title, col)
         self.k_label.setFont(px_font(TYPE_SCALE_PX["sm"]))
         self.k_label.setTextColor(*text_color_tier(2))
@@ -812,7 +812,7 @@ class FlowToolbar(QWidget):
         self.scroll.setWidget(self.body)
         self.flow = FlowLayout(self.body, needAni=False)
         self.flow.setContentsMargins(2, 4, 2, 4)
-        self.flow.setVerticalSpacing(6)
+        self.flow.setVerticalSpacing(4)
         if spacing:
             self.flow.setHorizontalSpacing(spacing)
         self.spacer = FlowSpacer(self.flow, self.body)

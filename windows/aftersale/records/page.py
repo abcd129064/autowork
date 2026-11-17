@@ -240,7 +240,7 @@ class RecordsPage(QWidget):
         ov_head.addWidget(self._lbl_source)
         root.addLayout(ov_head)
         cards_row = QHBoxLayout()
-        cards_row.setSpacing(10)
+        cards_row.setSpacing(8)
         self._card_total = self._make_stats_card(cards_row)
         self._card_unresolved = self._make_stats_card(cards_row)
         self._card_initiative = self._make_stats_card(cards_row)
@@ -257,7 +257,7 @@ class RecordsPage(QWidget):
         total_card = self._card_total[0]
         total_card.setCursor(Qt.CursorShape.PointingHandCursor)
         total_card.setToolTip(
-            "点击查看详细统计（每日趋势 · 地区分布 · 问题类型）")
+            "详细统计")
         total_card.clicked.connect(self._on_total_card_clicked)
 
         # --- 工具栏（与主界面同范式：库版 FlowLayout 换行 + 滚动容器锁高，
@@ -272,8 +272,8 @@ class RecordsPage(QWidget):
         toolbar_widget = QWidget(self)
         toolbar_scroll.setWidget(toolbar_widget)
         toolbar = FlowLayout(toolbar_widget)
-        toolbar.setHorizontalSpacing(6)
-        toolbar.setVerticalSpacing(6)
+        toolbar.setHorizontalSpacing(4)
+        toolbar.setVerticalSpacing(4)
         toolbar.setContentsMargins(2, 4, 2, 4)
 
         # 周期筛选（默认当前周期；qfluentwidgets ComboBox 支持 findData/currentData，
@@ -303,12 +303,12 @@ class RecordsPage(QWidget):
         self._resolved_seg = YesNoSegment("", self, include_all=True)
         self._resolved_seg.currentItemChanged.connect(
             lambda _k: self._on_filter_changed())
-        toolbar.addWidget(CaptionLabel("是否解决：", self))
+        toolbar.addWidget(CaptionLabel("已解决：", self))
         toolbar.addWidget(self._resolved_seg)
 
         # 是否是我们的问题筛选
         self._our_problem_seg = YesNoSegment("", self, include_all=True)
-        self._our_problem_seg.setToolTip("是否是我们的问题")
+        self._our_problem_seg.setToolTip("我方问题")
         self._our_problem_seg.currentItemChanged.connect(
             lambda _k: self._on_filter_changed())
         toolbar.addWidget(CaptionLabel("是否是我们问题：", self))
@@ -316,10 +316,10 @@ class RecordsPage(QWidget):
 
         # 是否我们主动发起筛选
         self._initiative_seg = YesNoSegment("", self, include_all=True)
-        self._initiative_seg.setToolTip("是否我们主动发起")
+        self._initiative_seg.setToolTip("主动发起")
         self._initiative_seg.currentItemChanged.connect(
             lambda _k: self._on_filter_changed())
-        toolbar.addWidget(CaptionLabel("是否主动发起：", self))
+        toolbar.addWidget(CaptionLabel("主动发起：", self))
         toolbar.addWidget(self._initiative_seg)
 
         # 关键词搜索（防抖）
@@ -334,13 +334,13 @@ class RecordsPage(QWidget):
         self._btn_add.clicked.connect(self._on_add)
         toolbar.addWidget(self._btn_add)
 
-        self._btn_import = PushButton(FluentIcon.ADD, "导入 Excel", self)
+        self._btn_import = PushButton(FluentIcon.ADD, "导入", self)
         self._btn_import.setToolTip("一次性导入 售后问题汇总 xlsx 历史数据")
         self._btn_import.clicked.connect(self._on_import)
         toolbar.addWidget(self._btn_import)
 
-        self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出 xlsx", self)
-        self._btn_export.setToolTip("按当前筛选条件导出 xlsx")
+        self._btn_export = PushButton(FluentIcon.DOWNLOAD, "导出", self)
+        self._btn_export.setToolTip("按当前筛选条件导出")
         self._btn_export.clicked.connect(self._on_export)
         toolbar.addWidget(self._btn_export)
 
@@ -351,7 +351,7 @@ class RecordsPage(QWidget):
 
         # pygwalker 自助分析入口
         self._btn_stats_chart = PushButton(
-            FluentIcon.HISTORY, "统计图表", self)
+            FluentIcon.HISTORY, "统计", self)
         self._btn_stats_chart.setToolTip(
             "打开 pygwalker 自助分析窗口")
         self._btn_stats_chart.clicked.connect(self._on_open_stats_chart)
@@ -415,7 +415,7 @@ class RecordsPage(QWidget):
 
         # --- 分页 + 状态栏 ---
         bottom = QHBoxLayout()
-        bottom.setSpacing(6)
+        bottom.setSpacing(4)
         self._lbl_stats = CaptionLabel("", self)
         bottom.addWidget(self._lbl_stats)
         bottom.addStretch(1)
@@ -449,7 +449,7 @@ class RecordsPage(QWidget):
         card = CardWidget(self)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         lbl = CaptionLabel("", card)
         num = QLabel("0", card)
         num.setStyleSheet("font-size: 24px; font-weight: 500; background: transparent;")
@@ -542,9 +542,7 @@ class RecordsPage(QWidget):
                            SEMANTIC["warning"])
         self._lbl_source.setText(text)
         self._lbl_source.setStyleSheet(f"color: {color};")
-        self._lbl_source.setToolTip(
-            "关闭 MySQL 后自动读写本地 SQLite；"
-            "MySQL 恢复可用时会自动切回并合并兜底增量")
+        self._lbl_source.setToolTip("MySQL 断开时改用本地库，恢复后自动合并")
         # 同步刷新网页入口（跟随主题色与 settings 中 local_web 最新配置）
         self._btn_web.setText(_web_link_html())
 
@@ -875,15 +873,14 @@ class RecordsPage(QWidget):
         cycle = self._current_filters().get("cycle_start") or ""
         if cycle:
             self._lbl_cycle.setText(f"周期: {aftersale_db.cycle_label(cycle)}")
-            self._lbl_overview.setText(
-                f"概览 · {aftersale_db.cycle_label(cycle)}")
+            self._lbl_overview.setText("概览")
         else:
             self._lbl_cycle.setText("周期: 全部")
-            self._lbl_overview.setText("概览 · 全部周期")
+            self._lbl_overview.setText("概览")
         if self._manual_refresh:
             # 手动点击刷新后的完成反馈（筛选/翻页/静默刷新不弹）
             self._manual_refresh = False
-            show_info_bar(f"已刷新 · 共 {total} 条记录", "success",
+            show_info_bar("已刷新", "success",
                           title="刷新", parent=self, duration=2500)
         # 自动刷新的静默重查：还原触发前的滚动位置与勾选（用户无感）
         pv = self._preserve_view
@@ -922,7 +919,7 @@ class RecordsPage(QWidget):
         _lbl.setText("售后总数")
         num.setText(str(total))
         num.setStyleSheet(base)
-        sub.setText(f"已解决 {resolved} · 未解决 {unresolved}")
+        sub.setText(f"已解决 {resolved}　未解决 {unresolved}")
 
         _card, _lbl, num, sub = self._card_unresolved
         _lbl.setText("未解决")
@@ -930,21 +927,21 @@ class RecordsPage(QWidget):
         # 未解决为 0 时用常规字色，有积压时用危险红提醒
         color = SEMANTIC["danger"] if unresolved > 0 else ""
         num.setStyleSheet(base + (f" color: {color};" if color else ""))
-        sub.setText(f"待处理有 {unresolved} 条" if unresolved else "全部已处理")
+        sub.setText("")
 
         _card, _lbl, num, sub = self._card_initiative
         _lbl.setText("主动发起")
         init_rate = int(round(initiative * 100 / total)) if total else 0
         num.setText(f"{init_rate}%")
         num.setStyleSheet(base)
-        sub.setText(f"我们发起的售后有 {initiative} 条")
+        sub.setText("")
 
         _card, _lbl, num, sub = self._card_our_problem
         _lbl.setText("我方问题")
         our_rate = int(round(our_problem * 100 / total)) if total else 0
         num.setText(f"{our_rate}%")
         num.setStyleSheet(base)
-        sub.setText(f"我们的问题有 {our_problem} 条")
+        sub.setText("")
 
         self._lbl_stats.setText(f"共 {total} 条")
 
@@ -1342,7 +1339,7 @@ class RecordsPage(QWidget):
         """删除（按记录引用入口：行内按钮回调，排序后行号失效不影响定位）"""
         if not rec:
             return
-        desc = f"{rec.get('table_no') or ''} · {rec.get('problem') or ''}"
+        desc = f"{rec.get('table_no') or ''}　{rec.get('problem') or ''}"
         is_yes = str(rec.get("resolved") or "") == "是"
         msg = f"确定删除售后记录「{desc}」吗？\n删除后不可恢复。"
         if is_yes:

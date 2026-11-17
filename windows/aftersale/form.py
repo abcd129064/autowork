@@ -22,7 +22,10 @@ from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     SpinBox, SegmentedWidget, ProgressBar, FlowLayout,
     EditableComboBox)
 
-from core.design_tokens import SEMANTIC, lighten, darken
+from core.design_tokens import (SEMANTIC, lighten, darken,
+    UI_V2, ui_color, ui_hover_colors, ui_qss)
+
+UI = UI_V2  # 本模块内简写，避免每行重复字典下标
 from core.flow_widgets import FlowToolbarScrollArea
 from core.perf import is_acrylic_enabled
 from core.theme_qss import current_accent_hex
@@ -71,23 +74,23 @@ class AftersaleForm(QWidget):
         # 外边距交给宿主：录入页在滚动区、编辑弹窗在对话框，两处留白不同，
         # 表单再加一层会双重缩进
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setSpacing(UI["space"]["lg"])
 
         # ---------- 板块一：基本信息（标签上置，控件固定宽度，右侧留白） ----------
         sec1 = _SectionCard("基本信息", self)
         row1 = QHBoxLayout()
-        row1.setSpacing(16)
+        row1.setSpacing(UI["space"]["sm"])
         # 每个字段列固定「标签-控件-内联错误」三段；错误行常驻占位，
         # 只切显隐，避免报错瞬间整行高度跳动
         col_type = QVBoxLayout()
-        col_type.setSpacing(3)
+        col_type.setSpacing(UI["space"]["2xs"])
         col_type.addWidget(_field_label("问题类型", True, self))
         # 与「问题描述-问题」同规格：EditableComboBox（可选预置也可手输，
         # 需求13 替换 FluentCombo 原生 QComboBox 为 qfluentwidgets 组件）
         self.type_combo = EditableComboBox(self)
         self.type_combo.addItems(aftersale_db.ISSUE_TYPES)
         # 与「问题」下拉同为 320：两列字段的左右边缘才对得齐
-        self.type_combo.setFixedWidth(320)
+        self.type_combo.setFixedWidth(UI["size"]["field_wide"])
         # 与「问题」控件交互一致：挂手输补全，支持预置可选 + 可手输
         self._set_completer(self.type_combo, list(aftersale_db.ISSUE_TYPES))
         col_type.addWidget(self.type_combo)
@@ -96,15 +99,15 @@ class AftersaleForm(QWidget):
         col_type.addWidget(self._err_type)
         row1.addLayout(col_type)
         col_occ = QVBoxLayout()
-        col_occ.setSpacing(3)
+        col_occ.setSpacing(UI["space"]["2xs"])
         col_occ.addWidget(_field_label("发生时间", True, self))
         occurred_row = QHBoxLayout()
-        occurred_row.setSpacing(2)
+        occurred_row.setSpacing(UI["space"]["2xs"])
         self.occurred_picker = ZhDatePicker(self)
         # 高度写死 33 与步进按钮对齐：ZhDatePicker 默认比 ToolButton 高 1px，
         # 不显式指定时整行看起来是歪的
-        self.occurred_picker.setFixedWidth(150)
-        self.occurred_picker.setFixedHeight(33)
+        self.occurred_picker.setFixedWidth(UI["size"]["date"])
+        self.occurred_picker.setFixedHeight(UI["size"]["control"])
         # 默认日期走 _default_occurred_date()：开「记住上次发生日期」时
         # 沿用上一条新增的日期（连续补录同一天免重复拨日期），否则当日
         self.occurred_picker.setDate(self._default_occurred_date())
@@ -113,14 +116,16 @@ class AftersaleForm(QWidget):
         # 补录历史发生日期（如 8/25 录 8/20 的售后）连续点 ◀ 即可回退
         self._btn_occurred_prev = ToolButton(
             FluentIcon.CARE_LEFT_SOLID, self)
-        self._btn_occurred_prev.setFixedSize(28, 33)
+        self._btn_occurred_prev.setFixedSize(
+            UI["size"]["step_btn"], UI["size"]["control"])
         self._btn_occurred_prev.setToolTip("前一天")
         self._btn_occurred_prev.clicked.connect(
             lambda _=False: self._step_occurred(-1))
         occurred_row.addWidget(self._btn_occurred_prev)
         self._btn_occurred_next = ToolButton(
             FluentIcon.CARE_RIGHT_SOLID, self)
-        self._btn_occurred_next.setFixedSize(28, 33)
+        self._btn_occurred_next.setFixedSize(
+            UI["size"]["step_btn"], UI["size"]["control"])
         self._btn_occurred_next.setToolTip("后一天")
         self._btn_occurred_next.clicked.connect(
             lambda _=False: self._step_occurred(1))
@@ -128,14 +133,14 @@ class AftersaleForm(QWidget):
         col_occ.addLayout(occurred_row)
         row1.addLayout(col_occ)
         col_creator = QVBoxLayout()
-        col_creator.setSpacing(3)
+        col_creator.setSpacing(UI["space"]["2xs"])
         col_creator.addWidget(_field_label("填写人", False, self))
         # 默认值三级回退：上次填写 → 配置默认 → 空；读取发生在构造期
         # 填写人：可编辑下拉（默认取配置，可手输；候选由 load_candidates 从历史填充）
         self.creator_edit = EditableComboBox(self)
         # 默认优先取「上次填写」，无则取配置，可改
         self.creator_edit.setText(aftersale_db.load_last_creator() or _default_creator())
-        self.creator_edit.setFixedWidth(160)
+        self.creator_edit.setFixedWidth(UI["size"]["field_mid"])
         self._set_completer(self.creator_edit, [])  # 候选动态填充，初始空
         col_creator.addWidget(self.creator_edit)
         row1.addLayout(col_creator)
@@ -147,14 +152,14 @@ class AftersaleForm(QWidget):
         # ---------- 板块二：位置关联（控件固定宽度，带出芯片 + 关联确认条） ----------
         sec2 = _SectionCard("位置关联", self)
         row2 = QHBoxLayout()
-        row2.setSpacing(16)
+        row2.setSpacing(UI["space"]["sm"])
         room_col = QVBoxLayout()
-        room_col.setSpacing(3)
+        room_col.setSpacing(UI["space"]["2xs"])
         room_col.addWidget(_field_label("球房", True, self))
         # 用 SearchLineEdit 而非 LineEdit：自带清除按钮，清空即收起候选
         self.room_edit = SearchLineEdit(self)
-        self.room_edit.setPlaceholderText("输入球房名搜索球桌")
-        self.room_edit.setFixedWidth(320)
+        self.room_edit.setPlaceholderText("搜索球房")
+        self.room_edit.setFixedWidth(UI["size"]["field_wide"])
         self.room_edit.textChanged.connect(self._on_room_text_changed)
         self.room_edit.clearSignal.connect(self._hide_candidates)
         room_col.addWidget(self.room_edit)
@@ -162,23 +167,23 @@ class AftersaleForm(QWidget):
         room_col.addWidget(self._err_room)
         row2.addLayout(room_col)
         tbl_col = QVBoxLayout()
-        tbl_col.setSpacing(3)
+        tbl_col.setSpacing(UI["space"]["2xs"])
         tbl_col.addWidget(_field_label("桌号", False, self))
         # 桌号允许手填但不参与必填：历史工单里有没桌号的记录，
         # 强制必填会让老数据无法补录
         self.table_no_edit = LineEdit(self)
-        self.table_no_edit.setPlaceholderText("选桌自动带出")
-        self.table_no_edit.setFixedWidth(140)
+        self.table_no_edit.setPlaceholderText("选择桌号")
+        self.table_no_edit.setFixedWidth(UI["size"]["field_narrow"])
         tbl_col.addWidget(self.table_no_edit)
         self._err_table = _inline_error("必填项未填写", self)
         tbl_col.addWidget(self._err_table)
         row2.addLayout(tbl_col)
         reg_col = QVBoxLayout()
-        reg_col.setSpacing(3)
+        reg_col.setSpacing(UI["space"]["2xs"])
         reg_col.addWidget(_field_label("地区", True, self))
         self.region_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.region_combo.addItems(aftersale_db.REGIONS_PRESET)
-        self.region_combo.setFixedWidth(160)
+        self.region_combo.setFixedWidth(UI["size"]["field_mid"])
         reg_col.addWidget(self.region_combo)
         self._err_region = _inline_error("必填项未填写", self)
         reg_col.addWidget(self._err_region)
@@ -189,7 +194,7 @@ class AftersaleForm(QWidget):
         # 候选用原生 QListWidget：单列点选即可，TableWidget 还要定义表头
         # 与列宽，反而多写一堆无用配置
         self._cand_list = QListWidget(self)
-        self._cand_list.setFixedHeight(132)
+        self._cand_list.setFixedHeight(UI["size"]["cand_list"])
         self._cand_list.setVisible(False)
         self._cand_list.itemClicked.connect(self._on_candidate_clicked)
         _style_cand_list(self._cand_list)
@@ -209,8 +214,10 @@ class AftersaleForm(QWidget):
         self._link_bar.setWordWrap(True)
         self._link_bar.setStyleSheet(
             "QLabel#aftersaleLinkBar { background: %s; color: %s;"
-            " border-radius: 6px; padding: 5px 10px; font-size: 12px; }"
-            % (_hex_rgba(SEMANTIC["success"], 26), SEMANTIC["success"]))
+            " border-radius: %dpx; padding: %dpx %dpx; %s }"
+            % (_hex_rgba(SEMANTIC["success"], 26), SEMANTIC["success"],
+               UI["radius"]["control"], UI["space"]["xs"],
+               UI["space"]["sm"], ui_qss("caption")))
         self._link_bar.setVisible(False)
         sec2.content_layout.addWidget(self._link_bar)
         root.addWidget(sec2)
@@ -221,14 +228,15 @@ class AftersaleForm(QWidget):
         v3.addWidget(_field_label("问题", True, self))
         # 问题行：下拉 + 「常用句」按钮（点击弹窗内条目复制到剪贴板，不自动填入）
         prob_row = QHBoxLayout()
-        prob_row.setSpacing(8)
+        prob_row.setSpacing(UI["space"]["xs"])
         self.problem_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         # 锁 320：再宽会把右侧「常用句」按钮挤出可视区
-        self.problem_combo.setFixedWidth(320)
+        self.problem_combo.setFixedWidth(UI["size"]["field_wide"])
         prob_row.addWidget(self.problem_combo)
         # 常用句只复制不写入：直接填入会覆盖用户敲了一半的描述
         self._btn_phrases = PushButton(FluentIcon.COPY, "常用句", self)
-        self._btn_phrases.setToolTip("常用句（点击条目复制到剪贴板，可添加新句子）")
+        self._btn_phrases.setFixedHeight(UI["size"]["control"])
+        self._btn_phrases.setToolTip("常用句")
         self._btn_phrases.clicked.connect(self._open_quick_phrases)
         prob_row.addWidget(self._btn_phrases)
         prob_row.addStretch(1)
@@ -237,38 +245,38 @@ class AftersaleForm(QWidget):
         v3.addWidget(self._err_problem)
         # 发生原因 / 解决方案：等宽等高多行文本框并排（64px ≈ 3 行）
         txt_row = QHBoxLayout()
-        txt_row.setSpacing(14)
+        txt_row.setSpacing(UI["space"]["sm"])
         col_cause = QVBoxLayout()
-        col_cause.setSpacing(5)
-        col_cause.addWidget(_field_label("发生原因", False, self))
+        col_cause.setSpacing(UI["space"]["2xs"])
+        col_cause.addWidget(_field_label("发生原因（选填）", False, self))
         # 64px 约三行，与右侧解决方案等高：并排两块文本高度不等会显得错位
         self.cause_edit = PlainTextEdit(self)
-        self.cause_edit.setFixedHeight(64)
-        self.cause_edit.setPlaceholderText("选填")
+        self.cause_edit.setFixedHeight(UI["size"]["textarea"])
+        self.cause_edit.setPlaceholderText("")
         col_cause.addWidget(self.cause_edit)
         txt_row.addLayout(col_cause, 1)
         col_sol = QVBoxLayout()
-        col_sol.setSpacing(5)
-        col_sol.addWidget(_field_label("解决方案", False, self))
+        col_sol.setSpacing(UI["space"]["2xs"])
+        col_sol.addWidget(_field_label("解决方案（选填）", False, self))
         # 与发生原因同高、1:1 拉伸；超长内容各自滚动，不撑高整块卡片
         self.solution_edit = PlainTextEdit(self)
-        self.solution_edit.setFixedHeight(64)
-        self.solution_edit.setPlaceholderText("选填，多行文本")
+        self.solution_edit.setFixedHeight(UI["size"]["textarea"])
+        self.solution_edit.setPlaceholderText("")
         col_sol.addWidget(self.solution_edit)
         txt_row.addLayout(col_sol, 1)
         v3.addLayout(txt_row)
         # 三个是/否判定：分段开关（默认值与旧版一致：是 / 否 / 是）
         seg_row = QHBoxLayout()
-        seg_row.setSpacing(18)
+        seg_row.setSpacing(UI["space"]["sm"])
         # 用分段开关而非复选框：复选框的「未勾选」既可能是「否」也可能是
         # 「没填」，分段开关没有这种歧义
-        seg_row.addWidget(_field_label("是否解决", True, self))
+        seg_row.addWidget(_field_label("已解决", True, self))
         self.resolved_combo = YesNoSegment("是", self)
         seg_row.addWidget(self.resolved_combo)
-        seg_row.addWidget(_field_label("我们主动发起", False, self))
+        seg_row.addWidget(_field_label("主动发起", False, self))
         self.is_initiative_combo = YesNoSegment("否", self)
         seg_row.addWidget(self.is_initiative_combo)
-        seg_row.addWidget(_field_label("是我们的问题", False, self))
+        seg_row.addWidget(_field_label("我方问题", False, self))
         self.is_our_problem_combo = YesNoSegment("是", self)
         seg_row.addWidget(self.is_our_problem_combo)
         # 重要标记：勾选后「记录与统计」列表中该条显示淡黄色底色，代表比较重要
@@ -278,34 +286,57 @@ class AftersaleForm(QWidget):
         seg_row.addWidget(self.is_important_check)
         seg_row.addStretch(1)
         v3.addLayout(seg_row)
-        # 解决人 / 响应时间：左右平分两列
-        # 解决人与响应时间并排：都是选填且同为 220 宽，对称排布更省纵向空间
+        # 解决人 / 解决时间：左右平分两列
+        # 解决人与解决时间并排：都是选填且同为 220 宽，对称排布更省纵向空间
         res_row = QHBoxLayout()
-        res_row.setSpacing(16)
+        res_row.setSpacing(UI["space"]["sm"])
         col_res = QVBoxLayout()
-        col_res.setSpacing(5)
+        col_res.setSpacing(UI["space"]["2xs"])
         col_res.addWidget(_field_label("解决人", False, self))
         self.resolver_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         # 默认取「上次填写」，重新打开面板时解决人保持不变
         if aftersale_db.load_last_resolver():
             self.resolver_combo.setText(aftersale_db.load_last_resolver())
-        self.resolver_combo.setFixedWidth(220)
+        self.resolver_combo.setFixedWidth(UI["size"]["resolver"])
         col_res.addWidget(self.resolver_combo)
         res_row.addLayout(col_res)
         col_resp = QVBoxLayout()
-        col_resp.setSpacing(5)
-        col_resp.addWidget(_field_label("响应时间", False, self))
+        col_resp.setSpacing(UI["space"]["2xs"])
+        col_resp.addWidget(_field_label("解决时间", False, self))
         self.response_combo = EditableComboBox(self)  # 需求13：QFluentWidgets 组件
         self.response_combo.addItems(aftersale_db.RESPONSE_TIME_PRESET)
-        self.response_combo.setFixedWidth(220)
+        self.response_combo.setFixedWidth(UI["size"]["resolver"])
         col_resp.addWidget(self.response_combo)
         res_row.addLayout(col_resp)
         res_row.addStretch(1)
         v3.addLayout(res_row)
         root.addWidget(sec3)
 
+        self._apply_uniform_sizes()
+
         # 首个错误控件由 validate 写入，调用方据此滚动定位；其余路径不碰
         self.first_error = None
+
+    def _apply_uniform_sizes(self):
+        """把所有单行控件锁到 32px，消除 qfw 默认 33px 的 1px 错位。
+
+        qfluentwidgets 的 EditableComboBox / LineEdit 默认高度是 33px，不在
+        4px 网格上；同一行里与 32px 的日期、按钮并排时基线会差 1px。
+        """
+        for w in (self.type_combo, self.creator_edit, self.room_edit,
+                  self.table_no_edit, self.region_combo, self.problem_combo,
+                  self.resolver_combo, self.response_combo,
+                  self._btn_phrases):
+            w.setFixedHeight(UI["size"]["control"])
+
+    def showEvent(self, event):
+        """库在 show 时会把 ZhDatePicker 的高度压回 30，这里补一次统一高度。
+
+        分段开关不在此处理：YesNoSegment 已在构造期把内部 item 一起锁到 32px，
+        Pivot 的 SetMinimumSize 布局约束算出的最小高度本身就是 32，不会被回写。
+        """
+        super().showEvent(event)
+        self.occurred_picker.setFixedHeight(UI["size"]["control"])
 
     # ---------- 候选值加载 ----------
 
@@ -475,7 +506,7 @@ class AftersaleForm(QWidget):
         for r in rows:
             name = str(r.get("name") or "")
             room = str(r.get("roomName") or "")
-            item = QListWidgetItem(f"{name} · {room}")
+            item = QListWidgetItem(f"{name}　{room}")
             item.setToolTip(f"桌号: {name}\n球房: {room}\nSNK: {r.get('snk_code') or ''}")
             self._cand_list.addItem(item)
         self._cand_list.setVisible(True)
@@ -525,7 +556,7 @@ class AftersaleForm(QWidget):
             return
         # 城市两种来源：新库叫 city，老库只有 region，按序兜底
         city = str(row.get("city") or row.get("region") or "").strip()
-        parts = ["已关联球桌：%s · %s 号桌" % (
+        parts = ["已关联 %s %s 号桌" % (
             str(row.get("roomName") or ""), str(row.get("name") or ""))]
         if str(row.get("snk_code") or ""):
             parts.append("SNK: %s" % str(row.get("snk_code")))

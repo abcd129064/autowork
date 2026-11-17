@@ -56,14 +56,14 @@ class LedgerForm(QWidget):
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # ---------- 板块一：分类与基础信息 ----------
         sec1 = _SectionCard("分类与基础信息", self)
         row1 = QHBoxLayout()
         row1.setSpacing(16)
         col_cat = QVBoxLayout()
-        col_cat.setSpacing(3)
+        col_cat.setSpacing(4)
         col_cat.addWidget(_field_label("分类", True, self))
         # 分类候选取自 ledger_db.CATEGORIES（模板 sheet 名），故意不做可编辑：
         # 手输一个不在表里的分类，写库时找不到对应工作表，只能整条丢给后台人工处理
@@ -79,7 +79,7 @@ class LedgerForm(QWidget):
         col_cat.addWidget(self._err_category)
         row1.addLayout(col_cat)
         col_kind = QVBoxLayout()
-        col_kind.setSpacing(3)
+        col_kind.setSpacing(4)
         col_kind.addWidget(_field_label("类别", True, self))
         # 需求12：类别改用 qfluentwidgets EditableComboBox（可编辑 + 下拉候选，
         # 支持手输新类别，替代 FluentCombo 的原生 QComboBox 可编辑实现）
@@ -95,7 +95,7 @@ class LedgerForm(QWidget):
         row2 = QHBoxLayout()
         row2.setSpacing(16)
         col_room = QVBoxLayout()
-        col_room.setSpacing(3)
+        col_room.setSpacing(4)
         col_room.addWidget(_field_label("球房", True, self))
         self.room_edit = LineEdit(self)
         self.room_edit.setPlaceholderText("设备代码/球房名")
@@ -105,7 +105,7 @@ class LedgerForm(QWidget):
         col_room.addWidget(self._err_room)
         row2.addLayout(col_room)
         col_video = QVBoxLayout()
-        col_video.setSpacing(3)
+        col_video.setSpacing(4)
         col_video.addWidget(_field_label("视频名", False, self))
         self.video_edit = LineEdit(self)
         self.video_edit.setPlaceholderText("当前视频/日志文件名")
@@ -113,7 +113,7 @@ class LedgerForm(QWidget):
         col_video.addWidget(self.video_edit)
         row2.addLayout(col_video)
         col_frame = QVBoxLayout()
-        col_frame.setSpacing(3)
+        col_frame.setSpacing(4)
         col_frame.addWidget(_field_label("帧数", False, self))
         self.frame_edit = LineEdit(self)
         self.frame_edit.setPlaceholderText("400")  # 帧数只做文本透传，录入时转 int 会把非数字输入直接吞掉
@@ -123,10 +123,10 @@ class LedgerForm(QWidget):
         # 日期：视频日期（需求7）——默认「记住上次日期」或当天；
         # 需求1：控件改为与主面板相同方式（CalendarPicker + ◀▶ 步进按钮）
         col_date = QVBoxLayout()
-        col_date.setSpacing(3)
+        col_date.setSpacing(4)
         col_date.addWidget(_field_label("日期", False, self))
         date_row = QHBoxLayout()
-        date_row.setSpacing(2)
+        date_row.setSpacing(4)
         self.date_edit = CalendarPicker(self)
         self.date_edit.setMinimumWidth(150)
         self.date_edit.setFixedHeight(33)
@@ -158,9 +158,9 @@ class LedgerForm(QWidget):
         # 描述 / 备注：并排（70% / 30%，需求8；参照售后面板「发生原因/解决方案」
         # 等宽等高多行文本框并排范式，本处以 7:3 stretch 分配宽度）
         txt_desc = QHBoxLayout()
-        txt_desc.setSpacing(14)
+        txt_desc.setSpacing(12)
         col_desc = QVBoxLayout()
-        col_desc.setSpacing(5)
+        col_desc.setSpacing(4)
         col_desc.addWidget(_field_label("描述", False, self))
         self.desc_edit = PlainTextEdit(self)
         self.desc_edit.setFixedHeight(64)
@@ -168,7 +168,7 @@ class LedgerForm(QWidget):
         col_desc.addWidget(self.desc_edit)
         txt_desc.addLayout(col_desc, 7)
         col_remark = QVBoxLayout()
-        col_remark.setSpacing(5)
+        col_remark.setSpacing(4)
         col_remark.addWidget(_field_label("备注", False, self))
         # 需求8：备注与描述并排等高（多行文本框，参照售后面板并排范式）
         self.remark_edit = PlainTextEdit(self)
@@ -188,7 +188,7 @@ class LedgerForm(QWidget):
         self.new_program_seg.setFixedWidth(110)
         # 需求11：新程序与复现同列并排（两个是/否开关一行，紧凑展示）
         repro_row = QHBoxLayout()
-        repro_row.setSpacing(10)
+        repro_row.setSpacing(8)
         repro_row.addWidget(self._repro_label)
         repro_row.addWidget(self.repro_seg)
         repro_row.addWidget(self._new_program_label)
@@ -199,7 +199,7 @@ class LedgerForm(QWidget):
         txt_row = QHBoxLayout()
         txt_row.setSpacing(16)
         col_signer = QVBoxLayout()
-        col_signer.setSpacing(3)
+        col_signer.setSpacing(4)
         col_signer.addWidget(_field_label("署名", False, self))
         self.signer_edit = LineEdit(self)
         self.signer_edit.setText(_default_creator())  # 默认取配置，可改

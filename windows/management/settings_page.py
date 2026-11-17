@@ -170,8 +170,8 @@ class AdminSettingsPage(QWidget):
 
     # 数据源选项：(显示文本, 存储值)
     _SOURCE_OPTIONS = [
-        ("kd · 球房运维后台（kd.newbv.cn:30005）", "kd"),
-        ("xqzg · 新球房运维后台（xqzg.newbv.cn）", "xqzg"),
+        ("kd　球房运维后台（kd.newbv.cn:30005）", "kd"),
+        ("xqzg　新球房运维后台（xqzg.newbv.cn）", "xqzg"),
     ]
     _API_LABELS = {"api1": "接口1 xqzg", "api2": "接口2 kd"}
 
@@ -217,7 +217,7 @@ class AdminSettingsPage(QWidget):
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(14)
+        root.setSpacing(12)
 
         # 两种宿主布局不同：独立页自己包滚动区，嵌入模式交给外层统一滚动，
         # 否则会出现嵌套滚动条，滚轮事件归属也会互相抢。
@@ -238,7 +238,7 @@ class AdminSettingsPage(QWidget):
 
             layout = QVBoxLayout(view)
             layout.setContentsMargins(24, 20, 24, 20)
-            layout.setSpacing(14)
+            layout.setSpacing(12)
             host = view
 
         layout.addWidget(self._build_source_card(host))
@@ -246,10 +246,10 @@ class AdminSettingsPage(QWidget):
         # 保留账号密码，不能合并成一组共用。
         layout.addWidget(self._build_api_card(
             # （Session 认证）
-            host, "api1", "接口1 · xqzg", "xqzg.newbv.cn"))
+            host, "api1", "接口1　xqzg", "xqzg.newbv.cn"))
         layout.addWidget(self._build_api_card(
             # （JWT 认证）
-            host, "api2", "接口2 · kd", "kd.newbv.cn:30005"))
+            host, "api2", "接口2　kd", "kd.newbv.cn:30005"))
         if not self._embedded:
             # embedded（统一设置页「数据库」）仅保留 数据源/双接口/MySQL/保存：
             # 收集上传→统一设置「应用配置」、手动添加球桌→「面板设置→运维」、

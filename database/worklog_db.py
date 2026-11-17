@@ -722,17 +722,17 @@ def build_report_text(date_from: str = "", date_to: str = "",
     summary = totals(date_from, date_to, member_id)
     for (_sort, _mid, name), items in buckets.items():
         hours = round(sum(float(i["hours"]) for i in items), 2)
-        lines.append(f"【{name}】{len(items)} 项 · {hours}h")
+        lines.append(f"【{name}】{len(items)} 项　{hours}h")
         for item in items:
             lines.append(
                 f"  {item['work_date']}  {item['title']}"
                 f"（{item['category'] or '未分类'} / {item['project'] or '无项目'}）"
-                f" {item['hours']}h · {item['progress']}% · {item['status']}")
+                f" {item['hours']}h　{item['progress']}%　{item['status']}")
             note = _clean(item.get("note")).strip()
             if note:
                 lines.append(f"      备注：{note}")
         lines.append("")
-    lines.append(f"合计：{summary['count']} 项 · {summary['hours']}h · "
+    lines.append(f"合计：{summary['count']} 项　{summary['hours']}h　"
                  f"完成率 {summary['done_rate']}%")
     return "\n".join(lines)
 

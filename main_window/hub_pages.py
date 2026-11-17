@@ -313,7 +313,7 @@ class SettingsHubPage(QWidget):
         header.setSpacing(16)
 
         title_col = QVBoxLayout()
-        title_col.setSpacing(2)
+        title_col.setSpacing(4)
         title_col.addWidget(TitleLabel("设置", self))
         d = CaptionLabel("修改后立即生效并自动保存", self)
         d.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
@@ -382,7 +382,7 @@ class SettingsHubPage(QWidget):
         scroll.viewport().setStyleSheet("background: transparent;")
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 8, 8, 8)
-        lay.setSpacing(14)
+        lay.setSpacing(12)
         for build in builders:
             lay.addWidget(build(body))
         lay.addStretch(1)
@@ -535,7 +535,7 @@ class SettingsHubPage(QWidget):
                 return "全部关闭"
             if n == len(scopes) - 1:
                 return "全部开启"
-            return f"自定义 · {n} 项开启"
+            return f"自定义　{n} 项开启"
 
         def _apply(panel, on):
             if panel is None:
@@ -610,7 +610,7 @@ class SettingsHubPage(QWidget):
             _MenuShowFilter(smooth_menu, _refresh_checked, smooth_menu))
         smooth_btn.setMenu(smooth_menu)  # mouseReleaseEvent 自动弹出
 
-        # 按钮定宽 170：摘要文本在「全部关闭 / 自定义 · N 项」之间变长变短，
+        # 按钮定宽 170：摘要文本在「全部关闭 / 自定义　N 项」之间变长变短，
         # 不定宽会让整行在每次勾选时左右跳动
         g.addRow(SettingRow(
             FluentIcon.SPEED_HIGH, "表格平滑滚动",
@@ -1128,9 +1128,8 @@ class SettingsHubPage(QWidget):
                             {"home_log_exclude_frp": bool(v)}))))
 
         tip = CaptionLabel(
-            "规则按序匹配，命中行整行着色；开启「命中通知」后弹提示"
-            "（每规则 10 秒去重）。正则写法与 Python re 一致，"
-            "如 ERROR|Exception。", parent)
+            "按序匹配，命中行整行着色\n"
+            "正则写法与 Python re 一致，示例 ERROR|Exception", parent)
         # 说明必须换行：窄窗口下不换行会被直接截断，用户看不到正则写法约定
         tip.setWordWrap(True)
         tip.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
@@ -1148,7 +1147,7 @@ class SettingsHubPage(QWidget):
         btn_host = QWidget(parent)
         btn_lay = QHBoxLayout(btn_host)
         btn_lay.setContentsMargins(0, 0, 0, 0)
-        btn_lay.setSpacing(10)
+        btn_lay.setSpacing(8)
         btn_lay.addWidget(make_button("添加", lambda: _add_rule(), width=76))
         btn_lay.addWidget(make_button("编辑", lambda: _edit_rule(), width=76))
         btn_lay.addWidget(make_button("删除", lambda: _del_rule(), width=76))
@@ -1171,7 +1170,7 @@ class SettingsHubPage(QWidget):
                 name = r.get("name", "") or ""
                 pat = r.get("pattern", "") or ""
                 notify = "通知" if r.get("notify") else "静默"
-                item = QListWidgetItem(f"{name}  ·  {pat}  ·  {notify}")
+                item = QListWidgetItem(f"{name}　{pat}　{notify}")
                 try:
                     item.setForeground(QColor(r.get("color", "#ff5252")))
                 except Exception:
@@ -1311,7 +1310,7 @@ class AboutPage(QWidget):
         card = CardWidget(self)
         v = QVBoxLayout(card)
         v.setContentsMargins(24, 24, 24, 24)
-        v.setSpacing(6)
+        v.setSpacing(4)
 
         title = TitleLabel("AutoWork", card)
         v.addWidget(title)
@@ -1323,12 +1322,12 @@ class AboutPage(QWidget):
         except Exception:
             APP_VERSION = "2.9"
         self._version_text = str(APP_VERSION)
-        ver = CaptionLabel(f"版本 {APP_VERSION} · PySide6 6.11 · qfluentwidgets 1.11", card)
+        ver = CaptionLabel(f"版本 {APP_VERSION}　PySide6 6.11　qfluentwidgets 1.11", card)
         v.addWidget(ver)
 
         desc = BodyLabel(
-            "台球追踪视频控制 · 日志采集 · 球桌设备数据\n"
-            "运维管理 · 售后 · 跑视频 · P2P 远程 · MySQL 双后端", card)
+            "台球追踪视频控制　日志采集　球桌设备数据\n"
+            "运维管理　售后　跑视频　P2P 远程　MySQL 双后端", card)
         desc.setWordWrap(True)
         v.addWidget(desc)
 
@@ -1336,7 +1335,7 @@ class AboutPage(QWidget):
 
         # ---------- 检查更新 ----------
         upd_row = QHBoxLayout()
-        upd_row.setSpacing(10)
+        upd_row.setSpacing(8)
         from qfluentwidgets import PrimaryPushButton
         self.btn_check_update = PrimaryPushButton(FluentIcon.SYNC, "检查更新", card)
         self.btn_check_update.setObjectName("aboutCheckUpdateButton")
@@ -1352,7 +1351,7 @@ class AboutPage(QWidget):
 
         v.addSpacing(8)
         row = QHBoxLayout()
-        repo = CaptionLabel("FluentWindow 单窗口导航版 · design/fluent_window_proposal.html", card)
+        repo = CaptionLabel("单窗口导航版", card)
         row.addWidget(repo)
         row.addStretch(1)
         v.addLayout(row)

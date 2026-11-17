@@ -34,8 +34,8 @@ class SignerSettingsCard(CardWidget):
         vbox.setSpacing(8)
         vbox.addWidget(BodyLabel("默认署名", self))
         vbox.addWidget(CaptionLabel(
-            "填写录入页「署名」栏的预填值；与主界面视频/日志批量整理的"
-            "筛选署名共用同一配置，两处保持一致", self))
+            "录入页署名的预填值\n"
+            "与批量整理的筛选署名共用同一配置", self))
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -90,8 +90,7 @@ class AutoRefreshCard(CardWidget):
         vbox.setSpacing(8)
         vbox.addWidget(BodyLabel("自动刷新", self))
         vbox.addWidget(CaptionLabel(
-            "定时检查数据库变化（他人填写的记录自动出现，无需手动同步）；"
-            "仅在数据真正变化时刷新，不打扰当前浏览", self))
+            "数据变化时自动刷新，不打断当前浏览", self))
 
         row_sw = QHBoxLayout()
         row_sw.setSpacing(8)
@@ -174,7 +173,7 @@ class SettingsPage(QWidget):
         content = QWidget(self)
         cl = QVBoxLayout(content)
         cl.setContentsMargins(24, 20, 24, 20)
-        cl.setSpacing(14)
+        cl.setSpacing(12)
 
         # 默认署名卡片
         self.signer_card = SignerSettingsCard(content)

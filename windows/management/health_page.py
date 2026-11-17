@@ -257,7 +257,7 @@ class _AlertRow(CardWidget):
         # 只有一个 QLabel 才能让整行随窗口宽度自然省略，多控件拼排会互相挤压。
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 6, 12, 6)
-        lay.setSpacing(10)
+        lay.setSpacing(8)
         icon = QLabel("⚠", self)
         icon.setStyleSheet(f"color: {SEMANTIC['danger']}; font-size: 15px;")
         lay.addWidget(icon)
@@ -267,7 +267,7 @@ class _AlertRow(CardWidget):
         avg = max(float(info.get("avg_rate") or 0), 0.001)
         times = float(info.get("today_rate") or 0) / avg
         txt = QLabel(
-            f"{info.get('device_code', '')} · {info.get('club_name', '')} · "
+            f"{info.get('device_code', '')}　{info.get('club_name', '')}　"
             f"球桌 {info.get('table_id', '')} —— 今日错误率 "
             f"{float(info.get('today_rate') or 0):.1f}%，近 "
             f"{info.get('hist_days', 0)} 日均值 "
@@ -348,7 +348,7 @@ class TrendPage(QWidget):
         """搭建预警区 + 趋势折线 + 排行三张卡片"""
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
         # 三张卡片按排障顺序自上而下，末尾的 stretch 负责把内容顶到上方：
         # 窗口被拉高时空白留在底部，而不是把三块均匀撑开。
         title = TitleLabel("健康度趋势", self)
@@ -358,7 +358,7 @@ class TrendPage(QWidget):
         alert_card = CardWidget(self)
         a_lay = QVBoxLayout(alert_card)
         a_lay.setContentsMargins(14, 10, 14, 12)
-        a_lay.setSpacing(6)
+        a_lay.setSpacing(4)
         head = QHBoxLayout()
         # 判据直接写在标题里：预警阈值是个容易被质疑的数字，
         # 摆在用户眼前才能省掉「多少算突增」的来回解释。
@@ -397,7 +397,7 @@ class TrendPage(QWidget):
         t_lay.setContentsMargins(14, 10, 14, 12)
         t_lay.setSpacing(8)
         bar = QHBoxLayout()
-        bar.setSpacing(6)
+        bar.setSpacing(4)
         self._search_edit = SearchLineEdit(trend_card)
         self._search_edit.setPlaceholderText("搜索设备（编码 / 球房 / 球桌）")
         self._search_edit.setFixedWidth(230)
@@ -424,7 +424,7 @@ class TrendPage(QWidget):
         r_lay.setContentsMargins(14, 10, 14, 12)
         r_lay.setSpacing(8)
         r_head = QHBoxLayout()
-        r_head.setSpacing(6)
+        r_head.setSpacing(4)
         r_head.addWidget(QLabel("TOP", rank_card))
         # TOP 只给 10/20/50：再大就要扫更多行，而超出屏幕范围的部分
         # 用户也不会真的往下翻，只是白白增加查询时间。
@@ -433,7 +433,7 @@ class TrendPage(QWidget):
         self._top_combo.setFixedWidth(70)
         self._top_combo.currentTextChanged.connect(lambda _: self._load_ranking())
         r_head.addWidget(self._top_combo)
-        r_head.addWidget(QLabel("排行 · 排序:", rank_card))
+        r_head.addWidget(QLabel("排行　排序:", rank_card))
         self._sort_combo = ComboBox(rank_card)
         self._sort_combo.addItems(list(self._RANK_FIELD_MAP.keys()))
         self._sort_combo.currentTextChanged.connect(lambda _: self._load_ranking())
@@ -654,7 +654,7 @@ class TrendPage(QWidget):
         combo.clear()
         for r in rows:
             combo.addItem(
-                f"{r.get('device_code', '')} · {r.get('club_name', '')} · "
+                f"{r.get('device_code', '')}　{r.get('club_name', '')}　"
                 f"{r.get('table_id', '')}", r.get("device_code", ""))
         combo.blockSignals(False)
         if rows:
@@ -683,7 +683,7 @@ class TrendPage(QWidget):
         """
         if not device_code:
             return
-        self._lbl_trend_title.setText(f"{device_code} · 近 30 天趋势")
+        self._lbl_trend_title.setText(f"{device_code}　近 30 天趋势")
         self._run_query("_trend_worker", table_db.query_kd_trend,
                         (device_code, 30), self._chart.set_data)
 
@@ -892,9 +892,7 @@ class HealthPage(QWidget):
         self._search_edit = SearchLineEdit(self)
         self._search_edit.setPlaceholderText("搜索（球桌 / 球房 / 状态 / 健康度）")
         self._search_edit.setFixedWidth(240)
-        self._search_edit.setToolTip(
-            "在当前告警列表内即时过滤；清空恢复全部。"
-            "表格文本可用鼠标拖选后 Ctrl+C 或右键复制")
+        self._search_edit.setToolTip("即时过滤告警列表，清空恢复全部")
         self._search_edit.textChanged.connect(self._apply_filter)
         header.addWidget(self._search_edit)
         header.addStretch(1)
@@ -986,7 +984,7 @@ class HealthPage(QWidget):
         """告警查询完成：回写行数据并重建表格（Worker 线程零界面操作）"""
         self._rows = rows
         now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        self._sync_base_text = f"{len(rows)} 条异常 · 展示刷新于 {now}"
+        self._sync_base_text = f"{len(rows)} 条异常　展示刷新于 {now}"
         self._rebuild_table()
 
     @staticmethod
@@ -1029,7 +1027,7 @@ class HealthPage(QWidget):
         base = getattr(self, "_sync_base_text", "")
         raw = self._search_edit.text().strip()
         if raw:
-            self._lbl_sync.setText(f"{base} · 搜索「{raw}」命中 {shown} 条")
+            self._lbl_sync.setText(f"{base}　搜索「{raw}」命中 {shown} 条")
         else:
             self._lbl_sync.setText(base)
 
@@ -1078,14 +1076,12 @@ class HealthPage(QWidget):
                     if row_bg is not None:
                         it.setBackground(row_bg)
                     t.setItem(row, col, it)
-                it_h = QTableWidgetItem(f"{h:.0f}{' *' if stale else ''} · {level}")
+                it_h = QTableWidgetItem(f"{h:.0f}{' *' if stale else ''}　{level}")
                 it_h.setFlags(it_h.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 it_h.setForeground(QBrush(color))
                 if stale:
                     it_h.setBackground(row_bg)
-                    it_h.setToolTip(
-                        "已处理超过 48 小时，服务器数据仍未变化——"
-                        "可能是数据源未刷新或重置未生效，可重新勾选处理")
+                    it_h.setToolTip("超过 48 小时未更新，可重新处理")
                 t.setItem(row, 4, it_h)
         finally:
             t.blockSignals(False)
@@ -1178,7 +1174,7 @@ class HealthPage(QWidget):
         # 只显示时分秒：日期在「今天」的语境下没有信息量，
         # 而状态栏宽度有限，多几位日期会把条数挤出去。
         now = QDateTime.currentDateTime().toString("HH:mm:ss")
-        self._lbl_sync.setText(f"数据获取于 {now} · {count} 条异常")
+        self._lbl_sync.setText(f"数据获取于 {now}　{count} 条异常")
         self._refresh_display()
 
     def _on_sync_fail(self, msg):

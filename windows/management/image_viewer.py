@@ -193,7 +193,7 @@ class ImageViewerDialog(QDialog):
 
         # 图片区：左右箭头 + 居中图片标签
         mid = QHBoxLayout()
-        mid.setSpacing(6)
+        mid.setSpacing(4)
         self._btn_prev = ToolButton(FluentIcon.CARE_LEFT_SOLID, self)
         # 实心箭头 glyph 充满图标区域，按钮太小会被裁剪：加大固定尺寸
         self._btn_prev.setFixedSize(40, 40)
@@ -231,7 +231,7 @@ class ImageViewerDialog(QDialog):
             self._migrate_btns = {}
             btn_row = QHBoxLayout()
             btn_row.setContentsMargins(0, 0, 0, 0)
-            btn_row.setSpacing(6)
+            btn_row.setSpacing(4)
             # 先加弹簧把按钮推到右侧，与文件列表滑出面板的按钮位置保持一致
             btn_row.addStretch(1)
             for dest in self._dest_options:
@@ -269,7 +269,7 @@ class ImageViewerDialog(QDialog):
         self._lbl_name.setText(fname)
         # 长文件名悬停显示全名（tooltip 不影响文本拖选与复制）
         self._lbl_name.setToolTip(fname)
-        self._lbl_status.setText(f"{idx + 1} / {len(self._entries)} · 加载中...")
+        self._lbl_status.setText(f"{idx + 1} / {len(self._entries)}　加载中...")
         # 先清空旧图再异步下载：不清会让翻页瞬间仍显示上一张，用户以为是新图
         self._lbl_img.setText("")
         # 首尾禁用而不做循环翻页，避免用户以为列表是环形的、翻不到尽头
@@ -346,7 +346,7 @@ class ImageViewerDialog(QDialog):
         if not urls:
             self._lbl_img.setText("图片不存在（可能已迁移或已删除）")
             self._lbl_status.setText(
-                f"{self._idx + 1} / {len(self._entries)} · 加载失败")
+                f"{self._idx + 1} / {len(self._entries)}　加载失败")
             return
         url = urls[0]
         # 命中缓存直接显示：翻页回看不重复下载，也避免同一张图反复占带宽
@@ -388,7 +388,7 @@ class ImageViewerDialog(QDialog):
         # 所有候选都失败才落到这里：不再重试，直接把原因显示在图片区
         self._lbl_img.setText(f"加载失败: {msg}")
         self._lbl_status.setText(
-            f"{self._idx + 1} / {len(self._entries)} · 加载失败")
+            f"{self._idx + 1} / {len(self._entries)}　加载失败")
 
     def _apply_pixmap(self, pix):
         # 只把缩放后的位图交给控件，原图留在 _cache：窗口拉伸时按新尺寸重算
@@ -398,7 +398,7 @@ class ImageViewerDialog(QDialog):
         self._lbl_img.setPixmap(scaled)
         # 状态行顺带显示原始分辨率：一眼能看出拿到的是原图还是 320×200 缩略图
         self._lbl_status.setText(
-            f"{self._idx + 1} / {len(self._entries)} · "
+            f"{self._idx + 1} / {len(self._entries)}　"
             f"{pix.width()}×{pix.height()}")
 
     def resizeEvent(self, e):
@@ -423,5 +423,5 @@ class ImageViewerDialog(QDialog):
         # 翻页回看按新目录构造 URL 才能命中），状态行给出已提交标记
         self._entries[self._idx] = (fname, dest_cat)
         self._lbl_status.setText(
-            f"{self._idx + 1} / {len(self._entries)} · "
+            f"{self._idx + 1} / {len(self._entries)}　"
             f"已提交迁移「{src_cat} → {dest_cat}」")

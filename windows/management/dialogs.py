@@ -75,10 +75,10 @@ class AddRecordDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         form = QFormLayout()
-        form.setSpacing(10)
+        form.setSpacing(8)
         self._edit_name = LineEdit(self)
         form.addRow("球桌号:", self._edit_name)
         self._edit_room = LineEdit(self)
@@ -145,7 +145,7 @@ class EditSnkDialog(MessageBoxBase):
         """把当前值填进输入框；table_name 用于标题，便于确认改的是哪张桌。"""
         super().__init__(parent)
         # 标题带上球桌号：同一张桌子可能重复打开弹窗，不标号容易改错桌
-        self.titleLabel = BodyLabel(f"修改 SNK 标识 · 球桌 {table_name}", self)
+        self.titleLabel = BodyLabel(f"修改 SNK 标识　球桌 {table_name}", self)
         self.viewLayout.addWidget(self.titleLabel)
         self.edit = LineEdit(self)
         self.edit.setText(current)
@@ -189,7 +189,7 @@ class DeviceDirHealDialog(MessageBoxBase):
             QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         # scored 已按分数降序：最可能的排最上，多数情况直接点第一项就行
         for score, name in scored:
-            it = QListWidgetItem(f"{name}　·　相似度 {score}%", self.listWidget)
+            it = QListWidgetItem(f"{name}　相似度 {score}%", self.listWidget)
             # 目录名存 UserRole 而非解析显示文本，分数格式以后改了也不影响取值
             it.setData(Qt.ItemDataRole.UserRole, name)
             it.setToolTip(os.path.join(videos_dir, name))
@@ -669,7 +669,7 @@ class UploadListDialog(QDialog):
             table_db.update_submission_upload(str(info or ""), True)
         except Exception:
             pass
-        show_info_bar(f"{info} · 本地 upload 目录已清空", "success",
+        show_info_bar(f"{info}　本地 upload 目录已清空", "success",
                       title="上传成功", parent=self, duration=5000)
 
     def _on_upload_fail(self, msg):

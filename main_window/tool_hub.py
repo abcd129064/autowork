@@ -211,12 +211,11 @@ class SingleVideoWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
 
-        # 顶部一句话交代用途与耗时特征，让用户在点开始之前就知道这是 CPU 密集任务。
+        # 顶部一句话交代用途与耗时特征，避免用户误以为可以秒出结果。
         cl.addWidget(BodyLabel(
-            "从 .log 日志解析单杆得分，生成带计分水印的单杆视频（逐帧渲染，CPU 密集）。",
-            card))
+            "从日志生成带计分水印的单杆视频，逐帧渲染耗时较长", card))
 
         # ---------- 表单区：左列参数 + 右列日志预览（2026-09-19 反馈） ----------
         # 左列沿用「控件定宽、尾部空列吃剩余」的既定规范；右侧预览面板吃掉剩下的
@@ -225,7 +224,7 @@ class SingleVideoWork(QWidget):
         form_row = QHBoxLayout()
         form_row.setSpacing(16)
         left_col = QVBoxLayout()
-        left_col.setSpacing(10)
+        left_col.setSpacing(8)
         form_row.addLayout(left_col, 0)
         form_row.addWidget(self._build_log_preview(card), 1)
 
@@ -399,7 +398,7 @@ class SingleVideoWork(QWidget):
         box.setMinimumWidth(300)
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
+        v.setSpacing(4)
 
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -446,9 +445,9 @@ class SingleVideoWork(QWidget):
         if len(raw) < size:
             text += (f"\n\n… 日志较大（{_fmt_size(size)}），"
                      f"仅预览前 {_fmt_size(self._LOG_PREVIEW_MAX_BYTES)}")
-        # 面板本身较窄，头部只放「大小 · 行数」，文件名挂悬停提示（左侧字段已显示路径）
+        # 面板本身较窄，头部只放「大小　行数」，文件名挂悬停提示（左侧字段已显示路径）
         # 按换行符计数后补 1：末行没有换行符，不补的话行数永远少一行
-        info = f"{_fmt_size(size)} · {text.count(chr(10)) + 1} 行"
+        info = f"{_fmt_size(size)}　{text.count(chr(10)) + 1} 行"
         self.log_preview_meta.setText(info)
         self.log_preview_meta.setToolTip(f"{path}\n{info}")
         # setPlainText 会把光标留在文末，手动滚回顶部才能第一眼看到开头几帧
@@ -464,7 +463,7 @@ class SingleVideoWork(QWidget):
         w = QWidget(parent)
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(6)
+        h.setSpacing(4)
         h.addWidget(edit, 1)
         h.addWidget(btn, 0)
         return w
@@ -775,8 +774,7 @@ class PortFakeWork(QWidget):
         cl.setSpacing(12)
 
         cl.addWidget(BodyLabel(
-            "点击「占用」后端口被真实监听，netstat -ano 可见 LISTENING，模拟本机有服务在监听；"
-            "支持多端口同时占用，离开本页自动全部释放。", card))
+            "占用后真实监听端口，支持多个同时占用，离开本页自动释放", card))
 
         # 参数行：端口 / 协议 / 绑定地址 / 随机 / 占用 / 全部释放
         # 参数行整体横排、尾部 addStretch 收口，窗口变宽时控件不会被拉开
@@ -1006,7 +1004,7 @@ class PortFakeWork(QWidget):
         tcp = sum(1 for (_p, pr, _a) in self._sockets if pr == "TCP")
         # UDP 用总数相减而不是再扫一遍：两个分支的判定条件互补，结果必然一致
         udp = n - tcp
-        self.lbl_stat.setText(f"已占用 {n} 个端口 · TCP {tcp} · UDP {udp}")
+        self.lbl_stat.setText(f"已占用 {n} 个端口　TCP {tcp}　UDP {udp}")
 
     def hideEvent(self, e):
         """切走页面即释放全部端口
@@ -1054,7 +1052,7 @@ class UploadListWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
 
         # 路径只回显不缓存：videos_dir 可在设置里改，切页重扫比监听配置信号省事。
         self.lbl_root = BodyLabel("收集目录: —", card)
@@ -1295,7 +1293,7 @@ class UploadListWork(QWidget):
         self._update_sel_count()
 
     def _update_sel_count(self):
-        """刷新「已选 N 个 · 大小」文案，未勾选时退回文件总数
+        """刷新「已选 N 个　大小」文案，未勾选时退回文件总数
 
         求和上界取 min(total, len(_rows))：重建瞬间表格行数会短暂多于行数据，
         直接按下标取 size 会 IndexError。
@@ -1307,7 +1305,7 @@ class UploadListWork(QWidget):
         # 未勾选时显示总数而不是「已选 0 个」，空态文案才不至于长期占位。
         base = f"共 {total} 个文件" if total else "暂无待上传文件"
         self.lbl_progress.setText(
-            f"已选 {n} 个 · {_fmt_size(sel_size)}" if n else base)
+            f"已选 {n} 个　{_fmt_size(sel_size)}" if n else base)
 
     def resizeEvent(self, e):
         """窗口尺寸变化后重摆表头复选框；它浮在 header 上，表头一移位就会飘到别列。"""
@@ -1557,7 +1555,7 @@ class UploadListWork(QWidget):
         """上传成功：恢复 UI 后重扫清单，worker 已把上传过的文件从本地删掉"""
         self._restore_ui()
         self.refresh()   # 已上传文件被 worker 删除 → 刷新清单
-        self._win._show_info_bar(f"{info} · 已上传文件已从本地删除", "success",
+        self._win._show_info_bar(f"{info}　已上传文件已从本地删除", "success",
                                  duration=5000)
 
     def _on_fail(self, msg):
@@ -1597,11 +1595,10 @@ class NewLogWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
 
         cl.addWidget(BodyLabel(
-            "按 Excel「署名」列筛选记录，批量归类对应视频与日志；完成后可一键打包上传服务器。",
-            card))
+            "按署名筛选记录，批量归类视频与日志，完成后可打包上传", card))
 
         row = QHBoxLayout()
         row.addWidget(BodyLabel("筛选署名:", card))
@@ -1895,8 +1892,8 @@ class VideoRepairWork(QWidget):
     """
 
     # 下拉项顺序即本元组顺序，值对应 video_repair.pick_cut 的 mode
-    _CUT_MODES = (("auto", "自动裁到完整 GOP · 推荐"),
-                  ("vop", "裁到最后 VOP · 有损坏风险"))
+    _CUT_MODES = (("auto", "自动裁到完整 GOP（推荐）"),
+                  ("vop", "裁到最后 VOP（有损坏风险）"))
     _FILE_FILTER = "视频文件 (*.mp4);;所有文件 (*.*)"
 
     def __init__(self, win, parent=None):
@@ -1931,7 +1928,7 @@ class VideoRepairWork(QWidget):
         top.setStyleSheet("background: transparent;")
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(10)
+        tl.setSpacing(8)
         tl.addWidget(self._build_broken_card(top))
         tl.addWidget(self._build_ref_card(top))
         # 富余高度交给最后一张卡：尾部放 stretch 的话，分隔条一旦拖得比卡片自然
@@ -1947,7 +1944,7 @@ class VideoRepairWork(QWidget):
         topwrap.setStyleSheet("background: transparent;")
         twl = QVBoxLayout(topwrap)
         twl.setContentsMargins(0, 0, 0, 0)
-        twl.setSpacing(10)
+        twl.setSpacing(8)
         twl.addWidget(self._scroll, 1)
         self._action_bar = self._build_action_bar(topwrap, settings)
         twl.addWidget(self._action_bar)
@@ -2021,8 +2018,7 @@ class VideoRepairWork(QWidget):
         self._paint(self.lbl_verdict, "未选择文件", _C_MUTED)
 
         desc = BodyLabel(
-            "断电让 mp4 索引没写出来，文件有大小却打不开。媒体数据完好，"
-            "补回配置头即可无损救回。", card)
+            "修复断电导致的 mp4 无法打开，媒体数据保持不变", card)
         desc.setWordWrap(True)
         v.addWidget(desc)
 
@@ -2102,7 +2098,7 @@ class VideoRepairWork(QWidget):
         card = CardWidget(parent)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        v.setSpacing(8)
 
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -2182,7 +2178,7 @@ class VideoRepairWork(QWidget):
         self.btn_cancel.clicked.connect(self._on_cancel)
         h.addWidget(self.btn_cancel)
         h.addStretch(1)
-        h.addWidget(CaptionLabel("原文件只读 · 流拷贝不转码", bar))
+        h.addWidget(CaptionLabel("原文件只读　流拷贝不转码", bar))
         return bar
 
     @staticmethod
@@ -2191,7 +2187,7 @@ class VideoRepairWork(QWidget):
         w = QWidget(parent)
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(6)
+        h.setSpacing(4)
         h.addWidget(edit, 1)
         h.addWidget(btn, 0)
         return w
@@ -2632,12 +2628,10 @@ class FrameExtractWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
 
         cl.addWidget(BodyLabel(
-            "选择多个视频，一键切帧做球识别训练集：每个视频均匀粗抽 100 帧，"
-            "内容去重后保留 50 张，产物按「输出目录/视频名/train_0001.jpg」存放。",
-            card))
+            "从多个视频抽帧生成训练集，每个视频保留 50 张", card))
 
         row = QHBoxLayout()
         self.btn_pick = PushButton(FluentIcon.VIDEO, "选择视频（可多选）", card)

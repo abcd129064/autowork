@@ -250,7 +250,7 @@ def _stat_card(parent, color):
     card = CardWidget(parent)
     v = QVBoxLayout(card)
     v.setContentsMargins(16, 12, 16, 12)
-    v.setSpacing(2)
+    v.setSpacing(4)
     num = StrongBodyLabel("0", card)
     num.setStyleSheet(f"color: {color.name()}; font-size: 22px; font-weight: 700;")
     lbl = CaptionLabel("", card)
@@ -292,7 +292,7 @@ class SessionWork(QWidget):
 
         # ---------- 状态行 + 快捷操作 ----------
         head = QHBoxLayout()
-        head.setSpacing(10)
+        head.setSpacing(8)
         # 两个状态标签刻意分开：frpc 是本机进程状态，frps 是管理通道的感知
         # 状态；合并显示会让人把「感知断了」误当成「隧道断了」
         self.lbl_frpc = BodyLabel("frpc 未启动", body)
@@ -342,7 +342,7 @@ class SessionWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
         self.table = TableWidget(card)
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels(
@@ -381,6 +381,7 @@ class SessionWork(QWidget):
         install_ops_links(self.table, self._on_ops_link)
 
         self.lbl_hint = CaptionLabel("", body)
+        self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         lay.addWidget(self.lbl_hint)
 
@@ -454,7 +455,7 @@ class SessionWork(QWidget):
         n = len(self._frps.snapshot()["proxies"])
         self._win._show_info_bar(
             _CHANNEL_TEXT.get(state, state)
-            + (f" · 名单 {n} 条，数据已刷新" if state == "ok" else ""),
+            + (f"　名单 {n} 条，数据已刷新" if state == "ok" else ""),
             "success" if state == "ok" else
             ("warning" if state == "unconfigured" else "error"),
             duration=4000)
@@ -535,12 +536,12 @@ class SessionWork(QWidget):
         card.setObjectName("frpsOverviewCard")
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 10, 16, 10)
-        v.setSpacing(6)
+        v.setSpacing(4)
         head = QHBoxLayout()
         t = StrongBodyLabel("frps 概览", card)
         head.addWidget(t)
         head.addStretch(1)
-        self.ov_src = CaptionLabel("GET /api/serverinfo", card)
+        self.ov_src = CaptionLabel("", card)
         self.ov_src.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 150))
         head.addWidget(self.ov_src)
         v.addLayout(head)
@@ -586,7 +587,7 @@ class SessionWork(QWidget):
                 num.setText("—")
                 num.setStyleSheet(
                     f"color: {_C_MUTED.name()}; font-size: 17px; font-weight: 700;")
-            self.ov_src.setText("GET /api/serverinfo · 暂无数据")
+            self.ov_src.setText("暂无数据")
             return
         counts = info.get("proxyTypeCounts") or {}
         # 总数取自 serverinfo 的类型计数，在线数取自代理快照：两个来源不同，
@@ -612,8 +613,8 @@ class SessionWork(QWidget):
         _set("xtcp", f"{xtcp_online} / {xtcp_total}",
              _C_SUCCESS if xtcp_online else _C_MUTED)
         age = snap.get("age_sec")
-        self.ov_src.setText(f"GET /api/serverinfo"
-                            + (f" · {age}s 前" if age is not None else ""))
+        self.ov_src.setText(
+            f"{age}s 前更新" if age is not None else "")
 
     # ---------- 刷新 ----------
 
@@ -647,8 +648,8 @@ class SessionWork(QWidget):
         # 否则「3 条启用」里混进断开的行，用户会找不到哪条真的没启动
         active_n = sum(1 for r in records if not r.get("disabled"))
         self.lbl_frpc.setText(
-            f"frpc {'运行中' if running else '未启动'} · {active_n} 条启用"
-            + (f" / {len(records) - active_n} 条已断开"
+            f"frpc {'运行中' if running else '未启动'}　{active_n} 条启用"
+            + (f"　{len(records) - active_n} 条已断开"
                if len(records) > active_n else ""))
         self._update_frp_toggle()
         self.lbl_frpc.setTextColor(
@@ -657,7 +658,7 @@ class SessionWork(QWidget):
         snap = self._frps.snapshot()
         self.lbl_frps.setText(
             _CHANNEL_TEXT.get(snap["state"], snap["state"])
-            + (f" · {snap['age_sec']}s 前" if snap["state"] == "ok" else ""))
+            + (f"　{snap['age_sec']}s 前" if snap["state"] == "ok" else ""))
         _scolor = {"ok": _C_SUCCESS, "unconfigured": _C_MUTED}.get(
             snap["state"], _C_WARNING)
         self.lbl_frps.setTextColor(_scolor, _scolor)
@@ -729,12 +730,11 @@ class SessionWork(QWidget):
             self._add_row(rec, running,
                           frps_states.get(str(rec.get("serverName", ""))))
         if not records:
-            self.lbl_hint.setText("暂无隧道 —— 点右上「新建隧道」注册 xtcp visitor")
+            self.lbl_hint.setText("暂无隧道")
         else:
             self.lbl_hint.setText(
-                "「连接」复用球桌一键直连（SSH/SFTP 标签窗口）；"
-                "断开=关会话并释放端口（保留注册，点 SSH/SFTP 即重连），"
-                "删除=彻底移除注册与持久化配置（需确认、不可恢复）")
+                "断开仅关闭会话，注册保留\n"
+                "删除移除注册，不可恢复")
 
     def _add_row(self, rec, running, frps_state=None):
         """把一条注册记录渲染成表格行。
@@ -781,7 +781,7 @@ class SessionWork(QWidget):
         info = self._frps.info(sn)
         if info:
             it_frps.setToolTip(
-                f"当前连接 {info['curConns']} · 最近上线 {info['lastStartTime'] or '—'}")
+                f"当前连接 {info['curConns']}　最近上线 {info['lastStartTime'] or '—'}")
         table.setItem(r, 1, it_frps)
 
         # RTT 与质量列合并成一格：均值 + 评级文字 + 迷你趋势。趋势图要求
@@ -797,7 +797,7 @@ class SessionWork(QWidget):
         it_rtt.setForeground(g_color if avg is not None else _C_MUTED)
         p95 = st["p95_ms"]
         it_rtt.setToolTip(
-            f"样本 {st['samples']}（成功 {st['ok']}） · "
+            f"样本 {st['samples']}（成功 {st['ok']}）　"
             f"P95 {('%.0fms' % p95) if p95 is not None else '—'}")
         table.setItem(r, 5, it_rtt)
 
@@ -1007,7 +1007,7 @@ class VisitorWork(QWidget):
         add_card = self.add_card  # 局部别名（下方大量 parent 引用沿用原名）
         al = QVBoxLayout(self.add_card)
         al.setContentsMargins(16, 14, 16, 14)
-        al.setSpacing(10)
+        al.setSpacing(8)
         al.addWidget(BodyLabel("添加访客", self.add_card))
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -1016,19 +1016,19 @@ class VisitorWork(QWidget):
         # 球桌号搜索与球桌管理搜索栏同款，动态搜索 300ms 防抖加异步查库：
         # 命中球桌后带出 snk_code 填入 serverName，并同步关联球桌号
         self.edit_table_search = SearchLineEdit(add_card)
-        self.edit_table_search.setPlaceholderText("搜索球桌号带出 serverName")
+        self.edit_table_search.setPlaceholderText("搜索球桌号")
         self.edit_table_search.setFixedWidth(260)
         self.edit_table_search.textChanged.connect(self._on_table_search_changed)
         self.edit_table_search.clearSignal.connect(self._hide_table_candidates)
         # serverName 必须与球桌 frpc_xtcp_panel.toml 里的 proxy 名逐字一致：访客侧
         # 按名字找对端，拼错不会报错，只表现为访客一直连不上。
         self.edit_name = LineEdit(add_card)
-        self.edit_name.setPlaceholderText("snk 标识（与球桌 frps proxy 同名）")
+        self.edit_name.setPlaceholderText("与球桌端同名")
         self.edit_name.setFixedWidth(260)
         # 留空即沿用 frpc 默认 secretKey；两侧填不一致时打洞建不起来，
         # 日志里只有一行连接失败，看不出是密钥问题。
         self.edit_key = PasswordLineEdit(add_card)
-        self.edit_key.setPlaceholderText("secretKey（留空用默认）")
+        self.edit_key.setPlaceholderText("留空使用默认值")
         self.edit_key.setFixedWidth(200)
         # FittedSpinBox：端口是 4~5 位数字，qfw SpinBox 不为右侧自绘按钮预留
         # 文本空间，固定宽度在大字号/高 DPI 下会把数字压到箭头下面，
@@ -1040,7 +1040,6 @@ class VisitorWork(QWidget):
         # 选填：填了才能在注册表里按球桌号反查；留空注册照样成功，
         # 只是这一列显示「—」，事后无法从隧道名回溯是哪张球桌。
         self.edit_table_id = LineEdit(add_card)
-        self.edit_table_id.setPlaceholderText("关联球桌号（选填）")
         self.edit_table_id.setFixedWidth(130)
         # SSH 账号/密码。xtcp 隧道的 SSH/SFTP 用的是**设备自己**的账号
         # 密码，也就是 settings 里的 ssh_user/ssh_pass，与主面板 P2P 表单、
@@ -1048,10 +1047,10 @@ class VisitorWork(QWidget):
         # 一改就把隧道路径的凭据覆盖成直连主机的账号，比如 root，隧道 SSH
         # 随即报认证失败，所以在这里单独开一份并和直连侧彻底分开。
         self.xtcp_user = LineEdit(add_card)
-        self.xtcp_user.setPlaceholderText("设备 SSH 账号（如 newbv）")
+        self.xtcp_user.setPlaceholderText("设备账号")
         self.xtcp_user.setFixedWidth(260)
         self.xtcp_pass = PasswordLineEdit(add_card)
-        self.xtcp_pass.setPlaceholderText("设备 SSH 密码")
+        self.xtcp_pass.setPlaceholderText("设备密码")
         self.xtcp_pass.setFixedWidth(200)
         # textEdited 仅用户输入时触发，setText 不会触发，所以不会把回填当作用户修改
         # 换成 textChanged 的话，每次刷新回填都会被判成「用户改过」，
@@ -1065,10 +1064,7 @@ class VisitorWork(QWidget):
         # 不写进 credentials.json。
         self.xtcp_remember = CheckBox("记住密码", add_card)
         self.xtcp_remember.setChecked(True)
-        self.xtcp_remember.setToolTip(
-            "勾选：连接/注册后把设备账号密码写入 config/credentials.json"
-            "（DPAPI 加密，重启后仍在）\n"
-            "取消：只用于本次运行，关闭应用即丢失，不改动已保存的密码")
+        self.xtcp_remember.setToolTip("勾选后凭据加密保存，取消则仅本次有效")
         self.xtcp_pass.textEdited.connect(
             lambda _t: self._refresh_cred_hint(cred.KIND_DEVICE))
         self.xtcp_remember.toggled.connect(
@@ -1125,19 +1121,15 @@ class VisitorWork(QWidget):
         # 既忘不掉也清不掉，所以单独给一个按钮。
         self.btn_xtcp_clear = PushButton(FluentIcon.DELETE, "清除已保存凭据",
                                          add_card)
-        self.btn_xtcp_clear.setToolTip(
-            "清空 config/credentials.json 里保存的设备 SSH 密码（ssh_pass），"
-            "账号保留")
+        self.btn_xtcp_clear.setToolTip("清除已保存的设备密码，账号保留")
         self.btn_xtcp_clear.clicked.connect(
             lambda: self._clear_credentials(cred.KIND_DEVICE))
         btns.addWidget(self.btn_xtcp_clear)
         al.addLayout(btns)
         cap = CaptionLabel(
-            "注册仅写入 frpc_xtcp_panel.toml（不拉起 frpc）；「添加并连接」经一键直连建立隧道。"
-            "搜索球桌号可带出 serverName（snk 标识）与关联球桌。"
-            "SSH 账号/密码是**设备凭据**（与主面板、设置页同源），TCP 直连卡里填的是"
-            "直连主机自己的凭据，两边互不覆盖。取消「记住密码」可只对本次运行生效。",
-            add_card)
+            "此处填设备凭据，与 TCP 直连凭据互不覆盖\n"
+            "取消「记住密码」仅本次有效", add_card)
+        cap.setWordWrap(True)
         cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         al.addWidget(cap)
         lay.addWidget(self.add_card)
@@ -1147,7 +1139,7 @@ class VisitorWork(QWidget):
         self.tcp_card = CardWidget(body)
         tl = QVBoxLayout(self.tcp_card)
         tl.setContentsMargins(16, 14, 16, 14)
-        tl.setSpacing(10)
+        tl.setSpacing(8)
         tl.addWidget(BodyLabel("TCP 直连", self.tcp_card))
         tcp_grid = QGridLayout()
         tcp_grid.setHorizontalSpacing(12)
@@ -1157,16 +1149,14 @@ class VisitorWork(QWidget):
         # 凭据互相覆盖。
         # 端口单独成列，改端口等于新增一条记录，而不是覆盖同一主机的旧值。
         self.tcp_host = LineEdit(self.tcp_card)
-        self.tcp_host.setPlaceholderText("主机地址（IP 或域名）")
+        self.tcp_host.setPlaceholderText("IP 或域名")
         self.tcp_host.setFixedWidth(220)
         self.tcp_port = FittedSpinBox(self.tcp_card)
         self.tcp_port.setRange(1, 65535)
         self.tcp_port.setValue(22)
         self.tcp_user = LineEdit(self.tcp_card)
-        self.tcp_user.setPlaceholderText("SSH 用户名")
         self.tcp_user.setFixedWidth(150)
         self.tcp_pass = PasswordLineEdit(self.tcp_card)
-        self.tcp_pass.setPlaceholderText("SSH 密码")
         self.tcp_pass.setFixedWidth(150)
         # 读合并视图而不是裸 settings.json：缺键时能拿到默认值，文件半写坏也不抛错。
         # 这张卡在主窗口初始化阶段构造，一次读取异常会连带整个远程面板起不来。
@@ -1182,10 +1172,7 @@ class VisitorWork(QWidget):
         # 只对本次运行生效，不落盘。
         self.tcp_remember = CheckBox("记住密码", self.tcp_card)
         self.tcp_remember.setChecked(True)
-        self.tcp_remember.setToolTip(
-            "勾选：连接后把直连主机账号密码写入 config/credentials.json"
-            "（DPAPI 加密，重启后仍在）\n"
-            "取消：只用于本次运行，关闭应用即丢失")
+        self.tcp_remember.setToolTip("勾选后凭据加密保存，取消则仅本次有效")
         self.tcp_pass.textEdited.connect(
             lambda _t: self._refresh_cred_hint(cred.KIND_DIRECT))
         self.tcp_user.textEdited.connect(
@@ -1217,7 +1204,7 @@ class VisitorWork(QWidget):
         self.btn_tcp_sftp.clicked.connect(lambda: self._tcp_connect("sftp"))
         tcp_btns.addWidget(self.btn_tcp_sftp)
         btn_save = PushButton(FluentIcon.ADD, "保存服务器", self.tcp_card)
-        btn_save.setToolTip("把当前 host:port 存入服务器列表（与主面板同源）")
+        btn_save.setToolTip("存入服务器列表")
         btn_save.clicked.connect(self._tcp_save)
         tcp_btns.addWidget(btn_save)
         btn_del = PushButton(FluentIcon.DELETE, "删除选中", self.tcp_card)
@@ -1226,9 +1213,7 @@ class VisitorWork(QWidget):
         tcp_btns.addStretch(1)
         self.btn_tcp_clear = PushButton(FluentIcon.DELETE, "清除已保存凭据",
                                        self.tcp_card)
-        self.btn_tcp_clear.setToolTip(
-            "清空 config/credentials.json 里保存的直连主机 SSH 密码"
-            "（tcp_ssh_pass），账号保留")
+        self.btn_tcp_clear.setToolTip("清除已保存的直连密码，账号保留")
         self.btn_tcp_clear.clicked.connect(
             lambda: self._clear_credentials(cred.KIND_DIRECT))
         tcp_btns.addWidget(self.btn_tcp_clear)
@@ -1255,11 +1240,9 @@ class VisitorWork(QWidget):
         tl.addWidget(self.tcp_table)
         tl.addSpacing(8)    # 表格与说明文字间距
         tcp_cap = CaptionLabel(
-            "TCP 直连不经 frpc：局域网地址或 frps 转发端口（frps 代理页 tcp 页签可一键存入）。"
-            "用户/密码是**直连主机自己**的凭据（存 tcp_ssh_user/tcp_ssh_pass，"
-            "连接时写回、下次自动带出），不会覆盖 XTCP 卡的设备凭据；"
-            "连接成功进全局会话窗口。取消「记住密码」可只对本次运行生效。",
-            self.tcp_card)
+            "此处填直连主机凭据，与设备凭据互不覆盖\n"
+            "主机可填局域网地址或 frps 转发端口", self.tcp_card)
+        tcp_cap.setWordWrap(True)
         tcp_cap.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         tl.addWidget(tcp_cap)
         tl.addStretch(1)    # 剩余高度沉底：控件间隙不被均摊拉大
@@ -1280,7 +1263,7 @@ class VisitorWork(QWidget):
         self.visitor_card = CardWidget(body)
         cl = QVBoxLayout(self.visitor_card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
         head = QHBoxLayout()
         head.addWidget(BodyLabel("xtcp visitor 注册表", self.visitor_card))
         head.addStretch(1)
@@ -1486,7 +1469,7 @@ class VisitorWork(QWidget):
         # 有密码但没勾「记住密码」时补一句状态：不加的话用户看到「来自表单」
         # 会以为已经落盘，重启后才发现还得重新输。
         if creds.has_password and not remember:
-            text += " · 已取消「记住密码」"
+            text += "　已取消「记住密码」"
         hint.setText(text)
 
     def _clear_credentials(self, kind: str):
@@ -1753,7 +1736,7 @@ class VisitorWork(QWidget):
             name = str(r.get("name") or "")
             room = str(r.get("roomName") or "")
             snk = str(r.get("snk_code") or "")
-            item = QListWidgetItem(f"{name} · {room}")
+            item = QListWidgetItem(f"{name}　{room}")
             item.setToolTip(f"桌号: {name}\n球房: {room}\nSNK: {snk or '（未登记）'}")
             self._cand_list.addItem(item)
         self._cand_list.setVisible(True)
@@ -1882,7 +1865,7 @@ class QualityWork(QWidget):
         lay.setSpacing(12)
 
         head = QHBoxLayout()
-        head.setSpacing(10)
+        head.setSpacing(8)
         # 顶部只留状态与两个手动入口：定时探测由 VisitorProber 驱动，
         # 手动按钮用于「换了网络马上验一次」，不必等下一个 30s 周期。
         self.lbl_probe = BodyLabel("探测未启动", body)
@@ -1913,7 +1896,7 @@ class QualityWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
         # 表全列只读：数据由探测线程写进 prober，表格只做投影；
         # 放开编辑会造出「改了但下一轮探测又覆盖」的假象。
         self.table = TableWidget(card)
@@ -1942,8 +1925,8 @@ class QualityWork(QWidget):
         lay.addWidget(card, 1)
 
         self.lbl_hint = CaptionLabel(
-            "RTT = 对隧道本地端口 TCP 建连耗时（XTCP 打洞+握手全含），≈ 你按 SSH 的回连体感；"
-            "双击行可直接打开 SSH 会话", body)
+            "RTT 为隧道建连耗时，数值越低越好", body)
+        self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         lay.addWidget(self.lbl_hint)
 
@@ -2001,8 +1984,8 @@ class QualityWork(QWidget):
         running = self._mgr.is_running()
         q_on = self._prober.running
         self.lbl_probe.setText(
-            ("探测运行中 · 每 30s 一轮" if q_on else "探测未启动")
-            + (" · frpc 运行中" if running else " · frpc 未启动"))
+            ("探测运行中　每 30s 一轮" if q_on else "探测未启动")
+            + ("　frpc 运行中" if running else "　frpc 未启动"))
         self.lbl_probe.setTextColor(_C_SUCCESS if q_on and running else _C_MUTED,
                                     _C_SUCCESS if q_on and running else _C_MUTED)
 
@@ -2150,7 +2133,7 @@ class FrpsProxiesWork(QWidget):
         lay.setSpacing(12)
 
         head = QHBoxLayout()
-        head.setSpacing(10)
+        head.setSpacing(8)
         self.lbl_state = BodyLabel("frps 代理清单", body)
         head.addWidget(self.lbl_state)
         head.addStretch(1)
@@ -2183,7 +2166,7 @@ class FrpsProxiesWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
         self.table = TableWidget(card)
         self.table.setColumnCount(9)
         # 列名与顺序直接照抄 frps Proxies 页，英文原名不翻译，方便两边
@@ -2216,9 +2199,8 @@ class FrpsProxiesWork(QWidget):
         install_ops_links(self.table, self._on_proxy_ops_link)
 
         self.lbl_hint = CaptionLabel(
-            "数据源 GET /api/proxy/{type} + /api/clients（frps 网页面板 Proxies 页同源，"
-            "随周期感知 best-effort 拉取）。xtcp/tcp 页签可直连：动作走本地注册表与"
-            " TCP 直连的既有权威路径。", body)
+            "显示 frps 服务端已注册的代理", body)
+        self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         lay.addWidget(self.lbl_hint)
 
@@ -2292,8 +2274,9 @@ class FrpsProxiesWork(QWidget):
                 cell.setData(LINKS_ROLE, tuple(links))
                 self.table.setItem(r, 8, cell)
         self.lbl_state.setText(
-            f"frps 代理清单 · {self._tab.upper()} {len(rows)} 条"
-            + ("" if snap_state == "ok" else f"（感知通道 {snap_state}）"))
+            f"{self._tab.upper()} 代理　{len(rows)} 条"
+            + ("" if snap_state == "ok"
+               else f"　{_CHANNEL_TEXT.get(snap_state, snap_state)}"))
 
     # 行内动作。2026-09-24 与 P0-2 委托化一起调整成当前形式。
 
@@ -2451,10 +2434,10 @@ class TunnelConfWork(QWidget):
         card = CardWidget(body)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
-        cl.setSpacing(10)
+        cl.setSpacing(8)
         head = QHBoxLayout()
         head.addWidget(BodyLabel("frpc 服务器", card))
-        cap0 = CaptionLabel("所有 visitor 共享的 frps 接入点（与 设置-远程连接 同键）", card)
+        cap0 = CaptionLabel("所有访客共用的接入点", card)
         cap0.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         head.addWidget(cap0)
         head.addStretch(1)
@@ -2504,13 +2487,11 @@ class TunnelConfWork(QWidget):
         self.btn_save.clicked.connect(self._on_save)
         btns.addWidget(self.btn_save)
         self.btn_restart = PushButton(FluentIcon.SYNC, "重启 frpc", card)
-        self.btn_restart.setToolTip("按注册表与当前配置重写 TOML 并重启 frpc")
+        self.btn_restart.setToolTip("按当前配置重启 frpc")
         self.btn_restart.clicked.connect(self._on_restart)
         btns.addWidget(self.btn_restart)
         self.btn_stop = PushButton(FluentIcon.POWER_BUTTON, "优雅停止 frpc", card)
-        self.btn_stop.setToolTip(
-            "POST /api/stop 让 frpc 自行关闭控制连接与监听端口后退出；\n"
-            "2.5s 未退出才兜底强杀（修复 kill 强杀的端口 TIME_WAIT/TOML 半写残留）")
+        self.btn_stop.setToolTip("等待 frpc 自行退出，必要时强制结束")
         self.btn_stop.clicked.connect(self._on_stop)
         btns.addWidget(self.btn_stop)
         btns.addStretch(1)
@@ -2520,11 +2501,7 @@ class TunnelConfWork(QWidget):
         self.chk_autostart = CheckBox("开启时静默预连", card)
         self.chk_autostart.setChecked(
             _as0.get("frp_autostart", True) is not False)
-        self.chk_autostart.setToolTip(
-            "程序启动后自动拉起 frpc 并恢复启用中的隧道（跳过已断开的），\n"
-            "再预热打洞——点 SSH/SFTP 直接秒连，不再等 2.5s+ 冷启动。\n"
-            "全程静默：失败只进日志不打扰；勾选时立即执行一次。\n"
-            "注意：会在后台常驻 frpc 进程并保持到 frps 的控制连接。")
+        self.chk_autostart.setToolTip("启动时恢复隧道，后台常驻 frpc 进程")
         self.chk_autostart.clicked.connect(self._on_autostart_toggled)
         btns.addWidget(self.chk_autostart)
         cl.addLayout(btns)
@@ -2534,10 +2511,10 @@ class TunnelConfWork(QWidget):
         mcard = CardWidget(body)
         ml = QVBoxLayout(mcard)
         ml.setContentsMargins(16, 14, 16, 14)
-        ml.setSpacing(10)
+        ml.setSpacing(8)
         mhead = QHBoxLayout()
         mhead.addWidget(BodyLabel("管理通道", mcard))
-        cap1 = CaptionLabel("frps 在线感知（只读 GET）+ 本机 frpc admin API", mcard)
+        cap1 = CaptionLabel("在线状态与质量探测", mcard)
         cap1.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         mhead.addWidget(cap1)
         mhead.addStretch(1)
@@ -2579,25 +2556,23 @@ class TunnelConfWork(QWidget):
         self.btn_ch_save.clicked.connect(self._on_channel_save)
         mbtns.addWidget(self.btn_ch_save)
         self.btn_ch_test = PushButton(FluentIcon.SYNC, "测试连接", mcard)
-        self.btn_ch_test.setToolTip("GET /api/proxy/xtcp 验证 URL 与凭据")
+        self.btn_ch_test.setToolTip("验证面板地址与账号是否可用")
         self.btn_ch_test.clicked.connect(self._on_channel_test)
         mbtns.addWidget(self.btn_ch_test)
         self.btn_frpc_health = PushButton(FluentIcon.INFO, "frpc 通道自检", mcard)
-        self.btn_frpc_health.setToolTip(
-            "对 127.0.0.1:{admin_port} 依次 GET /healthz 与 /api/status，验证本机管理通道")
+        self.btn_frpc_health.setToolTip("检查本机 frpc 管理通道是否正常")
         self.btn_frpc_health.clicked.connect(self._on_frpc_health)
         mbtns.addWidget(self.btn_frpc_health)
         mbtns.addStretch(1)
         # 用按钮而非复选框：探测默认开启，按钮文案直接写「点下会发生什么」，
         # 复选框还要先读当前勾选态才知道自己在开还是在关。
         self.chk_quality = PushButton(FluentIcon.CANCEL, "暂停质量探测", mcard)
-        self.chk_quality.setToolTip("后台 RTT 探测线程开/关（每 30s 一轮，默认开启）")
+        self.chk_quality.setToolTip("开启或暂停后台 RTT 探测")
         self.chk_quality.clicked.connect(self._on_toggle_quality)
         mbtns.addWidget(self.chk_quality)
         ml.addLayout(mbtns)
         cap2 = CaptionLabel(
-            "感知通道仅发只读 GET，不触碰 frps 写端点；连续 3 次失败熔断 60s。"
-            "frps 需开启 webServer（dashboard）并配置 BasicAuth。", mcard)
+            "需启用 frps 面板并配置访问账号", mcard)
         cap2.setTextColor(QColor(0, 0, 0, 170), QColor(255, 255, 255, 170))
         ml.addWidget(cap2)
         lay.addWidget(mcard)
@@ -2656,8 +2631,8 @@ class TunnelConfWork(QWidget):
         snap = self._frps.snapshot()
         ch_text = _CHANNEL_TEXT.get(snap["state"], snap["state"])
         if snap["state"] == "ok" and snap["age_sec"] is not None:
-            ch_text += f" · {snap['age_sec']}s 前刷新"
-        ch_text += f"　|　frpc admin :{self._mgr.admin_port}"
+            ch_text += f"　{snap['age_sec']}s 前刷新"
+        ch_text += f"　frpc 管理端口 {self._mgr.admin_port}"
         self.lbl_channel.setText(ch_text)
         self.lbl_channel.setTextColor(
             {"ok": _C_SUCCESS, "unconfigured": _C_MUTED}.get(
@@ -2819,7 +2794,7 @@ class TunnelConfWork(QWidget):
         snap = self._frps.snapshot()
         msg = _CHANNEL_TEXT.get(state, state)
         if state == "ok":
-            msg += f" · 名单 {len(snap['proxies'])} 条 xtcp proxy"
+            msg += f"　名单 {len(snap['proxies'])} 条 xtcp proxy"
         self._win._show_info_bar(
             msg, "success" if state == "ok" else
             ("warning" if state == "unconfigured" else "error"),
@@ -2853,7 +2828,7 @@ class TunnelConfWork(QWidget):
                 return
             _tag, code2, body2 = result
             self._win._show_info_bar(
-                f"frpc 通道正常 :{admin_port} · /api/status "
+                f"frpc 通道正常 :{admin_port}　/api/status "
                 + ("OK" if code2 == 200 else f"HTTP {code2 or 'unreachable'}")
                 + (f" {body2[:60]}" if code2 == 200 and body2 else ""),
                 "success", duration=5000)
@@ -2907,15 +2882,14 @@ class RdpWork(QWidget):
         lay.setSpacing(12)
 
         head = QHBoxLayout()
-        head.setSpacing(10)
-        self.lbl_title = BodyLabel("远程桌面（RDP）—— 3389 隧道未开通", body)
+        head.setSpacing(8)
+        self.lbl_title = BodyLabel("远程桌面（RDP）暂未开通", body)
         head.addWidget(self.lbl_title)
         head.addStretch(1)
         # 已开的 RDP 会话统一由会话中心接管，这里只做跳转入口，
         # 不再重复实现打开/嵌入逻辑，否则两处状态会各自漂移。
         btn_sessions = PushButton(FluentIcon.VIDEO, "打开会话中心", body)
-        btn_sessions.setToolTip(
-            "已打开的 RDP 会话（含主面板「远程」菜单发起的）都在会话中心里")
+        btn_sessions.setToolTip("查看已打开的远程会话")
         btn_sessions.clicked.connect(self._on_open_sessions)
         head.addWidget(btn_sessions)
         lay.addLayout(head)
@@ -2937,12 +2911,9 @@ class RdpWork(QWidget):
         c1 = QVBoxLayout(card1)
         c1.setContentsMargins(16, 14, 16, 14)
         c1.setSpacing(8)
-        c1.addWidget(StrongBodyLabel("为什么操作列里没有 RDP 了", card1))
+        c1.addWidget(StrongBodyLabel("远程桌面未开通", card1))
         t1 = CaptionLabel(
-            "会话总览里的隧道由 frp xtcp visitor 提供，visitor 的 bindPort 固定"
-            "指向远端 22 端口（SSH/SFTP 复用同一端口），因此点 RDP 会连到 SSH "
-            "端口并必然失败。该链接已按需求从操作列移除；RDP 的 3389 映射需要"
-            "单独的隧道，属于后续功能。", card1)
+            "现有隧道只转发 SSH 端口，无法承载远程桌面。", card1)
         t1.setWordWrap(True)
         c1.addWidget(t1)
         lay.addWidget(card1)
@@ -2951,13 +2922,9 @@ class RdpWork(QWidget):
         c2 = QVBoxLayout(card2)
         c2.setContentsMargins(16, 14, 16, 14)
         c2.setSpacing(8)
-        c2.addWidget(StrongBodyLabel("现在能用什么", card2))
+        c2.addWidget(StrongBodyLabel("可用方式", card2))
         t2 = CaptionLabel(
-            "· 主面板「远程」菜单 → 远程桌面：TCP 模式下按手填 host/port 直连，"
-            "目标可达的 3389 可以正常打开；XTCP 模式下同样走 visitor bindPort"
-            "（22），不可用。\n"
-            "· 已打开的 RDP 会话由会话中心接管（标签页 + mstsc 窗口嵌入 + 免密"
-            "+ 断开/删除）。", card2)
+            "TCP 直连支持远程桌面。已打开的会话由会话中心管理。", card2)
         t2.setWordWrap(True)
         c2.addWidget(t2)
         lay.addWidget(card2)
@@ -2966,13 +2933,9 @@ class RdpWork(QWidget):
         c3 = QVBoxLayout(card3)
         c3.setContentsMargins(16, 14, 16, 14)
         c3.setSpacing(8)
-        c3.addWidget(StrongBodyLabel("后续接入清单（3389 隧道落地后）", card3))
+        c3.addWidget(StrongBodyLabel("后续支持", card3))
         t3 = CaptionLabel(
-            "1. frpc 侧为每台设备新增一个映射远端 3389 的 xtcp visitor"
-            "（约定 rdp_<serverName>）；\n"
-            "2. 注册表记录补充远端映射端口字段，本页据此列出「可 RDP」设备；\n"
-            "3. 本页行内打开入口复用 core.frp_remote.open_session('rdp', "
-            "serverName, tableId)，RDPPanel 无需改动。", card3)
+            "远程桌面隧道开通后，本页可直接发起连接。", card3)
         t3.setWordWrap(True)
         c3.addWidget(t3)
         lay.addWidget(card3)
@@ -3015,9 +2978,7 @@ class RdpWork(QWidget):
             f"color: {(_C_SUCCESS if ready else _C_WARNING).name()}; "
             "font-size: 22px; font-weight: 700;")
         self.lbl_state.setText("RDP 隧道状态")
-        self.lbl_hint.setText(
-            "说明：本页为 RDP 预留页。会话总览操作列已移除 RDP 链接（现有隧道只穿"
-            " 22，没有 3389 映射）；RDP 能力随 3389 专用隧道一起上线。")
+        self.lbl_hint.setText("")
 
     @staticmethod
     def _rdp_capable(records):

@@ -302,7 +302,7 @@ class RecordsPage(QWidget):
         t = self._totals or {}
         self.card_hours.setValue(fmt_hours(g.get("hours")), "h")
         self.card_tasks.setValue(g.get("count") or 0,
-                                 "项 · %d 人" % (g.get("members") or 0))
+                                 "项　%d 人" % (g.get("members") or 0))
         rate = int(g.get("done_rate") or 0)
         self._ring.setValue(rate)
         self.card_rate.setValue("%d%%" % rate, "",
@@ -340,7 +340,7 @@ class RecordsPage(QWidget):
         """分组带行（稿 348-350）：文案只挂在第 0 列，其余列只铺底色"""
         d = parse_iso(work_date)
         g = group or {}
-        text = "%s %s — %d 人 · %d 项 · %sh · 完成率 %d%%" % (
+        text = "%s %s — %d 人　%d 项　%sh　完成率 %d%%" % (
             day_label(d) if d.isValid() else work_date,
             weekday_zh(d) if d.isValid() else "",
             g.get("members") or 0, g.get("count") or 0,
