@@ -29,7 +29,8 @@ from PySide6.QtGui import (QColor, QShortcut, QKeySequence, QPalette, QCursor,
     QPainter, QPen, QFont, QFontMetrics, QBrush)
 from qfluentwidgets import (TableWidget, SearchLineEdit, PushButton,
     PrimaryPushButton, ToolButton, FluentIcon, ComboBox, RoundMenu, CheckBox,
-    Action, TransparentDropDownPushButton, LineEdit, PlainTextEdit,
+    Action, TransparentDropDownPushButton, TransparentTogglePushButton,
+    LineEdit, PlainTextEdit,
     FluentWindow, NavigationItemPosition, ProgressBar, TitleLabel,
     BodyLabel, CaptionLabel, CalendarPicker, PasswordLineEdit, ScrollArea,
     CardWidget, setCustomStyleSheet, qconfig, isDarkTheme, MessageBox, TreeWidget,
@@ -75,6 +76,27 @@ from windows.management.dialogs import (
 # update_todesk_status 的回写映射），UI 侧只能跟随，绝不能自行反转。
 _TODESK_ON = "1"
 _TODESK_OFF = "0"
+
+# 版本号条件下拉：(文案, 查询层 op)。文案只在这里绑定一次，
+# 改 UI 说法不会波及 SQL；首项「包含」保持与旧搜索一致的子串语义。
+_VER_MODES = (("包含", "contains"), ("低于", "lt"), ("不高于", "le"),
+              ("高于", "gt"), ("不低于", "ge"), ("等于", "eq"),
+              ("区间", "between"))
+
+# op → 文案（状态栏摘要用）：文本里写了运算符时下拉文案已不算数，
+# 摘要必须报生效的那个口径，否则会出现「低于 >=200074」这种矛盾描述。
+_VER_OP_LABELS = {op: label for label, op in _VER_MODES}
+_VER_OP_LABELS["ne"] = "不等于"
+
+# 占位文案随比较口径变：选「区间」时直接示范分隔符，省得用户去猜写法
+_VER_PLACEHOLDERS = {
+    "contains": "版本号 如 200072",
+    "between": "200070~200078",
+}
+_VER_NUM_PLACEHOLDER = "主版本号 200072"
+
+# 版本筛选组与左侧全字段搜索之间的竖线：半透明灰，深浅主题通用
+_VER_SEP_QSS = "QFrame{background-color: rgba(128, 128, 128, 90); border: none;}"
 
 
 def _is_todesk_on(status) -> bool:
@@ -130,6 +152,9 @@ class TablePage(QWidget):
         self._search_timer.setInterval(300)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._do_search)
+        # 版本号条件非法时的提示文案（空串 = 条件合法或未启用），
+        # 由 _version_args 刷新，状态栏据此告知「条件已忽略」
+        self._ver_err = ""
         self._init_ui()
         self._load_local()
         # frps 在线感知（二期 P1）：球桌页进入即确保感知启动（幂等单例），
@@ -166,6 +191,52 @@ class TablePage(QWidget):
         self._search_edit.setFixedWidth(280)
         self._search_edit.textChanged.connect(self._on_search_input)
         toolbar.addWidget(self._search_edit)
+        # 在线状态筛选：接口中文文案等值匹配（onlineStatusName），
+        # 「全部」传空串即不筛选；候选项与 _STATUS_COLORS 的键保持一致
+        self._status_combo = ComboBox(self)
+        self._status_combo.addItems(["全部状态", "运行中", "空闲", "下线"])
+        self._status_combo.setCurrentIndex(0)
+        self._status_combo.setFixedWidth(110)
+        self._status_combo.setToolTip("按在线状态筛选球桌")
+        self._status_combo.currentTextChanged.connect(self._on_status_changed)
+        toolbar.addWidget(self._status_combo)
+
+        # 版本号专用筛选：只作用于 deviceVersion 列，与左侧全字段搜索叠加。
+        # 数值比较（低于/高于…）才能回答「哪些桌还没升到 200072」，子串做不到。
+        sep = QFrame(self)
+        sep.setFixedSize(1, 20)
+        setCustomStyleSheet(sep, _VER_SEP_QSS, _VER_SEP_QSS)
+        toolbar.addWidget(sep)
+        self._ver_edit = SearchLineEdit(self)
+        self._ver_edit.setFixedWidth(170)
+        self._ver_edit.setToolTip(
+            "只搜「版本号」列，与左侧搜索框同时生效。\n"
+            "可直接写运算符覆盖右侧下拉：<200072、>=200078、!=200072。\n"
+            "数值比较按主版本号（200072-20063-100836 的首段 200072），\n"
+            "仅固件格式（含 - 分段）的版本参与，123456 这类人工版本不算。")
+        self._ver_edit.textChanged.connect(self._on_search_input)
+        toolbar.addWidget(self._ver_edit)
+        self._ver_mode = ComboBox(self)
+        self._ver_mode.addItems([t for t, _ in _VER_MODES])
+        self._ver_mode.setCurrentIndex(0)
+        self._ver_mode.setFixedWidth(92)
+        self._ver_mode.setToolTip(
+            "包含 = 版本号子串匹配；其余按主版本号数值比较。\n"
+            "区间含两端，写作 200070~200078。\n"
+            "没上报版本或人工版本（如 123456）的设备不参与数值比较\n"
+            "（可用「反选」把它们括回来）。")
+        self._ver_mode.currentTextChanged.connect(self._on_version_mode_changed)
+        toolbar.addWidget(self._ver_mode)
+        # 反选：取反整个版本条件。做成常驻 toggle 而不是菜单项，
+        # 当前是否取反必须一眼可见，否则很容易把反选结果当成正常结果读。
+        self._ver_invert = TransparentTogglePushButton(
+            FluentIcon.CANCEL, "反选", self)
+        self._ver_invert.setToolTip(
+            "反选：显示不满足版本条件的球桌（无版本号/人工版本的设备也计入）。\n"
+            "例：「低于 200072」+ 反选 = 200072 及以上的设备。")
+        self._ver_invert.toggled.connect(self._on_version_inverted)
+        toolbar.addWidget(self._ver_invert)
+        self._sync_version_placeholder()
         toolbar.addStretch(1)
 
         # 导出的是「当前搜索结果」而非全库：关键词与三个显隐开关都要带上，
@@ -327,27 +398,37 @@ class TablePage(QWidget):
             # PySide6 不支持无参 disconnect()：指定接收者断开全部信号
             self._query_worker.disconnect(self)
         keyword = self._search_edit.text().strip()
+        ver_kw, ver_op, ver_inv = self._version_args()
+        if self._ver_err:
+            # 非法条件已被忽略，必须明说：否则用户看到的是全量列表，
+            # 却以为筛选已生效。key 合并同一条，逐字输入不会堆提示。
+            show_info_bar(self._ver_err, "warning", title="版本号条件无效",
+                          parent=self, duration=3000, key=f"ver:{id(self)}")
         self._query_worker = _DBQueryWorker(
             _query_tables_page_with_stats,
             self._page_no, self._page_size, keyword, _HF_DAYS,
-            self._show_test, self._show_manual, self._show_tuidan)
+            self._show_test, self._show_manual, self._show_tuidan,
+            self._status_filter(), version_kw=ver_kw, version_mode=ver_op,
+            version_invert=ver_inv)
         self._query_worker.result_ready.connect(
-            lambda result, kw=keyword: self._on_query_finished(result, kw))
+            lambda result, kw=keyword, vt=self._version_tip(), ve=self._ver_err:
+            self._on_query_finished(result, kw, vt, ve))
         self._query_worker.error.connect(
             lambda msg: show_info_bar(str(msg).split(chr(10))[0], "error",
                                       title="查询失败", parent=self, duration=4000))
         self._query_worker.start()
 
-    def _on_query_finished(self, result, keyword=""):
+    def _on_query_finished(self, result, keyword="", ver_tip="", ver_err=""):
         """查询完成回调：更新表格与分页（高频统计已随分页同批返回）
 
         hf_stats 由 Worker 一并算好，界面线程零同步查询；同步时间另起一个 Worker，
-        晚到也不影响表格先把结果画出来。
+        晚到也不影响表格先把结果画出来。条件文案随查询快照传入，不现读控件：
+        结果回抛前用户可能又改了输入，现读会把新条件贴到旧结果上。
         """
         total, rows, hf_stats = result
         self._total = total
         self._populate(rows, hf_stats)
-        self._update_pager(keyword)
+        self._update_pager(keyword, ver_tip, ver_err)
         # 异步获取同步时间
         self._time_worker = _DBQueryWorker(table_db.get_meta)
         self._time_worker.result_ready.connect(self._on_time_meta)
@@ -568,7 +649,7 @@ class TablePage(QWidget):
         if self.isVisible():
             self._refresh_frps_column()
 
-    def _update_pager(self, keyword=""):
+    def _update_pager(self, keyword="", ver_tip="", ver_err=""):
         """按总数/页大小重算页码并同步分页控件与状态文本
 
         总页数用 ceil 现算而不缓存：搜索或筛选一变总数就变，缓存极易失真；
@@ -579,8 +660,17 @@ class TablePage(QWidget):
         self._lbl_page.setText(f"{self._page_no}/{total_pages}")
         self._btn_prev.setEnabled(self._page_no > 1)
         self._btn_next.setEnabled(self._page_no < total_pages)
-        kw_tip = f"（搜索: {keyword}）" if keyword else ""
-        self._lbl_info.setText(f"共 {self._total} 条{kw_tip}")
+        # 生效中的条件全写进计数文本：反选这种「看不见的取反」尤其要明示，
+        # 否则导出/截图出去的数字没人说得清是什么口径。
+        tips = []
+        if keyword:
+            tips.append(f"搜索: {keyword}")
+        if ver_tip:
+            tips.append(ver_tip)
+        if ver_err:
+            tips.append("版本号条件无效，已忽略")
+        suffix = f"（{' · '.join(tips)}）" if tips else ""
+        self._lbl_info.setText(f"共 {self._total} 条{suffix}")
 
     # ---------- 交互 ----------
 
@@ -596,6 +686,85 @@ class TablePage(QWidget):
 
         关键词变了旧页码就没有意义，必须回到第 1 页。
         """
+        self._page_no = 1
+        self._load_local()
+
+    def _status_filter(self) -> str:
+        """当前在线状态筛选值：「全部状态」→ 空串（查询层不筛选）"""
+        text = self._status_combo.text()
+        return "" if text == "全部状态" else text
+
+    def _on_status_changed(self, _text=""):
+        """在线状态切换：行集变了页码必然失效，回第一页重查"""
+        self._page_no = 1
+        self._load_local()
+
+    # ---------- 版本号筛选 ----------
+
+    def _version_op(self) -> str:
+        """下拉文案 → 查询层 op（未知文案退回子串匹配）"""
+        return dict(_VER_MODES).get(self._ver_mode.text(), "contains")
+
+    def _sync_version_placeholder(self):
+        """按当前比较口径刷新输入框占位文案（区间直接示范分隔符）"""
+        op = self._version_op()
+        self._ver_edit.setPlaceholderText(
+            _VER_PLACEHOLDERS.get(op, _VER_NUM_PLACEHOLDER))
+
+    def _version_args(self) -> tuple:
+        """版本筛选参数 (kw, op, invert)，并刷新 _ver_err
+
+        表格与导出共用这一份口径，避免「看到的」和「导出的」不一致。
+        非法输入在这里就置空，不把无效条件传给查询层。
+        """
+        text = self._ver_edit.text().strip()
+        op, invert = self._version_op(), self._ver_invert.isChecked()
+        self._ver_err = ""
+        if not text:
+            return "", op, invert
+        try:
+            table_db.parse_version_filter(text, op)
+        except ValueError as e:
+            self._ver_err = str(e)
+            return "", op, invert
+        return text, op, invert
+
+    def _version_tip(self) -> str:
+        """版本条件摘要（状态栏展示）；未启用或非法时返回空串
+
+        报解析后的生效口径而不是下拉文案 + 原始输入：用户写 >=200074 时
+        下拉可能还停在「低于」。调用前 _version_args 已验过，此处不会抛错。
+        """
+        text = self._ver_edit.text().strip()
+        if not text or self._ver_err:
+            return ""
+        op, values = table_db.parse_version_filter(text, self._version_op())
+        invert = self._ver_invert.isChecked()
+        if op == "ne":
+            # 与 build_version_cond 同口径归一，否则 != 叠加反选会报成双重否定
+            op, invert = "eq", not invert
+        shown = "~".join(str(v) for v in values) if op == "between" else str(values[0])
+        inv = "（反选）" if invert else ""
+        return f"版本 {_VER_OP_LABELS.get(op, op)} {shown}{inv}"
+
+    def _on_version_mode_changed(self, _text=""):
+        """比较口径切换：占位文案跟着变，条件已填则立即重查
+
+        不走防抖：下拉是离散动作，再等 300ms 只会让人觉得没反应。
+        """
+        self._sync_version_placeholder()
+        self._page_no = 1
+        self._load_local()
+
+    def _on_version_inverted(self, checked):
+        """反选开关：取反版本条件后回第一页重查
+
+        空条件时先给一句引导：否则点了没任何变化，会被当成按钮失灵。
+        """
+        if checked and not self._ver_edit.text().strip():
+            show_info_bar("先填版本号条件，反选即排除命中的球桌", "info",
+                          title="反选", parent=self, duration=2500,
+                          key=f"ver:{id(self)}")
         self._page_no = 1
         self._load_local()
 
@@ -817,11 +986,19 @@ class TablePage(QWidget):
                           title="提示", parent=self, duration=2000)
             return
         # 复用异步查询机制：一次拉取当前条件下的全部记录后写文件
-        # （遵循当前「公司测试」与「手动版本」筛选状态）
+        # （遵循当前「公司测试」「手动版本」、在线状态与版本号筛选）
+        ver_kw, ver_op, ver_inv = self._version_args()
+        if self._ver_err:
+            # 与 _load_local 同一提示：导出同样忽略了非法条件，必须明说，
+            # 否则用户以为导出了筛选结果，实际拿到的是未筛选口径
+            show_info_bar(self._ver_err, "warning", title="版本号条件无效",
+                          parent=self, duration=3000, key=f"ver:{id(self)}")
         self._export_worker = _DBQueryWorker(
             table_db.query_page, 1, _EXPORT_MAX_ROWS, keyword,
             include_test=self._show_test, include_manual=self._show_manual,
-            include_tuidan=self._show_tuidan)
+            include_tuidan=self._show_tuidan,
+            online_status=self._status_filter(), version_kw=ver_kw,
+            version_mode=ver_op, version_invert=ver_inv)
         self._export_worker.result_ready.connect(
             lambda result, p=path: self._on_export_query(result, p))
         self._export_worker.error.connect(

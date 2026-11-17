@@ -413,6 +413,9 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
                                 "上传清单": FluentIcon.LIBRARY,
                                 "视频与日志批量整理": FluentIcon.FOLDER,
                                 "视频修复": FluentIcon.MOVIE,
+                                # 切帧训练集（2026-11-07）：七键逐字对齐 ToolHub 的
+                                # addPage 文本，少一个弹出面板就退回内嵌 Pivot
+                                "切帧训练集": FluentIcon.PHOTO,
                                 "画质提升": FluentIcon.BRUSH},
                     # 画质提升（2026-11-06）：五键必须与 VideoEnhanceHub 的五个
                     # addPage 文本逐字一致，少一个就退回内嵌 Pivot 形态

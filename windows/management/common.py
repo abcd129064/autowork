@@ -356,7 +356,9 @@ def _query_xqzg_page_with_stats(page_no, page_size, keyword, date,
 
 def _query_tables_page_with_stats(page_no, page_size, keyword, hf_days,
                                   include_test, include_manual,
-                                  include_tuidan):
+                                  include_tuidan, online_status="",
+                                  version_kw="", version_mode="contains",
+                                  version_invert=False):
     """球桌分页查询 + 高频问题统计（Worker 线程内一次完成，界面零同步查询）
 
     高频统计若留在 _populate 里，GUI 线程每次查询完成都要同步查一次远程
@@ -365,7 +367,9 @@ def _query_tables_page_with_stats(page_no, page_size, keyword, hf_days,
     """
     total, rows = table_db.query_page(
         page_no, page_size, keyword, include_test=include_test,
-        include_manual=include_manual, include_tuidan=include_tuidan)
+        include_manual=include_manual, include_tuidan=include_tuidan,
+        online_status=online_status, version_kw=version_kw,
+        version_mode=version_mode, version_invert=version_invert)
     try:
         hf = table_db.get_submission_stats(days=hf_days)
     except Exception:

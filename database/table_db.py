@@ -755,15 +755,123 @@ def get_todesk_ids(codes) -> dict:
     return result
 
 
+# ==================== 版本号筛选 ====================
+# deviceVersion 形如 200072-20063-100836，首段是主版本号。运维要按「低于
+# 某个版本」批量找未升级设备，子串匹配做不到大小比较，故单列一套条件。
+
+# 合法比较口径：contains 走子串，其余按主版本号数值比较
+_VERSION_OPS = frozenset({"contains", "lt", "le", "gt", "ge", "eq", "ne", "between"})
+_VERSION_CMP = {"lt": "<", "le": "<=", "gt": ">", "ge": ">=", "eq": "="}
+
+# 文本自带运算符时覆盖下拉选择；长运算符必须排在短的前面，否则 <= 被 < 截断
+_VERSION_PREFIX = (("<=", "le"), (">=", "ge"), ("!=", "ne"), ("<>", "ne"),
+                   ("<", "lt"), (">", "gt"), ("=", "eq"))
+
+# 全角归一：中文输入法下 ＜ ＞ ≤ ≥ 与全角数字很常见，不归一会判成非法输入
+_VERSION_FULLWIDTH = str.maketrans({
+    "＜": "<", "＞": ">", "＝": "=", "！": "!", "≤": "<=", "≥": ">=",
+    "～": "~", "，": ",",
+    **{chr(0xFF10 + i): str(i) for i in range(10)},
+})
+
+# 区间分隔符不含 '-'：版本号自身就用 '-' 分段，用它会和版本前缀写法混淆
+_VERSION_RANGE_SEP = re.compile(r"\s*(?:~|\.\.|,)\s*")
+
+
+def _version_int(text: str) -> int:
+    """版本号数值段解析：只认 ASCII 数字，非法输入抛 ValueError
+
+    不做「取前导数字」的宽容处理：用户把整段 200072-20063 填进数值条件时
+    应当报错，而不是被静默截成 200072 让人以为按完整版本比过了。
+    """
+    s = str(text or "").strip()
+    if not (s.isascii() and s.isdigit()):
+        raise ValueError(f"版本号条件「{s}」不是数字，请写成 200072 这样的主版本号")
+    n = int(s)
+    # SQLite INTEGER 只有 8 字节：超界整数在参数绑定时抛 OverflowError，
+    # 不是 ValueError，会绕过查询层「非法输入按不筛选处理」的兜底
+    if n > 2**63 - 1:
+        raise ValueError(f"版本号条件「{s}」超出范围，请写成 200072 这样的主版本号")
+    return n
+
+
+def parse_version_filter(text: str, mode: str = "contains"):
+    """版本号筛选文本 → (op, values)；空输入返回 None，非法输入抛 ValueError
+
+    values 在 contains 下是原始字符串，其余是整数列表（between 已升序）。
+    文本里显式写运算符（<200072 / >=200078 / !=200072）时覆盖 mode，熟练
+    用户不必先切下拉；区间写作 200070~200078 或 200070..200078。
+    """
+    raw = str(text or "").strip().translate(_VERSION_FULLWIDTH)
+    if not raw:
+        return None
+    op = mode if mode in _VERSION_OPS else "contains"
+    for prefix, prefix_op in _VERSION_PREFIX:
+        if raw.startswith(prefix):
+            op, raw = prefix_op, raw[len(prefix):].strip()
+            break
+    if op == "contains":
+        if not raw:
+            raise ValueError("请输入版本号，如 200072")
+        return "contains", [raw]
+    if op == "between":
+        parts = [p for p in _VERSION_RANGE_SEP.split(raw) if p]
+        if len(parts) != 2:
+            raise ValueError("区间请写成 200070~200078（两个主版本号）")
+        return "between", sorted(_version_int(p) for p in parts)
+    return op, [_version_int(raw)]
+
+
+def build_version_cond(text: str, mode: str = "contains", invert: bool = False):
+    """版本号筛选 → (SQL 片段, 参数)；空输入返回 None，非法输入抛 ValueError
+
+    数值统一 CAST 成 DECIMAL：MySQL 与 SQLite 都认这个类型名，也都取字符串
+    的前导数字（200072-20063-100836 → 200072）。不按后端分叉是刻意的——
+    MySQL 闪断时 _get_conn 会回退 SQLite，只看配置选方言必然踩空。
+    invert 取反整个条件（含「有固件版本」前提），即「其余全部球桌」。
+    """
+    parsed = parse_version_filter(text, mode)
+    if parsed is None:
+        return None
+    op, values = parsed
+    if op == "ne":
+        # 「!=」等价于「等于 + 反选」，与工具栏反选开关叠加时按异或抵消
+        op, invert = "eq", not invert
+    if op == "contains":
+        cond, params = "IFNULL(deviceVersion, '') LIKE ?", [f"%{values[0]}%"]
+    else:
+        # IFNULL 不能省：NULL 参与比较得 NULL，NOT NULL 仍是 NULL，反选时
+        # 未上报版本（NULL）的行会两边都不出现，凭空消失
+        num = "CAST(IFNULL(deviceVersion, '') AS DECIMAL)"
+        if op == "between":
+            cmp_sql, cmp_params = f"{num} BETWEEN ? AND ?", list(values)
+        else:
+            cmp_sql, cmp_params = f"{num} {_VERSION_CMP[op]} ?", [values[0]]
+        # 「有固件版本」前提 = >0 且 '-' 分段：>0 兜掉空串与非数字（CAST 后
+        # 为 0）；固件版本恒为分段形态（200072-20063-100836），123456 这类
+        # 人工 placeholder 无分段，不挡住会被「低于 200072」当成低版本带出。
+        # 前提放在正向条件内部，invert 取反整体，正反向仍不重不漏
+        cond = f"({num} > 0 AND IFNULL(deviceVersion, '') LIKE ? AND {cmp_sql})"
+        params = ["%-%", *cmp_params]
+    return (f"NOT ({cond})" if invert else cond), params
+
+
 def query_page(page_no: int, page_size: int, keyword: str = "",
                include_test: bool = True, include_manual: bool = True,
-               include_tuidan: bool = True) -> tuple:
+               include_tuidan: bool = True,
+               online_status: str = "", version_kw: str = "",
+               version_mode: str = "contains",
+               version_invert: bool = False) -> tuple:
     """本地分页查询，支持全字段模糊搜索
 
     Args:
         include_test: 是否包含「公司测试」球房数据；False 时排除（面板默认）
         include_manual: 是否包含手动版本设备（name 或 roomName 含 @s）；False 时排除（面板默认）
         include_tuidan: 是否包含退单设备（status=2）；False 时排除（面板默认）
+        online_status: 在线状态精确筛选（运行中/空闲/下线）；空串不筛选
+        version_kw: 版本号条件文本（见 parse_version_filter）；空串不筛选
+        version_mode: 版本比较口径（contains/lt/le/gt/ge/eq/between）
+        version_invert: 反选，取反版本条件（显示不满足条件的球桌）
 
     Returns:
         (total, rows)  rows 为 list[dict]
@@ -771,6 +879,19 @@ def query_page(page_no: int, page_size: int, keyword: str = "",
     conn = _get_conn()
     conds = []
     params = []
+    if online_status:
+        # 在线状态是接口中文文案（onlineStatusName），等值精确匹配
+        conds.append("onlineStatusName = ?")
+        params.append(online_status)
+    if version_kw:
+        try:
+            ver = build_version_cond(version_kw, version_mode, version_invert)
+        except ValueError:
+            # 非法输入按不筛选处理：UI 侧负责提示，查询层不能因此抛错清空列表
+            ver = None
+        if ver:
+            conds.append(ver[0])
+            params.extend(ver[1])
     if not include_test:
         conds.append("TRIM(roomName) NOT IN (?, ?, ?)")
         params.extend(TEST_ROOM_NAMES)

@@ -3,8 +3,8 @@
 
 设计稿：design/tools_page_v2.html、design/video_repair_tool.html
 形态（2026-09-07 反馈修订）：与运维/售后/跑视频同风格——横排 Pivot 二级切换
-（无图标），六个工作区堆叠在下方：
-    单杆视频 │ 端口占用 │ 上传清单 │ 视频与日志批量整理 │ 视频修复 │ 画质提升
+（无图标），七个工作区堆叠在下方：
+    单杆视频 │ 端口占用 │ 上传清单 │ 视频与日志批量整理 │ 视频修复 │ 切帧训练集 │ 画质提升
 
 复用原则（后端零改动）：
   - 单杆视频 → workers.single_video_worker.SingleVideoWorker（参数校验复刻
@@ -14,11 +14,14 @@
   - 批量整理 → NewLogWorker + 整理产物 ZipUploadWorker（zip_prefix=newlog）
   - 视频修复 → windows.tools.video_repair（掉电截断无 moov 的 mp4 借参考文件
     VOL 头无损重封装），线程 workers.video_repair_worker
+  - 切帧训练集 → workers.frame_extract_worker（多视频均匀粗抽 + 内容去重，
+    产物按视频名分文件夹）
   - 画质提升 → windows.tools.video_enhance（纯 ffmpeg 滤镜链）
 
 busy 守卫：Worker 引用统一挂主窗口属性（_single_video_worker/_newlog_worker/
-_newlog_upload_worker/_video_probe_worker/_video_repair_worker 等），与弹出窗口
-入口互斥，防止双开；属性名要同时登记 hub_popout._BUSY_ATTRS 与 shutdown 7b。
+_newlog_upload_worker/_video_probe_worker/_video_repair_worker/
+_frame_extract_worker 等），与弹出窗口入口互斥，防止双开；属性名要同时登记
+hub_popout._BUSY_ATTRS 与 shutdown 7b。
 """
 import os
 import re
@@ -49,6 +52,7 @@ from workers.newlog_worker import NewLogWorker
 from workers.single_video_worker import SingleVideoWorker
 from workers.collect_worker import ZipUploadWorker
 from workers.video_repair_worker import VideoRepairWorker
+from workers.frame_extract_worker import FrameExtractWorker
 from windows.tools import video_repair
 
 
@@ -2592,13 +2596,244 @@ class VideoRepairWork(QWidget):
         self.log_view.append(text)
 
 
+# ==================== 工作区 6：切帧训练集 ====================
+
+class FrameExtractWork(QWidget):
+    """切帧训练集工作区：多选视频 → 一键批量切帧去重 → 按视频名分文件夹
+
+    零参数设计（2026-11-07 需求）：固定粗抽 2×50 帧再去重到 50 张，用户只选视频
+    和输出目录，其余全部走 workers.frame_extract_worker 默认值。
+    """
+
+    # 不认识的容器格式交给 ffmpeg 自己报错，这里只兜住常见扩展名
+    _FILE_FILTER = "视频文件 (*.mp4 *.avi *.mov *.mkv *.flv *.wmv *.ts);;所有文件 (*)"
+
+    def __init__(self, win, parent=None):
+        """建参数卡 + 运行输出，并读回上次的输出目录
+
+        同一批素材常分几次切，目录记住后不用每次重选。
+        """
+        super().__init__(parent)
+        # objectName 是 PivotPage.addPage 的 routeKey 来源，缺失会在注册时直接抛错
+        self.setObjectName("frameExtractWork")
+        _transparent(self)
+        self._win = win
+        self._videos = []
+        self._out_root = ""
+        last_out = str(win._load_settings().get("frame_extract_out_dir", "") or "")
+
+        body = QWidget(self)
+        body.setAutoFillBackground(False)
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 8, 20, 12)
+        lay.setSpacing(12)
+
+        card = CardWidget(body)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+
+        cl.addWidget(BodyLabel(
+            "选择多个视频，一键切帧做球识别训练集：每个视频均匀粗抽 100 帧，"
+            "内容去重后保留 50 张，产物按「输出目录/视频名/train_0001.jpg」存放。",
+            card))
+
+        row = QHBoxLayout()
+        self.btn_pick = PushButton(FluentIcon.VIDEO, "选择视频（可多选）", card)
+        self.btn_pick.clicked.connect(self._on_pick_videos)
+        row.addWidget(self.btn_pick)
+        self.lbl_videos = CaptionLabel("未选择视频", card)
+        self.lbl_videos.setTextColor(_C_MUTED)
+        row.addWidget(self.lbl_videos, 1)
+        self.btn_clear = ToolButton(FluentIcon.DELETE, card)
+        self.btn_clear.setToolTip("清空已选视频")
+        self.btn_clear.clicked.connect(self._on_clear_videos)
+        row.addWidget(self.btn_clear)
+        cl.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(BodyLabel("输出目录:", card))
+        self.out_edit = LineEdit(card)
+        self.out_edit.setText(last_out)
+        self.out_edit.setPlaceholderText("切帧产物根目录（每个视频一个同名子文件夹）")
+        row2.addWidget(self.out_edit, 1)
+        self.btn_browse = PushButton(FluentIcon.FOLDER, "浏览", card)
+        self.btn_browse.clicked.connect(self._on_browse_out)
+        row2.addWidget(self.btn_browse)
+        cl.addLayout(row2)
+
+        btns = QHBoxLayout()
+        self.btn_go = PrimaryPushButton(FluentIcon.SEND, "开始切帧", card)
+        self.btn_go.clicked.connect(self._on_go)
+        btns.addWidget(self.btn_go)
+        self.btn_open_out = PushButton(FluentIcon.FOLDER, "打开输出目录", card)
+        self.btn_open_out.clicked.connect(self._on_open_out)
+        # 输出目录要切完才存在，与整理页同策略：完成后再显示。
+        self.btn_open_out.hide()
+        btns.addWidget(self.btn_open_out)
+        btns.addStretch(1)
+        cl.addLayout(btns)
+
+        out_card = CardWidget(body)
+        ol = QVBoxLayout(out_card)
+        ol.setContentsMargins(16, 14, 16, 14)
+        ol.setSpacing(8)
+        ol.addWidget(CaptionLabel("运行输出:", out_card))
+        # height=None 让终端吃满卡片剩余高度，与单杆视频/批量整理同一套手感。
+        self.log_view = _make_terminal(out_card, None)
+        ol.addWidget(self.log_view, 1)
+
+        self.splitter = _make_vsplitter(body, card, out_card)
+        lay.addWidget(self.splitter, 1)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(body)
+
+    # ---------- 视频选择 ----------
+
+    def _on_pick_videos(self):
+        """多选视频文件，追加时按路径去重（分几次选到同一文件不该切两遍）"""
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择视频", "",
+                                                self._FILE_FILTER)
+        if not paths:
+            return
+        for p in paths:
+            if p not in self._videos:
+                self._videos.append(p)
+        self._refresh_video_label()
+
+    def _on_clear_videos(self):
+        self._videos.clear()
+        self._refresh_video_label()
+
+    def _refresh_video_label(self):
+        """已选数量提示：0 个置灰，超过 3 个折叠显示避免占满一行。"""
+        n = len(self._videos)
+        if n == 0:
+            self.lbl_videos.setText("未选择视频")
+        elif n <= 3:
+            self.lbl_videos.setText("、".join(
+                os.path.basename(v) for v in self._videos))
+        else:
+            self.lbl_videos.setText(
+                f"{n} 个视频: " + "、".join(
+                    os.path.basename(v) for v in self._videos[:2]) + " 等")
+        self.lbl_videos.setTextColor(_C_MUTED if n == 0 else _C_DANGER)
+
+    def _on_browse_out(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输出目录",
+                                             self.out_edit.text().strip() or "")
+        if d:
+            self.out_edit.setText(d)
+
+    # ---------- 切帧执行 ----------
+
+    def _on_go(self):
+        """启动批量切帧：busy 守卫 → 参数校验 → 存配置 → 置运行态 → 拉起线程"""
+        win = self._win
+        worker = getattr(win, "_frame_extract_worker", None)
+        if worker is not None and worker.isRunning():
+            win._show_info_bar("切帧任务正在运行中，请等待完成", "warning")
+            return
+        if not self._videos:
+            win._show_info_bar("请先选择至少一个视频", "warning")
+            return
+        out_root = self.out_edit.text().strip()
+        if not out_root:
+            win._show_info_bar("请选择输出目录", "warning")
+            return
+        # 先落配置再起线程：切帧失败也要保住用户刚选的目录。
+        win._save_settings({"frame_extract_out_dir": out_root})
+        self.btn_go.setEnabled(False)
+        self.btn_go.setText("切帧中...")
+        self.btn_pick.setEnabled(False)
+        self.log_view.clear()
+        w = FrameExtractWorker(self._videos, out_root, keep=50)
+        # 不传 parent：QThread 挂到控件下会随控件销毁而中断，统一用宿主属性持有
+        win._frame_extract_worker = w
+        w.line.connect(self.append_line)
+        w.video_done.connect(self._on_video_done)
+        w.finished_ok.connect(self._on_finished)
+        w.error.connect(self._on_failed)
+        # lambda 绑 w 防闭包晚绑定；运行中的 QThread 交给 _release_worker_safe 延迟销毁。
+        w.finished.connect(lambda w=w: win._release_worker_safe(w))
+        w.start()
+        win._append_log(f"[切帧] 批量切帧开始（{len(self._videos)} 个视频）")
+
+    def _release_extract_worker(self):
+        """摘掉宿主上的切帧 worker 引用并回收线程，否则下一次会被旧引用挡住"""
+        win = self._win
+        w = getattr(win, "_frame_extract_worker", None)
+        win._frame_extract_worker = None
+        if w is not None:
+            win._release_worker_safe(w)
+
+    def _leave_running(self):
+        """运行态收尾：恢复选择与主按钮，输入目录留着方便直接重试"""
+        self.btn_go.setEnabled(True)
+        self.btn_go.setText("开始切帧")
+        self.btn_pick.setEnabled(True)
+
+    def _on_video_done(self, name, outdir, kept):
+        """单个视频完成：主窗口日志同步一条，便于跨页留痕。"""
+        self._win._append_log(f"[切帧] {name} -> {outdir}（{kept} 张）")
+
+    def _on_finished(self, out_root):
+        """全部完成：恢复按钮，显示「打开输出目录」。"""
+        win = self._win
+        self._release_extract_worker()
+        self._out_root = out_root
+        self._leave_running()
+        self.btn_open_out.show()
+        win._show_info_bar("切帧完成，产物已按视频名分文件夹", "success", duration=4000)
+
+    def _on_failed(self, msg):
+        """致命失败（如 ffmpeg 缺失）：保留已选清单便于换目录后直接重试"""
+        win = self._win
+        self._release_extract_worker()
+        self._leave_running()
+        self.append_line("")
+        self.append_line(f"✘ {msg}")
+        win._append_log(f"[切帧] 批量切帧失败: {msg}")
+        win._show_info_bar(msg, "error", duration=6000)
+
+    def _on_open_out(self):
+        """打开输出根目录；目录被移动或删除时静默失败（与整理页同策略）"""
+        if self._out_root and os.path.isdir(self._out_root):
+            try:
+                os.startfile(self._out_root)
+            except Exception:
+                pass
+
+    # ---------- 收尾 ----------
+
+    def detach_workers(self):
+        """切页或关窗时中断切帧线程，由 PivotPage.detach_workers 调用
+
+        worker 引用挂在宿主上，页面自身的 *_worker 属性扫描扫不到，不主动中断
+        的话线程还在往已销毁的控件发信号。
+        """
+        w = getattr(self._win, "_frame_extract_worker", None)
+        if w is not None:
+            try:
+                w.requestInterruption()
+            except RuntimeError:
+                pass
+
+    def append_line(self, text):
+        """往运行输出追加一行；worker 的 line 信号直连这里"""
+        self.log_view.append(text)
+
+
 # ==================== ToolHub 容器 ====================
 
 class ToolHub(PivotPage):
-    """工具页：横排 Pivot 二级切换 + 六工作区堆叠（与运维/售后/跑视频同风格）"""
+    """工具页：横排 Pivot 二级切换 + 七工作区堆叠（与运维/售后/跑视频同风格）"""
 
     def __init__(self, parent=None):
-        """建六个工作区并按导航顺序注册到 Pivot，默认停在单杆视频页
+        """建七个工作区并按导航顺序注册到 Pivot，默认停在单杆视频页
 
         工作区常驻不销毁，切页只做显隐，所以占用端口的页面能靠 hideEvent 收尾。
         """
@@ -2606,12 +2841,14 @@ class ToolHub(PivotPage):
         self.setObjectName("toolHub")
         self._win = parent
 
-        # 六个工作区一次建好：Pivot 切页只做显隐，不重建控件，切回来状态还在。
+        # 七个工作区一次建好：Pivot 切页只做显隐，不重建控件，切回来状态还在。
         self.single_video_work = SingleVideoWork(self._win, self)
         self.port_fake_work = PortFakeWork(self._win, self)
         self.upload_list_work = UploadListWork(self._win, self)
         self.newlog_work = NewLogWork(self._win, self)
         self.video_repair_work = VideoRepairWork(self._win, self)
+        # 切帧训练集（2026-11-07）：多视频一键切帧去重，产物按视频名分文件夹
+        self.frame_extract_work = FrameExtractWork(self._win, self)
         # 画质提升必须延迟 import：它顶层要借本文件的 _card/_make_terminal 等
         # 私有助手，放模块头就是 import 环（本文件 ↔ video_enhance_hub）。
         from windows.tools.video_enhance_hub import VideoEnhanceHub
@@ -2624,6 +2861,7 @@ class ToolHub(PivotPage):
         self.addPage(self.upload_list_work, "上传清单")
         self.addPage(self.newlog_work, "视频与日志批量整理")
         self.addPage(self.video_repair_work, "视频修复")
+        self.addPage(self.frame_extract_work, "切帧训练集")
         # 「画质提升」这四个字同时是 main_window.open_hub_popout 里
         # nav_icons["toolHub"] 的键，改一处必须改另一处，否则弹出面板会
         # 静默退回「内嵌 Pivot」形态（判定条件是 len(entries) == len(meta)）。

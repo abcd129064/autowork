@@ -30,6 +30,9 @@ from qfluentwidgets import FluentWindow, FluentIcon
 _BUSY_ATTRS = ("_single_video_worker", "_newlog_worker",
                "_newlog_upload_worker", "_video_probe_worker",
                "_video_repair_worker",
+               # 切帧训练集（2026-11-07）：与 tool_hub.FrameExtractWork 写在宿主上的
+               # 引用同名，漏登记会让弹出窗口与内嵌视图各持一份守卫、双开 ffmpeg
+               "_frame_extract_worker",
                # 画质提升（2026-11-06）：四个 worker 属性名与
                # windows/tools/video_enhance_hub.py 的 WORKER_ATTRS 一一对应，
                # 改名要两边同步，否则弹出窗口与内嵌视图各自一份守卫，会双开 ffmpeg

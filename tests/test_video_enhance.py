@@ -362,6 +362,148 @@ class TestBuildCommand:
         assert cmd[cmd.index("-vf") + 1] == ve.build_filter_chain(p, INFO)
 
 
+# ==================== GPU 光流插帧 fruc_vulkan ====================
+
+class TestGpuInterpolation:
+    """GPU 光流插帧：链拼装、Vulkan 设备旗标、档位门控、能力探测
+
+    全部离线：能力探测用 monkeypatch 替掉 _run_capture，不起真子进程。真机能不能
+    跑由「环境检测」的 test_fruc_vulkan 实测，这里只锁住命令拼装与降级契约。
+    """
+
+    def test_uses_fruc_requires_both_switch_and_mode(self):
+        """只看模式会在补帧关闭时也注入设备旗标，平白初始化一次显卡"""
+        assert ve._uses_fruc(_p(interp_on=True, interp_mode="fruc")) is True
+        assert ve._uses_fruc(_p(interp_on=False, interp_mode="fruc")) is False
+        assert ve._uses_fruc(_p(interp_on=True, interp_mode="mci")) is False
+
+    def test_gpu_chain_uploads_interpolates_then_downloads(self):
+        chain = ve.build_filter_chain(_p(interp_on=True, interp_mode="fruc"), INFO)
+        pos = _idx(chain, "hwupload", "fruc_vulkan=fps=60", "hwdownload")
+        assert -1 not in pos.values(), chain
+        assert pos["hwupload"] < pos["fruc_vulkan=fps=60"] < pos["hwdownload"], chain
+        # 进 Vulkan 前转一次 yuv420p、回内存后再转一次，缺一个都会花屏或报错
+        assert chain.count("format=yuv420p") == 2, chain
+        assert chain.endswith("format=yuv420p"), chain
+
+    def test_cpu_filters_run_before_hwupload(self):
+        """去噪/锐化/色彩都在 CPU 上做，上传显卡的必须是处理完的帧"""
+        chain = ve.build_filter_chain(_p(interp_on=True, interp_mode="fruc"), INFO)
+        up = chain.index("hwupload")
+        for key in ("hqdn3d", "cas", "eq="):
+            assert chain.index(key) < up, (key, chain)
+
+    def test_device_flags_precede_input_and_honor_index(self):
+        cmd = ve.build_command("a.mp4", "b.mp4",
+                               _p(interp_on=True, interp_mode="fruc",
+                                  interp_gpu_index=2), INFO)
+        assert cmd.index("-init_hw_device") < cmd.index("-i"), cmd
+        assert cmd[cmd.index("-init_hw_device") + 1] == "vulkan=vk:2"
+        assert cmd[cmd.index("-filter_hw_device") + 1] == "vk"
+
+    def test_device_index_defaults_to_zero(self):
+        cmd = ve.build_command("a.mp4", "b.mp4",
+                               _p(interp_on=True, interp_mode="fruc"), INFO)
+        assert cmd[cmd.index("-init_hw_device") + 1] == "vulkan=vk:0"
+
+    def test_no_device_flags_when_interp_off_or_cpu_mode(self):
+        off = ve.build_command("a.mp4", "b.mp4",
+                               _p(interp_on=False, interp_mode="fruc"), INFO)
+        assert "-init_hw_device" not in off and "-filter_hw_device" not in off
+        mci = ve.build_command("a.mp4", "b.mp4",
+                               _p(interp_on=True, interp_mode="mci"), INFO)
+        assert "-init_hw_device" not in mci
+        assert "hwupload" not in mci[mci.index("-vf") + 1]
+
+    @pytest.mark.parametrize("perf", ["slow", "medium", "fast"])
+    def test_valid_perf_is_appended(self, perf):
+        chain = ve.build_filter_chain(
+            _p(interp_on=True, interp_mode="fruc", interp_perf=perf), INFO)
+        assert f"fruc_vulkan=fps=60:perf={perf}" in chain, chain
+
+    @pytest.mark.parametrize("perf", ["", "turbo", "SLOW"])
+    def test_empty_or_unknown_perf_falls_back_to_filter_default(self, perf):
+        """传了滤镜不认的档位名，ffmpeg 会拒绝整条链；空值走滤镜自带默认"""
+        chain = ve.build_filter_chain(
+            _p(interp_on=True, interp_mode="fruc", interp_perf=perf), INFO)
+        assert "perf=" not in chain, chain
+
+    def test_custom_fps_flows_into_fruc(self):
+        chain = ve.build_filter_chain(
+            _p(interp_on=True, interp_mode="fruc", interp_fps=120), INFO)
+        assert "fruc_vulkan=fps=120" in chain, chain
+
+    def test_preview_never_emits_gpu_chain_or_flags(self):
+        """预览只跑一帧，补帧要先缓冲若干帧，留着会把秒级预览拖成十几秒"""
+        p = _p(interp_on=True, interp_mode="fruc")
+        cmd = ve.build_preview_command("v.mp4", 0, "o.png", p, INFO)
+        joined = " ".join(cmd)
+        assert "-init_hw_device" not in joined
+        assert "fruc_vulkan" not in joined and "hwupload" not in joined
+
+    def test_fruc_vulkan_without_ffmpeg_degrades(self):
+        ok, why = ve.test_fruc_vulkan(None)
+        assert ok is False and why
+
+    def test_fruc_vulkan_success(self, monkeypatch):
+        monkeypatch.setattr(ve, "_run_capture", lambda cmd, timeout=120: (0, ""))
+        ok, why = ve.test_fruc_vulkan("ffmpeg", 0)
+        assert ok is True and why == ""
+
+    def test_fruc_vulkan_failure_surfaces_last_stderr_line(self, monkeypatch):
+        monkeypatch.setattr(ve, "_run_capture",
+                            lambda cmd, timeout=120: (1, "noise\nFilter not found"))
+        ok, why = ve.test_fruc_vulkan("ffmpeg", 0)
+        assert ok is False and "Filter not found" in why
+
+    def test_fruc_vulkan_probe_uses_index_and_full_chain(self, monkeypatch):
+        seen = {}
+
+        def fake(cmd, timeout=120):
+            seen["cmd"] = cmd
+            return 0, ""
+
+        monkeypatch.setattr(ve, "_run_capture", fake)
+        ve.test_fruc_vulkan("ffmpeg", 3)
+        cmd = seen["cmd"]
+        assert cmd[cmd.index("-init_hw_device") + 1] == "vulkan=vk:3"
+        vf = cmd[cmd.index("-vf") + 1]
+        assert "hwupload" in vf and "fruc_vulkan=fps=60" in vf and "hwdownload" in vf
+
+    @staticmethod
+    def _fake_capture(with_fruc):
+        filters = " ... libvmaf           V->V       VMAF\n"
+        if with_fruc:
+            filters += " ... fruc_vulkan       V->V       FRUC Vulkan\n"
+
+        def fake(cmd, timeout=120):
+            if "-version" in cmd:
+                return 0, ("ffmpeg version N-123456 Copyright (c) 2000-2026\n"
+                           "configuration: --enable-gpl --enable-libvmaf\n")
+            if "-encoders" in cmd:
+                return 0, "Encoders:\n V..... libx264              H.264\n"
+            if "-filters" in cmd:
+                return 0, "Filters:\n" + filters
+            return -1, "unexpected command"
+
+        return fake
+
+    def test_detect_capabilities_reports_fruc_when_present(self, tmp_path, monkeypatch):
+        ff = tmp_path / "ffmpeg.exe"
+        ff.write_bytes(b"\x00")
+        monkeypatch.setattr(ve, "_run_capture", self._fake_capture(True))
+        cap = ve.detect_capabilities(str(ff))
+        assert cap["ok"] is True and cap["has_fruc"] is True
+
+    def test_detect_capabilities_fruc_absent_when_filter_missing(self, tmp_path,
+                                                                monkeypatch):
+        ff = tmp_path / "ffmpeg.exe"
+        ff.write_bytes(b"\x00")
+        monkeypatch.setattr(ve, "_run_capture", self._fake_capture(False))
+        cap = ve.detect_capabilities(str(ff))
+        assert cap["ok"] is True and cap["has_fruc"] is False
+
+
 class TestAudioArgs:
 
     def test_source_without_audio_forces_an(self):

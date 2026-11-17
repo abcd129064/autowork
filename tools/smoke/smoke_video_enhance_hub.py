@@ -324,6 +324,32 @@ def main() -> int:
     hub.rows = saved_rows
     hub.task_page._refresh_stats()
 
+    print("\n[3b] GPU 光流补帧控件随模式显隐")
+    fp_page = hub.filter_page
+    hub.switchTo(fp_page)
+    app.processEvents()
+    gpu_ws = fp_page._gpu_widgets
+    # isHidden() 只看控件自身的显隐标志，不受父页是否当前页影响，比 isVisible() 稳
+    hub.set_param("interp_on", True)
+    hub.set_param("interp_mode", "mci")
+    fp_page.refresh()
+    check("3b.1 CPU 模式下 GPU 档位/设备号控件隐藏",
+          all(w.isHidden() for w in gpu_ws), [w.isHidden() for w in gpu_ws])
+    hub.set_param("interp_mode", "fruc")
+    fp_page.refresh()
+    check("3b.2 选 GPU 光流后档位/设备号控件露面",
+          all(not w.isHidden() for w in gpu_ws), [w.isHidden() for w in gpu_ws])
+    check("3b.3 GPU 模式提示文案非空",
+          bool(fp_page.lbl_interp_hint.text().strip()),
+          fp_page.lbl_interp_hint.text()[:60])
+    hub.set_param("interp_on", False)
+    fp_page.refresh()
+    check("3b.4 关掉补帧后 GPU 控件重新隐藏",
+          all(w.isHidden() for w in gpu_ws))
+    hub.set_param("interp_mode", "mci")
+    fp_page.refresh()
+    check("3b.5 环境页有 GPU 光流状态标签", hasattr(hub.env_page, "lbl_fruc"))
+
     try:
         hub.detach_workers()
         check("3.9 detach_workers 不抛", True)
@@ -573,6 +599,27 @@ def main() -> int:
             if pr.returncode != 0:
                 bad.append((name, pr.stderr.decode("utf-8", "replace").strip()[:160]))
         check("8.11 六个预设的滤镜链都能被真 ffmpeg 初始化", not bad, bad)
+
+        # GPU 光流插帧：本机 ffmpeg 多半没有 fruc_vulkan（需 2026-09 之后的 master），
+        # 这里只验「能力探测给出确定结论 + 不可用时优雅降级」，不要求真能跑
+        check("8.12 detect_capabilities 报 has_fruc 布尔",
+              isinstance(cap.get("has_fruc"), bool), cap.get("has_fruc"))
+        gok, gwhy = ve.test_fruc_vulkan(ff, 0)
+        check("8.13 test_fruc_vulkan 给出确定结论（可用或带原因）",
+              isinstance(gok, bool) and (gok or bool(gwhy)), (gok, gwhy))
+        if cap.get("has_fruc") and gok:
+            gp = dict(ve.default_params(), interp_on=True, interp_mode="fruc")
+            gchain = ve.build_filter_chain(gp, info)
+            gcmd = [ff, "-hide_banner", "-loglevel", "error",
+                    "-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk",
+                    "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=1",
+                    "-vf", gchain, "-frames:v", "1", "-f", "null", "-"]
+            gpr = subprocess.run(gcmd, capture_output=True)
+            check("8.14 GPU 光流链能被真 ffmpeg 初始化", gpr.returncode == 0,
+                  gpr.stderr.decode("utf-8", "replace").strip()[:160])
+        else:
+            print(f"  [SKIP] 本机 GPU 光流插帧不可用（has_fruc={cap.get('has_fruc')}"
+                  f" test={gok}），跳过端到端；降级与命令拼装已离线覆盖")
 
     print("\n结果：" + ("全部通过" if OK else "存在失败项"))
     return 0 if OK else 2

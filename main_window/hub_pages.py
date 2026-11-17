@@ -665,7 +665,7 @@ class SettingsHubPage(QWidget):
         row(FluentIcon.DEVELOPER_TOOLS, "连接诊断", "查看连接日志与失败记录",
             "打开", win._on_open_conn_diag)
         row(FluentIcon.CODE, "打开工具页",
-            "单杆视频 / 端口占用 / 上传清单 / 批量整理 / 视频修复",
+            "单杆视频 / 端口占用 / 上传清单 / 批量整理 / 视频修复 / 切帧训练集 / 画质提升",
             "前往", win._on_open_tool_hub)
 
         # 工具页行为开关（单杆视频工作区读取，2026-09-07 二期需求）

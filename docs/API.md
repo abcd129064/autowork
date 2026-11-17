@@ -1128,12 +1128,16 @@ SQLite3 本地数据层（`database/tables.db`），线程内共享连接。
 |------|------|
 | `parse_snk_code(remark)` | 从 remark 正则提取 snk 标识（如 `snk_001`），无则返回空串 |
 | `save_all(rows)` | 全量覆盖写入球桌表，返回条数（自动解析 snk_code；remark 无 snk 时保留旧库手动值） |
-| `query_page(page_no, page_size, keyword="", include_test=True, include_manual=True)` | 分页查询，返回 `(total, rows)`；`include_test` 排除「公司测试」球房、`include_manual` 排除手动版本设备（name/roomName 含 `@s`） |
+| `query_page(page_no, page_size, keyword="", include_test=True, include_manual=True, include_tuidan=True, online_status="", version_kw="", version_mode="contains", version_invert=False)` | 分页查询，返回 `(total, rows)`；`include_test` 排除「公司测试」球房、`include_manual` 排除手动版本设备（name/roomName 含 `@s`）、`include_tuidan` 排除退单设备（status=2）、`online_status` 按在线状态等值筛选（运行中/空闲/下线，空串不筛选）、`version_kw`/`version_mode`/`version_invert` 为版本号筛选（见下） |
+| `parse_version_filter(text, mode="contains")` | 版本号条件文本 → `(op, values)`；空输入返回 `None`，非法输入抛 `ValueError`。文本自带运算符（`<200072` / `>=200078` / `!=200072`）时覆盖 `mode`；全角 `＜＞≤≥` 与全角数字自动归一；区间写作 `200070~200078`（也认 `..` 与逗号，含两端、自动升序） |
+| `build_version_cond(text, mode="contains", invert=False)` | 版本号条件 → `(SQL 片段, 参数)`，空输入返回 `None`。`contains` 走 `deviceVersion` 子串 LIKE；其余按主版本号数值比较（`CAST(IFNULL(deviceVersion,'') AS DECIMAL)` 取首段，MySQL/SQLite 同方言），仅固件格式（含 `-` 分段）且首段 >0 的行参与——无版本号/非数字/人工 placeholder 版本（如 `123456`）不参与数值比较；`invert` 取反整个条件（这些行会被括回来） |
 | `insert_one(record)` | 手动插入一条记录（API 失效时的兜底入口） |
 | `update_snk_by_name(name, snk_code)` | 按球桌号手动写入/修改 snk（TRIM 匹配），空串表示清空 |
 | `get_snk_by_name(name)` | 按球桌号查 snk（设备状态页 table_id ↔ 球桌管理 name 关联） |
 
 球桌表字段（`FIELDS`）：`name`、`roomName`、`onlineStatusName`、`remark`、`cameraPassExt`、`snk_code`（SNK 标识，手动维护）、`code`（设备编码，接口同步）。旧库自动惰性迁移：首次连接时 `ALTER TABLE ADD COLUMN` 补列并重建 FTS 索引，数据无损。
+
+**版本号筛选 UI（2026-11-14）**：`windows/management/table_page.py` 工具栏「在线状态」右侧为版本号搜索框 + 比较口径下拉（包含/低于/不高于/高于/不低于/等于/区间）+ 常驻「反选」开关。三者经 `_version_args()` 统一取值后透传 `_query_tables_page_with_stats` → `query_page`，导出 CSV 复用同一份口径；非法条件不抛错，按不筛选处理并在状态栏标注「版本号条件无效，已忽略」+ InfoBar 提示。回归见 `tests/test_table_version_filter.py`。
 
 #### 安装清单视图（createTime 视角，2026-10-11）
 

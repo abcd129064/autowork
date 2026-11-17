@@ -326,13 +326,17 @@
   其余凡画布与实现不一致处，都在紧邻画布的<b>黄色 note</b> 或文末「已识别的风险 / 本次明确不做」里写明差异与理由。
   <b>2026-11-09 又刷了一处取值</b>：cas 的 strength 被 ffmpeg 限定在 0–1，原画布警告语与「动漫 / 线条」预设写的
   1.2 会让整条链被拒收，现已把滑块量程、预设、警告语与预设对照表统一收到 0–1。
+  <b>2026-11-11 补帧加了 GPU 光流分支</b>：新增 <code>fruc_vulkan</code> 模式，走 NVIDIA 光流硬件插帧、接近实时，
+  与 mci/blend 并列在补帧卡的模式下拉里；GPU 档位与 Vulkan 设备号两个控件只在该模式露面。
+  它依赖 RTX 30+ 显卡与 2026-09 之后的 ffmpeg master 构建，故由「环境检测」的 <code>test_fruc_vulkan</code> 真跑一段实测门控，
+  探测不到就置灰提示、不替用户偷偷换回 mci。CPU 的 mci 默认档保持不变。
   已回填为实际值的部分：滤镜预设 &#8594; <code>-vf</code> 串对照表、注册点清单（A~<b>H</b>，第八处是设计阶段漏掉的
   <code>shutdown.py</code>）、文件与类结构、worker 信号签名、验证结果与实测数据、控件文案。
   <br>落地产物：<code>windows/tools/video_enhance.py</code>（引擎）·
   <code>workers/video_enhance_worker.py</code>（6 stage 单 worker 类）·
   <code>windows/tools/video_enhance_hub.py</code>（5 子页 UI）·
-  <code>tests/test_video_enhance.py</code>（202 passed）·
-  <code>tools/smoke/smoke_video_enhance_hub.py</code>（65 项全 PASS，rc=0）。
+  <code>tests/test_video_enhance.py</code>（241 passed，含 GPU 光流 20 例）·
+  <code>tools/smoke/smoke_video_enhance_hub.py</code>（全 PASS，rc=0，含 GPU 控件显隐与能力门控核对）。
 </div>
 
 <div class="note" style="border-left-color:var(--danger)">
@@ -363,6 +367,7 @@
   已确认可用：<code>libx264 / libx265 / h264_nvenc / hevc_nvenc / av1_nvenc / libsvtav1</code>，
   滤镜 <code>hqdn3d / nlmeans / atadenoise / vaguedenoiser / bm3d / cas / unsharp / eq / scale / minterpolate</code>，
   且带 <code>--enable-libvmaf</code>（质量对比子页的客观评分有依据）。
+  <br><b>GPU 光流插帧另算：</b>补帧的 GPU 模式走 <code>fruc_vulkan</code>，需 2026-09 之后的 ffmpeg master 构建，本机这份 2026-04 的还没有它，所以该模式由「环境检测」实测门控——探测不到就置灰并提示，不影响其余功能。
 </div>
 
 <!-- ============ 画布 1：内嵌页签（默认落地子页 = 增强任务） ============ -->
@@ -715,19 +720,30 @@
         </div>
 
         <div class="card">
-          <div class="card-h"><span class="ch-ico">&#8634;</span><h3>补帧 minterpolate</h3>
-            <div class="ch-right"><span class="sw off"><span class="track"></span></span><span class="tag err">极慢 · 默认关</span></div></div>
+          <div class="card-h"><span class="ch-ico">&#8634;</span><h3>补帧</h3>
+            <span class="ch-sub">minterpolate 运动补偿 · blend 混合 · GPU 光流硬件插帧</span>
+            <div class="ch-right"><span class="sw off"><span class="track"></span></span><span class="tag err">默认关</span></div></div>
           <div class="flex wrap">
             <label style="font-size:13px;color:var(--text2)">目标帧率</label>
             <span class="combo" style="width:110px">60</span>
             <label style="font-size:13px;color:var(--text2)">模式</label>
-            <span class="combo" style="width:150px">mci</span>
-            <span class="hint" style="margin:0">mi_mode=blend 快 10 倍但会有重影</span>
+            <span class="combo" style="width:200px">mci</span>
+            <span class="hint" style="margin:0">下拉三项：mci / blend / GPU 光流</span>
+          </div>
+          <div class="flex wrap" style="margin-top:8px">
+            <label style="font-size:13px;color:var(--text2)">GPU 档位</label>
+            <span class="combo" style="width:110px">默认</span>
+            <label style="font-size:13px;color:var(--text2)">Vulkan 设备号</label>
+            <span class="combo" style="width:80px">0</span>
+            <span class="hint" style="margin:0">这一行只在选了 GPU 光流时出现 · 档位 slow/medium/fast，空值走滤镜默认 · 多显卡时把设备号选到 NVIDIA RTX 30+ 那张</span>
           </div>
           <div class="infobar err" style="margin:12px 0 0">
             <span class="ib-ico">!</span>
-            <div>运动补偿插帧在 1080p 上大约 <b>0.1x 实时速度</b>（10 分钟视频要跑 100 分钟），
-            且台球这种高速小球容易出现插帧撕裂。默认关闭，勾选前请确认时长可接受。</div>
+            <div><b>mci</b> 运动补偿插帧在 1080p 上大约 <b>0.1x 实时速度</b>，10 分钟视频要跑 100 分钟，且台球这种高速小球容易出现插帧撕裂。<b>blend</b> 只是混合相邻帧，快约百倍但高速小球会拖成两道影，适合预览。</div>
+          </div>
+          <div class="infobar info" style="margin:8px 0 0">
+            <span class="ib-ico">&#9889;</span>
+            <div><b>GPU 光流</b> 走 <code>fruc_vulkan</code>，调 NVIDIA 光流硬件合成中间帧，接近实时。前提有三：显卡是 <b>RTX 30 及以上</b>、驱动带 <code>VK_NV_optical_flow</code> 扩展、ffmpeg 是 <b>2026-09 之后的 master 构建</b>——9.0.1 稳定版还没有这个滤镜。能不能跑由「环境检测」真跑一段极小片段实测，<b>编译进来 ≠ 能跑</b>；实测失败时本行提示变红并给出 stderr 摘要，但<b>不替用户偷偷换回 mci</b>。高速小球与遮挡场景仍可能撕裂。链形如 <code>…,format=yuv420p,hwupload,fruc_vulkan=fps=60,hwdownload,format=yuv420p</code>，设备旗标 <code>-init_hw_device vulkan=vk:N -filter_hw_device vk</code> 由命令构建注入在 <code>-i</code> 之前。</div>
           </div>
         </div>
 
@@ -975,9 +991,11 @@
             <span class="chk y"><i>&#10003;</i>eq</span>
             <span class="chk y"><i>&#10003;</i>scale</span>
             <span class="chk y"><i>&#10003;</i>minterpolate</span>
+            <span class="chk n"><i>&#10005;</i>fruc_vulkan</span>
             <span class="chk y"><i>&#10003;</i>libvmaf</span>
             <span class="chk y"><i>&#10003;</i>psnr / ssim</span>
           </div>
+          <div class="hint" style="margin-top:8px">GPU 光流插帧单独一行实测状态：<code>fruc_vulkan</code> 在网格里只反映「编译进来没有」，能不能真跑还要看 <code>test_fruc_vulkan</code> 真跑一段极小片段的结果——就绪显示绿色「✔ GPU 光流插帧就绪」，失败显示红色「✘ 不可用」并带 stderr 摘要，本机这份 2026-04 构建没有该滤镜，故为灰色 ✗。</div>
           <div class="divider"></div>
           <div class="flex between wrap">
             <div class="hint" style="max-width:760px">
@@ -1000,6 +1018,10 @@
             <span class="ib-ico">!</span>
             <div><b>ffmpeg 找到但缺 libvmaf。</b>不影响增强主流程，只把「质量对比」子页的 VMAF 卡片置灰，
             PSNR / SSIM 仍可用（这两个是 ffmpeg 内建，不依赖外部库）。</div>
+          </div>
+          <div class="infobar warn">
+            <span class="ib-ico">!</span>
+            <div><b>选了 GPU 光流补帧但实测跑不通。</b>构建太旧没有 <code>fruc_vulkan</code>、显卡不是 RTX 30+、驱动缺 <code>VK_NV_optical_flow</code>、或 Vulkan 设备号选到了非 N 卡，都会让 <code>test_fruc_vulkan</code> 失败。此时「滤镜调参」的补帧提示变红、「环境检测」给出原因，若用户已选 GPU 模式还会弹一条 InfoBar 提醒换回 mci/blend——但<b>不替他偷偷改模式</b>，与编码器探测失败同一口径。</div>
           </div>
         </div>
 
@@ -1332,7 +1354,8 @@
         不用位置参数——ffmpeg 版本间位置参数含义变过。
         <br>以下为<b>叠加项</b>，按固定顺序插入到预设串中（不是独立预设）：
         放大 &#8594; 在去噪之后插入 <code>scale=-2:H:flags=lanczos</code>；
-        补帧 &#8594; 在链尾（<code>format</code> 之前）追加 <code>minterpolate=fps=N:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1</code>。
+        补帧 &#8594; 在链尾（<code>format</code> 之前）按模式追加：mci 为 <code>minterpolate=fps=N:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1</code>，blend 为 <code>minterpolate=fps=N:mi_mode=blend</code>，GPU 光流为 <code>format=yuv420p,hwupload,fruc_vulkan=fps=N[:perf=slow|medium|fast],hwdownload</code>。
+        GPU 模式另由 <code>build_command</code> 在 <code>-i</code> 之前注入 <code>-init_hw_device vulkan=vk:N -filter_hw_device vk</code>，N 取自 <code>interp_gpu_index</code>；补帧关闭或非 GPU 模式时不注入任何设备旗标。
         <code>format=yuv420p</code> 永远置于链尾，保证播放器兼容。</td></tr>
     </tbody>
   </table>
@@ -1343,7 +1366,7 @@
   <ul>
     <li><b>第 1 步 引擎层 + 单测</b>：先写 <code>windows/tools/video_enhance.py</code> 与 <code>tests/test_video_enhance.py</code>，
         纯字符串/列表变换，无 Qt、无子进程，<code>pytest tests/test_video_enhance.py -q</code> 必须全绿。
-        <b>落地结果：202 passed。</b></li>
+        <b>落地结果：241 passed（含 GPU 光流插帧 20 例）。</b></li>
     <li><b>第 2 步 Worker</b>：<code>workers/video_enhance_worker.py</code>，信号名避开 <code>finished</code>。</li>
     <li><b>第 3 步 UI</b>：<code>windows/tools/video_enhance_hub.py</code> 的 5 子页。</li>
     <li><b>第 4 步 八处注册</b>（A~H），逐个核对。
