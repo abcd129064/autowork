@@ -138,6 +138,7 @@ def shutdown_main_window(host) -> None:
     # 会一直占着 CPU 与输出文件句柄（worker 收到中断才会 _kill 子进程）
     for attr in ('_newlog_worker', '_newlog_upload_worker', '_single_video_worker',
                  '_video_probe_worker', '_video_repair_worker',
+                 '_frame_extract_worker',
                  '_ve_enhance_worker', '_ve_probe_worker',
                  '_ve_env_worker', '_ve_cmp_worker'):
         nw = getattr(host, attr, None)

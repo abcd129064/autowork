@@ -39,6 +39,8 @@ _OCCLUDE_ELONG_DIM = 75
 _MIN_GREEN_COVERAGE = 0.20
 # 行/列绿占比超过此值才算桌面行/列（桌外地板行通常 < 0.2）
 _TABLE_PROFILE_FRAC = 0.30
+# 分析框相对绿区判定线向内收缩的像素：木库边抗锯齿渗色约 4px，取 3 倍余量
+_BOX_INSET = 12
 # 外来像元判定：与台呢中位色的欧氏距离阈值。实测本机素材——
 # baulk 标线 ~69（排除）、球影 ~94（排除）、阴影杆身 ~106（检出）、白球 ~350
 _FOREIGN_DIST = 95
@@ -178,10 +180,18 @@ def analyze_frame(arr):
         dil = d
     foreign &= ~dil
 
-    foreign[:row_idx[0], :] = False
-    foreign[row_idx[-1] + 1:, :] = False
-    foreign[:, :col_idx[0]] = False
-    foreign[:, col_idx[-1] + 1:] = False
+    # 台面框向内收缩 _BOX_INSET：绿区判定线处木库边还有数像素抗锯齿渗色，
+    # 机位拉近时会在框边连成上百像素长的暗色细条，被误判成球杆（真机教训）
+    y0 = row_idx[0] + _BOX_INSET
+    y1 = row_idx[-1] - _BOX_INSET
+    x0 = col_idx[0] + _BOX_INSET
+    x1 = col_idx[-1] - _BOX_INSET
+    if y1 - y0 < 60 or x1 - x0 < 60:
+        return True, vec
+    foreign[:y0, :] = False
+    foreign[y1 + 1:, :] = False
+    foreign[:, :x0] = False
+    foreign[:, x1 + 1:] = False
 
     # 膨胀 1 圈桥接细杆抗锯齿断点，再稀疏 BFS
     f = foreign.copy()
@@ -190,7 +200,7 @@ def analyze_frame(arr):
     f[:, 1:] |= foreign[:, :-1]
     f[:, :-1] |= foreign[:, 1:]
 
-    if _foreign_block_exists(f, (col_idx[0], col_idx[-1], row_idx[0], row_idx[-1])):
+    if _foreign_block_exists(f, (x0, x1, y0, y1)):
         return False, vec
     return True, vec
 
