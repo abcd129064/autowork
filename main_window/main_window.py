@@ -942,13 +942,15 @@ class MainWindow(SettingsMixin, ProcessMixin, RemoteMixin, UIMixin, UpdateMixin,
         if doc.blockCount() > self._LOG_MAX_LINES:
             # 从文档头选中「超出上限的行数」，整体移除最早的历史行
             cursor = self.ui.show_log.textCursor()
-            cursor.movePosition(cursor.Start)
-            cursor.movePosition(cursor.Down, cursor.KeepAnchor,
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down,
+                                cursor.MoveMode.KeepAnchor,
                                 doc.blockCount() - self._LOG_MAX_LINES)
             # 一次性选中整段再删，而不是逐块 removeBlock：几千行逐块删除每次
             # 都触发一次文档重排，截断本身就成了卡顿源。
+            # 选区终点落在块首，removeSelectedText 已整块移除、无残留换行；
+            # 再补 deleteChar 会吃掉保留区首行的第一个字符。
             cursor.removeSelectedText()
-            cursor.deleteChar()  # 删除选区末尾残留的换行符
 
         # 命中通知规则 → InfoBar（每规则 10s 静默期，避免刷屏）
         now = time.time()
